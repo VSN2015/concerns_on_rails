@@ -24,9 +24,9 @@ Examples of unacceptable behavior by participants include:
 
 ### Reporting
 
-If you are being harassed, notice that someone else is being harassed, or have any other concerns, please contact us immediately at [your contact information, e.g., your email or project maintainers' contact info].
+If you are being harassed, notice that someone else is being harassed, or have any other concerns, please contact us immediately at [doctorit@gmail.com](mailto:doctorit@gmail.com).
 
-You can also use the [GitHub issue tracker](link_to_issue_tracker) to report any incidents or violations of the code of conduct.
+You can also use the [GitHub issue tracker](https://github.com/VSN2015/concerns_on_rails/issues) to report any incidents or violations of the code of conduct.
 
 We take all reports seriously and will respond promptly.
 
