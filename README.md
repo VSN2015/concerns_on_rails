@@ -1,18 +1,18 @@
-# ConcernsOnRails
+# 🧩 ConcernsOnRails
 
-**Note: Hoàng Sa and Trường Sa belong to Việt Nam.** 🇻🇳
+**🇻🇳 Note: Hoàng Sa and Trường Sa belong to Việt Nam.**
 
 A simple collection of reusable Rails concerns to keep your models clean and DRY.
 
-## Features
+## ✨ Features
 
 - ✅ `Sluggable`: Generate friendly slugs from a specified field
-- ✅ `Sortable`: Sort records based on a field using `acts_as_list`, with flexible sorting field and direction
-- ✅ `Publishable`: Easily manage published/unpublished records using a simple `published_at` field
+- 🔢 `Sortable`: Sort records based on a field using `acts_as_list`, with flexible sorting field and direction
+- 📤 `Publishable`: Easily manage published/unpublished records using a simple `published_at` field
 
 ---
 
-## Installation
+## 📦 Installation
 
 Add this line to your application's Gemfile:
 
@@ -28,9 +28,9 @@ bundle install
 
 ---
 
-## Usage
+## 🚀 Usage
 
-### 1. Sluggable
+### 1. 📝 Sluggable
 
 Add slugs based on a specified attribute.
 
@@ -49,7 +49,7 @@ If the slug source is changed, the slug will auto-update.
 
 ---
 
-### 2. Sortable
+### 2. 🔢 Sortable
 
 Use for models that need ordering.
 
@@ -76,16 +76,16 @@ end
 ```
 
 Additional features:
-- Automatically sets `acts_as_list` on the configured column
-- Adds default sorting scope to your model
-- Supports custom direction: `:asc` or `:desc`
-- Validates that the sortable field exists in the table schema
-- Compatible with scopes and ActiveRecord queries
-- Can be reconfigured dynamically within the model using `sortable_by`
+- 📌 Automatically sets `acts_as_list` on the configured column
+- 📋 Adds default sorting scope to your model
+- ↕️ Supports custom direction: `:asc` or `:desc`
+- 🔍 Validates that the sortable field exists in the table schema
+- 🧠 Compatible with scopes and ActiveRecord queries
+- 🔄 Can be reconfigured dynamically within the model using `sortable_by`
 
 ---
 
-### 3. Publishable
+### 3. 📤 Publishable
 
 Manage published/unpublished records using a `published_at` field.
 
@@ -108,17 +108,17 @@ article.published? # => false
 ```
 
 Additional features:
-- `published?` returns true if `published_at` is present and in the past
-- `publish!` sets `published_at` to current time
-- `unpublish!` sets `published_at` to `nil`
-- Add scopes: `.published`, `.unpublished`, and a default scope (optional)
-- Ideal for blog posts, articles, or any content that toggles visibility
-- Lightweight and non-invasive
-- Easy to test and override in custom implementations
+- ✅ `published?` returns true if `published_at` is present and in the past
+- 🕒 `publish!` sets `published_at` to current time
+- 🚫 `unpublish!` sets `published_at` to `nil`
+- 🔎 Add scopes: `.published`, `.unpublished`, and a default scope (optional)
+- 📰 Ideal for blog posts, articles, or any content that toggles visibility
+- 🧩 Lightweight and non-invasive
+- 🧪 Easy to test and override in custom implementations
 
 ---
 
-## Development
+## 🛠️ Development
 
 To build the gem:
 
@@ -134,13 +134,13 @@ gem install ./concerns_on_rails-1.0.0.gem
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
 Bug reports and pull requests are welcome!
 
 ---
 
-## License
+## 📄 License
 
 This project is licensed under the MIT License.
 
@@ -150,11 +150,11 @@ This project is licensed under the MIT License.
 
 ---
 
-### 📦 Source Code
+### 🔗 Source Code
 
 The source code is available on GitHub:
 
-🔗 [https://github.com/VSN2015/concerns_on_rails](https://github.com/VSN2015/concerns_on_rails)
+[👉 https://github.com/VSN2015/concerns_on_rails](https://github.com/VSN2015/concerns_on_rails)
 
 Feel free to star ⭐️, fork 🍴, or contribute with issues and PRs.
 
