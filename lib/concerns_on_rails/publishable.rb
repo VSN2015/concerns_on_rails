@@ -7,7 +7,7 @@ module ConcernsOnRails
     # instance methods
     included do
       # declare class attributes and set default values
-      class_attribute :publishable_field
+      class_attribute :publishable_field, instance_accessor: false
       self.publishable_field ||= :published_at
     end
 

@@ -14,8 +14,8 @@ module ConcernsOnRails
     #   end
     included do
       # declare class attributes
-      class_attribute :sortable_field
-      class_attribute :sortable_direction
+      class_attribute :sortable_field, instance_accessor: false
+      class_attribute :sortable_direction, instance_accessor: false
 
       # set default values
       self.sortable_field ||= :position

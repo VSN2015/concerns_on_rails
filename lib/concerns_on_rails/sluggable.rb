@@ -8,7 +8,7 @@ module ConcernsOnRails
     # instance methods
     included do
       # declare class attributes and set default values
-      class_attribute :sluggable_field
+      class_attribute :sluggable_field, instance_accessor: false
       self.sluggable_field ||= :name
 
       extend FriendlyId
