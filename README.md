@@ -9,7 +9,7 @@ A simple collection of reusable Rails concerns to keep your models clean and DRY
 - ✅ `Sluggable`: Generate friendly slugs from a specified field
 - 🔢 `Sortable`: Sort records based on a field using `acts_as_list`, with flexible sorting field and direction
 - 📤 `Publishable`: Easily manage published/unpublished records using a simple `published_at` field
-- ✅ `SoftDeletable`: Soft delete records using a configurable timestamp field (e.g., `deleted_at`) with automatic scoping
+- ❌ `SoftDeletable`: Soft delete records using a configurable timestamp field (e.g., `deleted_at`) with automatic scoping
 
 ---
 
@@ -119,7 +119,7 @@ Additional features:
 
 ---
 
-### 4. SoftDeletable
+### 4. ❌ SoftDeletable
 
 Soft delete records using a timestamp field (default: `deleted_at`).
 
