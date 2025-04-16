@@ -258,4 +258,39 @@ describe ConcernsOnRails::SoftDeletable do
       expect(ChildModel.active).to include(child)
     end
   end
+
+  context 'with default_scope enabled' do
+    let(:scoped_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'scoped_soft_deletables'
+        include ConcernsOnRails::SoftDeletable
+        default_scope { without_deleted }
+        soft_deletable_by :deleted_at
+      end
+    end
+    before(:all) do
+      ActiveRecord::Schema.define do
+        create_table :scoped_soft_deletables, force: true do |t|
+          t.string :name
+          t.datetime :deleted_at
+          t.timestamps null: false
+        end
+      end
+    end
+    let!(:active) { scoped_class.create!(name: 'active') }
+    let!(:deleted) { scoped_class.create!(name: 'deleted', deleted_at: Time.zone.now) }
+    it 'hides soft deleted records by default' do
+      expect(scoped_class.all).to include(active)
+      expect(scoped_class.all).not_to include(deleted)
+    end
+    it 'can find soft deleted records with unscoped' do
+      expect(scoped_class.unscoped.all).to include(deleted)
+    end
+    it 'still allows soft_delete! and restore! to work' do
+      expect { active.soft_delete! }.to change { active.reload.deleted_at }.from(nil)
+      expect(scoped_class.all).not_to include(active)
+      expect { active.restore! }.to change { active.reload.deleted_at }.to(nil)
+      expect(scoped_class.all).to include(active)
+    end
+  end
 end

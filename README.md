@@ -9,6 +9,7 @@ A simple collection of reusable Rails concerns to keep your models clean and DRY
 - ✅ `Sluggable`: Generate friendly slugs from a specified field
 - 🔢 `Sortable`: Sort records based on a field using `acts_as_list`, with flexible sorting field and direction
 - 📤 `Publishable`: Easily manage published/unpublished records using a simple `published_at` field
+- ✅ `SoftDeletable`: Soft delete records using a configurable timestamp field (e.g., `deleted_at`) with automatic scoping
 
 ---
 
@@ -115,6 +116,40 @@ Additional features:
 - 📰 Ideal for blog posts, articles, or any content that toggles visibility
 - 🧩 Lightweight and non-invasive
 - 🧪 Easy to test and override in custom implementations
+
+---
+
+### 4. SoftDeletable
+
+Soft delete records using a timestamp field (default: `deleted_at`).
+
+```ruby
+class User < ApplicationRecord
+  include ConcernsOnRails::SoftDeletable
+
+  soft_deletable_by :deleted_at
+end
+
+user = User.create!(name: "Alice")
+user.soft_delete!
+user.deleted? # => true
+
+User.without_deleted   # => returns only active users
+User.soft_deleted      # => returns soft-deleted users
+User.all               # => returns only non-deleted by default (default_scope applied)
+
+user.restore!
+user.deleted? # => false
+```
+
+Additional features:
+- Default field is `deleted_at`, can be configured
+- Automatically applies `default_scope` to hide soft-deleted records
+- Scopes: `without_deleted`, `soft_deleted`, `active`
+- Methods: `soft_delete!`, `restore!`, `deleted?`, `really_delete!`
+- Callbacks: `before_soft_delete`, `after_soft_delete`, `before_restore`, `after_restore`
+- Touch support when soft deleting or restoring (can be turned off)
+- Aliases for `deleted?`: `soft_deleted?`, `is_soft_deleted?`
 
 ---
 
