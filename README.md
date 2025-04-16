@@ -130,16 +130,33 @@ class User < ApplicationRecord
   soft_deletable_by :deleted_at
 end
 
-user = User.create!(name: "Alice")
-user.soft_delete!
-user.deleted? # => true
-
 User.without_deleted   # => returns only active users
 User.soft_deleted      # => returns soft-deleted users
 User.all               # => returns only non-deleted by default (default_scope applied)
+```
 
+Soft delete an object:
+
+```ruby
+user.soft_delete!
+user.deleted?          # => true
+user.soft_deleted?     # => true
+user.is_soft_deleted?  # => true
+```
+
+Restore a soft-deleted object:
+
+```ruby
 user.restore!
-user.deleted? # => false
+user.deleted?          # => false
+user.soft_deleted?     # => false
+user.is_soft_deleted?  # => false
+```
+
+Permanently delete:
+
+```ruby
+user.really_delete!
 ```
 
 Additional features:
