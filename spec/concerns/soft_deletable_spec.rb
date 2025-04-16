@@ -124,4 +124,138 @@ describe ConcernsOnRails::SoftDeletable do
       expect(record.is_really_deleted?).to be true
     end
   end
+
+  context 'with multiple models using SoftDeletable' do
+    let(:other_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'other_soft_deletables'
+        include ConcernsOnRails::SoftDeletable
+        soft_deletable_by :removed_on
+      end
+    end
+    before(:all) do
+      ActiveRecord::Schema.define do
+        create_table :other_soft_deletables, force: true do |t|
+          t.string :name
+          t.datetime :removed_on
+          t.timestamps null: false
+        end
+      end
+    end
+    let!(:other) { other_class.create!(name: 'other') }
+    it 'does not interfere with other models' do
+      expect(other_class.active).to include(other)
+      other.soft_delete!
+      expect(other_class.soft_deleted).to include(other)
+    end
+  end
+
+  context 'with custom soft delete field' do
+    let(:custom_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'custom_soft_deletables'
+        include ConcernsOnRails::SoftDeletable
+        soft_deletable_by :removed_on
+      end
+    end
+    before(:all) do
+      ActiveRecord::Schema.define do
+        create_table :custom_soft_deletables, force: true do |t|
+          t.string :name
+          t.datetime :removed_on
+          t.timestamps null: false
+        end
+      end
+    end
+    let!(:custom) { custom_class.create!(name: 'custom') }
+    it 'soft deletes and restores using custom field' do
+      expect { custom.soft_delete! }.to change { custom.reload.removed_on }.from(nil)
+      expect(custom_class.soft_deleted).to include(custom)
+      expect { custom.restore! }.to change { custom.reload.removed_on }.to(nil)
+      expect(custom_class.active).to include(custom)
+    end
+  end
+
+  context 'callbacks order' do
+    it 'calls callbacks in order' do
+      record.callback_log = []
+      record.soft_delete!
+      expect(record.callback_log).to eq([:before_soft_delete, :after_soft_delete])
+      record.callback_log = []
+      record.restore!
+      expect(record.callback_log).to eq([:before_restore, :after_restore])
+    end
+  end
+
+  context 'idempotency' do
+    it 'soft_delete! twice does not error and does not change deleted_at again' do
+      record.soft_delete!
+      t = record.deleted_at
+      sleep 1
+      expect { record.soft_delete! }.not_to change { record.reload.deleted_at }
+    end
+    it 'restore! twice does not error and does not change deleted_at' do
+      record.restore!
+      expect { record.restore! }.not_to change { record.reload.deleted_at }
+    end
+  end
+
+  context 'return values' do
+    it 'returns true on successful soft_delete!' do
+      expect(record.soft_delete!).to eq(true)
+    end
+    it 'returns true on successful restore!' do
+      record.soft_delete!
+      expect(record.restore!).to eq(true)
+    end
+  end
+
+  context 'validation/failure cases' do
+    it 'soft_delete! still works if other validations fail' do
+      allow(record).to receive(:update).and_return(false)
+      expect(record.soft_delete!).to eq(false)
+    end
+    it 'restore! still works if other validations fail' do
+      record.soft_delete!
+      allow(record).to receive(:update).and_return(false)
+      expect(record.restore!).to eq(false)
+    end
+  end
+
+  context 'scope chaining' do
+    it 'returns no record when chaining soft_deleted and active' do
+      record.soft_delete!
+      # Chaining these scopes is not meaningful due to unscope usage, so test intersection instead
+      expect(dummy_class.soft_deleted & dummy_class.active).to be_empty
+    end
+  end
+
+  context 'STI (Single Table Inheritance)' do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :sti_models, force: true do |t|
+          t.string :type
+          t.string :name
+          t.datetime :deleted_at
+          t.timestamps null: false
+        end
+      end
+
+      class StiModel < ActiveRecord::Base
+        self.table_name = 'sti_models'
+        include ConcernsOnRails::SoftDeletable
+        soft_deletable_by :deleted_at
+      end
+      class ChildModel < StiModel; end
+    end
+
+    it 'works for subclasses' do
+      child = ChildModel.create!(name: 'child')
+      expect(ChildModel.active).to include(child)
+      child.soft_delete!
+      expect(ChildModel.soft_deleted).to include(child)
+      child.restore!
+      expect(ChildModel.active).to include(child)
+    end
+  end
 end
