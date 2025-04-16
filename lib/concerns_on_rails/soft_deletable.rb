@@ -43,6 +43,7 @@ module ConcernsOnRails
 
     # add soft delete methods
     def soft_delete!
+      return true if deleted?
       run_callbacks(:soft_delete) do
         before_soft_delete
         if self.class.soft_delete_touch
