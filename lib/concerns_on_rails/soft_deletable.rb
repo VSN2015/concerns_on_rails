@@ -14,7 +14,7 @@ module ConcernsOnRails
       scope :without_deleted, -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
       scope :soft_deleted, -> { unscope(where: soft_delete_field).where.not(soft_delete_field => nil) }
       # Optionally, uncomment to hide deleted by default:
-      # default_scope { without_deleted }
+      default_scope { without_deleted }
 
       # define callbacks
       define_model_callbacks :soft_delete
