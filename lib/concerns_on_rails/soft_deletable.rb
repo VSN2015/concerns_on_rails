@@ -33,6 +33,16 @@ module ConcernsOnRails
           raise ArgumentError, "ConcernsOnRails::SoftDeletable: soft_delete_field '#{soft_delete_field}' does not exist in the database"
         end
       end
+
+      # Override destroy_all to perform soft delete on all records
+      def destroy_all
+        all.each(&:soft_delete!)
+      end
+
+      # Provide really_destroy_all to hard delete all records
+      def really_destroy_all
+        unscoped.delete_all
+      end
     end
 
     # Soft delete hooks

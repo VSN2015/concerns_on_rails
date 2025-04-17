@@ -127,46 +127,70 @@ Soft delete records using a timestamp field (default: `deleted_at`).
 class User < ApplicationRecord
   include ConcernsOnRails::SoftDeletable
 
-  soft_deletable_by :deleted_at
+  # Optional: customize field and touch behavior
+  soft_deletable_by :deleted_at, touch: true
 end
+```
 
+#### Scopes
+```ruby
 User.without_deleted   # => returns only active users
 User.soft_deleted      # => returns soft-deleted users
+User.active            # => same as without_deleted
 User.all               # => returns only non-deleted by default (default_scope applied)
 ```
 
-Soft delete an object:
-
+#### Soft delete and restore
 ```ruby
-user.soft_delete!
+user.soft_delete!      # Soft delete the user (sets deleted_at)
 user.deleted?          # => true
-user.soft_deleted?     # => true
-user.is_soft_deleted?  # => true
-```
+user.soft_deleted?     # => true (alias)
+user.is_soft_deleted?  # => true (alias)
 
-Restore a soft-deleted object:
-
-```ruby
-user.restore!
+user.restore!          # Restore the user (sets deleted_at to nil)
 user.deleted?          # => false
-user.soft_deleted?     # => false
-user.is_soft_deleted?  # => false
 ```
 
-Permanently delete:
-
+#### Permanently delete
 ```ruby
-user.really_delete!
+user.really_delete!    # Hard delete the record from DB
 ```
 
-Additional features:
-- Default field is `deleted_at`, can be configured
-- Automatically applies `default_scope` to hide soft-deleted records
-- Scopes: `without_deleted`, `soft_deleted`, `active`
-- Methods: `soft_delete!`, `restore!`, `deleted?`, `really_delete!`
-- Callbacks: `before_soft_delete`, `after_soft_delete`, `before_restore`, `after_restore`
-- Touch support when soft deleting or restoring (can be turned off)
+#### Soft delete/hard delete all records
+```ruby
+User.destroy_all           # Soft delete all users (sets deleted_at)
+User.really_destroy_all    # Hard delete ALL users (removes from DB)
+```
+
+#### Callbacks (Hooks)
+You can use the following hooks to run logic before/after soft delete or restore:
+```ruby
+class User < ApplicationRecord
+  include ConcernsOnRails::SoftDeletable
+
+  def before_soft_delete
+    # Code to run before soft delete
+  end
+
+  def after_soft_delete
+    # Code to run after soft delete
+  end
+
+  def before_restore
+    # Code to run before restore
+  end
+
+  def after_restore
+    # Code to run after restore
+  end
+end
+```
+
+#### Notes
+- Default field is `deleted_at`, can be changed with `soft_deletable_by :your_field`
+- `touch: false` to skip updating updated_at when soft deleting/restoring
 - Aliases for `deleted?`: `soft_deleted?`, `is_soft_deleted?`
+- All scopes and methods work seamlessly with ActiveRecord
 
 ---
 

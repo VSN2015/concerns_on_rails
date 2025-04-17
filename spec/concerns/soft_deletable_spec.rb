@@ -293,4 +293,28 @@ describe ConcernsOnRails::SoftDeletable do
       expect(scoped_class.all).to include(active)
     end
   end
+
+  describe '.destroy_all' do
+    let!(:record1) { dummy_class.create!(name: 'foo') }
+    let!(:record2) { dummy_class.create!(name: 'bar') }
+
+    it 'soft deletes all records created in this test' do
+      dummy_class.destroy_all
+      expect(record1.reload).to be_deleted
+      expect(record2.reload).to be_deleted
+    end
+  end
+
+  describe '.really_destroy_all' do
+    before do
+      dummy_class.create!(name: 'baz')
+      dummy_class.create!(name: 'qux')
+    end
+
+    it 'hard deletes all records' do
+      expect {
+        dummy_class.really_destroy_all
+      }.to change { dummy_class.count }.to(0)
+    end
+  end
 end
