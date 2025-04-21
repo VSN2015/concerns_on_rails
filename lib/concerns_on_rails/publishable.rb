@@ -9,6 +9,9 @@ module ConcernsOnRails
       # declare class attributes and set default values
       class_attribute :publishable_field, instance_accessor: false
       self.publishable_field ||= :published_at
+
+      scope :published, -> { where(arel_table[publishable_field].not_eq(nil)) }
+      scope :unpublished, -> { where(arel_table[publishable_field].eq(nil)) }
     end
 
     # class methods
@@ -23,9 +26,6 @@ module ConcernsOnRails
         unless column_names.include?(publishable_field.to_s)
           raise ArgumentError, "ConcernsOnRails::Publishable: publishable_field '#{publishable_field}' does not exist in the database"
         end
-
-        scope :published, -> { where(arel_table[publishable_field].not_eq(nil)) }
-        scope :unpublished, -> { where(arel_table[publishable_field].eq(nil)) }
       end
     end
 
