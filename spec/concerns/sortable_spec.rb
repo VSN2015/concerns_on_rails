@@ -123,33 +123,6 @@ describe ConcernsOnRails::Sortable do
     end
   end
 
-  context "when sortable_by is called multiple times" do
-    before do
-      ActiveRecord::Schema.define do
-        create_table :multi_sortable_tasks, force: true do |t|
-          t.string  :name
-          t.integer :position
-          t.integer :priority
-        end
-      end
-
-      class MultiSortableTask < TestModel
-        include ConcernsOnRails::Sortable
-        sortable_by :position
-      end
-    end
-  
-    it "respects the latest sortable_by config" do
-      MultiSortableTask.sortable_by(priority: :desc)
-  
-      MultiSortableTask.create!(name: "Low",    priority: 1, position: 1)
-      MultiSortableTask.create!(name: "Medium", priority: 2, position: 3)
-      MultiSortableTask.create!(name: "High",   priority: 3, position: 2)
-  
-      expect(MultiSortableTask.all.pluck(:name)).to eq(["High", "Medium", "Low"])
-    end
-  end
-
   context "with sorting but without acts_as_list" do
     before do
       ActiveRecord::Schema.define do

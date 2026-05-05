@@ -4,7 +4,9 @@ require "concerns_on_rails"
 require "faker"
 require "simplecov"
 require "support/database"
-require "active_support/core_ext/time" # for Time.zone
+require "active_support/core_ext/time"
+require "active_support/core_ext/numeric/time"
+require "active_support/testing/time_helpers"
 
 Time.zone = "UTC"
 
@@ -14,6 +16,8 @@ end
 
 
 RSpec.configure do |config|
+  config.include ActiveSupport::Testing::TimeHelpers
+
   config.expect_with :rspec do |expectations|
     expectations.include_chain_clauses_in_custom_matcher_descriptions = true
   end

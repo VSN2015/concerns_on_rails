@@ -4,28 +4,22 @@ module ConcernsOnRails
   module Publishable
     extend ActiveSupport::Concern
 
-    # instance methods
     included do
-      # declare class attributes and set default values
-      class_attribute :publishable_field, instance_accessor: false
-      self.publishable_field ||= :published_at
+      class_attribute :publishable_field, instance_accessor: false, default: :published_at
+
+      scope :published, -> { where(arel_table[publishable_field].lteq(Time.zone.now)) }
+      scope :unpublished, -> {
+        where(arel_table[publishable_field].eq(nil).or(arel_table[publishable_field].gt(Time.zone.now)))
+      }
     end
 
-    # class methods
     class_methods do
-      # Define publishable field
-      # Example:
-      #   publishable_by :published_at
       def publishable_by(field = nil)
         self.publishable_field = field || :published_at
 
-        # validate publishable_field exists in database
         unless column_names.include?(publishable_field.to_s)
           raise ArgumentError, "ConcernsOnRails::Publishable: publishable_field '#{publishable_field}' does not exist in the database"
         end
-
-        scope :published, -> { where(arel_table[publishable_field].not_eq(nil)) }
-        scope :unpublished, -> { where(arel_table[publishable_field].eq(nil)) }
       end
     end
 
@@ -48,7 +42,9 @@ module ConcernsOnRails
     # Example:
     #   record.published?
     def published?
-      self[self.class.publishable_field].present?
+      value = self[self.class.publishable_field]
+      return false unless value.present?
+      value.respond_to?(:<=) ? value <= Time.zone.now : true
     end
 
     # Check if the record is unpublished

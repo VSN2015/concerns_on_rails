@@ -23,6 +23,8 @@ describe ConcernsOnRails::Publishable do
     end
   end
 
+  
+
   it "defaults to unpublished" do
     article = Article.create!(title: "Draft")
     expect(article.published?).to be false

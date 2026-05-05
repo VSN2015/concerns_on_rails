@@ -28,6 +28,13 @@ describe ConcernsOnRails::SoftDeletable do
     end
   end
 
+  after(:all) do
+    ActiveRecord::Base.connection.tables.each do |table|
+      next if table == "schema_migrations"
+      ActiveRecord::Base.connection.drop_table(table)
+    end
+  end
+
   let!(:record) { dummy_class.create!(name: 'test') }
 
   describe '.soft_deletable_by' do
@@ -69,15 +76,13 @@ describe ConcernsOnRails::SoftDeletable do
     end
     it 'touches updated_at if enabled' do
       t = record.updated_at
-      sleep 1
-      record.soft_delete!
+      travel(1.second) { record.soft_delete! }
       expect(record.reload.updated_at).to be > t
     end
     it 'does not touch updated_at if disabled' do
       dummy_class.soft_deletable_by :deleted_at, touch: false
       t = record.updated_at
-      sleep 1
-      record.soft_delete!
+      travel(1.second) { record.soft_delete! }
       expect(record.reload.updated_at).to eq t
     end
   end
@@ -95,16 +100,14 @@ describe ConcernsOnRails::SoftDeletable do
     end
     it 'touches updated_at if enabled' do
       t = record.updated_at
-      sleep 1
-      record.restore!
+      travel(1.second) { record.restore! }
       expect(record.reload.updated_at).to be > t
     end
     it 'does not touch updated_at if disabled' do
       dummy_class.soft_deletable_by :deleted_at, touch: false
       record.soft_delete!
       t = record.updated_at
-      sleep 1
-      record.restore!
+      travel(1.second) { record.restore! }
       expect(record.reload.updated_at).to eq t
     end
   end

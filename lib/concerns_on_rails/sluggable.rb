@@ -51,13 +51,8 @@ module ConcernsOnRails
     # Example:
     #   record.slug_source
     def slug_source
-      if self.class.sluggable_field.present? && respond_to?(self.class.sluggable_field)
-        send(self.class.sluggable_field)
-      elsif respond_to?(:title)
-        title
-      else
-        to_s
-      end
+      field = self.class.sluggable_field
+      respond_to?(field) ? send(field) : to_s
     end
   end
 end

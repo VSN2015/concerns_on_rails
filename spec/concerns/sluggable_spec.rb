@@ -9,7 +9,6 @@ describe ConcernsOnRails::Sluggable do
     end
 
     class Page < TestModel
-      extend FriendlyId
       include ConcernsOnRails::Sluggable
 
       sluggable_by :title

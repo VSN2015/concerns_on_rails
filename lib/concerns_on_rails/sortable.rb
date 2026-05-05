@@ -22,7 +22,12 @@ module ConcernsOnRails
       self.sortable_direction ||= :asc
 
       # we cannot use acts_as_list here
-      default_scope { order(sortable_field => sortable_direction) }
+      default_scope do
+        unless column_names.include?(sortable_field.to_s)
+          raise ArgumentError, "#{name}: '#{sortable_field}' column not found. Call `sortable_by :your_column` to configure the sort field."
+        end
+        order(sortable_field => sortable_direction)
+      end
     end
 
     # class methods
@@ -48,12 +53,7 @@ module ConcernsOnRails
 
         validate_sortable_field!
 
-        # add acts_as_list and default scope
-        # Setup sorting behaviors
         acts_as_list column: sortable_field if use_acts_as_list
-
-        # add default scope: position => asc
-        default_scope { order(sortable_field => sortable_direction) }
       end
 
       private

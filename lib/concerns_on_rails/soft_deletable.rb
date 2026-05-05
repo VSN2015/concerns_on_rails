@@ -16,9 +16,6 @@ module ConcernsOnRails
       # Optionally, uncomment to hide deleted by default:
       default_scope { without_deleted }
 
-      # define callbacks
-      define_model_callbacks :soft_delete
-      define_model_callbacks :restore
     end
 
     class_methods do
@@ -51,43 +48,34 @@ module ConcernsOnRails
     def before_restore; end
     def after_restore; end
 
-    # add soft delete methods
     def soft_delete!
       return true if deleted?
-      run_callbacks(:soft_delete) do
-        before_soft_delete
-        if self.class.soft_delete_touch
-          update(self.class.soft_delete_field => Time.zone.now).tap do |result|
-            touch if respond_to?(:touch)
-            after_soft_delete if result
-          end
-        else
-          update_column(self.class.soft_delete_field, Time.zone.now).tap do |result|
-            after_soft_delete if result
-          end
-        end
+      before_soft_delete
+      result = if self.class.soft_delete_touch
+        update(self.class.soft_delete_field => Time.zone.now)
+      else
+        update_column(self.class.soft_delete_field, Time.zone.now)
       end
+      after_soft_delete if result
+      result
     end
 
-    # really delete the record
-    def really_delete!
-      destroy
-    end
-  
     def restore!
-      run_callbacks(:restore) do
-        before_restore
-        if self.class.soft_delete_touch
-          update(self.class.soft_delete_field => nil).tap do |result|
-            touch if respond_to?(:touch)
-            after_restore if result
-          end
-        else
-          update_column(self.class.soft_delete_field, nil).tap do |result|
-            after_restore if result
-          end
-        end
+      return true unless deleted?
+      before_restore
+      result = if self.class.soft_delete_touch
+        update(self.class.soft_delete_field => nil)
+      else
+        update_column(self.class.soft_delete_field, nil)
       end
+      after_restore if result
+      result
+    end
+
+    # bypasses AR callbacks and validations — use when you want a true hard delete
+    def really_delete!
+      self.class.unscoped.where(self.class.primary_key => id).delete_all
+      freeze
     end
   
     def deleted?
@@ -99,9 +87,8 @@ module ConcernsOnRails
     alias_method :is_soft_deleted?, :deleted?
     alias_method :soft_deleted?, :deleted?
 
-    # Is really deleted?
     def is_really_deleted?
-      !self.class.exists?(id)
+      !self.class.unscoped.exists?(id)
     end
   end
 end
