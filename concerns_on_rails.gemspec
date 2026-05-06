@@ -18,7 +18,7 @@ Gem::Specification.new do |spec|
   spec.files         = Dir["lib/**/*", "bin/*", "README.md", "LICENSE.txt", "CODE_OF_CONDUCT.md", "CHANGELOG.md"]
   spec.require_paths = ["lib"]
 
-  spec.add_runtime_dependency 'rails', '~> 5.0'
+  spec.add_runtime_dependency 'rails', '>= 5.0', '< 9'
   spec.add_runtime_dependency 'acts_as_list', '~> 0.7.5'
   spec.add_runtime_dependency 'friendly_id', '~> 5.4'
 

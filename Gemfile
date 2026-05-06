@@ -2,6 +2,8 @@ source "https://rubygems.org"
 
 gemspec
 
+gem 'rake'
+
 gem "rspec", "~> 3.12"
 gem "activerecord", ">= 5.0", "< 8.0"
 gem "sqlite3", "~> 1.6.2"
