@@ -5,7 +5,7 @@ gemspec
 gem 'rake'
 
 gem "rspec", "~> 3.12"
-gem "activerecord", ">= 5.0", "< 8.0"
+gem "activerecord", ">= 5.0", "< 9"
 gem "sqlite3", "~> 1.6.2"
 gem "friendly_id", "~> 5.4"
 gem "faker", "~> 3.2"
