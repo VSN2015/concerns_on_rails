@@ -19,4 +19,5 @@ jobs:
       with:
         ruby-version: '3.2'
         bundler: latest
+        bundler-cache: true
     - uses: rubygems/release-gem@v1
