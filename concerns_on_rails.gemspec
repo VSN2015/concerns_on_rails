@@ -13,7 +13,7 @@ Gem::Specification.new do |spec|
   spec.metadata["license"] = "MIT"
 
 
-  spec.required_ruby_version = ">= 2.7.0"
+  spec.required_ruby_version = ">= 3.2.0"
 
   spec.files         = Dir["lib/**/*", "bin/*", "README.md", "LICENSE.txt", "CODE_OF_CONDUCT.md", "CHANGELOG.md"]
   spec.require_paths = ["lib"]
