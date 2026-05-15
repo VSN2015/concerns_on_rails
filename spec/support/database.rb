@@ -9,7 +9,7 @@ ActiveRecord::Base.establish_connection(
 )
 
 # Optional: log SQL to STDOUT during test run
-ActiveRecord::Base.logger = Logger.new(STDOUT)
+ActiveRecord::Base.logger = Logger.new($stdout)
 
 # Base class for test models
 class TestModel < ActiveRecord::Base

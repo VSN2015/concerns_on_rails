@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+
 require 'spec_helper'
 
 describe ConcernsOnRails::SoftDeletable do
@@ -7,14 +8,31 @@ describe ConcernsOnRails::SoftDeletable do
     Class.new(ActiveRecord::Base) do
       self.table_name = 'dummy_soft_deletables'
       include ConcernsOnRails::SoftDeletable
+
       soft_deletable_by :deleted_at
 
       # For callback test
       attr_accessor :callback_log
-      def before_soft_delete; @callback_log ||= []; @callback_log << :before_soft_delete; end
-      def after_soft_delete;  @callback_log ||= []; @callback_log << :after_soft_delete; end
-      def before_restore;     @callback_log ||= []; @callback_log << :before_restore; end
-      def after_restore;      @callback_log ||= []; @callback_log << :after_restore; end
+
+      def before_soft_delete
+        @callback_log ||= []
+        @callback_log << :before_soft_delete
+      end
+
+      def after_soft_delete
+        @callback_log ||= []
+        @callback_log << :after_soft_delete
+      end
+
+      def before_restore
+        @callback_log ||= []
+        @callback_log << :before_restore
+      end
+
+      def after_restore
+        @callback_log ||= []
+        @callback_log << :after_restore
+      end
     end
   end
 
@@ -31,6 +49,7 @@ describe ConcernsOnRails::SoftDeletable do
   after(:all) do
     ActiveRecord::Base.connection.tables.each do |table|
       next if table == "schema_migrations"
+
       ActiveRecord::Base.connection.drop_table(table)
     end
   end
@@ -39,13 +58,14 @@ describe ConcernsOnRails::SoftDeletable do
 
   describe '.soft_deletable_by' do
     it 'raises error if field does not exist' do
-      expect {
+      expect do
         Class.new(ActiveRecord::Base) do
           self.table_name = 'dummy_soft_deletables'
           include ConcernsOnRails::SoftDeletable
+
           soft_deletable_by :not_a_field
         end
-      }.to raise_error(ArgumentError)
+      end.to raise_error(ArgumentError)
     end
     it 'sets the soft delete field' do
       expect(dummy_class.soft_delete_field).to eq(:deleted_at)
@@ -133,6 +153,7 @@ describe ConcernsOnRails::SoftDeletable do
       Class.new(ActiveRecord::Base) do
         self.table_name = 'other_soft_deletables'
         include ConcernsOnRails::SoftDeletable
+
         soft_deletable_by :removed_on
       end
     end
@@ -158,6 +179,7 @@ describe ConcernsOnRails::SoftDeletable do
       Class.new(ActiveRecord::Base) do
         self.table_name = 'custom_soft_deletables'
         include ConcernsOnRails::SoftDeletable
+
         soft_deletable_by :removed_on
       end
     end
@@ -183,17 +205,17 @@ describe ConcernsOnRails::SoftDeletable do
     it 'calls callbacks in order' do
       record.callback_log = []
       record.soft_delete!
-      expect(record.callback_log).to eq([:before_soft_delete, :after_soft_delete])
+      expect(record.callback_log).to eq(%i[before_soft_delete after_soft_delete])
       record.callback_log = []
       record.restore!
-      expect(record.callback_log).to eq([:before_restore, :after_restore])
+      expect(record.callback_log).to eq(%i[before_restore after_restore])
     end
   end
 
   context 'idempotency' do
     it 'soft_delete! twice does not error and does not change deleted_at again' do
       record.soft_delete!
-      t = record.deleted_at
+      record.deleted_at
       sleep 1
       expect { record.soft_delete! }.not_to change { record.reload.deleted_at }
     end
@@ -247,8 +269,10 @@ describe ConcernsOnRails::SoftDeletable do
       class StiModel < ActiveRecord::Base
         self.table_name = 'sti_models'
         include ConcernsOnRails::SoftDeletable
+
         soft_deletable_by :deleted_at
       end
+
       class ChildModel < StiModel; end
     end
 
@@ -267,6 +291,7 @@ describe ConcernsOnRails::SoftDeletable do
       Class.new(ActiveRecord::Base) do
         self.table_name = 'scoped_soft_deletables'
         include ConcernsOnRails::SoftDeletable
+
         default_scope { without_deleted }
         soft_deletable_by :deleted_at
       end
@@ -315,9 +340,9 @@ describe ConcernsOnRails::SoftDeletable do
     end
 
     it 'hard deletes all records' do
-      expect {
+      expect do
         dummy_class.really_destroy_all
-      }.to change { dummy_class.count }.to(0)
+      end.to change { dummy_class.count }.to(0)
     end
   end
 end

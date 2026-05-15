@@ -8,7 +8,7 @@ module ConcernsOnRails
       class_attribute :publishable_field, instance_accessor: false, default: :published_at
 
       scope :published, -> { where(arel_table[publishable_field].lteq(Time.zone.now)) }
-      scope :unpublished, -> {
+      scope :unpublished, lambda {
         where(arel_table[publishable_field].eq(nil).or(arel_table[publishable_field].gt(Time.zone.now)))
       }
     end
@@ -17,9 +17,9 @@ module ConcernsOnRails
       def publishable_by(field = nil)
         self.publishable_field = field || :published_at
 
-        unless column_names.include?(publishable_field.to_s)
-          raise ArgumentError, "ConcernsOnRails::Publishable: publishable_field '#{publishable_field}' does not exist in the database"
-        end
+        return if column_names.include?(publishable_field.to_s)
+
+        raise ArgumentError, "ConcernsOnRails::Publishable: publishable_field '#{publishable_field}' does not exist in the database"
       end
     end
 
@@ -44,6 +44,7 @@ module ConcernsOnRails
     def published?
       value = self[self.class.publishable_field]
       return false unless value.present?
+
       value.respond_to?(:<=) ? value <= Time.zone.now : true
     end
 

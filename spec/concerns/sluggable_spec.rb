@@ -18,6 +18,7 @@ describe ConcernsOnRails::Sluggable do
   after(:each) do
     ActiveRecord::Base.connection.tables.each do |table|
       next if table == "schema_migrations"
+
       ActiveRecord::Base.connection.drop_table(table)
     end
   end
@@ -71,6 +72,7 @@ describe ConcernsOnRails::Sluggable do
     expect do
       class InvalidPage < TestModel
         include ConcernsOnRails::Sluggable
+
         sluggable_by :nonexistent_field
       end
     end.to raise_error(ArgumentError)
@@ -87,10 +89,10 @@ describe ConcernsOnRails::Sluggable do
     class DynamicPage < TestModel
       extend FriendlyId
       include ConcernsOnRails::Sluggable
-  
+
       sluggable_by :custom_title
     end
-  
+
     page = DynamicPage.create!(custom_title: "Dynamic Slug")
     expect(page.slug).to eq("dynamic-slug")
   end

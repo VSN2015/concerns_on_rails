@@ -12,6 +12,7 @@ describe ConcernsOnRails::Publishable do
 
     class Article < TestModel
       include ConcernsOnRails::Publishable
+
       publishable_by :published_at
     end
   end
@@ -19,11 +20,10 @@ describe ConcernsOnRails::Publishable do
   after(:each) do
     ActiveRecord::Base.connection.tables.each do |table|
       next if table == "schema_migrations"
+
       ActiveRecord::Base.connection.drop_table(table)
     end
   end
-
-  
 
   it "defaults to unpublished" do
     article = Article.create!(title: "Draft")
@@ -63,6 +63,7 @@ describe ConcernsOnRails::Publishable do
 
     class CustomArticle < TestModel
       include ConcernsOnRails::Publishable
+
       publishable_by :is_published
     end
 
@@ -85,12 +86,13 @@ describe ConcernsOnRails::Publishable do
       end
     end
 
-    expect {
+    expect do
       class InvalidArticle < TestModel
         include ConcernsOnRails::Publishable
+
         publishable_by :non_existing_field
       end
-    }.to raise_error(ArgumentError)
+    end.to raise_error(ArgumentError)
   end
 
   it "supports custom publish time" do

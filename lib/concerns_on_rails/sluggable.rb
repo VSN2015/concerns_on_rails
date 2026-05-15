@@ -12,6 +12,7 @@ module ConcernsOnRails
       self.sluggable_field ||= :name
 
       extend FriendlyId
+
       # we need use a lambda to access the instance variable
       # instead of friendly_id :slug_source, use: :slugged
       friendly_id :slug_source, use: :slugged
@@ -37,11 +38,12 @@ module ConcernsOnRails
       end
 
       private
+
       # Validate sluggable_field exists in database
       def validate_sluggable_field!
-        unless column_names.include?(sluggable_field.to_s)
-          raise ArgumentError, "ConcernsOnRails::Sluggable: sluggable_field '#{sluggable_field}' does not exist in the database"
-        end
+        return if column_names.include?(sluggable_field.to_s)
+
+        raise ArgumentError, "ConcernsOnRails::Sluggable: sluggable_field '#{sluggable_field}' does not exist in the database"
       end
     end
 

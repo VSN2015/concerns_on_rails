@@ -14,7 +14,6 @@ SimpleCov.start do
   add_filter "/spec/"
 end
 
-
 RSpec.configure do |config|
   config.include ActiveSupport::Testing::TimeHelpers
 

@@ -7,6 +7,21 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    name: RuboCop
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.2'
+        bundler: latest
+        bundler-cache: true
+    - name: Run RuboCop
+      run: bundle exec rubocop --format github
+
   test:
     name: RSpec
     runs-on: ubuntu-latest
@@ -24,7 +39,7 @@ jobs:
 
   publish:
     name: Build + Publish
-    needs: test
+    needs: [lint, test]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

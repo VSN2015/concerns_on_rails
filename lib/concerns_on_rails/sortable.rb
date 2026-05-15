@@ -26,6 +26,7 @@ module ConcernsOnRails
         unless column_names.include?(sortable_field.to_s)
           raise ArgumentError, "#{name}: '#{sortable_field}' column not found. Call `sortable_by :your_column` to configure the sort field."
         end
+
         order(sortable_field => sortable_direction)
       end
     end
@@ -57,6 +58,7 @@ module ConcernsOnRails
       end
 
       private
+
       def parse_sortable_config(config)
         if config.is_a?(Hash)
           # extract key and value
@@ -71,9 +73,9 @@ module ConcernsOnRails
 
       # Validate sortable_field exists in database
       def validate_sortable_field!
-        unless column_names.include?(sortable_field.to_s)
-          raise ArgumentError, "ConcernsOnRails::Sortable: sortable_field '#{sortable_field}' does not exist in the database"
-        end
+        return if column_names.include?(sortable_field.to_s)
+
+        raise ArgumentError, "ConcernsOnRails::Sortable: sortable_field '#{sortable_field}' does not exist in the database"
       end
     end
   end

@@ -1,0 +1,59 @@
+AllCops:
+  TargetRubyVersion: 2.7
+  NewCops: enable
+  SuggestExtensions: false
+  Exclude:
+    - 'bin/**/*'
+    - 'coverage/**/*'
+    - 'vendor/**/*'
+    - 'tmp/**/*'
+    - '*.gemspec'
+
+# Documentation isn't required for every class/module in a small gem.
+Style/Documentation:
+  Enabled: false
+
+# Allow both single- and double-quoted strings; codebase mixes them.
+Style/StringLiterals:
+  Enabled: false
+
+Style/StringLiteralsInInterpolation:
+  Enabled: false
+
+# Frozen string literal magic comment isn't required.
+Style/FrozenStringLiteralComment:
+  Enabled: false
+
+# Metric cops produce noise on concerns that legitimately have a few branches.
+Metrics/MethodLength:
+  Enabled: false
+
+Metrics/AbcSize:
+  Enabled: false
+
+Metrics/ClassLength:
+  Enabled: false
+
+Metrics/ModuleLength:
+  Enabled: false
+
+Metrics/BlockLength:
+  Exclude:
+    - 'spec/**/*'
+
+Layout/LineLength:
+  Max: 140
+
+# Specs use describe/context blocks with long bodies.
+Lint/AmbiguousBlockAssociation:
+  Exclude:
+    - 'spec/**/*'
+
+# Specs intentionally define test model constants inside before blocks; see CLAUDE.md.
+Lint/ConstantDefinitionInBlock:
+  Exclude:
+    - 'spec/**/*'
+
+# `is_soft_deleted?` / `is_really_deleted?` are part of the gem's public API.
+Naming/PredicatePrefix:
+  Enabled: false
