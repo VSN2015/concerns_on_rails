@@ -11,6 +11,7 @@ A simple collection of reusable Rails concerns to keep your models clean and DRY
 - 📤 `Publishable`: Easily manage published/unpublished records using a simple `published_at` field
 - ❌ `SoftDeletable`: Soft delete records using a configurable timestamp field (e.g., `deleted_at`) with automatic scoping
 - 🔐 `Hashable`: Auto-generate a random hex/UUID/integer/custom-alphabet value on create, with a `regenerate_<field>!` helper
+- 🗓️ `Schedulable`: Manage time-windowed records via `starts_at` / `ends_at` with `.current`, `.upcoming`, `.expired`, and `.active_at(time)` scopes
 
 ---
 
@@ -235,6 +236,67 @@ hashable_by :code,        type: :custom,  length: 8,
 - No uniqueness retry is built in. For collision-prone configurations (e.g. short integer codes), add a unique index and rescue at the application level.
 - For fixed-width numeric codes (e.g. `000042`), use a string column — integer columns drop leading zeros.
 - If your model has `validates :<field>, presence: true`, switch to a `before_validation` callback in your model since the concern uses `before_create`.
+
+---
+
+### 6. 🗓️ Schedulable
+
+Manage records with a time window using `starts_at` / `ends_at` columns.
+
+```ruby
+class Promotion < ApplicationRecord
+  include ConcernsOnRails::Schedulable
+
+  # Defaults: starts_at: :starts_at, ends_at: :ends_at
+  schedulable_by
+end
+
+promo = Promotion.create!(starts_at: 1.hour.ago, ends_at: 1.day.from_now)
+promo.current?   # => true
+promo.upcoming?  # => false
+promo.expired?   # => false
+
+Promotion.current                  # currently active
+Promotion.upcoming                 # starts_at in the future
+Promotion.expired                  # ends_at in the past
+Promotion.active_at(Time.zone.now) # active at any specific time
+```
+
+#### Custom column names
+
+```ruby
+class Event < ApplicationRecord
+  include ConcernsOnRails::Schedulable
+
+  schedulable_by starts_at: :starts_on, ends_at: :ends_on
+end
+```
+
+#### Open-ended start (only an expiry)
+
+```ruby
+class Coupon < ApplicationRecord
+  include ConcernsOnRails::Schedulable
+
+  schedulable_by starts_at: nil, ends_at: :expires_at
+end
+```
+
+#### Mutators
+
+```ruby
+promo.start!                                              # sets starts_at to now
+promo.finish!                                             # sets ends_at to now
+promo.reschedule!(starts_at: 1.day.from_now,
+                  ends_at: 2.days.from_now)               # sets both
+```
+
+#### Notes
+- Boundary semantics are **inclusive start, exclusive end**: a record is active at exactly `starts_at`, but not at exactly `ends_at`.
+- A `nil` `ends_at` means "no end" — the record stays active forever once started.
+- A `nil` `starts_at` means "not yet started" — the record is not active (unless `starts_at` is unconfigured).
+- No `default_scope` is added; chain `.current` (or any other scope) explicitly to filter.
+- `schedulable_by` validates that the configured columns exist and raises `ArgumentError` otherwise.
 
 ---
 

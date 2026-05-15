@@ -1,5 +1,10 @@
 <!-- CHANGELOG.md -->
 
+## 1.4.0 (2026-05-16)
+
+### Added
+- Schedulable: Manage time-windowed records via `starts_at` / `ends_at` columns. Adds `schedulable_by` macro, scopes (`.current`, `.upcoming`, `.expired`, `.active_at(time)`), predicates (`current?`, `upcoming?`, `expired?`, `active_at?`), and mutators (`start!`, `finish!`, `reschedule!`). Supports custom column names and open-ended schedules (`starts_at: nil`).
+
 ## 1.3.0 (2026-05-16)
 
 ### Added
