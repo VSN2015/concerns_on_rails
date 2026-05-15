@@ -10,6 +10,7 @@ A simple collection of reusable Rails concerns to keep your models clean and DRY
 - 🔢 `Sortable`: Sort records based on a field using `acts_as_list`, with flexible sorting field and direction
 - 📤 `Publishable`: Easily manage published/unpublished records using a simple `published_at` field
 - ❌ `SoftDeletable`: Soft delete records using a configurable timestamp field (e.g., `deleted_at`) with automatic scoping
+- 🔐 `Hashable`: Auto-generate a random hex/UUID/integer/custom-alphabet value on create, with a `regenerate_<field>!` helper
 
 ---
 
@@ -191,6 +192,49 @@ end
 - `touch: false` to skip updating updated_at when soft deleting/restoring
 - Aliases for `deleted?`: `soft_deleted?`, `is_soft_deleted?`
 - All scopes and methods work seamlessly with ActiveRecord
+
+---
+
+### 5. Hashable
+
+Auto-generate a random value (hex, UUID, fixed-digit integer, or custom-alphabet string) on create.
+
+```ruby
+class Order < ApplicationRecord
+  include ConcernsOnRails::Hashable
+
+  # Defaults: type: :hex, length: 16 (32-char hex string)
+  hashable_by :token
+end
+
+order = Order.create!
+order.token              # => "a3f7c9b1e2d40859e2f1c9b73d40a857"
+order.regenerate_token!  # rolls a new random value and persists it
+```
+
+#### Types
+
+```ruby
+hashable_by :token,       type: :hex,     length: 16
+hashable_by :external_id, type: :uuid
+hashable_by :code,        type: :integer, length: 6
+hashable_by :code,        type: :custom,  length: 8,
+            alphabet: "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+```
+
+| Type       | `length` means          | Example output           |
+|------------|-------------------------|--------------------------|
+| `:hex`     | byte count (output is `length * 2` hex chars) | `"a3f7c9b1e2d40859"` |
+| `:uuid`    | ignored                 | `"550e8400-e29b-41d4-a716-446655440000"` |
+| `:integer` | digit count             | `483921`                 |
+| `:custom`  | output length, samples from `alphabet:` | `"K7M3PQ9A"` |
+
+#### Notes
+- Auto-assigns on `before_create` only when the field is blank, so callers can still pass an explicit value.
+- A `regenerate_<field>!` instance method is defined dynamically to match the configured column.
+- No uniqueness retry is built in. For collision-prone configurations (e.g. short integer codes), add a unique index and rescue at the application level.
+- For fixed-width numeric codes (e.g. `000042`), use a string column — integer columns drop leading zeros.
+- If your model has `validates :<field>, presence: true`, switch to a `before_validation` callback in your model since the concern uses `before_create`.
 
 ---
 
