@@ -41,7 +41,9 @@ module ConcernsOnRails
       #   sortable_by position: :desc
       #
       #   sortable_by :position, use_acts_as_list: false
-      def sortable_by(field_config, use_acts_as_list: true)
+      def sortable_by(field_config = nil, use_acts_as_list: true, **field_options)
+        field_config = field_options if field_config.nil? && field_options.any?
+
         # parse field_config
         field, direction = parse_sortable_config(field_config)
 
