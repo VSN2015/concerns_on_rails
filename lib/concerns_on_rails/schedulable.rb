@@ -61,16 +61,7 @@ module ConcernsOnRails
 
     # Is the record active at the given time? Inclusive start, exclusive end.
     def active_at?(time)
-      starts_field = self.class.schedulable_starts_at_field
-      ends_field = self.class.schedulable_ends_at_field
-      starts_value = starts_field && self[starts_field]
-      ends_value = ends_field && self[ends_field]
-
-      return false if starts_field && starts_value.nil?
-      return false if starts_value && starts_value > time
-      return false if ends_value && ends_value <= time
-
-      true
+      schedulable_started_by?(time) && schedulable_not_ended_at?(time)
     end
 
     def current?
@@ -114,6 +105,24 @@ module ConcernsOnRails
       attrs[starts_field] = starts_at if starts_field
       attrs[ends_field] = ends_at if ends_field
       update(attrs)
+    end
+
+    private
+
+    def schedulable_started_by?(time)
+      field = self.class.schedulable_starts_at_field
+      return true unless field
+
+      value = self[field]
+      !value.nil? && value <= time
+    end
+
+    def schedulable_not_ended_at?(time)
+      field = self.class.schedulable_ends_at_field
+      return true unless field
+
+      value = self[field]
+      value.nil? || value > time
     end
   end
 end
