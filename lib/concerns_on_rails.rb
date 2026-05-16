@@ -6,6 +6,7 @@ require "concerns_on_rails/sluggable"
 require "concerns_on_rails/soft_deletable"
 require "concerns_on_rails/hashable"
 require "concerns_on_rails/schedulable"
+require "concerns_on_rails/expirable"
 
 module ConcernsOnRails
 end

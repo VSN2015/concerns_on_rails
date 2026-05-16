@@ -12,6 +12,7 @@ A simple collection of reusable Rails concerns to keep your models clean and DRY
 - ❌ `SoftDeletable`: Soft delete records using a configurable timestamp field (e.g., `deleted_at`) with automatic scoping
 - 🔐 `Hashable`: Auto-generate a random hex/UUID/integer/custom-alphabet value on create, with a `regenerate_<field>!` helper
 - 🗓️ `Schedulable`: Manage time-windowed records via `starts_at` / `ends_at` with `.current`, `.upcoming`, `.expired`, and `.active_at(time)` scopes
+- ⏳ `Expirable`: Single-timestamp expiry with `.active` / `.expired` / `.expiring_within(duration)` scopes and `expire!` / `extend_expiry!` / `time_until_expiry` helpers
 
 ---
 
@@ -297,6 +298,58 @@ promo.reschedule!(starts_at: 1.day.from_now,
 - A `nil` `starts_at` means "not yet started" — the record is not active (unless `starts_at` is unconfigured).
 - No `default_scope` is added; chain `.current` (or any other scope) explicitly to filter.
 - `schedulable_by` validates that the configured columns exist and raises `ArgumentError` otherwise.
+
+---
+
+### 7. ⏳ Expirable
+
+For records with a single expiry timestamp — auth tokens, API keys, sessions, password-reset links, invitations.
+
+```ruby
+class ApiToken < ApplicationRecord
+  include ConcernsOnRails::Expirable
+
+  # Default field: :expires_at
+  expirable_by
+end
+
+token = ApiToken.create!(expires_at: 1.hour.from_now)
+token.active?               # => true
+token.expired?              # => false
+token.time_until_expiry     # => ActiveSupport::Duration (~1.hour)
+
+ApiToken.active                       # nil expiry OR future expiry
+ApiToken.expired                      # past expiry
+ApiToken.expiring_within(1.day)       # future expiry within the next 1.day
+```
+
+#### Mutators
+
+```ruby
+token.expire!                       # sets expires_at to now
+token.expire!(2.hours.from_now)     # sets to an explicit time
+token.extend_expiry!(by: 1.day)     # pushes expiry forward
+```
+
+`extend_expiry!` is "smart" about the base:
+- If `expires_at` is nil or already in the past, the new value is `now + by`.
+- If `expires_at` is still in the future, `by` is added to the existing value.
+
+#### Custom field name
+
+```ruby
+class License < ApplicationRecord
+  include ConcernsOnRails::Expirable
+
+  expirable_by :valid_until
+end
+```
+
+#### Notes
+- `nil` `expires_at` means **never expires** (the record stays `active?`).
+- The expiry boundary is **exclusive**: at exactly `expires_at`, the record is `expired?`.
+- No `default_scope` is added; chain `.active` explicitly to filter.
+- `Expirable` overlaps with `Schedulable`'s open-ended pattern (`schedulable_by starts_at: nil, ends_at: :expires_at`). Use `Expirable` when the API ergonomics around expiry — `active?`, `expire!`, `extend_expiry!`, `expiring_within` — fit your domain better; use `Schedulable` when you also need a start time.
 
 ---
 

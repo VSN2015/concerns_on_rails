@@ -1,5 +1,10 @@
 <!-- CHANGELOG.md -->
 
+## 1.5.0 (2026-05-16)
+
+### Added
+- Expirable: Single-timestamp expiry for tokens, API keys, sessions, and similar records. Adds `expirable_by` macro, `.active` / `.expired` / `.expiring_within(duration)` scopes, predicates (`active?`, `expired?`), mutators (`expire!`, `extend_expiry!`), and `time_until_expiry`. `nil` expiry means "never expires"; the expiry boundary is exclusive.
+
 ## 1.4.2 (2026-05-16)
 
 ### Added
