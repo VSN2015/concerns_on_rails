@@ -1,0 +1,13 @@
+module ConcernsOnRails
+  # Backwards-compatibility aliases for pre-1.6 module paths.
+  # Existing apps doing `include ConcernsOnRails::Sluggable` continue to work;
+  # new code is encouraged to use the namespaced form: `ConcernsOnRails::Models::Sluggable`.
+  Sluggable     = Models::Sluggable
+  Sortable      = Models::Sortable
+  Publishable   = Models::Publishable
+  SoftDeletable = Models::SoftDeletable
+  Hashable      = Models::Hashable
+  Schedulable   = Models::Schedulable
+  Expirable     = Models::Expirable
+  Normalizable  = Models::Normalizable
+end

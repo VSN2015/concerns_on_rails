@@ -1,30 +1,75 @@
 # 🧩 ConcernsOnRails
 
-**🇻🇳 Note: Hoàng Sa and Trường Sa belong to Việt Nam.**
+> 🇻🇳 **Hoàng Sa and Trường Sa belong to Việt Nam.**
 
-A simple collection of reusable Rails concerns to keep your models clean and DRY.
+A plug-and-play collection of reusable ActiveSupport concerns for Rails **models** and **controllers** — slugs, soft delete, scheduled publish, expiry, pagination, filtering, JSON envelopes, and more. One `include`, one declarative macro, done.
 
-## ✨ Features
+```ruby
+class Article < ApplicationRecord
+  include ConcernsOnRails::Sluggable
+  include ConcernsOnRails::Publishable
+  include ConcernsOnRails::SoftDeletable
 
-- ✅ `Sluggable`: Generate friendly slugs from a specified field
-- 🔢 `Sortable`: Sort records based on a field using `acts_as_list`, with flexible sorting field and direction
-- 📤 `Publishable`: Easily manage published/unpublished records using a simple `published_at` field
-- ❌ `SoftDeletable`: Soft delete records using a configurable timestamp field (e.g., `deleted_at`) with automatic scoping
-- 🔐 `Hashable`: Auto-generate a random hex/UUID/integer/custom-alphabet value on create, with a `regenerate_<field>!` helper
-- 🗓️ `Schedulable`: Manage time-windowed records via `starts_at` / `ends_at` with `.current`, `.upcoming`, `.expired`, and `.active_at(time)` scopes
-- ⏳ `Expirable`: Single-timestamp expiry with `.active` / `.expired` / `.expiring_within(duration)` scopes and `expire!` / `extend_expiry!` / `time_until_expiry` helpers
+  sluggable_by :title
+end
+
+Article.published.without_deleted.find("hello-world")
+```
+
+---
+
+## 📚 Table of Contents
+
+- [Why this gem?](#-why-this-gem)
+- [Installation](#-installation)
+- [Compatibility](#-compatibility)
+- [Quick Start](#-quick-start)
+- **Model concerns**
+  - [Sluggable](#-sluggable) — URL-friendly slugs
+  - [Sortable](#-sortable) — list ordering via `acts_as_list`
+  - [Publishable](#-publishable) — `published_at` timestamp publishing
+  - [SoftDeletable](#-softdeletable) — soft delete with scopes & hooks
+  - [Hashable](#-hashable) — auto-generate tokens / UUIDs / codes
+  - [Schedulable](#-schedulable) — `starts_at` / `ends_at` time windows
+  - [Expirable](#-expirable) — single-timestamp expiry
+  - [Normalizable](#-normalizable) — attribute normalization (`:email`, `:phone`, …)
+- **Controller concerns**
+  - [Paginatable](#-paginatable) — offset pagination with headers
+  - [Filterable](#-filterable) — declarative URL-param filters
+  - [Sortable (controller)](#-sortable-controller) — URL-param ordering with allow-list
+  - [Respondable](#-respondable) — standardized JSON envelopes
+- [Module paths & namespacing](#-module-paths--namespacing)
+- [Development](#-development)
+- [Contributing](#-contributing)
+- [License](#-license)
+
+---
+
+## ✨ Why this gem?
+
+- **Eight model concerns + four controller concerns**, all production-ready
+- **One include, one macro** — no boilerplate, no glue code
+- **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
+- **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
+- **Composable** — concerns are independent; mix and match per model
 
 ---
 
 ## 📦 Installation
 
-Add this line to your application's Gemfile:
+Add to your application's `Gemfile`:
 
 ```ruby
-gem 'concerns_on_rails', github: 'VSN2015/concerns_on_rails'
+gem "concerns_on_rails", "~> 1.6"
 ```
 
-Then execute:
+Or pull the latest from GitHub:
+
+```ruby
+gem "concerns_on_rails", github: "VSN2015/concerns_on_rails"
+```
+
+Then run:
 
 ```sh
 bundle install
@@ -32,11 +77,54 @@ bundle install
 
 ---
 
-## 🚀 Usage
+## 🧪 Compatibility
 
-### 1. 📝 Sluggable
+- **Ruby**: 3.2+
+- **Rails**: 5.0 through 8.x
 
-Add slugs based on a specified attribute.
+---
+
+## 🚀 Quick Start
+
+```ruby
+# A model that's sluggable, publishable, and soft-deletable
+class Article < ApplicationRecord
+  include ConcernsOnRails::Sluggable
+  include ConcernsOnRails::Publishable
+  include ConcernsOnRails::SoftDeletable
+  include ConcernsOnRails::Normalizable
+
+  sluggable_by    :title
+  normalizable    :title, with: :squish
+end
+
+# A controller that paginates, filters, sorts, and renders JSON envelopes
+class ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Paginatable
+  include ConcernsOnRails::Controllers::Filterable
+  include ConcernsOnRails::Controllers::Sortable
+  include ConcernsOnRails::Controllers::Respondable
+
+  filter_by   :published, scope: :published
+  sortable_by :created_at, :title, default: :created_at, direction: :desc
+
+  def index
+    render_success(data: paginated(sorted(filtered(Article.all))))
+  end
+end
+```
+
+That's it. The sections below document each concern individually.
+
+---
+
+# 🧱 Model Concerns
+
+All model concerns are independent — `include` only what you need.
+
+## 📝 Sluggable
+
+URL-friendly slugs via [`friendly_id`](https://github.com/norman/friendly_id) — auto-updates when the source attribute changes.
 
 ```ruby
 class Post < ApplicationRecord
@@ -46,271 +134,230 @@ class Post < ApplicationRecord
 end
 
 post = Post.create!(title: "Hello World")
-post.slug # => "hello-world"
+post.slug              # => "hello-world"
+post.update!(title: "Hello, World!")
+post.slug              # => "hello-world"  (regenerates on title change)
+
+Post.friendly.find("hello-world")
 ```
 
-If the slug source is changed, the slug will auto-update.
+**Notes**
+- Schema must have a `slug` column (string).
+- Falls back to `to_s` if the configured source field doesn't respond.
+- Uses friendly_id's `:slugged` strategy under the hood.
 
 ---
 
-### 2. 🔢 Sortable
+## 🔢 Sortable
 
-Use for models that need ordering.
+List ordering via [`acts_as_list`](https://github.com/brendon/acts_as_list) — adds a `default_scope` ordering plus `move_higher`, `move_lower`, `move_to_top`, `move_to_bottom`, and automatic position reordering on destroy.
 
 ```ruby
 class Task < ApplicationRecord
   include ConcernsOnRails::Sortable
 
-  sortable_by :position
+  sortable_by :position           # default — ascending
 end
 
-Task.create!(name: "B")
 Task.create!(name: "A")
-Task.first.name # => "B" (sorted by position ASC)
+Task.create!(name: "B")
+Task.last.move_higher
 ```
 
-You can customize the sort field and direction:
+**Configuration**
 
 ```ruby
-class PriorityTask < ApplicationRecord
-  include ConcernsOnRails::Sortable
-
-  sortable_by priority: :desc
-end
+sortable_by :priority                       # ascending priority
+sortable_by priority: :desc                 # descending priority
+sortable_by :position, use_acts_as_list: false   # just the default_scope ordering, no acts_as_list
 ```
 
-Additional features:
-- 📌 Automatically sets `acts_as_list` on the configured column
-- 📋 Adds default sorting scope to your model
-- ↕️ Supports custom direction: `:asc` or `:desc`
-- 🔍 Validates that the sortable field exists in the table schema
-- 🧠 Compatible with scopes and ActiveRecord queries
-- 🔄 Can be reconfigured dynamically within the model using `sortable_by`
+**Notes**
+- The configured field must exist as a column.
+- Direction values other than `:asc` / `:desc` silently fall back to `:asc`.
 
 ---
 
-### 3. 📤 Publishable
+## 📤 Publishable
 
-Manage published/unpublished records using a `published_at` field.
+Manage published / unpublished records via a `published_at` timestamp.
 
 ```ruby
 class Article < ApplicationRecord
   include ConcernsOnRails::Publishable
-end
 
-Article.published   # => returns only published articles
-Article.unpublished # => returns only unpublished articles
+  publishable_by :published_at   # default — call is optional
+end
 
 article = Article.create!(title: "Draft")
-article.published? # => false
-
+article.published?      # => false
 article.publish!
-article.published? # => true
-
+article.published?      # => true
 article.unpublish!
-article.published? # => false
+
+Article.published       # WHERE published_at <= NOW()
+Article.unpublished     # WHERE published_at IS NULL OR published_at > NOW()
 ```
 
-Additional features:
-- ✅ `published?` returns true if `published_at` is present and in the past
-- 🕒 `publish!` sets `published_at` to current time
-- 🚫 `unpublish!` sets `published_at` to `nil`
-- 🔎 Add scopes: `.published`, `.unpublished`, and a default scope (optional)
-- 📰 Ideal for blog posts, articles, or any content that toggles visibility
-- 🧩 Lightweight and non-invasive
-- 🧪 Easy to test and override in custom implementations
+**Notes**
+- "Published" means `published_at` is set **and** in the past — so scheduled posts (future `published_at`) stay unpublished until their time arrives.
+- No `default_scope` is added; chain `.published` explicitly.
 
 ---
 
-### 4. ❌ SoftDeletable
+## ❌ SoftDeletable
 
-Soft delete records using a timestamp field (default: `deleted_at`).
+Soft delete records using a timestamp field (default: `deleted_at`). Includes a `default_scope` that hides deleted records and overrides `destroy_all` to soft-delete in bulk.
 
 ```ruby
 class User < ApplicationRecord
   include ConcernsOnRails::SoftDeletable
 
-  # Optional: customize field and touch behavior
-  soft_deletable_by :deleted_at, touch: true
+  soft_deletable_by :deleted_at, touch: true   # both args optional
 end
+
+user = User.create!(email: "alice@example.com")
+user.soft_delete!
+user.deleted?              # => true
+user.restore!
+user.deleted?              # => false
+
+user.really_delete!        # bypasses callbacks, hard deletes from DB
 ```
 
-#### Scopes
+**Scopes**
+
 ```ruby
-User.without_deleted   # => returns only active users
-User.soft_deleted      # => returns soft-deleted users
-User.active            # => same as without_deleted
-User.all               # => returns only non-deleted by default (default_scope applied)
+User.active           # alias of .without_deleted — non-deleted records
+User.without_deleted  # same
+User.soft_deleted     # only deleted records
+User.all              # default scope: non-deleted only
+User.unscoped         # everything (deleted + non-deleted)
 ```
 
-#### Soft delete and restore
+**Bulk operations**
+
 ```ruby
-user.soft_delete!      # Soft delete the user (sets deleted_at)
-user.deleted?          # => true
-user.soft_deleted?     # => true (alias)
-user.is_soft_deleted?  # => true (alias)
-
-user.restore!          # Restore the user (sets deleted_at to nil)
-user.deleted?          # => false
+User.destroy_all          # soft-deletes all matching records
+User.really_destroy_all   # hard-deletes all matching records
 ```
 
-#### Permanently delete
-```ruby
-user.really_delete!    # Hard delete the record from DB
-```
+**Lifecycle hooks** — override these methods on the model:
 
-#### Soft delete/hard delete all records
-```ruby
-User.destroy_all           # Soft delete all users (sets deleted_at)
-User.really_destroy_all    # Hard delete ALL users (removes from DB)
-```
-
-#### Callbacks (Hooks)
-You can use the following hooks to run logic before/after soft delete or restore:
 ```ruby
 class User < ApplicationRecord
   include ConcernsOnRails::SoftDeletable
 
-  def before_soft_delete
-    # Code to run before soft delete
-  end
-
-  def after_soft_delete
-    # Code to run after soft delete
-  end
-
-  def before_restore
-    # Code to run before restore
-  end
-
-  def after_restore
-    # Code to run after restore
-  end
+  def before_soft_delete; end
+  def after_soft_delete;  end
+  def before_restore;     end
+  def after_restore;      end
 end
 ```
 
-#### Notes
-- Default field is `deleted_at`, can be changed with `soft_deletable_by :your_field`
-- `touch: false` to skip updating updated_at when soft deleting/restoring
-- Aliases for `deleted?`: `soft_deleted?`, `is_soft_deleted?`
-- All scopes and methods work seamlessly with ActiveRecord
+**Aliases**: `soft_deleted?` and `is_soft_deleted?` both delegate to `deleted?`.
 
 ---
 
-### 5. Hashable
+## 🔐 Hashable
 
-Auto-generate a random value (hex, UUID, fixed-digit integer, or custom-alphabet string) on create.
+Auto-generate random values on create — tokens, codes, UUIDs, or anything from a custom alphabet.
 
 ```ruby
 class Order < ApplicationRecord
   include ConcernsOnRails::Hashable
 
-  # Defaults: type: :hex, length: 16 (32-char hex string)
-  hashable_by :token
+  hashable_by :token   # default: type: :hex, length: 16 → 32-char hex string
 end
 
 order = Order.create!
 order.token              # => "a3f7c9b1e2d40859e2f1c9b73d40a857"
-order.regenerate_token!  # rolls a new random value and persists it
+order.regenerate_token!  # rolls a new value and persists it
 ```
 
-#### Types
+**Generators**
+
+| Type       | `length` means                                | Example                                  |
+|------------|-----------------------------------------------|------------------------------------------|
+| `:hex`     | byte count (output is `length * 2` chars)     | `"a3f7c9b1e2d40859"`                     |
+| `:uuid`    | ignored                                       | `"550e8400-e29b-41d4-a716-446655440000"` |
+| `:integer` | digit count                                   | `483921`                                 |
+| `:custom`  | output length, samples from `alphabet:`       | `"K7M3PQ9A"`                             |
 
 ```ruby
 hashable_by :token,       type: :hex,     length: 16
 hashable_by :external_id, type: :uuid
 hashable_by :code,        type: :integer, length: 6
 hashable_by :code,        type: :custom,  length: 8,
-            alphabet: "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+            alphabet: "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # Crockford-style, no ambiguous chars
 ```
 
-| Type       | `length` means          | Example output           |
-|------------|-------------------------|--------------------------|
-| `:hex`     | byte count (output is `length * 2` hex chars) | `"a3f7c9b1e2d40859"` |
-| `:uuid`    | ignored                 | `"550e8400-e29b-41d4-a716-446655440000"` |
-| `:integer` | digit count             | `483921`                 |
-| `:custom`  | output length, samples from `alphabet:` | `"K7M3PQ9A"` |
-
-#### Notes
-- Auto-assigns on `before_create` only when the field is blank, so callers can still pass an explicit value.
-- A `regenerate_<field>!` instance method is defined dynamically to match the configured column.
-- No uniqueness retry is built in. For collision-prone configurations (e.g. short integer codes), add a unique index and rescue at the application level.
-- For fixed-width numeric codes (e.g. `000042`), use a string column — integer columns drop leading zeros.
-- If your model has `validates :<field>, presence: true`, switch to a `before_validation` callback in your model since the concern uses `before_create`.
+**Notes**
+- Auto-assigns in `before_create` only when the field is blank — callers can pass an explicit value.
+- A `regenerate_<field>!` instance method is defined dynamically.
+- For fixed-width numeric codes (e.g. `000042`), use a **string** column — integer columns drop leading zeros.
+- No uniqueness retry is built in. For collision-prone configs (short integer codes), add a unique index and rescue at the app level.
+- If your model has `validates :<field>, presence: true`, switch this concern's hook to `before_validation` in your model — it uses `before_create` by default.
 
 ---
 
-### 6. 🗓️ Schedulable
+## 🗓️ Schedulable
 
-Manage records with a time window using `starts_at` / `ends_at` columns.
+Records with a `starts_at` / `ends_at` time window — promotions, events, feature flags.
 
 ```ruby
 class Promotion < ApplicationRecord
   include ConcernsOnRails::Schedulable
 
-  # Defaults: starts_at: :starts_at, ends_at: :ends_at
-  schedulable_by
+  schedulable_by   # defaults: starts_at: :starts_at, ends_at: :ends_at
 end
 
 promo = Promotion.create!(starts_at: 1.hour.ago, ends_at: 1.day.from_now)
-promo.current?   # => true
-promo.upcoming?  # => false
-promo.expired?   # => false
+promo.current?     # => true
+promo.upcoming?    # => false
+promo.expired?     # => false
 
-Promotion.current                  # currently active
-Promotion.upcoming                 # starts_at in the future
-Promotion.expired                  # ends_at in the past
-Promotion.active_at(Time.zone.now) # active at any specific time
+Promotion.current                    # WHERE starts_at <= NOW AND (ends_at IS NULL OR ends_at > NOW)
+Promotion.upcoming                   # WHERE starts_at > NOW
+Promotion.expired                    # WHERE ends_at <= NOW
+Promotion.active_at(time)            # active at an arbitrary time
 ```
 
-#### Custom column names
+**Configuration**
 
 ```ruby
-class Event < ApplicationRecord
-  include ConcernsOnRails::Schedulable
+# Custom column names
+schedulable_by starts_at: :starts_on, ends_at: :ends_on
 
-  schedulable_by starts_at: :starts_on, ends_at: :ends_on
-end
+# Open-ended start (only an end / expiry)
+schedulable_by starts_at: nil, ends_at: :expires_at
 ```
 
-#### Open-ended start (only an expiry)
+**Mutators**
 
 ```ruby
-class Coupon < ApplicationRecord
-  include ConcernsOnRails::Schedulable
-
-  schedulable_by starts_at: nil, ends_at: :expires_at
-end
-```
-
-#### Mutators
-
-```ruby
-promo.start!                                              # sets starts_at to now
-promo.finish!                                             # sets ends_at to now
+promo.start!                                                # sets starts_at = now
+promo.finish!                                               # sets ends_at   = now
 promo.reschedule!(starts_at: 1.day.from_now,
-                  ends_at: 2.days.from_now)               # sets both
+                  ends_at:   2.days.from_now)
 ```
 
-#### Notes
-- Boundary semantics are **inclusive start, exclusive end**: a record is active at exactly `starts_at`, but not at exactly `ends_at`.
-- A `nil` `ends_at` means "no end" — the record stays active forever once started.
-- A `nil` `starts_at` means "not yet started" — the record is not active (unless `starts_at` is unconfigured).
-- No `default_scope` is added; chain `.current` (or any other scope) explicitly to filter.
-- `schedulable_by` validates that the configured columns exist and raises `ArgumentError` otherwise.
+**Notes**
+- Boundary semantics: **inclusive start, exclusive end** — active at exactly `starts_at`, not at exactly `ends_at`.
+- A `nil` end means "never expires"; a `nil` start means "not yet started".
+- No `default_scope`; chain `.current` explicitly.
 
 ---
 
-### 7. ⏳ Expirable
+## ⏳ Expirable
 
-For records with a single expiry timestamp — auth tokens, API keys, sessions, password-reset links, invitations.
+Single-timestamp expiry — tokens, sessions, password-reset links, invitations.
 
 ```ruby
 class ApiToken < ApplicationRecord
   include ConcernsOnRails::Expirable
 
-  # Default field: :expires_at
-  expirable_by
+  expirable_by   # default field: :expires_at
 end
 
 token = ApiToken.create!(expires_at: 1.hour.from_now)
@@ -318,78 +365,256 @@ token.active?               # => true
 token.expired?              # => false
 token.time_until_expiry     # => ActiveSupport::Duration (~1.hour)
 
-ApiToken.active                       # nil expiry OR future expiry
-ApiToken.expired                      # past expiry
-ApiToken.expiring_within(1.day)       # future expiry within the next 1.day
+ApiToken.active                  # nil expiry OR future expiry
+ApiToken.expired                 # past expiry
+ApiToken.expiring_within(1.day)  # future expiry within the next 1 day
 ```
 
-#### Mutators
+**Mutators**
 
 ```ruby
-token.expire!                       # sets expires_at to now
-token.expire!(2.hours.from_now)     # sets to an explicit time
+token.expire!                       # expires_at = now
+token.expire!(2.hours.from_now)     # explicit time
 token.extend_expiry!(by: 1.day)     # pushes expiry forward
 ```
 
-`extend_expiry!` is "smart" about the base:
-- If `expires_at` is nil or already in the past, the new value is `now + by`.
-- If `expires_at` is still in the future, `by` is added to the existing value.
+`extend_expiry!` is smart about the base:
+- If `expires_at` is `nil` or in the past → new value is `now + by`
+- If `expires_at` is still in the future → `by` is added to the existing value
 
-#### Custom field name
+**Custom field name**
 
 ```ruby
-class License < ApplicationRecord
-  include ConcernsOnRails::Expirable
+expirable_by :valid_until
+```
 
-  expirable_by :valid_until
+**Expirable vs. Schedulable**: `Expirable` is the ergonomic choice when you just care about expiry; `Schedulable` adds a start time. They overlap (`schedulable_by starts_at: nil, ends_at: :expires_at` is similar) — pick whichever reads better in your domain.
+
+---
+
+## ✨ Normalizable
+
+Auto-normalize attribute values in `before_validation` — strip whitespace, downcase emails, dedupe spaces, run any custom transform.
+
+```ruby
+class User < ApplicationRecord
+  include ConcernsOnRails::Normalizable
+
+  normalizable :email,                  with: :email                       # strip + downcase
+  normalizable :phone,                  with: :phone                       # digits only
+  normalizable :first_name, :last_name, with: :whitespace                  # strip — same rule, multiple fields
+  normalizable :slug,                   with: ->(v) { v.to_s.parameterize } # custom lambda
+end
+
+User.create(email: "  ALICE@Example.com  ").email   # => "alice@example.com"
+User.create(phone: "+1 (415) 555-1234").phone       # => "14155551234"
+```
+
+**Built-in presets**
+
+| Preset       | Transform                                |
+|--------------|------------------------------------------|
+| `:email`     | `strip` + `downcase`                     |
+| `:phone`     | digits only (`gsub(/\D/, "")`)           |
+| `:whitespace`| `strip`                                  |
+| `:squish`    | `squish` (collapse inner whitespace)     |
+| `:downcase`  | `downcase`                               |
+| `:upcase`    | `upcase`                                 |
+
+**Notes**
+- Runs in `before_validation`, so DB constraints and AR validations see the normalized value.
+- `nil` values are skipped — no `nil → ""` coercion.
+- Preset normalizers pass non-string values through unchanged.
+- Works on Rails 5+ (no dependency on Rails 7.1's built-in `normalizes`).
+
+---
+
+# 🎮 Controller Concerns
+
+Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
+
+## 📄 Paginatable
+
+Offset-based pagination with standard response headers — no Kaminari needed.
+
+```ruby
+class ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Paginatable
+
+  paginate_by per_page: 25, max_per_page: 200    # optional — these are the defaults
+
+  def index
+    render json: paginated(Article.all)
+  end
 end
 ```
 
-#### Notes
-- `nil` `expires_at` means **never expires** (the record stays `active?`).
-- The expiry boundary is **exclusive**: at exactly `expires_at`, the record is `expired?`.
-- No `default_scope` is added; chain `.active` explicitly to filter.
-- `Expirable` overlaps with `Schedulable`'s open-ended pattern (`schedulable_by starts_at: nil, ends_at: :expires_at`). Use `Expirable` when the API ergonomics around expiry — `active?`, `expire!`, `extend_expiry!`, `expiring_within` — fit your domain better; use `Schedulable` when you also need a start time.
+**URL params**
+
+| Param        | Default | Notes                              |
+|--------------|---------|------------------------------------|
+| `?page=`     | `1`     | Page numbers below 1 are clamped to 1 |
+| `?per_page=` | `25`    | Capped at `max_per_page` (default 200) |
+
+**Response headers**: `X-Total-Count`, `X-Page`, `X-Per-Page`, `X-Total-Pages`.
+
+---
+
+## 🔎 Filterable
+
+Declarative URL-param filtering with three modes per filter.
+
+```ruby
+class ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Filterable
+
+  filter_by :status, :category                                       # ?status=draft → .where(status: 'draft')
+  filter_by :published, scope: :published                            # ?published=1 → Article.published
+  filter_by :q, with: ->(rel, v) { rel.where("title ILIKE ?", "%#{v}%") }
+
+  def index
+    render json: filtered(Article.all)
+  end
+end
+```
+
+**Modes**
+
+| Mode        | Declaration                          | What it does                                    |
+|-------------|--------------------------------------|-------------------------------------------------|
+| Direct      | `filter_by :status`                  | `relation.where(status: params[:status])`       |
+| Scope       | `filter_by :published, scope: :published` | `relation.published` (when param is present)    |
+| Custom      | `filter_by :q, with: ->(rel, v) { ... }`  | Calls your lambda with `(relation, value)`      |
+
+**Notes**
+- Blank params are skipped — unset filters don't narrow the relation.
+- Passing both `:scope` and `:with` raises `ArgumentError`.
+- Scope mode pairs naturally with `Publishable.published`, `SoftDeletable.active`, `Expirable.active`, etc.
+
+---
+
+## ↕️ Sortable (controller)
+
+URL-param-driven ordering with a **strict allow-list** — never orders by an arbitrary user-supplied column.
+
+```ruby
+class ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Sortable
+
+  sortable_by :created_at, :title, :published_at,
+              default: :created_at, direction: :desc
+
+  def index
+    render json: sorted(Article.all)
+  end
+end
+```
+
+**URL params**: `?sort=title&direction=asc`
+
+- `params[:sort]` selects the column; non-whitelisted values fall back to the declared default.
+- `params[:direction]` accepts `asc` / `desc` (case-insensitive); invalid values fall back to the declared default direction.
+- If no `default:` is given, the **first** declared field is used.
+
+> Distinct from `Models::Sortable` (which manages list position via `acts_as_list`). Both can coexist on a model + its controller.
+
+---
+
+## 📦 Respondable
+
+Standardized JSON envelopes for API controllers — two methods, zero state.
+
+```ruby
+class Api::ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Respondable
+
+  def show
+    article = Article.find_by(id: params[:id])
+    return render_error(message: "Not found", status: :not_found) unless article
+
+    render_success(data: article)
+  end
+
+  def create
+    article = Article.new(article_params)
+    if article.save
+      render_success(data: article, status: :created)
+    else
+      render_error(message: "Invalid", errors: article.errors.full_messages)
+    end
+  end
+end
+```
+
+**Response shapes**
+
+```jsonc
+// Success
+{ "success": true, "data": {...}, "meta": {...}  /* meta omitted when empty */ }
+
+// Error
+{ "success": false, "error": { "message": "...", "code": "...", "details": [...] } }
+```
+
+**API**
+
+| Method            | Signature                                                                                  |
+|-------------------|--------------------------------------------------------------------------------------------|
+| `render_success`  | `render_success(data: nil, status: :ok, meta: {})`                                         |
+| `render_error`    | `render_error(message:, status: :unprocessable_entity, code: nil, errors: nil)`            |
+
+> `data:` is a keyword arg (not positional) on purpose — it sidesteps Ruby 3's behavior of treating hash literals as kwargs when a method declares any keyword params.
+
+---
+
+## 🗂️ Module paths & namespacing
+
+Every concern is available under two paths:
+
+```ruby
+# Short form (recommended for brevity):
+include ConcernsOnRails::Sluggable
+include ConcernsOnRails::Normalizable
+
+# Fully-qualified form:
+include ConcernsOnRails::Models::Sluggable
+include ConcernsOnRails::Models::Normalizable
+```
+
+Controller concerns live under `ConcernsOnRails::Controllers::*` (no short form, to disambiguate from `Models::Sortable`):
+
+```ruby
+include ConcernsOnRails::Controllers::Paginatable
+include ConcernsOnRails::Controllers::Sortable
+```
+
+Both forms reference the same module, so you can freely mix them.
 
 ---
 
 ## 🛠️ Development
 
-To build the gem:
-
 ```sh
-gem build concerns_on_rails.gemspec
+bundle install                                  # install dev dependencies
+bundle exec rspec                               # run the test suite
+gem build concerns_on_rails.gemspec             # build the gem
+gem install ./concerns_on_rails-1.6.0.gem       # install locally
 ```
 
-To install locally:
-
-```sh
-gem install ./concerns_on_rails-1.0.0.gem
-```
+The test suite uses an in-memory SQLite database and a lightweight `FakeController` harness for controller-concern specs — no Rails routes or boot required.
 
 ---
 
 ## 🤝 Contributing
 
-Bug reports and pull requests are welcome!
+Bug reports and pull requests are welcome at **[github.com/VSN2015/concerns_on_rails](https://github.com/VSN2015/concerns_on_rails)**. ⭐️ stars and 🍴 forks appreciated.
 
 ---
 
 ## 📄 License
 
-This project is licensed under the MIT License.
+MIT — see [LICENSE](MIT-LICENSE).
 
 ---
 
 🇻🇳 **Hoàng Sa and Trường Sa belong to Việt Nam.**
-
----
-
-### 🔗 Source Code
-
-The source code is available on GitHub:
-
-[👉 https://github.com/VSN2015/concerns_on_rails](https://github.com/VSN2015/concerns_on_rails)
-
-Feel free to star ⭐️, fork 🍴, or contribute with issues and PRs.
-
