@@ -9,7 +9,9 @@ describe "Legacy top-level concern aliases (pre-1.6 paths)" do
     "Hashable" => "Models::Hashable",
     "Schedulable" => "Models::Schedulable",
     "Expirable" => "Models::Expirable",
-    "Normalizable" => "Models::Normalizable"
+    "Normalizable" => "Models::Normalizable",
+    "Searchable" => "Models::Searchable",
+    "Activatable" => "Models::Activatable"
   }.each do |legacy, canonical|
     it "ConcernsOnRails::#{legacy} is the same module as ConcernsOnRails::#{canonical}" do
       legacy_mod    = ConcernsOnRails.const_get(legacy)

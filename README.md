@@ -33,11 +33,14 @@ Article.published.without_deleted.find("hello-world")
   - [Schedulable](#-schedulable) — `starts_at` / `ends_at` time windows
   - [Expirable](#-expirable) — single-timestamp expiry
   - [Normalizable](#-normalizable) — attribute normalization (`:email`, `:phone`, …)
+  - [Searchable](#-searchable) — LIKE/ILIKE search across configured columns
+  - [Activatable](#-activatable) — boolean active/inactive toggle
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
   - [Filterable](#-filterable) — declarative URL-param filters
   - [Sortable (controller)](#-sortable-controller) — URL-param ordering with allow-list
   - [Respondable](#-respondable) — standardized JSON envelopes
+  - [ErrorHandleable](#-errorhandleable) — JSON `rescue_from` handlers for common controller errors
 - [Module paths & namespacing](#-module-paths--namespacing)
 - [Development](#-development)
 - [Contributing](#-contributing)
@@ -47,7 +50,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Eight model concerns + four controller concerns**, all production-ready
+- **Ten model concerns + five controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -60,7 +63,7 @@ Article.published.without_deleted.find("hello-world")
 Add to your application's `Gemfile`:
 
 ```ruby
-gem "concerns_on_rails", "~> 1.6"
+gem "concerns_on_rails", "~> 1.7"
 ```
 
 Or pull the latest from GitHub:
@@ -429,6 +432,59 @@ User.create(phone: "+1 (415) 555-1234").phone       # => "14155551234"
 
 ---
 
+## 🔍 Searchable
+
+LIKE-based search across one or more columns — no external search engine, no extra gems.
+
+```ruby
+class Article < ApplicationRecord
+  include ConcernsOnRails::Searchable
+
+  searchable_by :title, :body
+end
+
+Article.search("hello")                # WHERE title ILIKE '%hello%' OR body ILIKE '%hello%'
+Article.search("")                     # no-op — returns the full relation
+Article.search("foo").where(state: 1)  # chainable like any scope
+```
+
+**Notes**
+- Uses Arel's `matches`, which emits `ILIKE` on Postgres (case-insensitive) and `LIKE` elsewhere.
+- The query is escaped before interpolation — `%`, `_`, and `\` from user input are treated as literals, not wildcards.
+- Blank or nil queries return the relation unchanged so it's safe to drop into a controller pipeline.
+- Single-term substring match by design; reach for `pg_search` / Elasticsearch when you need ranking, stemming, or multi-term queries.
+
+---
+
+## ✅ Activatable
+
+Boolean active/inactive toggle backed by a single column.
+
+```ruby
+class Subscription < ApplicationRecord
+  include ConcernsOnRails::Activatable
+
+  activatable_by               # defaults to :active
+  # activatable_by :enabled    # custom column name
+end
+
+sub = Subscription.create!(active: true)
+sub.active?            # => true
+sub.deactivate!
+sub.inactive?          # => true
+sub.toggle_active!     # flips back to true
+
+Subscription.active     # WHERE active = TRUE
+Subscription.inactive   # WHERE active = FALSE OR active IS NULL
+```
+
+**Notes**
+- `NULL` is treated as inactive (same convention as most apps' "unset = off").
+- The configured column must exist; `activatable_by` raises `ArgumentError` otherwise.
+- `SoftDeletable` also defines a `.active` scope (alias of `.without_deleted`). If both concerns are included on the same model, the later one wins — include the one whose `.active` semantics you want last, or stick to one of them.
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -567,6 +623,51 @@ end
 
 ---
 
+## 🛟 ErrorHandleable
+
+Install `rescue_from` handlers for the three most common controller exceptions and render them as the same JSON envelope used by Respondable.
+
+```ruby
+class Api::BaseController < ApplicationController
+  include ConcernsOnRails::Controllers::Respondable       # recommended
+  include ConcernsOnRails::Controllers::ErrorHandleable
+end
+```
+
+**Handled exceptions**
+
+| Exception                              | Status | `code`                |
+|----------------------------------------|--------|-----------------------|
+| `ActiveRecord::RecordNotFound`         | 404    | `"not_found"`         |
+| `ActionController::ParameterMissing`   | 400    | `"parameter_missing"` |
+| `ActiveRecord::RecordInvalid`          | 422    | `"record_invalid"`    |
+
+Response shape (matches `Respondable#render_error`):
+
+```json
+{ "success": false, "error": { "message": "...", "code": "...", "details": [...] } }
+```
+
+**Overriding a handler**
+
+Each handler is a public instance method, so subclasses can customize the message or response shape without re-declaring the `rescue_from`:
+
+```ruby
+class Api::BaseController < ApplicationController
+  include ConcernsOnRails::Controllers::ErrorHandleable
+
+  def handle_record_not_found(error)
+    render json: { success: false, error: { message: "Not here, friend." } }, status: :not_found
+  end
+end
+```
+
+**Notes**
+- When `Respondable` is also included, the handlers delegate to `render_error` so the envelope shape stays in one place. Otherwise they render the same envelope inline.
+- `RecordInvalid.details` are populated from `error.record.errors.full_messages`.
+
+---
+
 ## 🗂️ Module paths & namespacing
 
 Every concern is available under two paths:
@@ -598,7 +699,7 @@ Both forms reference the same module, so you can freely mix them.
 bundle install                                  # install dev dependencies
 bundle exec rspec                               # run the test suite
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.6.0.gem       # install locally
+gem install ./concerns_on_rails-1.7.0.gem       # install locally
 ```
 
 The test suite uses an in-memory SQLite database and a lightweight `FakeController` harness for controller-concern specs — no Rails routes or boot required.

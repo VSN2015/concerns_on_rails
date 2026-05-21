@@ -15,12 +15,15 @@ require "concerns_on_rails/models/hashable"
 require "concerns_on_rails/models/schedulable"
 require "concerns_on_rails/models/expirable"
 require "concerns_on_rails/models/normalizable"
+require "concerns_on_rails/models/searchable"
+require "concerns_on_rails/models/activatable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"
 require "concerns_on_rails/controllers/filterable"
 require "concerns_on_rails/controllers/sortable"
 require "concerns_on_rails/controllers/respondable"
+require "concerns_on_rails/controllers/error_handleable"
 
 # Backwards compatibility (top-level aliases for pre-1.6 module paths)
 require "concerns_on_rails/legacy_aliases"

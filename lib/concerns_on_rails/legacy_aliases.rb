@@ -10,4 +10,6 @@ module ConcernsOnRails
   Schedulable   = Models::Schedulable
   Expirable     = Models::Expirable
   Normalizable  = Models::Normalizable
+  Searchable    = Models::Searchable
+  Activatable   = Models::Activatable
 end
