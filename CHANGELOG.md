@@ -1,5 +1,13 @@
 <!-- CHANGELOG.md -->
 
+## 1.8.1 (2026-05-22)
+
+### Internal
+- Refactored `Models::Tokenizable` `class_methods` blocks to satisfy `Metrics/BlockLength`. No behavior change.
+
+### Notes
+- The `v1.8.0` tag was pushed but failed RuboCop; `1.8.1` is the first usable release of the Tokenizable concern.
+
 ## 1.8.0 (2026-05-22)
 
 ### Added

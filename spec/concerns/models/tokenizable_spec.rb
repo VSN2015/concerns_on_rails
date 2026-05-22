@@ -35,7 +35,7 @@ describe ConcernsOnRails::Tokenizable do
       account = Account.create!(name: "A")
       expect(account.api_token).to be_a(String)
       expect(account.api_token.length).to eq(32)
-      expect(account.api_token).to match(%r{\A[A-Za-z0-9_-]+\z})
+      expect(account.api_token).to match(/\A[A-Za-z0-9_-]+\z/)
     end
 
     it "generates distinct values for different records" do

@@ -55,30 +55,7 @@ module ConcernsOnRails
 
           before_create -> { assign_tokenizable_value(field) }
 
-          define_method("regenerate_#{field}!") do
-            update!(field => self.class.generate_tokenizable_value(field))
-          end
-
-          define_method("revoke_#{field}!") do
-            update!(field => nil)
-          end
-
-          define_method("#{field}?") do
-            self[field].present?
-          end
-
-          define_singleton_method("authenticate_by_#{field}") do |value|
-            return nil if value.blank?
-
-            candidate = find_by(field => value)
-            return nil unless candidate
-
-            stored = candidate[field].to_s
-            given = value.to_s
-            return nil unless stored.bytesize == given.bytesize
-
-            ActiveSupport::SecurityUtils.secure_compare(stored, given) ? candidate : nil
-          end
+          define_tokenizable_methods(field)
         end
 
         # Generate a new random value for the given field using its configured type/length.
@@ -96,9 +73,33 @@ module ConcernsOnRails
           when :numeric      then random_string_from_alphabet(NUMERIC_ALPHABET, length)
           end
         end
+      end
 
+      class_methods do
         private
 
+        def define_tokenizable_methods(field)
+          define_method("regenerate_#{field}!") { update!(field => self.class.generate_tokenizable_value(field)) }
+          define_method("revoke_#{field}!")     { update!(field => nil) }
+          define_method("#{field}?")            { self[field].present? }
+          define_singleton_method("authenticate_by_#{field}") { |value| timing_safe_find(field, value) }
+        end
+
+        def timing_safe_find(field, value)
+          return nil if value.blank?
+
+          candidate = find_by(field => value)
+          return nil unless candidate
+
+          stored = candidate[field].to_s
+          given = value.to_s
+          return nil unless stored.bytesize == given.bytesize
+
+          ActiveSupport::SecurityUtils.secure_compare(stored, given) ? candidate : nil
+        end
+      end
+
+      class_methods do
         def validate_tokenizable_options!(field, type, length)
           unless column_names.include?(field.to_s)
             raise ArgumentError,
@@ -118,6 +119,8 @@ module ConcernsOnRails
         def random_string_from_alphabet(alphabet, length)
           Array.new(length) { alphabet[SecureRandom.random_number(alphabet.size)] }.join
         end
+
+        private :validate_tokenizable_options!, :random_string_from_alphabet
       end
 
       # Assigns the generated value only when blank, so callers can pass an explicit one.
