@@ -1,5 +1,13 @@
 <!-- CHANGELOG.md -->
 
+## 1.8.2 (2026-05-22)
+
+### Internal
+- Regenerated `Gemfile.lock` so the pinned `concerns_on_rails` version matches the gemspec. No behavior change.
+
+### Notes
+- The `v1.8.1` tag was pushed but failed CI (`bundle install --deployment` rejected the stale `Gemfile.lock`); `1.8.2` is the first usable release of the Tokenizable concern.
+
 ## 1.8.1 (2026-05-22)
 
 ### Internal
