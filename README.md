@@ -35,6 +35,7 @@ Article.published.without_deleted.find("hello-world")
   - [Normalizable](#-normalizable) — attribute normalization (`:email`, `:phone`, …)
   - [Searchable](#-searchable) — LIKE/ILIKE search across configured columns
   - [Activatable](#-activatable) — boolean active/inactive toggle
+  - [Tokenizable](#-tokenizable) — security tokens with timing-safe lookup
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
   - [Filterable](#-filterable) — declarative URL-param filters
@@ -50,7 +51,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Ten model concerns + five controller concerns**, all production-ready
+- **Eleven model concerns + five controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -63,7 +64,7 @@ Article.published.without_deleted.find("hello-world")
 Add to your application's `Gemfile`:
 
 ```ruby
-gem "concerns_on_rails", "~> 1.7"
+gem "concerns_on_rails", "~> 1.8"
 ```
 
 Or pull the latest from GitHub:
@@ -482,6 +483,46 @@ Subscription.inactive   # WHERE active = FALSE OR active IS NULL
 - `NULL` is treated as inactive (same convention as most apps' "unset = off").
 - The configured column must exist; `activatable_by` raises `ArgumentError` otherwise.
 - `SoftDeletable` also defines a `.active` scope (alias of `.without_deleted`). If both concerns are included on the same model, the later one wins — include the one whose `.active` semantics you want last, or stick to one of them.
+
+---
+
+## 🔑 Tokenizable
+
+Generate and manage security tokens — API keys, invite codes, share links, password-reset tokens. One model can declare any number of independently-configured token fields.
+
+```ruby
+class User < ApplicationRecord
+  include ConcernsOnRails::Tokenizable
+
+  tokenizable_by :api_token                                  # 32-char URL-safe
+  tokenizable_by :reset_password_token, length: 24
+  tokenizable_by :invite_code, type: :alphanumeric, length: 8
+end
+
+user = User.create!                       # all three tokens auto-generated
+user.api_token                            # => "k3Jf...g2" (32 URL-safe chars)
+user.api_token?                           # => true
+
+user.regenerate_api_token!                # rotates and persists
+user.revoke_api_token!                    # nils the column
+
+User.find_by_api_token(token)             # Rails default
+User.authenticate_by_api_token(token)     # timing-safe; returns user or nil
+```
+
+**Options**
+
+| Option   | Default     | Notes                                                         |
+| -------- | ----------- | ------------------------------------------------------------- |
+| `type:`  | `:urlsafe`  | One of `:urlsafe`, `:hex`, `:alphanumeric`, `:numeric`        |
+| `length:`| `32`        | Character length of the generated token                       |
+
+**Notes**
+- URL-safe by default (`A–Z`, `a–z`, `0–9`, `-`, `_`) — drop straight into URLs and headers.
+- Caller-supplied values are respected: `User.create!(api_token: "preset")` won't be overwritten.
+- Generation does a best-effort uniqueness check before insert and retries up to 10 times. Pair with a `unique` DB index for real safety, especially for short alphanumeric/numeric codes.
+- `.authenticate_by_<field>` uses `ActiveSupport::SecurityUtils.secure_compare` to avoid leaking partial matches via response timing.
+- Distinct from `Hashable`: Hashable handles a single random field; Tokenizable focuses on security tokens (multi-field, URL-safe default, timing-safe lookup, revocation).
 
 ---
 

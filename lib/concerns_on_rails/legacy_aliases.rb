@@ -12,4 +12,5 @@ module ConcernsOnRails
   Normalizable  = Models::Normalizable
   Searchable    = Models::Searchable
   Activatable   = Models::Activatable
+  Tokenizable   = Models::Tokenizable
 end

@@ -17,6 +17,7 @@ require "concerns_on_rails/models/expirable"
 require "concerns_on_rails/models/normalizable"
 require "concerns_on_rails/models/searchable"
 require "concerns_on_rails/models/activatable"
+require "concerns_on_rails/models/tokenizable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"

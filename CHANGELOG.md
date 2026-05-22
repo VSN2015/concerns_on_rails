@@ -1,5 +1,10 @@
 <!-- CHANGELOG.md -->
 
+## 1.8.0 (2026-05-22)
+
+### Added
+- **Models::Tokenizable**: Security-token generation for API keys, invite codes, share links, password-reset tokens. Each `tokenizable_by` call adds an independently-configured field (one model can hold many tokens). Defaults to 32-char URL-safe values; also supports `:hex`, `:alphanumeric`, and `:numeric` types with a configurable `length:`. Auto-generates on create with best-effort uniqueness retry, and provides `regenerate_<field>!`, `revoke_<field>!`, `<field>?`, and a timing-safe `.authenticate_by_<field>` class method.
+
 ## 1.7.0 (2026-05-21)
 
 ### Added
