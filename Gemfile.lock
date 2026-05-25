@@ -106,7 +106,7 @@ GEM
     erb (4.0.4.1)
       cgi (>= 0.3.3)
     erubi (1.13.1)
-    faker (3.4.2)
+    faker (3.8.0)
       i18n (>= 1.8.11, < 2)
     friendly_id (5.7.0)
       activerecord (>= 4.0.0)
@@ -270,7 +270,7 @@ DEPENDENCIES
   activerecord (>= 5.0, < 9)
   acts_as_list (~> 0.7.5)
   concerns_on_rails!
-  faker (~> 3.2)
+  faker (~> 3.8)
   friendly_id (~> 5.4)
   rake
   rspec (~> 3.12)
