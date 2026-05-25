@@ -39,6 +39,8 @@ module ConcernsOnRails
       end
 
       class_methods do
+        include ConcernsOnRails::Support::ColumnGuard
+
         # Configure the start/end timestamp columns.
         # Example:
         #   schedulable_by                                          # uses :starts_at and :ends_at
@@ -52,11 +54,8 @@ module ConcernsOnRails
             raise ArgumentError, "ConcernsOnRails::Models::Schedulable: at least one of starts_at: or ends_at: must be configured"
           end
 
-          [schedulable_starts_at_field, schedulable_ends_at_field].compact.each do |field|
-            next if column_names.include?(field.to_s)
-
-            raise ArgumentError, "ConcernsOnRails::Models::Schedulable: field '#{field}' does not exist in the database"
-          end
+          ensure_columns!("ConcernsOnRails::Models::Schedulable",
+                          schedulable_starts_at_field, schedulable_ends_at_field)
         end
       end
 

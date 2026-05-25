@@ -10,18 +10,33 @@ module ConcernsOnRails
 
         scope :published, -> { where(arel_table[publishable_field].lteq(Time.zone.now)) }
         scope :unpublished, lambda {
-          where(arel_table[publishable_field].eq(nil).or(arel_table[publishable_field].gt(Time.zone.now)))
+          column = arel_table[publishable_field]
+          unscope(where: publishable_field).where(column.eq(nil).or(column.gt(Time.zone.now)))
         }
+        # Set, but the publish time is still in the future.
+        scope :scheduled, -> { unscope(where: publishable_field).where(arel_table[publishable_field].gt(Time.zone.now)) }
+        # Never set — a true draft.
+        scope :draft, -> { unscope(where: publishable_field).where(publishable_field => nil) }
       end
 
       class_methods do
-        def publishable_by(field = nil)
+        include ConcernsOnRails::Support::ColumnGuard
+
+        # Pass `default_scope: true` to hide unpublished records by default
+        # (`.all` then returns only published). The negative scopes
+        # (.unpublished/.scheduled/.draft) unscope the field, so they still work.
+        def publishable_by(field = nil, default_scope: false)
           self.publishable_field = field || :published_at
+          ensure_columns!("ConcernsOnRails::Models::Publishable", publishable_field)
+          enable_published_default_scope if default_scope
+        end
 
-          return if column_names.include?(publishable_field.to_s)
+        private
 
-          raise ArgumentError,
-                "ConcernsOnRails::Models::Publishable: publishable_field '#{publishable_field}' does not exist in the database"
+        # Routed through a helper so the `default_scope:` keyword doesn't shadow
+        # the `default_scope` macro inside `publishable_by`.
+        def enable_published_default_scope
+          default_scope { published }
         end
       end
 
@@ -55,6 +70,26 @@ module ConcernsOnRails
       #   record.unpublished?
       def unpublished?
         !published?
+      end
+
+      # Set, but the publish time is still in the future.
+      def scheduled?
+        value = self[self.class.publishable_field]
+        return false if value.blank?
+
+        value.respond_to?(:>) ? value > Time.zone.now : false
+      end
+
+      # Never set — a true draft.
+      def draft?
+        self[self.class.publishable_field].blank?
+      end
+
+      # Publish at an explicit time. A future time schedules the record.
+      # Example:
+      #   record.publish_at!(1.day.from_now)
+      def publish_at!(time)
+        update(self.class.publishable_field => time)
       end
     end
   end

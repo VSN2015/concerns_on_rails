@@ -345,4 +345,30 @@ describe ConcernsOnRails::SoftDeletable do
       end.to change { dummy_class.count }.to(0)
     end
   end
+
+  describe '1.9 scopes and bulk restore' do
+    let!(:kept)    { dummy_class.create!(name: 'kept') }
+    let!(:removed) { dummy_class.create!(name: 'removed').tap(&:soft_delete!) }
+
+    it '.with_deleted returns both deleted and non-deleted' do
+      expect(dummy_class.with_deleted).to include(kept, removed)
+    end
+
+    it '.only_deleted returns just the deleted records' do
+      expect(dummy_class.only_deleted).to include(removed)
+      expect(dummy_class.only_deleted).not_to include(kept)
+    end
+
+    it '.deleted_within returns recently deleted, excludes older ones' do
+      old = nil
+      travel_to(3.days.ago) { old = dummy_class.create!(name: 'old').tap(&:soft_delete!) }
+      expect(dummy_class.deleted_within(1.day)).to include(removed)
+      expect(dummy_class.deleted_within(1.day)).not_to include(old)
+    end
+
+    it '.restore_all restores every soft-deleted record' do
+      dummy_class.restore_all
+      expect(removed.reload).not_to be_deleted
+    end
+  end
 end

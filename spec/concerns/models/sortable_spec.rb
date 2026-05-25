@@ -71,7 +71,7 @@ describe ConcernsOnRails::Sortable do
 
           sortable_by :nonexistent_column
         end
-      end.to raise_error(ArgumentError, /sortable_field 'nonexistent_column' does not exist/)
+      end.to raise_error(ArgumentError, /'nonexistent_column' does not exist/)
     end
   end
 

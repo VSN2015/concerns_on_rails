@@ -1,5 +1,19 @@
 <!-- CHANGELOG.md -->
 
+## 1.9.0 (2026-05-25)
+
+### Added
+- **Models::Stateable**: Lightweight string-backed state machine — predicates (`draft?`, `published?`), scopes (`Article.draft`), direct setters (`published!`), guarded transitions (`publish!` / `may_publish?`) with optional `transitions:` config, generic `transition_to!`, and a configurable default applied via `after_initialize`. Supports `prefix:` / `suffix:` to avoid name clashes. Raises `Stateable::InvalidTransition` for disallowed state changes.
+- **Controllers::Includable**: Whitelisted association sideloading + sparse fieldsets for JSON APIs. `includable :author, :comments, fields: { articles: %i[id title] }` declares an allow-list; `with_includes(relation)` applies only the requested, permitted associations; `requested_includes` / `requested_fields` return sanitized values to pass directly to serializers.
+- **Models::SoftDeletable**: New scopes `with_deleted` (all records including deleted), `only_deleted` (alias for `soft_deleted`), `deleted_within(duration)` (recently deleted in a time window); new class method `restore_all` (bulk-restores all soft-deleted records).
+- **Models::Publishable**: New scopes `scheduled` (future `published_at`) and `draft` (nil `published_at`); predicates `scheduled?` / `draft?`; mutator `publish_at!(time)` for scheduling a future publish; opt-in `publishable_by :published_at, default_scope: true` to hide unpublished records from `.all` (default is off).
+- **Models::Searchable**: New options — `mode: :all` (AND all whitespace-separated terms across fields instead of OR), `match: :prefix` (anchors at start) / `match: :exact` (full match) / `match: :contains` (default, substring); option validation raises `ArgumentError` for unknown values.
+- **Models::Sluggable**: New options — `history: true` (keeps slug history via the `friendly_id_slugs` table so old slugs still resolve) and `scope: :account_id` (slug uniqueness scoped to a foreign-key column). Both delegate to `friendly_id`'s built-in `:history` / `:scoped` modules.
+
+### Internal
+- Extracted duplicated column-existence checks from all 11 model concerns into `ConcernsOnRails::Support::ColumnGuard`. Error messages are now unified: `"<Concern>: '<field>' does not exist in the database (table: <table>)"` — the `/does not exist/` substring is preserved across all concerns.
+- Extracted duplicated random-value generation (`Hashable` `:custom` branch + `Tokenizable`) into `ConcernsOnRails::Support::RandomValue`. No behavior change.
+
 ## 1.8.2 (2026-05-22)
 
 ### Internal

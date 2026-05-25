@@ -38,6 +38,8 @@ module ConcernsOnRails
       end
 
       class_methods do
+        include ConcernsOnRails::Support::ColumnGuard
+
         # Configure a tokenizable field.
         #
         # Options:
@@ -48,7 +50,8 @@ module ConcernsOnRails
           type = type.to_sym
           length = length.to_i
 
-          validate_tokenizable_options!(field, type, length)
+          ensure_columns!("ConcernsOnRails::Models::Tokenizable", field)
+          validate_tokenizable_options!(type, length)
 
           # Build a fresh hash so subclasses don't mutate the parent's config.
           self.tokenizable_fields = tokenizable_fields.merge(field => { type: type, length: length })
@@ -69,8 +72,8 @@ module ConcernsOnRails
           case config[:type]
           when :urlsafe      then SecureRandom.urlsafe_base64(length)[0, length]
           when :hex          then SecureRandom.hex((length + 1) / 2)[0, length]
-          when :alphanumeric then random_string_from_alphabet(ALPHANUMERIC_ALPHABET, length)
-          when :numeric      then random_string_from_alphabet(NUMERIC_ALPHABET, length)
+          when :alphanumeric then ConcernsOnRails::Support::RandomValue.from_alphabet(ALPHANUMERIC_ALPHABET, length)
+          when :numeric      then ConcernsOnRails::Support::RandomValue.from_alphabet(NUMERIC_ALPHABET, length)
           end
         end
       end
@@ -100,12 +103,7 @@ module ConcernsOnRails
       end
 
       class_methods do
-        def validate_tokenizable_options!(field, type, length)
-          unless column_names.include?(field.to_s)
-            raise ArgumentError,
-                  "ConcernsOnRails::Models::Tokenizable: tokenizable field '#{field}' does not exist in the database"
-          end
-
+        def validate_tokenizable_options!(type, length)
           unless VALID_TYPES.include?(type)
             raise ArgumentError,
                   "ConcernsOnRails::Models::Tokenizable: unknown type '#{type}'. Valid types: #{VALID_TYPES.join(', ')}"
@@ -116,11 +114,7 @@ module ConcernsOnRails
           raise ArgumentError, "ConcernsOnRails::Models::Tokenizable: length must be a positive integer"
         end
 
-        def random_string_from_alphabet(alphabet, length)
-          Array.new(length) { alphabet[SecureRandom.random_number(alphabet.size)] }.join
-        end
-
-        private :validate_tokenizable_options!, :random_string_from_alphabet
+        private :validate_tokenizable_options!
       end
 
       # Assigns the generated value only when blank, so callers can pass an explicit one.

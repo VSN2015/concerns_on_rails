@@ -122,4 +122,61 @@ describe ConcernsOnRails::Publishable do
     ReconfigArticle.publishable_by :published_at
     expect(ReconfigArticle.publishable_field).to eq(:published_at)
   end
+
+  describe "scheduling helpers (1.9)" do
+    it ".scheduled returns only future-dated records" do
+      Article.create!(title: "past",   published_at: 1.day.ago)
+      Article.create!(title: "future", published_at: 1.day.from_now)
+      Article.create!(title: "draft",  published_at: nil)
+      expect(Article.scheduled.map(&:title)).to eq(["future"])
+    end
+
+    it ".draft returns only records with no timestamp" do
+      Article.create!(title: "pub",   published_at: 1.day.ago)
+      Article.create!(title: "draft", published_at: nil)
+      expect(Article.draft.map(&:title)).to eq(["draft"])
+    end
+
+    it "#scheduled? / #draft? reflect the record state" do
+      expect(Article.new(published_at: 1.day.from_now).scheduled?).to be true
+      expect(Article.new(published_at: 1.day.ago).scheduled?).to be false
+      expect(Article.new(published_at: nil).draft?).to be true
+      expect(Article.new(published_at: 1.day.ago).draft?).to be false
+    end
+
+    it "#publish_at! schedules a future publish" do
+      article = Article.create!(title: "t")
+      article.publish_at!(1.day.from_now)
+      expect(article.reload.scheduled?).to be true
+      expect(article.published?).to be false
+    end
+  end
+
+  describe "default_scope: true" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :scoped_posts, force: true do |t|
+          t.string :title
+          t.datetime :published_at
+        end
+      end
+
+      class ScopedPost < TestModel
+        include ConcernsOnRails::Publishable
+
+        publishable_by :published_at, default_scope: true
+      end
+    end
+
+    it "hides unpublished records by default but keeps them reachable" do
+      ScopedPost.create!(title: "live",   published_at: 1.day.ago)
+      ScopedPost.create!(title: "draft",  published_at: nil)
+      ScopedPost.create!(title: "future", published_at: 1.day.from_now)
+
+      expect(ScopedPost.all.map(&:title)).to eq(["live"])
+      expect(ScopedPost.draft.map(&:title)).to eq(["draft"])
+      expect(ScopedPost.scheduled.map(&:title)).to eq(["future"])
+      expect(ScopedPost.unscoped.count).to eq(3)
+    end
+  end
 end

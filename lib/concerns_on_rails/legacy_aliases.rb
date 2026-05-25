@@ -13,4 +13,5 @@ module ConcernsOnRails
   Searchable    = Models::Searchable
   Activatable   = Models::Activatable
   Tokenizable   = Models::Tokenizable
+  Stateable     = Models::Stateable
 end

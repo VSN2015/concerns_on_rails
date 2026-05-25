@@ -28,13 +28,11 @@ module ConcernsOnRails
       end
 
       class_methods do
+        include ConcernsOnRails::Support::ColumnGuard
+
         def activatable_by(field = DEFAULT_FIELD)
           self.activatable_field = field.to_sym
-
-          unless column_names.include?(activatable_field.to_s)
-            raise ArgumentError,
-                  "ConcernsOnRails::Models::Activatable: activatable_field '#{activatable_field}' does not exist in the database"
-          end
+          ensure_columns!("ConcernsOnRails::Models::Activatable", activatable_field)
 
           scope :active,   -> { where(activatable_field => true) }
           scope :inactive, -> { where(activatable_field => [false, nil]) }

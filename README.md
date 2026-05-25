@@ -36,12 +36,14 @@ Article.published.without_deleted.find("hello-world")
   - [Searchable](#-searchable) — LIKE/ILIKE search across configured columns
   - [Activatable](#-activatable) — boolean active/inactive toggle
   - [Tokenizable](#-tokenizable) — security tokens with timing-safe lookup
+  - [Stateable](#-stateable) — lightweight string-backed state machine
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
   - [Filterable](#-filterable) — declarative URL-param filters
   - [Sortable (controller)](#-sortable-controller) — URL-param ordering with allow-list
   - [Respondable](#-respondable) — standardized JSON envelopes
   - [ErrorHandleable](#-errorhandleable) — JSON `rescue_from` handlers for common controller errors
+  - [Includable](#-includable) — whitelisted association sideloading + sparse fieldsets
 - [Module paths & namespacing](#-module-paths--namespacing)
 - [Development](#-development)
 - [Contributing](#-contributing)
@@ -51,7 +53,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Eleven model concerns + five controller concerns**, all production-ready
+- **Twelve model concerns + six controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -64,7 +66,7 @@ Article.published.without_deleted.find("hello-world")
 Add to your application's `Gemfile`:
 
 ```ruby
-gem "concerns_on_rails", "~> 1.8"
+gem "concerns_on_rails", "~> 1.9"
 ```
 
 Or pull the latest from GitHub:
@@ -145,10 +147,23 @@ post.slug              # => "hello-world"  (regenerates on title change)
 Post.friendly.find("hello-world")
 ```
 
+**Options**
+
+```ruby
+# Keep old slugs resolvable after a title change (needs a friendly_id_slugs migration)
+sluggable_by :title, history: true
+Post.friendly.find("old-slug")   # still resolves to the renamed post
+
+# Unique slug only within a scope column (same slug allowed in different accounts)
+sluggable_by :title, scope: :account_id
+```
+
 **Notes**
 - Schema must have a `slug` column (string).
+- `history: true` requires a `friendly_id_slugs` table — generate with `rails generate friendly_id` or add a manual migration.
+- `scope: :col` requires `col` to exist in the same table.
 - Falls back to `to_s` if the configured source field doesn't respond.
-- Uses friendly_id's `:slugged` strategy under the hood.
+- Uses friendly_id's `:slugged` (+ optionally `:history`, `:scoped`) strategies under the hood.
 
 ---
 
@@ -201,11 +216,29 @@ article.unpublish!
 
 Article.published       # WHERE published_at <= NOW()
 Article.unpublished     # WHERE published_at IS NULL OR published_at > NOW()
+Article.scheduled       # WHERE published_at > NOW()  (future-dated — not live yet)
+Article.draft           # WHERE published_at IS NULL  (no date set at all)
+```
+
+**Scheduling**
+
+```ruby
+article.publish_at!(1.week.from_now)   # sets published_at to a future time
+article.scheduled?                      # => true (not live yet)
+article.draft?                          # => false
+```
+
+**Opt-in default scope**
+
+```ruby
+publishable_by :published_at, default_scope: true
+# Article.all now returns only published records automatically
+# Article.unscoped reaches everything
 ```
 
 **Notes**
-- "Published" means `published_at` is set **and** in the past — so scheduled posts (future `published_at`) stay unpublished until their time arrives.
-- No `default_scope` is added; chain `.published` explicitly.
+- "Published" means `published_at` is set **and** in the past — so future-dated posts stay unpublished until their time arrives.
+- No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`).
 
 ---
 
@@ -232,11 +265,14 @@ user.really_delete!        # bypasses callbacks, hard deletes from DB
 **Scopes**
 
 ```ruby
-User.active           # alias of .without_deleted — non-deleted records
-User.without_deleted  # same
-User.soft_deleted     # only deleted records
-User.all              # default scope: non-deleted only
-User.unscoped         # everything (deleted + non-deleted)
+User.active               # alias of .without_deleted — non-deleted records
+User.without_deleted      # same
+User.soft_deleted         # only deleted records (timestamp set)
+User.only_deleted         # alias for .soft_deleted
+User.with_deleted         # all records — deleted + non-deleted
+User.deleted_within(7.days)  # soft-deleted within the last 7 days
+User.all                  # default scope: non-deleted only
+User.unscoped             # everything (deleted + non-deleted)
 ```
 
 **Bulk operations**
@@ -244,6 +280,7 @@ User.unscoped         # everything (deleted + non-deleted)
 ```ruby
 User.destroy_all          # soft-deletes all matching records
 User.really_destroy_all   # hard-deletes all matching records
+User.restore_all          # restores all soft-deleted records
 ```
 
 **Lifecycle hooks** — override these methods on the model:
@@ -449,11 +486,25 @@ Article.search("")                     # no-op — returns the full relation
 Article.search("foo").where(state: 1)  # chainable like any scope
 ```
 
+**Options**
+
+```ruby
+# mode: :any (default) — any term in any field matches (OR)
+# mode: :all           — every whitespace-separated term must match somewhere (AND per term, OR across fields)
+searchable_by :title, :body, mode: :all
+Article.search("ruby framework")  # title OR body must contain "ruby" AND "framework"
+
+# match: :contains (default) — %term% (substring)
+# match: :prefix           — term%  (starts with)
+# match: :exact            — term   (full match)
+searchable_by :sku, match: :prefix
+```
+
 **Notes**
 - Uses Arel's `matches`, which emits `ILIKE` on Postgres (case-insensitive) and `LIKE` elsewhere.
 - The query is escaped before interpolation — `%`, `_`, and `\` from user input are treated as literals, not wildcards.
-- Blank or nil queries return the relation unchanged so it's safe to drop into a controller pipeline.
-- Single-term substring match by design; reach for `pg_search` / Elasticsearch when you need ranking, stemming, or multi-term queries.
+- Blank or nil queries return the relation unchanged, so it's safe to drop into a controller pipeline.
+- Reach for `pg_search` / Elasticsearch when you need ranking, stemming, or full-text indexes.
 
 ---
 
@@ -523,6 +574,59 @@ User.authenticate_by_api_token(token)     # timing-safe; returns user or nil
 - Generation does a best-effort uniqueness check before insert and retries up to 10 times. Pair with a `unique` DB index for real safety, especially for short alphanumeric/numeric codes.
 - `.authenticate_by_<field>` uses `ActiveSupport::SecurityUtils.secure_compare` to avoid leaking partial matches via response timing.
 - Distinct from `Hashable`: Hashable handles a single random field; Tokenizable focuses on security tokens (multi-field, URL-safe default, timing-safe lookup, revocation).
+
+---
+
+## 🔄 Stateable
+
+Lightweight string-backed state machine — the 80% of AASM without the dependency.
+
+```ruby
+class Article < ApplicationRecord
+  include ConcernsOnRails::Stateable
+
+  stateable_by :status,
+               states:      %i[draft pending published archived],
+               default:     :draft,
+               transitions: {
+                 publish:  { from: %i[draft pending], to: :published },
+                 archive:  { to: :archived }   # no :from → allowed from any state
+               }
+end
+```
+
+**Generated API**
+
+```ruby
+article = Article.new          # status defaults to "draft"
+article.draft?                 # => true   (predicate per state)
+article.published?             # => false
+
+Article.draft                  # scope: WHERE status = 'draft'
+Article.published              # scope: WHERE status = 'published'
+
+article.published!             # direct setter — updates regardless of current state
+article.publish!               # guarded transition — raises InvalidTransition if not allowed
+article.may_publish?           # => true  (guard check without raising)
+
+article.transition_to!(:archived)  # generic move to any declared state
+```
+
+**Prefix / suffix** — avoid clashes when the state names overlap with other concerns or scopes:
+
+```ruby
+stateable_by :state, states: %i[open closed], prefix: true
+# generates: state_open?, state_closed?, state_open!, state_closed!, State.state_open, …
+```
+
+**Validation**
+- Raises `ArgumentError` if the column, states, default, or transition config is invalid.
+- Raises `Stateable::InvalidTransition` at runtime for disallowed guarded transitions.
+
+**Notes**
+- String-column backed (not integer-backed like Rails enum) — values are stored as-is.
+- States like `active` / `expired` overlap with `Activatable`/`Expirable` scopes — use `prefix:` or `suffix:` to disambiguate.
+- No persistence of transition history; combine with `Publishable` / `Schedulable` for time-based state tracking.
 
 ---
 
@@ -709,6 +813,46 @@ end
 
 ---
 
+## 🔗 Includable
+
+Whitelisted association sideloading + sparse fieldsets for JSON APIs — zero arbitrary `.includes` from user input.
+
+```ruby
+class ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Includable
+
+  includable :author, :comments,
+             fields: { articles: %i[id title published_at], authors: %i[id name] }
+
+  def index
+    render json: with_includes(Article.all),
+           include: requested_includes,
+           fields:  requested_fields
+  end
+end
+```
+
+**URL params**
+
+```
+GET /articles?include=author,comments&fields[articles]=id,title&fields[authors]=id,name
+```
+
+**API**
+
+| Method               | What it does                                                                               |
+|----------------------|--------------------------------------------------------------------------------------------|
+| `with_includes(rel)` | Parses `params[:include]`, intersects with the allow-list, calls `relation.includes(...)`  |
+| `requested_includes` | Returns the sanitized `[:author, :comments]` array (pass to `render json:, include:`)     |
+| `requested_fields`   | Returns `{ articles: [:id, :title] }` sanitized map (pass to your serializer)             |
+
+**Notes**
+- Non-whitelisted associations are **silently dropped** — no error, no arbitrary eager-loading.
+- Non-whitelisted tables in `params[:fields]` are dropped; non-whitelisted columns within an allowed table are dropped.
+- Pass `requested_fields` to your serializer (e.g. AMS / Blueprinter) — `Includable` itself does not alter the JSON output, only the query.
+
+---
+
 ## 🗂️ Module paths & namespacing
 
 Every concern is available under two paths:
@@ -740,7 +884,7 @@ Both forms reference the same module, so you can freely mix them.
 bundle install                                  # install dev dependencies
 bundle exec rspec                               # run the test suite
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.7.0.gem       # install locally
+gem install ./concerns_on_rails-1.9.0.gem       # install locally
 ```
 
 The test suite uses an in-memory SQLite database and a lightweight `FakeController` harness for controller-concern specs — no Rails routes or boot required.

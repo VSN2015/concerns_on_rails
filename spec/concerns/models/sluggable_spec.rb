@@ -114,4 +114,62 @@ describe ConcernsOnRails::Sluggable do
     page.update(updated_at: Time.now)
     expect(page.slug).to eq(original_slug)
   end
+
+  describe "scoped slugs (1.9)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :scoped_pages, force: true do |t|
+          t.string :title
+          t.string :slug
+          t.integer :account_id
+        end
+      end
+
+      class ScopedPage < TestModel
+        include ConcernsOnRails::Sluggable
+
+        sluggable_by :title, scope: :account_id
+      end
+    end
+
+    it "allows the same slug under different scopes" do
+      a = ScopedPage.create!(title: "Hello", account_id: 1)
+      b = ScopedPage.create!(title: "Hello", account_id: 2)
+      expect(a.slug).to eq("hello")
+      expect(b.slug).to eq("hello")
+    end
+  end
+
+  describe "slug history (1.9)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :versioned_pages, force: true do |t|
+          t.string :title
+          t.string :slug
+        end
+        create_table :friendly_id_slugs, force: true do |t|
+          t.string   :slug, null: false
+          t.integer  :sluggable_id, null: false
+          t.string   :sluggable_type, limit: 50
+          t.string   :scope
+          t.datetime :created_at
+        end
+      end
+
+      class VersionedPage < TestModel
+        include ConcernsOnRails::Sluggable
+
+        sluggable_by :title, history: true
+      end
+    end
+
+    it "keeps resolving an old slug after the title changes" do
+      page = VersionedPage.create!(title: "First Title")
+      old_slug = page.slug
+      page.update!(title: "Second Title")
+
+      expect(page.reload.slug).to eq("second-title")
+      expect(VersionedPage.friendly.find(old_slug)).to eq(page)
+    end
+  end
 end

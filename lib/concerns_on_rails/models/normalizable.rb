@@ -22,6 +22,8 @@ module ConcernsOnRails
       end
 
       class_methods do
+        include ConcernsOnRails::Support::ColumnGuard
+
         # Declare which fields should be normalized and how.
         # Example:
         #   normalizable :email, with: :email
@@ -31,19 +33,13 @@ module ConcernsOnRails
           raise ArgumentError, "ConcernsOnRails::Models::Normalizable: at least one field is required" if fields.empty?
 
           normalizer = resolve_normalizer(with)
-          fields.each { |field| validate_normalizable_field!(field) }
+          ensure_columns!("ConcernsOnRails::Models::Normalizable", fields)
           self.normalizable_rules = normalizable_rules.merge(fields.to_h { |f| [f.to_sym, normalizer] })
         end
       end
 
       class_methods do
         private
-
-        def validate_normalizable_field!(field)
-          return if column_names.include?(field.to_s)
-
-          raise ArgumentError, "ConcernsOnRails::Models::Normalizable: field '#{field}' does not exist in the database"
-        end
 
         def resolve_normalizer(with)
           case with

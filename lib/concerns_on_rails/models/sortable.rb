@@ -24,11 +24,7 @@ module ConcernsOnRails
 
         # we cannot use acts_as_list here
         default_scope do
-          unless column_names.include?(sortable_field.to_s)
-            raise ArgumentError,
-                  "#{name}: '#{sortable_field}' column not found. Call `sortable_by :your_column` to configure the sort field."
-          end
-
+          ensure_columns!("ConcernsOnRails::Models::Sortable", sortable_field)
           order(sortable_field => sortable_direction)
         end
       end
@@ -36,6 +32,8 @@ module ConcernsOnRails
       # class methods
       # Example: Task.sortable_by(priority: :asc)
       class_methods do
+        include ConcernsOnRails::Support::ColumnGuard
+
         # Define sortable field and direction
         # Example:
         #   sortable_by :position
@@ -56,7 +54,7 @@ module ConcernsOnRails
           self.sortable_field = field
           self.sortable_direction = direction
 
-          validate_sortable_field!
+          ensure_columns!("ConcernsOnRails::Models::Sortable", sortable_field)
 
           acts_as_list column: sortable_field if use_acts_as_list
         end
@@ -73,13 +71,6 @@ module ConcernsOnRails
           else
             [config.to_sym, :asc]
           end
-        end
-
-        # Validate sortable_field exists in database
-        def validate_sortable_field!
-          return if column_names.include?(sortable_field.to_s)
-
-          raise ArgumentError, "ConcernsOnRails::Models::Sortable: sortable_field '#{sortable_field}' does not exist in the database"
         end
       end
     end

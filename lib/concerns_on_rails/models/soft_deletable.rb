@@ -14,22 +14,25 @@ module ConcernsOnRails
         scope :active, -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
         scope :without_deleted, -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
         scope :soft_deleted, -> { unscope(where: soft_delete_field).where.not(soft_delete_field => nil) }
+        scope :only_deleted, -> { soft_deleted }
+        # `with_deleted` peels off the default scope so deleted + non-deleted are both returned.
+        scope :with_deleted, -> { unscope(where: soft_delete_field) }
+        # Records soft-deleted within the last `duration` (e.g. `deleted_within(7.days)`).
+        scope :deleted_within, ->(duration) { soft_deleted.where(soft_delete_field => duration.ago..) }
         # Optionally, uncomment to hide deleted by default:
         default_scope { without_deleted }
       end
 
       class_methods do
+        include ConcernsOnRails::Support::ColumnGuard
+
         # Define soft delete field and options
         # Example:
         #   soft_deletable_by :deleted_at, touch: false
         def soft_deletable_by(field = nil, touch: true)
           self.soft_delete_field = field || :deleted_at
           self.soft_delete_touch = touch
-
-          return if column_names.include?(soft_delete_field.to_s)
-
-          raise ArgumentError,
-                "ConcernsOnRails::Models::SoftDeletable: soft_delete_field '#{soft_delete_field}' does not exist in the database"
+          ensure_columns!("ConcernsOnRails::Models::SoftDeletable", soft_delete_field)
         end
 
         # Override destroy_all to perform soft delete on all records
@@ -40,6 +43,11 @@ module ConcernsOnRails
         # Provide really_destroy_all to hard delete all records
         def really_destroy_all
           unscoped.delete_all
+        end
+
+        # Restore every soft-deleted record (mirror of the destroy_all override).
+        def restore_all
+          soft_deleted.each(&:restore!)
         end
       end
 

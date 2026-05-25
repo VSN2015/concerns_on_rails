@@ -29,22 +29,32 @@ module ConcernsOnRails
 
       # class methods
       class_methods do
-        # Define sluggable field
+        include ConcernsOnRails::Support::ColumnGuard
+
+        # Define sluggable field, with optional friendly_id features.
         # Example:
         #   sluggable_by :wonderful_name
-        def sluggable_by(field)
+        #   sluggable_by :title, history: true       # old slugs keep resolving (needs a friendly_id_slugs table)
+        #   sluggable_by :title, scope: :account_id  # slugs unique per scope column
+        def sluggable_by(field, history: false, scope: nil)
           self.sluggable_field = field.to_sym
-
-          validate_sluggable_field!
+          ensure_columns!("ConcernsOnRails::Models::Sluggable", [sluggable_field, scope].compact)
+          reconfigure_friendly_id(history: history, scope: scope) if history || scope
         end
 
         private
 
-        # Validate sluggable_field exists in database
-        def validate_sluggable_field!
-          return if column_names.include?(sluggable_field.to_s)
-
-          raise ArgumentError, "ConcernsOnRails::Models::Sluggable: sluggable_field '#{sluggable_field}' does not exist in the database"
+        # Re-runs friendly_id with the extra modules. friendly_id merges config
+        # across calls, so this layers :history / :scoped onto the base :slugged.
+        def reconfigure_friendly_id(history:, scope:)
+          modules = [:slugged]
+          modules << :history if history
+          modules << :scoped if scope
+          options = { use: modules }
+          options[:scope] = scope if scope
+          # friendly_id's second argument is a positional options hash (not kwargs),
+          # so pass it positionally to stay correct on both Ruby 2.7 and 3.x.
+          friendly_id(:slug_source, options)
         end
       end
 

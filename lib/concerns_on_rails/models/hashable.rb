@@ -16,6 +16,8 @@ module ConcernsOnRails
       end
 
       class_methods do
+        include ConcernsOnRails::Support::ColumnGuard
+
         # Define hashable field and generation options.
         # Example:
         #   hashable_by :token
@@ -29,6 +31,7 @@ module ConcernsOnRails
           self.hashable_length = length.to_i
           self.hashable_alphabet = alphabet
 
+          ensure_columns!("ConcernsOnRails::Models::Hashable", hashable_field)
           validate_hashable_options!
           before_create :assign_hashable_value
 
@@ -45,17 +48,13 @@ module ConcernsOnRails
           when :hex     then SecureRandom.hex(hashable_length)
           when :uuid    then SecureRandom.uuid
           when :integer then SecureRandom.random_number(10**hashable_length).to_s.rjust(hashable_length, "0").to_i
-          when :custom  then Array.new(hashable_length) { hashable_alphabet[SecureRandom.random_number(hashable_alphabet.size)] }.join
+          when :custom  then ConcernsOnRails::Support::RandomValue.from_alphabet(hashable_alphabet, hashable_length)
           end
         end
 
         private
 
         def validate_hashable_options!
-          unless column_names.include?(hashable_field.to_s)
-            raise ArgumentError, "ConcernsOnRails::Models::Hashable: hashable_field '#{hashable_field}' does not exist in the database"
-          end
-
           unless VALID_TYPES.include?(hashable_type)
             raise ArgumentError,
                   "ConcernsOnRails::Models::Hashable: unknown type '#{hashable_type}'. Valid types: #{VALID_TYPES.join(', ')}"

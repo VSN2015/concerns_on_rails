@@ -129,4 +129,93 @@ describe ConcernsOnRails::Searchable do
       end.to raise_error(ArgumentError, /'missing_column' does not exist/)
     end
   end
+
+  describe "match modes (1.9)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :products, force: true do |t|
+          t.string :sku
+        end
+      end
+    end
+
+    it "match: :prefix anchors at the start" do
+      class PrefixProduct < TestModel
+        self.table_name = "products"
+        include ConcernsOnRails::Searchable
+
+        searchable_by :sku, match: :prefix
+      end
+
+      PrefixProduct.create!(sku: "ABC-1")
+      PrefixProduct.create!(sku: "X-ABC")
+      expect(PrefixProduct.search("ABC").pluck(:sku)).to eq(["ABC-1"])
+    end
+
+    it "match: :exact requires a full match" do
+      class ExactProduct < TestModel
+        self.table_name = "products"
+        include ConcernsOnRails::Searchable
+
+        searchable_by :sku, match: :exact
+      end
+
+      ExactProduct.create!(sku: "ABC")
+      ExactProduct.create!(sku: "ABCD")
+      expect(ExactProduct.search("ABC").pluck(:sku)).to eq(["ABC"])
+    end
+  end
+
+  describe "mode: :all (1.9)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :books, force: true do |t|
+          t.string :title
+          t.text :body
+        end
+      end
+
+      class Book < TestModel
+        include ConcernsOnRails::Searchable
+
+        searchable_by :title, :body, mode: :all
+      end
+    end
+
+    it "requires every whitespace-separated term to match (across any field)" do
+      Book.create!(title: "Ruby on Rails", body: "web framework")
+      Book.create!(title: "Ruby",          body: "language")
+
+      expect(Book.search("ruby framework").pluck(:title)).to eq(["Ruby on Rails"])
+      expect(Book.search("ruby language").pluck(:title)).to eq(["Ruby"])
+    end
+  end
+
+  describe "option validation (1.9)" do
+    before do
+      ActiveRecord::Schema.define { create_table(:gadgets, force: true) { |t| t.string :name } }
+    end
+
+    it "raises for an unknown mode" do
+      expect do
+        class BadModeGadget < TestModel
+          self.table_name = "gadgets"
+          include ConcernsOnRails::Searchable
+
+          searchable_by :name, mode: :bogus
+        end
+      end.to raise_error(ArgumentError, /unknown mode/)
+    end
+
+    it "raises for an unknown match" do
+      expect do
+        class BadMatchGadget < TestModel
+          self.table_name = "gadgets"
+          include ConcernsOnRails::Searchable
+
+          searchable_by :name, match: :bogus
+        end
+      end.to raise_error(ArgumentError, /unknown match/)
+    end
+  end
 end

@@ -27,16 +27,15 @@ module ConcernsOnRails
       end
 
       class_methods do
+        include ConcernsOnRails::Support::ColumnGuard
+
         # Configure the expiry column.
         # Example:
         #   expirable_by                  # uses :expires_at
         #   expirable_by :valid_until
         def expirable_by(field = DEFAULT_FIELD)
           self.expirable_field = field.to_sym
-
-          return if column_names.include?(expirable_field.to_s)
-
-          raise ArgumentError, "ConcernsOnRails::Models::Expirable: expirable_field '#{expirable_field}' does not exist in the database"
+          ensure_columns!("ConcernsOnRails::Models::Expirable", expirable_field)
         end
       end
 
