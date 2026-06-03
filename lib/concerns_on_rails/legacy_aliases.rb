@@ -15,4 +15,5 @@ module ConcernsOnRails
   Tokenizable   = Models::Tokenizable
   Stateable     = Models::Stateable
   Addressable   = Models::Addressable
+  Sequenceable  = Models::Sequenceable
 end

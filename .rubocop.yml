@@ -41,6 +41,11 @@ Metrics/BlockLength:
   Exclude:
     - 'spec/**/*'
 
+# Configuration macros (e.g. sequenceable_by) expose many self-documenting
+# keyword options; counting them adds noise without the positional-arg risk.
+Metrics/ParameterLists:
+  CountKeywordArgs: false
+
 Layout/LineLength:
   Max: 140
 

@@ -2,7 +2,7 @@
 
 > 🇻🇳 **Hoàng Sa and Trường Sa belong to Việt Nam.**
 
-A plug-and-play collection of reusable ActiveSupport concerns for Rails **models** and **controllers** — slugs, soft delete, scheduled publish, expiry, pagination, filtering, JSON envelopes, and more. One `include`, one declarative macro, done.
+A plug-and-play collection of reusable ActiveSupport concerns for Rails **models** and **controllers** — slugs, soft delete, scheduled publish, expiry, sequential reference numbers, pagination, filtering, JSON envelopes, and more. One `include`, one declarative macro, done.
 
 ```ruby
 class Article < ApplicationRecord
@@ -36,6 +36,7 @@ Article.published.without_deleted.find("hello-world")
   - [Searchable](#-searchable) — LIKE/ILIKE search across configured columns
   - [Activatable](#-activatable) — boolean active/inactive toggle
   - [Tokenizable](#-tokenizable) — security tokens with timing-safe lookup
+  - [Sequenceable](#-sequenceable) — ordered, human-friendly reference numbers
   - [Stateable](#-stateable) — lightweight string-backed state machine
   - [Addressable](#-addressable) — postal address normalization + format validation
 - **Controller concerns**
@@ -54,7 +55,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Thirteen model concerns + six controller concerns**, all production-ready
+- **Fourteen model concerns + six controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -67,7 +68,7 @@ Article.published.without_deleted.find("hello-world")
 Add to your application's `Gemfile`:
 
 ```ruby
-gem "concerns_on_rails", "~> 1.9"
+gem "concerns_on_rails", "~> 1.11"
 ```
 
 Or pull the latest from GitHub:
@@ -578,6 +579,70 @@ User.authenticate_by_api_token(token)     # timing-safe; returns user or nil
 
 ---
 
+## 🧾 Sequenceable
+
+Ordered, human-friendly reference numbers — invoice numbers, order numbers, ticket IDs, support cases. Unlike the *random* identifiers from [Hashable](#-hashable) / [Tokenizable](#-tokenizable), `Sequenceable` produces *sequential* ones backed by an integer column that is the source of truth.
+
+```ruby
+class Invoice < ApplicationRecord
+  include ConcernsOnRails::Sequenceable
+
+  sequenceable_by :sequence,        # integer column — the source of truth
+    into:    :number,               # optional string column for the formatted value
+    prefix:  "INV-",
+    padding: 5,
+    scope:   :account_id,           # one independent counter per account
+    reset:   :year                  # restart numbering each calendar year
+end
+
+invoice = Invoice.create!(account_id: 1)
+invoice.sequence            # => 1, 2, 3 ... (per account, per year)
+invoice.number              # => "INV-2026-00001"
+invoice.formatted_sequence  # => "INV-2026-00001"
+
+Invoice.next_sequence(account_id: 1)   # => 4  (peek the next value, without creating)
+```
+
+**Options**
+
+| Option               | Default     | Purpose                                                                                  |
+|----------------------|-------------|------------------------------------------------------------------------------------------|
+| `field` (positional) | `:sequence` | Integer column holding the sequence — the source of truth.                               |
+| `into:`              | `nil`       | String column to persist the formatted reference into (immutable display value).          |
+| `prefix:`            | `""`        | Prepended to the formatted value.                                                        |
+| `padding:`           | `0`         | Zero-pad width of the numeric portion (`0` = no padding).                                |
+| `separator:`         | `"-"`       | Joins prefix / period token / number in the default format.                              |
+| `start_at:`          | `1`         | First value when the scope/period has no rows yet.                                       |
+| `scope:`             | `nil`       | Column (or array of columns) the counter is scoped to — e.g. one sequence per `account_id`. |
+| `reset:`             | `:never`    | `:never` / `:year` / `:month` / `:day` — restart numbering each period (needs `created_at`). |
+| `template:`          | `nil`       | `->(seq, record) { ... }` full custom formatter; overrides `prefix` / `padding` / period. |
+
+**Default format**
+
+| `reset:`  | Example               | Shape                            |
+|-----------|-----------------------|----------------------------------|
+| `:never`  | `INV-00001`           | `prefix + padded`                |
+| `:year`   | `INV-2026-00001`      | `prefix + YYYY + sep + padded`   |
+| `:month`  | `INV-202606-00001`    | `prefix + YYYYMM + sep + padded` |
+| `:day`    | `INV-20260604-00001`  | `prefix + YYYYMMDD + sep + padded` |
+
+**Generated API**
+
+| Method                            | What it does                                                                          |
+|-----------------------------------|---------------------------------------------------------------------------------------|
+| `formatted_<field>`               | The formatted string — the persisted `into:` value when set, otherwise computed.      |
+| `Model.next_<field>(scope_attrs)` | Peek the next integer for a scope without creating a record.                           |
+
+**Notes**
+- The next value is `MAX(<field>) + 1` within the scope (and period), so numbering is dense and ordered — not random.
+- Caller-supplied values are respected: `Invoice.create!(sequence: 100)` is not overwritten (and its `into:` string is still formatted from `100`).
+- Generation reads `MAX` then inserts, so two concurrent inserts can race. It's **best-effort** — add a **scoped unique index** on `<field>` (and on `into:`) for a real guarantee, the same way you would for any `MAX`-based numbering.
+- `reset:` requires a `created_at` column; the period is taken from each row's creation time.
+- For fixed-width display (`00042`), make the `into:` column a **string** — integer columns drop leading zeros.
+- Distinct from `Hashable` / `Tokenizable`, which generate *random* values; reach for those when the identifier must be unguessable.
+
+---
+
 ## 🔄 Stateable
 
 Lightweight string-backed state machine — the 80% of AASM without the dependency.
@@ -956,7 +1021,7 @@ Both forms reference the same module, so you can freely mix them.
 bundle install                                  # install dev dependencies
 bundle exec rspec                               # run the test suite
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.9.0.gem       # install locally
+gem install ./concerns_on_rails-1.11.0.gem      # install locally
 ```
 
 The test suite uses an in-memory SQLite database and a lightweight `FakeController` harness for controller-concern specs — no Rails routes or boot required.

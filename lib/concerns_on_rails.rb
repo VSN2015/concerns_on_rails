@@ -11,6 +11,7 @@ end
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/random_value"
 require "concerns_on_rails/support/address_data"
+require "concerns_on_rails/support/sequence_calculator"
 
 # Model concerns
 require "concerns_on_rails/models/sluggable"
@@ -26,6 +27,7 @@ require "concerns_on_rails/models/activatable"
 require "concerns_on_rails/models/tokenizable"
 require "concerns_on_rails/models/stateable"
 require "concerns_on_rails/models/addressable"
+require "concerns_on_rails/models/sequenceable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"
