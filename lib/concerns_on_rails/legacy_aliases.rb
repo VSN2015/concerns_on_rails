@@ -14,4 +14,5 @@ module ConcernsOnRails
   Activatable   = Models::Activatable
   Tokenizable   = Models::Tokenizable
   Stateable     = Models::Stateable
+  Addressable   = Models::Addressable
 end

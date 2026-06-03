@@ -37,6 +37,7 @@ Article.published.without_deleted.find("hello-world")
   - [Activatable](#-activatable) — boolean active/inactive toggle
   - [Tokenizable](#-tokenizable) — security tokens with timing-safe lookup
   - [Stateable](#-stateable) — lightweight string-backed state machine
+  - [Addressable](#-addressable) — postal address normalization + format validation
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
   - [Filterable](#-filterable) — declarative URL-param filters
@@ -53,7 +54,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Twelve model concerns + six controller concerns**, all production-ready
+- **Thirteen model concerns + six controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -627,6 +628,77 @@ stateable_by :state, states: %i[open closed], prefix: true
 - String-column backed (not integer-backed like Rails enum) — values are stored as-is.
 - States like `active` / `expired` overlap with `Activatable`/`Expirable` scopes — use `prefix:` or `suffix:` to disambiguate.
 - No persistence of transition history; combine with `Publishable` / `Schedulable` for time-based state tracking.
+
+---
+
+## 🏠 Addressable
+
+Normalize and format-validate a postal address spread across several columns — one macro for whitespace cleanup, postal-code and ISO country-code checks, required-part presence, and a `full_address` helper. No external geocoding service required.
+
+```ruby
+class Location < ApplicationRecord
+  include ConcernsOnRails::Addressable
+
+  addressable_by   # standard columns: line1, line2, city, state, postal_code, country
+end
+
+loc = Location.create(line1: "  1 Infinite  Loop ", city: "Cupertino",
+                      state: "ca", postal_code: "95014", country: "us")
+loc.line1         # => "1 Infinite Loop"   (stripped + squished)
+loc.state         # => "CA"                (2-letter code upcased)
+loc.country       # => "US"
+loc.full_address  # => "1 Infinite Loop, Cupertino, CA, 95014, US"
+```
+
+Map onto your own column names and tune behavior:
+
+```ruby
+class Place < ApplicationRecord
+  include ConcernsOnRails::Addressable
+
+  addressable_by line1: :street, postal_code: :zip, country: :country_code,
+                 required:        %i[line1 city postal_code country],
+                 default_country: "GB",                       # country used when the record has none
+                 validate_state:  true,                       # opt-in US/CA state-code check
+                 verify_with:     ->(rec) { Usps.verify(rec) } # opt-in external verifier
+end
+```
+
+**Options**
+
+| Option            | Default                              | Purpose                                                              |
+|-------------------|--------------------------------------|---------------------------------------------------------------------|
+| `line1:` … `country:` | same-named columns               | Map each canonical part to a real column. Missing columns are skipped. |
+| `required:`       | `%i[line1 city postal_code country]` | Parts (by canonical name) that must be present. Each must map to an existing column. |
+| `default_country:`| `"US"`                               | Country used to pick the postal-code format when the record has no recognized country. |
+| `validate_state:` | `false`                              | When `true`, validates the state against US / CA code sets.         |
+| `verify_with:`    | `nil`                                | A callable for real-world verification (see below).                 |
+
+**What it normalizes** (in `before_validation`)
+- Text parts: `strip` + `squish`.
+- `postal_code`: squish + upcase, with canonical spacing for CA (`A1A1A1` → `A1A 1A1`).
+- `country` / `state`: upcased when they look like a 2-letter code (full names left alone).
+
+**What it validates**
+- Presence of every `required:` part.
+- `country`: a 2-letter value must be a real ISO 3166-1 alpha-2 code.
+- `postal_code`: matched against a per-country pattern (US, CA, GB, AU, DE, FR) with a permissive fallback for everything else.
+- `state`: only when `validate_state: true` and the country is US/CA.
+
+**External verification (`verify_with:`)** — runs **only after** structural validation passes, so you never spend an API call on an obviously-broken address. The callable receives the record and may either add to `record.errors` itself, or return:
+
+| Return value      | Effect                                          |
+|-------------------|-------------------------------------------------|
+| `true` / `nil`    | success                                         |
+| `false`           | adds a generic `:base` error                    |
+| `String`          | added as a `:base` error                        |
+| `Array`           | each element added as a `:base` error           |
+
+**Notes**
+- Scope is **format/structure only** — it checks shape, not real-world deliverability. Plug a USPS/Google/Smarty client into `verify_with:` for that.
+- Error messages are plain English strings — no host-app i18n setup required.
+- Partial schemas just work: a model without a `line2` (or any other) column simply omits that part.
+- Pairs with [Normalizable](#-normalizable) when you also have non-address fields to clean up.
 
 ---
 

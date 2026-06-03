@@ -10,6 +10,7 @@ end
 # Shared internal helpers (must load before the concerns that use them)
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/random_value"
+require "concerns_on_rails/support/address_data"
 
 # Model concerns
 require "concerns_on_rails/models/sluggable"
@@ -24,6 +25,7 @@ require "concerns_on_rails/models/searchable"
 require "concerns_on_rails/models/activatable"
 require "concerns_on_rails/models/tokenizable"
 require "concerns_on_rails/models/stateable"
+require "concerns_on_rails/models/addressable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"

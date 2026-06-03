@@ -1,5 +1,13 @@
 <!-- CHANGELOG.md -->
 
+## 1.10.0 (2026-06-03)
+
+### Added
+- **Models::Addressable**: Declarative postal-address normalization + format validation via a single `addressable_by` macro. Maps the canonical parts (`line1` / `line2` / `city` / `state` / `postal_code` / `country`) onto real columns — any subset works, missing columns are skipped, and required parts are schema-checked. Normalizes in `before_validation` (strip + squish, postal-code upcasing with canonical CA spacing, 2-letter country/state codes upcased) and validates required-part presence, ISO 3166-1 alpha-2 country codes, per-country postal formats (US/CA/GB/AU/DE/FR + a permissive fallback), and opt-in US/CA state codes. Offline and dependency-free; layer real deliverability checks via the opt-in `verify_with:` callable. Adds helpers `full_address`, `address_lines`, `address_present?`, `address_complete?`, and `address_attributes`.
+
+### Internal
+- Added `ConcernsOnRails::Support::AddressData` — ISO 3166-1 alpha-2 country codes, per-country postal-format patterns, US state / CA province sets, and the case-insensitive lookups (`valid_country?`, `postal_format_for`, `valid_state?`, `normalize_postal`) backing the Addressable concern.
+
 ## 1.9.0 (2026-05-25)
 
 ### Added
