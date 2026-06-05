@@ -1,0 +1,16 @@
+.git
+.github
+.bundle
+.yardoc
+_yardoc
+coverage
+doc
+pkg
+tmp
+spec/reports
+.rspec_status
+.byebug_history
+*.gem
+.claude
+.mcp.json
+article

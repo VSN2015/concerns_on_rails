@@ -371,4 +371,77 @@ describe ConcernsOnRails::SoftDeletable do
       expect(removed.reload).not_to be_deleted
     end
   end
+
+  describe 'default_scope option (1.12)' do
+    before(:all) do
+      ActiveRecord::Schema.define do
+        create_table :ds_hidden_softs, force: true do |t|
+          t.string :name
+          t.datetime :deleted_at
+        end
+        create_table :ds_visible_softs, force: true do |t|
+          t.string :name
+          t.datetime :deleted_at
+        end
+      end
+    end
+
+    it 'hides soft-deleted rows from .all by default' do
+      klass = Class.new(ActiveRecord::Base) do
+        self.table_name = 'ds_hidden_softs'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at
+      end
+      klass.create!(name: 'a')
+      klass.create!(name: 'b', deleted_at: Time.zone.now)
+      expect(klass.count).to eq(1)
+      expect(klass.unscoped.count).to eq(2)
+    end
+
+    it 'shows soft-deleted rows from .all when default_scope: false' do
+      klass = Class.new(ActiveRecord::Base) do
+        self.table_name = 'ds_visible_softs'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, default_scope: false
+      end
+      klass.create!(name: 'a')
+      klass.create!(name: 'b', deleted_at: Time.zone.now)
+      expect(klass.count).to eq(2)
+      expect(klass.without_deleted.count).to eq(1)
+    end
+  end
+
+  describe '.soft_delete_all (1.12)' do
+    let!(:r1) { dummy_class.create!(name: 'x') }
+    let!(:r2) { dummy_class.create!(name: 'y') }
+
+    it 'soft-deletes every matching record' do
+      dummy_class.soft_delete_all
+      expect(r1.reload).to be_deleted
+      expect(r2.reload).to be_deleted
+    end
+  end
+
+  describe 'transactional hooks (1.12)' do
+    let(:raising_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'dummy_soft_deletables'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, default_scope: false
+
+        def after_soft_delete
+          raise 'boom'
+        end
+      end
+    end
+
+    it 'rolls the timestamp back when an after hook raises' do
+      rec = raising_class.create!(name: 'z')
+      expect { rec.soft_delete! }.to raise_error('boom')
+      expect(rec.reload.deleted_at).to be_nil
+    end
+  end
 end

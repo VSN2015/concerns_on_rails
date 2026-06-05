@@ -172,4 +172,52 @@ describe ConcernsOnRails::Sluggable do
       expect(VersionedPage.friendly.find(old_slug)).to eq(page)
     end
   end
+
+  describe "reserved words (1.12)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :reserved_pages, force: true do |t|
+          t.string :title
+          t.string :slug
+        end
+      end
+
+      class ReservedPage < TestModel
+        include ConcernsOnRails::Sluggable
+
+        sluggable_by :title, reserved_words: %w[new edit]
+      end
+    end
+
+    it "rejects a reserved slug with a validation error" do
+      expect { ReservedPage.create!(title: "new") }.to raise_error(ActiveRecord::RecordInvalid, /reserved/i)
+    end
+
+    it "still slugs a non-reserved title normally" do
+      page = ReservedPage.create!(title: "Hello World")
+      expect(page.slug).to eq("hello-world")
+    end
+  end
+
+  describe "finders (1.12)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :findable_pages, force: true do |t|
+          t.string :title
+          t.string :slug
+        end
+      end
+
+      class FindablePage < TestModel
+        include ConcernsOnRails::Sluggable
+
+        sluggable_by :title, finders: true
+      end
+    end
+
+    it "finds a record by its slug via .find" do
+      page = FindablePage.create!(title: "Hello World")
+      expect(FindablePage.find("hello-world")).to eq(page)
+    end
+  end
 end

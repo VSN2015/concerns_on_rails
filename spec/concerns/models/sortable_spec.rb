@@ -236,4 +236,64 @@ describe ConcernsOnRails::Sortable do
       expect(Task.pluck(:position)).to eq([1, 2])
     end
   end
+
+  context "acts_as_list scope: option (1.12)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :list_items, force: true do |t|
+          t.string  :name
+          t.integer :position
+          t.integer :list_id
+        end
+      end
+
+      class ListItem < TestModel
+        include ConcernsOnRails::Sortable
+
+        sortable_by :position, scope: :list_id
+      end
+    end
+
+    after do
+      Object.send(:remove_const, :ListItem) if defined?(ListItem)
+    end
+
+    it "numbers position independently per scope" do
+      a = ListItem.create!(name: "a", list_id: 1)
+      b = ListItem.create!(name: "b", list_id: 1)
+      c = ListItem.create!(name: "c", list_id: 2)
+
+      expect([a.position, b.position]).to eq([1, 2])
+      expect(c.position).to eq(1)
+    end
+  end
+
+  context "acts_as_list add_new_at: option (1.12)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :stack_items, force: true do |t|
+          t.string  :name
+          t.integer :position
+        end
+      end
+
+      class StackItem < TestModel
+        include ConcernsOnRails::Sortable
+
+        sortable_by :position, add_new_at: :top
+      end
+    end
+
+    after do
+      Object.send(:remove_const, :StackItem) if defined?(StackItem)
+    end
+
+    it "inserts new records at the top of the list" do
+      first  = StackItem.create!(name: "first")
+      second = StackItem.create!(name: "second")
+
+      expect(second.position).to eq(1)
+      expect(first.reload.position).to eq(2)
+    end
+  end
 end

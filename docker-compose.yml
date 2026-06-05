@@ -1,0 +1,22 @@
+services:
+  test:
+    build: .
+    image: concerns_on_rails
+    volumes:
+      - .:/app
+      - bundle:/usr/local/bundle
+    command: bundle exec rspec
+
+  console:
+    image: concerns_on_rails
+    depends_on:
+      - test
+    volumes:
+      - .:/app
+      - bundle:/usr/local/bundle
+    command: bundle exec irb -r ./lib/concerns_on_rails.rb
+    stdin_open: true
+    tty: true
+
+volumes:
+  bundle:

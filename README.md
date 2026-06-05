@@ -39,6 +39,7 @@ Article.published.without_deleted.find("hello-world")
   - [Sequenceable](#-sequenceable) — ordered, human-friendly reference numbers
   - [Stateable](#-stateable) — lightweight string-backed state machine
   - [Addressable](#-addressable) — postal address normalization + format validation
+  - [Taggable](#-taggable) — lightweight tagging over a single column
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
   - [Filterable](#-filterable) — declarative URL-param filters
@@ -55,7 +56,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Fourteen model concerns + six controller concerns**, all production-ready
+- **Fifteen model concerns + six controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -158,6 +159,13 @@ Post.friendly.find("old-slug")   # still resolves to the renamed post
 
 # Unique slug only within a scope column (same slug allowed in different accounts)
 sluggable_by :title, scope: :account_id
+
+# Reject reserved slugs — saving a record whose slug would be reserved fails validation
+sluggable_by :title, reserved_words: %w[new edit admin]
+
+# Let Model.find accept a slug directly (not just the id)
+sluggable_by :title, finders: true
+Post.find("hello-world")   # resolves by slug
 ```
 
 **Notes**
@@ -191,6 +199,8 @@ Task.last.move_higher
 sortable_by :priority                       # ascending priority
 sortable_by priority: :desc                 # descending priority
 sortable_by :position, use_acts_as_list: false   # just the default_scope ordering, no acts_as_list
+sortable_by :position, scope: :list_id           # independent position sequence per list (acts_as_list scope:)
+sortable_by :position, add_new_at: :top          # new rows insert at the top (acts_as_list add_new_at:)
 ```
 
 **Notes**
@@ -246,7 +256,7 @@ publishable_by :published_at, default_scope: true
 
 ## ❌ SoftDeletable
 
-Soft delete records using a timestamp field (default: `deleted_at`). Includes a `default_scope` that hides deleted records and overrides `destroy_all` to soft-delete in bulk.
+Soft delete records using a timestamp field (default: `deleted_at`). By default a `default_scope` hides deleted records — **opt out** with `soft_deletable_by :deleted_at, default_scope: false` and chain `.without_deleted` explicitly (the safer choice for new models, avoiding `default_scope`'s join/uniqueness footguns). `soft_delete!` / `restore!` and the bulk helpers run inside a transaction, so a raising hook rolls the change back.
 
 ```ruby
 class User < ApplicationRecord
@@ -280,10 +290,13 @@ User.unscoped             # everything (deleted + non-deleted)
 **Bulk operations**
 
 ```ruby
-User.destroy_all          # soft-deletes all matching records
+User.soft_delete_all      # soft-deletes all matching records (explicit — preferred)
+User.destroy_all          # alias of soft_delete_all (kept for backwards compatibility)
 User.really_destroy_all   # hard-deletes all matching records
 User.restore_all          # restores all soft-deleted records
 ```
+
+All of these run in a transaction, so a raising hook rolls the whole batch back.
 
 **Lifecycle hooks** — override these methods on the model:
 
@@ -775,6 +788,45 @@ end
 
 ---
 
+## 🏷️ Taggable
+
+Lightweight, dependency-free tagging stored in a **single string column** — no join tables, no tagging engine. Works on any database, including SQLite.
+
+```ruby
+class Article < ApplicationRecord
+  include ConcernsOnRails::Taggable
+
+  taggable_by :tags                      # default column :tags
+  # taggable_by :skills, downcase: true  # custom column, case-folded
+end
+
+article = Article.new
+article.tag_list = "Ruby, Rails, Ruby"   # accepts a String or an Array
+article.tag_list                          # => ["Ruby", "Rails"]  (stripped + de-duped)
+article.add_tags("api")
+article.remove_tags("Rails")
+article.tagged_with?("ruby")              # => membership predicate
+article.save!
+
+Article.tagged_with("ruby", "rails")          # records carrying BOTH tags
+Article.tagged_with("ruby", "go", any: true)  # records carrying ANY tag
+Article.all_tags                               # => sorted unique tags in use
+```
+
+**Options**
+
+| Option       | Default | Purpose                                                          |
+|--------------|---------|------------------------------------------------------------------|
+| `delimiter:` | `","`   | Character joining the stored tags (a tag must not contain it).    |
+| `downcase:`  | `false` | Case-fold tags on write so matching is case-insensitive.          |
+
+**Notes**
+- Matching is **boundary-safe** — searching `rail` does not match `rails`. An explicit SQL `ESCAPE` clause makes tags containing `_` / `%` match literally on every adapter.
+- Tags are normalized in `before_validation`, so a direct `record.tags = "a, b"` assignment is cleaned too. An empty list stores `NULL`.
+- Reach for [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) when you need tag contexts, ownership, counts/clouds, or polymorphic tags shared across models.
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -1023,13 +1075,29 @@ Both forms reference the same module, so you can freely mix them.
 
 ---
 
+## 🧭 Philosophy & when to reach for a dedicated gem
+
+`concerns_on_rails` aims to cover the common 80% of each behavior with **one `include` + one declarative macro**, **schema-validated** configuration, **no-surprise defaults**, and **lean dependencies** (only `acts_as_list` and `friendly_id`; controller concerns have none). It is deliberately *not* a re-implementation of the category leaders — reach for a dedicated gem when you outgrow the basics:
+
+| Need | Use instead |
+|------|-------------|
+| Complex state machines (callbacks, transition logging) | [`aasm`](https://github.com/aasm/aasm) |
+| Association-cascade soft delete / sentinel-aware unique indexes | [`paranoia`](https://github.com/rubysherpas/paranoia) or [`discard`](https://github.com/jhawthorn/discard) |
+| Tagging with contexts, ownership, or tag clouds | [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) |
+| Full-text search with ranking / stemming | [`pg_search`](https://github.com/Casecommons/pg_search) / Elasticsearch |
+| Audit trails / version history | [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) |
+
+`Sluggable` wraps [`friendly_id`](https://github.com/norman/friendly_id) and `Sortable` wraps [`acts_as_list`](https://github.com/brendon/acts_as_list), so you get those leaders' engines behind the declarative macro.
+
+---
+
 ## 🛠️ Development
 
 ```sh
 bundle install                                  # install dev dependencies
 bundle exec rspec                               # run the test suite
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.11.0.gem      # install locally
+gem install ./concerns_on_rails-1.11.2.gem      # install locally
 ```
 
 The test suite uses an in-memory SQLite database and a lightweight `FakeController` harness for controller-concern specs — no Rails routes or boot required.

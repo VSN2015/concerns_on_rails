@@ -34,27 +34,40 @@ module ConcernsOnRails
         # Define sluggable field, with optional friendly_id features.
         # Example:
         #   sluggable_by :wonderful_name
-        #   sluggable_by :title, history: true       # old slugs keep resolving (needs a friendly_id_slugs table)
-        #   sluggable_by :title, scope: :account_id  # slugs unique per scope column
-        def sluggable_by(field, history: false, scope: nil)
+        #   sluggable_by :title, history: true            # old slugs keep resolving (needs a friendly_id_slugs table)
+        #   sluggable_by :title, scope: :account_id       # slugs unique per scope column
+        #   sluggable_by :title, reserved_words: %w[new]  # block these slugs (a UUID is appended instead)
+        #   sluggable_by :title, finders: true            # Model.find accepts a slug directly
+        def sluggable_by(field, history: false, scope: nil, reserved_words: nil, finders: false)
           self.sluggable_field = field.to_sym
           ensure_columns!("ConcernsOnRails::Models::Sluggable", [sluggable_field, scope].compact)
-          reconfigure_friendly_id(history: history, scope: scope) if history || scope
+          return unless history || scope || reserved_words || finders
+
+          reconfigure_friendly_id(history: history, scope: scope,
+                                  reserved_words: reserved_words, finders: finders)
         end
 
         private
 
         # Re-runs friendly_id with the extra modules. friendly_id merges config
-        # across calls, so this layers :history / :scoped onto the base :slugged.
-        def reconfigure_friendly_id(history:, scope:)
+        # across calls, so this layers :history / :scoped / :finders / :reserved onto :slugged.
+        def reconfigure_friendly_id(history:, scope:, reserved_words: nil, finders: false)
           modules = [:slugged]
           modules << :history if history
           modules << :scoped if scope
-          options = { use: modules }
-          options[:scope] = scope if scope
+          modules << :finders if finders
+          modules << :reserved if reserved_words
           # friendly_id's second argument is a positional options hash (not kwargs),
           # so pass it positionally to stay correct on both Ruby 2.7 and 3.x.
-          friendly_id(:slug_source, options)
+          friendly_id(:slug_source, friendly_id_options(modules, scope, reserved_words))
+        end
+
+        # Build friendly_id's positional options hash from the resolved modules.
+        def friendly_id_options(modules, scope, reserved_words)
+          options = { use: modules }
+          options[:scope] = scope if scope
+          options[:reserved_words] = Array(reserved_words).map(&:to_s) if reserved_words
+          options
         end
       end
 

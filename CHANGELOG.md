@@ -1,5 +1,19 @@
 <!-- CHANGELOG.md -->
 
+## 1.11.2 (2026-06-06)
+
+### Added
+- **Models::Taggable**: Lightweight, dependency-free tagging over a single string column (no join tables, no tagging engine; works on any database including SQLite). `taggable_by :tags` adds `tag_list` get/set (accepts a String or an Array, stripped + de-duped), `add_tags` / `remove_tags`, a `tagged_with?` predicate, a boundary-safe `tagged_with(*tags, any:)` class scope (AND by default, OR with `any: true`), and `all_tags`. Options: `delimiter:` and `downcase:`. Reach for `acts-as-taggable-on` when you need tag contexts, ownership, or tag clouds.
+- **Models::SoftDeletable**: `soft_deletable_by` gained `default_scope:` (default `true`) to opt out of the deleted-hiding `default_scope`; new explicit `soft_delete_all` class method (preferred over the `destroy_all` override).
+- **Models::Sluggable**: `sluggable_by` gained `reserved_words:` (reject slugs like `new` / `edit` / `admin` — saving such a record fails validation) and `finders: true` (`Model.find` accepts a slug directly), layering friendly_id's `:reserved` / `:finders` modules.
+- **Models::Sortable**: `sortable_by` now threads acts_as_list's `scope:` (independent position sequence per group) and `add_new_at:` (`:top` / `:bottom`) options through to `acts_as_list`.
+
+### Fixed
+- **Models::SoftDeletable**: `soft_delete!` / `restore!` (and the bulk `soft_delete_all` / `restore_all` / `destroy_all`) now run inside a transaction, so a raising `before_*` / `after_*` hook rolls the timestamp change back instead of leaving a half-applied state — adopting `discard`'s transactional playbook.
+
+### Notes
+- All changes are backward-compatible: the soft-delete `default_scope` stays on by default and `destroy_all` continues to soft-delete. New models are encouraged to set `default_scope: false` and use the explicit `soft_delete_all`.
+
 ## 1.11.1 (2026-06-05)
 
 ### Added

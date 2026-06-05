@@ -9,6 +9,11 @@ module ConcernsOnRails
         # declare class attributes and set default values
         class_attribute :soft_delete_field, instance_accessor: false, default: :deleted_at
         class_attribute :soft_delete_touch, instance_accessor: false, default: true
+        # Whether `.all` hides soft-deleted rows via a default_scope. ON by default for
+        # backwards compatibility; opt out with `soft_deletable_by ..., default_scope: false`.
+        # A default_scope is sticky and breaks unscoped joins / uniqueness validations /
+        # eager-loading, so new models are encouraged to disable it and chain `.without_deleted`.
+        class_attribute :soft_delete_default_scope, instance_accessor: false, default: true
 
         # scopes
         scope :active, -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
@@ -19,25 +24,35 @@ module ConcernsOnRails
         scope :with_deleted, -> { unscope(where: soft_delete_field) }
         # Records soft-deleted within the last `duration` (e.g. `deleted_within(7.days)`).
         scope :deleted_within, ->(duration) { soft_deleted.where(soft_delete_field => duration.ago..) }
-        # Optionally, uncomment to hide deleted by default:
-        default_scope { without_deleted }
+
+        # Hide soft-deleted rows from `.all` only when enabled (the default). The block is
+        # evaluated lazily, so toggling `soft_delete_default_scope` via the macro takes effect.
+        default_scope { soft_delete_default_scope ? without_deleted : all }
       end
 
       class_methods do
         include ConcernsOnRails::Support::ColumnGuard
 
-        # Define soft delete field and options
+        # Define soft delete field and options.
         # Example:
         #   soft_deletable_by :deleted_at, touch: false
-        def soft_deletable_by(field = nil, touch: true)
+        #   soft_deletable_by :deleted_at, default_scope: false  # don't hide deleted rows from .all
+        def soft_deletable_by(field = nil, touch: true, default_scope: true)
           self.soft_delete_field = field || :deleted_at
           self.soft_delete_touch = touch
+          self.soft_delete_default_scope = default_scope
           ensure_columns!("ConcernsOnRails::Models::SoftDeletable", soft_delete_field)
         end
 
-        # Override destroy_all to perform soft delete on all records
+        # Soft-delete every matching record, wrapped in a transaction so the batch is atomic.
+        def soft_delete_all
+          transaction { all.each(&:soft_delete!) }
+        end
+
+        # Override destroy_all to soft delete. Kept for backwards compatibility, but prefer the
+        # explicit `soft_delete_all` — silently redefining a standard AR method is a known footgun.
         def destroy_all
-          all.each(&:soft_delete!)
+          soft_delete_all
         end
 
         # Provide really_destroy_all to hard delete all records
@@ -45,9 +60,9 @@ module ConcernsOnRails
           unscoped.delete_all
         end
 
-        # Restore every soft-deleted record (mirror of the destroy_all override).
+        # Restore every soft-deleted record, atomically (mirror of soft_delete_all).
         def restore_all
-          soft_deleted.each(&:restore!)
+          transaction { soft_deleted.each(&:restore!) }
         end
       end
 
@@ -60,26 +75,34 @@ module ConcernsOnRails
       def soft_delete!
         return true if deleted?
 
-        before_soft_delete
-        result = if self.class.soft_delete_touch
-                   update(self.class.soft_delete_field => Time.zone.now)
-                 else
-                   update_column(self.class.soft_delete_field, Time.zone.now)
-                 end
-        after_soft_delete if result
+        result = false
+        # Wrap the timestamp change and its hooks in a transaction so a raising
+        # before/after hook rolls the change back instead of leaving a half-applied state.
+        transaction do
+          before_soft_delete
+          result = if self.class.soft_delete_touch
+                     update(self.class.soft_delete_field => Time.zone.now)
+                   else
+                     update_column(self.class.soft_delete_field, Time.zone.now)
+                   end
+          after_soft_delete if result
+        end
         result
       end
 
       def restore!
         return true unless deleted?
 
-        before_restore
-        result = if self.class.soft_delete_touch
-                   update(self.class.soft_delete_field => nil)
-                 else
-                   update_column(self.class.soft_delete_field, nil)
-                 end
-        after_restore if result
+        result = false
+        transaction do
+          before_restore
+          result = if self.class.soft_delete_touch
+                     update(self.class.soft_delete_field => nil)
+                   else
+                     update_column(self.class.soft_delete_field, nil)
+                   end
+          after_restore if result
+        end
         result
       end
 

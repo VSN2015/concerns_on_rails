@@ -34,14 +34,16 @@ module ConcernsOnRails
       class_methods do
         include ConcernsOnRails::Support::ColumnGuard
 
-        # Define sortable field and direction
+        # Define sortable field and direction.
         # Example:
         #   sortable_by :position
         #   sortable_by position: :asc
         #   sortable_by position: :desc
         #
         #   sortable_by :position, use_acts_as_list: false
-        def sortable_by(field_config = nil, use_acts_as_list: true, **field_options)
+        #   sortable_by :position, scope: :list_id        # independent ordering within each list
+        #   sortable_by :position, add_new_at: :top       # new records go to the top of the list
+        def sortable_by(field_config = nil, use_acts_as_list: true, scope: nil, add_new_at: nil, **field_options)
           field_config = field_options if field_config.nil? && field_options.any?
 
           # parse field_config
@@ -56,7 +58,14 @@ module ConcernsOnRails
 
           ensure_columns!("ConcernsOnRails::Models::Sortable", sortable_field)
 
-          acts_as_list column: sortable_field if use_acts_as_list
+          return unless use_acts_as_list
+
+          # Thread acts_as_list's own options through (scope: for per-group ordering,
+          # add_new_at: for where freshly-inserted rows land).
+          list_options = { column: sortable_field }
+          list_options[:scope] = scope unless scope.nil?
+          list_options[:add_new_at] = add_new_at unless add_new_at.nil?
+          acts_as_list(list_options)
         end
 
         private

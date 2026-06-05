@@ -28,6 +28,7 @@ require "concerns_on_rails/models/tokenizable"
 require "concerns_on_rails/models/stateable"
 require "concerns_on_rails/models/addressable"
 require "concerns_on_rails/models/sequenceable"
+require "concerns_on_rails/models/taggable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"

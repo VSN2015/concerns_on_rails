@@ -16,4 +16,5 @@ module ConcernsOnRails
   Stateable     = Models::Stateable
   Addressable   = Models::Addressable
   Sequenceable  = Models::Sequenceable
+  Taggable      = Models::Taggable
 end
