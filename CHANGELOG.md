@@ -1,5 +1,20 @@
 <!-- CHANGELOG.md -->
 
+## 1.11.1 (2026-06-05)
+
+### Added
+- **Models::Addressable**: `addressable_by` gained four options:
+  - `lengths:` — per-part length limits (`{ line1: 100, city: 3..50 }`); an Integer is a positive maximum, a Range is `min..max` (inclusive/exclusive, endless, and beginless all supported). Length is measured on the normalized value; messages mirror Rails (singular/plural). Bad bounds raise an `ArgumentError` at load time.
+  - `allow_blank:` — per-field opt-out (an Array of parts, or `true`) for the length check when a value is blank. Independent of `required:`.
+  - `normalize_country:` — opt-in canonicalization of a country value to its ISO 3166-1 alpha-2 code: a recognized English name (`"Canada"`) or 3-letter alpha-3 (`"CAN"`) maps to the alpha-2 (`"CA"`); unrecognized values are left untouched. Lets postal/state validation recognize a named country.
+  - `if:` / `unless:` — standard Rails validation conditions (Symbol, Proc, or Array) gating the address validations. Normalization still runs unconditionally.
+
+### Fixed
+- **Models::Addressable**: a present-but-unrecognized country (e.g. a full name with `normalize_country` off, or an invalid code) no longer borrows the `default_country`'s postal/state rules. It now falls back to the permissive postal pattern and skips state validation, so valid foreign postal codes aren't rejected against the wrong country. `default_country` still applies when the country column is absent or blank.
+
+### Internal
+- **Support::AddressData**: added `COUNTRY_DATA` (all 249 ISO 3166-1 countries → `[name, alpha-3]`) as the single source of truth; `ISO_COUNTRY_CODES` and the name / alpha-3 lookups are derived from it, and a new `normalize_country_code` backs the country normalization.
+
 ## 1.10.0 (2026-06-03)
 
 ### Added

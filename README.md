@@ -725,6 +725,9 @@ class Place < ApplicationRecord
                  required:        %i[line1 city postal_code country],
                  default_country: "GB",                       # country used when the record has none
                  validate_state:  true,                       # opt-in US/CA state-code check
+                 lengths:         { line1: 100, city: 50, postal_code: 5..10 }, # max (Int) or min..max (Range)
+                 allow_blank:     %i[state],                   # these parts skip the length check when blank
+                 normalize_country: true,                      # "Canada"/"CAN" -> "CA" (off by default)
                  verify_with:     ->(rec) { Usps.verify(rec) } # opt-in external verifier
 end
 ```
@@ -735,20 +738,25 @@ end
 |-------------------|--------------------------------------|---------------------------------------------------------------------|
 | `line1:` … `country:` | same-named columns               | Map each canonical part to a real column. Missing columns are skipped. |
 | `required:`       | `%i[line1 city postal_code country]` | Parts (by canonical name) that must be present. Each must map to an existing column. |
-| `default_country:`| `"US"`                               | Country used to pick the postal-code format when the record has no recognized country. |
+| `default_country:`| `"US"`                               | Postal-code format used when the country column is **absent or blank**. A present-but-unrecognized country value falls back to the permissive pattern instead — see the postal note below. |
 | `validate_state:` | `false`                              | When `true`, validates the state against US / CA code sets.         |
+| `lengths:`        | `{}`                                 | Per-part length limits: `{ line1: 100, city: 50, postal_code: 5..10 }`. An Integer is a (positive) maximum; a Range is `min..max` (non-negative, satisfiable; endless `3..` and beginless `..50` allowed). Only the parts you list are checked. Bad bounds raise an `ArgumentError` at load time. |
+| `allow_blank:`    | `false`                              | Per-field opt-out for the length check: an Array of parts (e.g. `%i[line2 state]`), or `true` for all parts. A blank value for an allowed part skips its length check. Independent of `required:`. |
+| `normalize_country:` | `false`                           | When `true`, canonicalize the country to its ISO 3166-1 alpha-2 code: an English name (`"Canada"`, `"United States"`) or a 3-letter alpha-3 (`"CAN"`, `"USA"`) maps to the alpha-2 (`"CA"`, `"US"`); unrecognized values are left untouched. This also lets postal/state validation recognize a named country. |
 | `verify_with:`    | `nil`                                | A callable for real-world verification (see below).                 |
+| `if:` / `unless:` | `nil`                                | Standard Rails validation conditions (Symbol, Proc, or Array) gating the address **validations** — e.g. `if: :on_addresses?`. Normalization still runs unconditionally. |
 
 **What it normalizes** (in `before_validation`)
 - Text parts: `strip` + `squish`.
 - `postal_code`: squish + upcase, with canonical spacing for CA (`A1A1A1` → `A1A 1A1`).
-- `country` / `state`: upcased when they look like a 2-letter code (full names left alone).
+- `country` / `state`: upcased when they look like a 2-letter code (full names left alone). With `normalize_country: true`, a recognized ISO country name or alpha-3 code is canonicalized to its alpha-2 (`"Canada"`/`"CAN"` → `"CA"`); unrecognized values are left as-is.
 
 **What it validates**
 - Presence of every `required:` part.
 - `country`: a 2-letter value must be a real ISO 3166-1 alpha-2 code.
-- `postal_code`: matched against a per-country pattern (US, CA, GB, AU, DE, FR) with a permissive fallback for everything else.
+- `postal_code`: matched against a per-country pattern (US, CA, GB, AU, DE, FR) with a permissive fallback for everything else. A strict per-country pattern is only applied when the country is a recognized ISO alpha-2 code (or `default_country` when the country column is absent/blank); a present-but-unrecognized country (e.g. a full name like `"Canada"`) uses the permissive pattern, so valid foreign codes aren't rejected against the wrong country.
 - `state`: only when `validate_state: true` and the country is US/CA.
+- `lengths`: each listed part's length (measured on the **normalized** value) must fit its `min..max` (Integer = max only). Errors mirror Rails, including singular/plural: `"is too short (minimum is N characters)"` / `"is too long (maximum is 1 character)"`. A blank value satisfies a max-only rule and, by default, **fails a minimum greater than 0** — list the part in `allow_blank:` to skip the check when blank. `allow_blank` is independent of `required:`: presence is still governed solely by `required:`, so a required part with a minimum that's left blank reports both `"can't be blank"` and `"is too short …"`. Note length is counted *after* normalization, so a CA `postal_code` includes the inserted space (`"A1A 1A1"` is 7) — size limits accordingly.
 
 **External verification (`verify_with:`)** — runs **only after** structural validation passes, so you never spend an API call on an obviously-broken address. The callable receives the record and may either add to `record.errors` itself, or return:
 
