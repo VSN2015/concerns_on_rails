@@ -44,12 +44,12 @@ module ConcernsOnRails
       # auditor was itself exploitable and is gone from modern browsers
       # (Rails 7+ ships "0"), so "0" is the only correct value.
       PRESETS = {
-        nosniff:            ["X-Content-Type-Options", "nosniff"],
-        sameorigin_frame:   ["X-Frame-Options", "SAMEORIGIN"],
-        deny_frame:         ["X-Frame-Options", "DENY"],
-        no_referrer_leak:   ["Referrer-Policy", "strict-origin-when-cross-origin"],
-        no_cross_domain:    ["X-Permitted-Cross-Domain-Policies", "none"],
-        disable_legacy_xss: ["X-XSS-Protection", "0"]
+        nosniff: %w[X-Content-Type-Options nosniff],
+        sameorigin_frame: %w[X-Frame-Options SAMEORIGIN],
+        deny_frame: %w[X-Frame-Options DENY],
+        no_referrer_leak: %w[Referrer-Policy strict-origin-when-cross-origin],
+        no_cross_domain: %w[X-Permitted-Cross-Domain-Policies none],
+        disable_legacy_xss: %w[X-XSS-Protection 0]
       }.freeze
 
       included do

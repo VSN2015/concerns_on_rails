@@ -15,6 +15,7 @@ describe ConcernsOnRails::Controllers::SecureHeadable do
   def controller_class(base, &declaration)
     Class.new(base) do
       include ConcernsOnRails::Controllers::SecureHeadable
+
       class_eval(&declaration) if declaration
     end
   end

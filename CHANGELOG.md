@@ -1,6 +1,6 @@
 <!-- CHANGELOG.md -->
 
-## 1.12.0 (2026-06-06)
+## 1.12.1 (2026-06-06)
 
 ### Added
 - **Models::Sanitizable**: opt-in HTML sanitization for string attributes — defense-in-depth on top of Rails' default output escaping (not a replacement for it). `sanitizable :body, with: :safe_list` is **non-destructive by default** (`on: :read`): it adds a `sanitized_<field>` reader and leaves the stored column raw. `on: :write` is an explicit, lossy opt-in that overwrites the column in `before_validation` (so presence/length validations see the cleaned value). Presets: `:strip` (remove all tags), `:safe_list` (Rails' allow-list), `:no_links`, `:none`, plus custom `Array` / `Hash` (`{ tags:, attributes: }`) allow-lists and a `Proc` escape hatch. Schema-checked via `ColumnGuard`. Zero new runtime dependencies.
@@ -9,6 +9,7 @@
 
 ### Notes
 - All changes are additive and backward-compatible. `ConcernsOnRails::Sanitizable` is aliased to `Models::Sanitizable`; the controller concern stays namespace-only (`ConcernsOnRails::Controllers::SecureHeadable`), matching the existing controller concerns.
+- These features were first tagged as `1.12.0`, but that tag's CI lint failed before the RubyGems publish step, so it was never released. `1.12.1` is the first published version carrying them.
 
 ## 1.11.2 (2026-06-06)
 

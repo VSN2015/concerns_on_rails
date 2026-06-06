@@ -36,7 +36,7 @@ describe ConcernsOnRails::Models::Sanitizable do
       article.valid?
 
       expect(article.body).to eq("<b>Hi</b> <script>x()</script>") # raw, intact
-      expect(article.sanitized_body).to eq("Hi x()")                # cleaned view
+      expect(article.sanitized_body).to eq("Hi x()") # cleaned view
     end
 
     it "applies the :safe_list preset in the reader (keeps formatting, drops <script>)" do

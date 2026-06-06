@@ -47,10 +47,10 @@ module ConcernsOnRails
       # dependency and libgumbo is probed once, not per access) and always
       # returns a plain String via #to_s, so a SafeBuffer is never persisted.
       PRESETS = {
-        strip:     ->(v) { v.is_a?(String) ? ConcernsOnRails::Support::HtmlSanitizers.full.sanitize(v).to_s : v },
+        strip: ->(v) { v.is_a?(String) ? ConcernsOnRails::Support::HtmlSanitizers.full.sanitize(v).to_s : v },
         safe_list: ->(v) { v.is_a?(String) ? ConcernsOnRails::Support::HtmlSanitizers.safe.sanitize(v).to_s : v },
-        no_links:  ->(v) { v.is_a?(String) ? ConcernsOnRails::Support::HtmlSanitizers.link.sanitize(v).to_s : v },
-        none:      ->(v) { v }
+        no_links: ->(v) { v.is_a?(String) ? ConcernsOnRails::Support::HtmlSanitizers.link.sanitize(v).to_s : v },
+        none: ->(v) { v }
       }.freeze
 
       included do
@@ -86,38 +86,48 @@ module ConcernsOnRails
         end
       end
 
-      class_methods do
+      class_methods do # rubocop:disable Metrics/BlockLength
         private
 
         # Accepts a preset Symbol, a Proc (used as-is), an Array (custom tags
         # allow-list), or a Hash with :tags / :attributes.
         def resolve_sanitizer(with)
           case with
-          when Symbol
-            PRESETS.fetch(with) do
-              raise ArgumentError,
-                    "ConcernsOnRails::Models::Sanitizable: unknown preset '#{with}'. " \
-                    "Valid presets: #{PRESETS.keys.join(', ')}"
-            end
-          when Proc then with
-          when Array
-            tags = with.map(&:to_s)
-            ->(v) { v.is_a?(String) ? ConcernsOnRails::Support::HtmlSanitizers.safe.sanitize(v, tags: tags).to_s : v }
-          when Hash
-            unknown = with.keys - %i[tags attributes]
-            unless unknown.empty?
-              raise ArgumentError,
-                    "ConcernsOnRails::Models::Sanitizable: allow-list keys must be :tags / :attributes, got #{unknown.inspect}"
-            end
-
-            tags  = with[:tags]&.map(&:to_s)
-            attrs = with[:attributes]&.map(&:to_s)
-            ->(v) { v.is_a?(String) ? ConcernsOnRails::Support::HtmlSanitizers.safe.sanitize(v, tags: tags, attributes: attrs).to_s : v }
+          when Symbol then preset_sanitizer(with)
+          when Proc   then with
+          when Array  then allowlist_sanitizer(tags: with.map(&:to_s))
+          when Hash   then hash_allowlist_sanitizer(with)
           else
             raise ArgumentError,
                   "ConcernsOnRails::Models::Sanitizable: :with must be a preset symbol, an allow-list " \
                   "(Array or Hash), or a Proc/lambda, got #{with.class}"
           end
+        end
+
+        def preset_sanitizer(name)
+          PRESETS.fetch(name) do
+            raise ArgumentError,
+                  "ConcernsOnRails::Models::Sanitizable: unknown preset '#{name}'. " \
+                  "Valid presets: #{PRESETS.keys.join(', ')}"
+          end
+        end
+
+        def hash_allowlist_sanitizer(opts)
+          unknown = opts.keys - %i[tags attributes]
+          unless unknown.empty?
+            raise ArgumentError,
+                  "ConcernsOnRails::Models::Sanitizable: allow-list keys must be :tags / :attributes, got #{unknown.inspect}"
+          end
+
+          allowlist_sanitizer(tags: opts[:tags]&.map(&:to_s), attributes: opts[:attributes]&.map(&:to_s))
+        end
+
+        # Builds a SafeListSanitizer lambda restricted to the given tags/attributes.
+        def allowlist_sanitizer(tags: nil, attributes: nil)
+          options = {}
+          options[:tags] = tags if tags
+          options[:attributes] = attributes if attributes
+          ->(v) { v.is_a?(String) ? ConcernsOnRails::Support::HtmlSanitizers.safe.sanitize(v, **options).to_s : v }
         end
       end
 
