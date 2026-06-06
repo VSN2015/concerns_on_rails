@@ -8,7 +8,7 @@ Gem::Specification.new do |spec|
 
   spec.summary       = "Reusable Rails concerns like Sortable, Publishable, and Sluggable"
   spec.description   = "A collection of plug-and-play ActiveSupport concerns for Rails models and Rails controllers"
-  spec.homepage      = "https://github.com/VSN2015/concerns_on_rails"
+  spec.homepage      = "https://vsn2015.github.io/concerns_on_rails"
   spec.license       = "MIT"
   spec.metadata["license"] = "MIT"
 
@@ -25,6 +25,6 @@ Gem::Specification.new do |spec|
   spec.metadata = {
     "homepage_uri" => spec.homepage,
     "source_code_uri" => spec.homepage,
-    "changelog_uri" => "#{spec.homepage}/CHANGELOG.md"
+    "changelog_uri" => "https://github.com/VSN2015/concerns_on_rails/blob/master/CHANGELOG.md"
   }
 end
