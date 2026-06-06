@@ -13,6 +13,8 @@ require "concerns_on_rails/support/random_value"
 require "concerns_on_rails/support/address_data"
 require "concerns_on_rails/support/sequence_calculator"
 require "concerns_on_rails/support/html_sanitizers"
+require "concerns_on_rails/support/masker"
+require "concerns_on_rails/support/money"
 
 # Model concerns
 require "concerns_on_rails/models/sluggable"
@@ -31,6 +33,8 @@ require "concerns_on_rails/models/addressable"
 require "concerns_on_rails/models/sequenceable"
 require "concerns_on_rails/models/taggable"
 require "concerns_on_rails/models/sanitizable"
+require "concerns_on_rails/models/maskable"
+require "concerns_on_rails/models/monetizable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"
@@ -40,6 +44,7 @@ require "concerns_on_rails/controllers/respondable"
 require "concerns_on_rails/controllers/error_handleable"
 require "concerns_on_rails/controllers/includable"
 require "concerns_on_rails/controllers/secure_headable"
+require "concerns_on_rails/controllers/localizable"
 
 # Backwards compatibility (top-level aliases for pre-1.6 module paths)
 require "concerns_on_rails/legacy_aliases"

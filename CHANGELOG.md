@@ -1,5 +1,15 @@
 <!-- CHANGELOG.md -->
 
+## 1.13.0 (2026-06-06)
+
+### Added
+- **Models::Maskable**: non-destructive display masking for sensitive attributes. `maskable :email, with: :email` adds a `masked_<field>` reader and never writes the column (the raw value stays in the DB). Presets `:email` / `:phone` / `:credit_card` / `:last4` / `:all`, a configurable `mask:` character, and a `Proc` escape hatch. Backed by `Support::Masker`; complements `Sanitizable`.
+- **Models::Monetizable**: exact, float-free money handling over an integer subunit column. `monetizable :price_cents` derives `price` / `price=` / `formatted_price` (the `_cents` suffix is stripped, or name them with `as:`). Options `unit:` / `precision:` / `delimiter:` / `separator:` / `subunit_to_unit:`. Uses `BigDecimal` throughout; backed by `Support::Money`.
+- **Controllers::Localizable**: per-request locale selection from `params` and/or the `Accept-Language` header via an `around_action` (`I18n.with_locale`). `localizable available: %i[en fr], default: :en`; options `param:` / `header:`. The resolved locale is always validated against `I18n.available_locales`, so it can never raise `I18n::InvalidLocale`.
+
+### Notes
+- All changes are additive and backward-compatible, with zero new runtime dependencies (BigDecimal and I18n already ship with the existing stack). `ConcernsOnRails::Maskable` / `ConcernsOnRails::Monetizable` are aliased to their `Models::*` modules; the controller concern stays namespace-only (`ConcernsOnRails::Controllers::Localizable`).
+
 ## 1.12.1 (2026-06-06)
 
 ### Added

@@ -41,6 +41,8 @@ Article.published.without_deleted.find("hello-world")
   - [Addressable](#-addressable) — postal address normalization + format validation
   - [Taggable](#-taggable) — lightweight tagging over a single column
   - [Sanitizable](#-sanitizable) — opt-in HTML sanitization (XSS defense-in-depth)
+  - [Maskable](#-maskable) — non-destructive display masking of sensitive fields
+  - [Monetizable](#-monetizable) — integer-cents money columns (BigDecimal)
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
   - [Filterable](#-filterable) — declarative URL-param filters
@@ -49,6 +51,7 @@ Article.published.without_deleted.find("hello-world")
   - [ErrorHandleable](#-errorhandleable) — JSON `rescue_from` handlers for common controller errors
   - [Includable](#-includable) — whitelisted association sideloading + sparse fieldsets
   - [SecureHeadable](#-secureheadable) — security response headers + native CSP DSL
+  - [Localizable](#-localizable) — per-request locale from params / Accept-Language
 - [Module paths & namespacing](#-module-paths--namespacing)
 - [Development](#-development)
 - [Contributing](#-contributing)
@@ -58,7 +61,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Sixteen model concerns + seven controller concerns**, all production-ready
+- **Eighteen model concerns + eight controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -871,6 +874,64 @@ article.sanitized_body  # => "<b>Hi</b>alert(1)"                    (script tag 
 
 ---
 
+## 🙈 Maskable
+
+Non-destructive display masking for sensitive attributes. Each declaration adds a `masked_<field>` reader and **never writes the column** — the raw value stays in the database (masking is a presentation concern). Dependency-free.
+
+```ruby
+class User < ApplicationRecord
+  include ConcernsOnRails::Maskable
+
+  maskable :email, with: :email          # => user.masked_email  "j****@example.com"
+  maskable :card,  with: :credit_card    # => user.masked_card   "**** **** **** 4242"
+  maskable :ssn,   with: :last4, mask: "•"
+  maskable :token, with: ->(v) { "#{v.to_s[0, 3]}…" }
+end
+```
+
+**Presets** (`with:`)
+
+| Preset         | Result                                      |
+|----------------|---------------------------------------------|
+| `:email`       | `j****@example.com` (first char + domain)   |
+| `:phone`       | `***-2671` (last 4 digits)                  |
+| `:credit_card` | `**** **** **** 4242` (last 4 digits)       |
+| `:last4`       | keep the last 4 characters                  |
+| `:all`         | mask every character (the default)          |
+| `Proc`         | used as-is (you own the non-String guard)   |
+
+`mask:` sets the mask character (default `*`). Nil and non-string values pass through untouched. To strip dangerous HTML instead, see [Sanitizable](#-sanitizable).
+
+---
+
+## 💰 Monetizable
+
+Money handling for an integer "subunit" column (e.g. cents) — exact and float-free via `BigDecimal`. `monetizable :price_cents` derives three methods (the `_cents` suffix is stripped):
+
+```ruby
+class Product < ApplicationRecord
+  include ConcernsOnRails::Monetizable
+
+  monetizable :price_cents                          # => price / price= / formatted_price
+  monetizable :shipping_cents, as: :shipping
+  monetizable :total_cents, unit: "€", delimiter: ".", separator: ","
+end
+
+product.price = 19.99   # stores price_cents = 1999 (rounded to whole cents)
+product.price           # => BigDecimal 19.99
+product.formatted_price # => "$19.99"
+```
+
+| Method            | Returns                                       |
+|-------------------|-----------------------------------------------|
+| `price`           | the amount as a `BigDecimal` (cents ÷ 100)    |
+| `price=`          | assign in major units; rounded to whole cents |
+| `formatted_price` | a display string (`"$1,234.56"`)              |
+
+**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all three methods.
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -1131,6 +1192,25 @@ end
 - `content_security_policy_for` forwards `report_only:` and per-action `only:` / `except:` / `if:` / `unless:` straight to Rails — it never re-implements CSP. Per-controller CSP overrides the global initializer for that controller.
 - CSP nonce generation (`content_security_policy_nonce_generator`) is app-wide initializer config and intentionally stays out of the concern.
 - These headers mitigate clickjacking / MIME-sniffing and (via CSP) XSS as **defense-in-depth** — output escaping remains the primary defense.
+
+---
+
+## 🌐 Localizable
+
+Per-request locale selection from the request params and/or the `Accept-Language` header, wrapped in an `around_action` so `I18n.locale` is set for the action and restored afterwards. Dependency-free.
+
+```ruby
+class ApplicationController < ActionController::Base
+  include ConcernsOnRails::Controllers::Localizable
+
+  localizable available: %i[en fr de], default: :en
+  # localizable param: :lang, header: false   # params[:lang] only
+end
+```
+
+Resolution order: `params[param]` → first match in `Accept-Language` → `default` → `I18n.default_locale`. The chosen locale is always validated against `I18n.available_locales`, so a stray param or a mismatched `available:` list can never raise `I18n::InvalidLocale`.
+
+**Options**: `available:` (allow-list for matching; defaults to `I18n.available_locales`), `default:`, `param:` (default `:locale`), `header:` (default `true`).
 
 ---
 

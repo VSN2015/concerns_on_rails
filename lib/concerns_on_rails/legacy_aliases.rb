@@ -18,4 +18,6 @@ module ConcernsOnRails
   Sequenceable  = Models::Sequenceable
   Taggable      = Models::Taggable
   Sanitizable   = Models::Sanitizable
+  Maskable      = Models::Maskable
+  Monetizable   = Models::Monetizable
 end
