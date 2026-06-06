@@ -1,0 +1,70 @@
+/* highlight.js theme matching the concerns_on_rails "terminal" design palette.
+   Token colors from the Claude design: keyword #e06c9f, class/constant #e3b341,
+   string #8cc265, method/symbol #7aa7e0, comment #6f685c, punctuation #c98fb0. */
+
+.hljs {
+  color: #e9e4d9;
+  background: transparent;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #6f685c;
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-doctag,
+.hljs-name {
+  color: #e06c9f;
+}
+
+.hljs-title,
+.hljs-title.class_,
+.hljs-class .hljs-title,
+.hljs-type,
+.hljs-built_in,
+.hljs-literal {
+  color: #e3b341;
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-meta .hljs-string {
+  color: #8cc265;
+}
+
+.hljs-symbol,
+.hljs-title.function_,
+.hljs-section,
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable.constant_ {
+  color: #7aa7e0;
+}
+
+.hljs-number,
+.hljs-bullet {
+  color: #e3b341;
+}
+
+.hljs-variable,
+.hljs-template-variable,
+.hljs-variable.language_,
+.hljs-params {
+  color: #d8d1c4;
+}
+
+.hljs-operator,
+.hljs-punctuation {
+  color: #c98fb0;
+}
+
+.hljs-meta {
+  color: #8a8377;
+}
+
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }
+.hljs-link { text-decoration: underline; }
