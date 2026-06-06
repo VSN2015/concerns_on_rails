@@ -1,5 +1,16 @@
 <!-- CHANGELOG.md -->
 
+## 1.14.1 (2026-06-07)
+
+### Fixed
+- **gemspec**: `source_code_uri` now points to the GitHub repository (`https://github.com/VSN2015/concerns_on_rails`) instead of the documentation site, so RubyGems' "Source Code" link resolves to the actual source again (it had been set to the Pages homepage in 1.14.0).
+
+### Docs
+- Added a GitHub Pages documentation site covering all 29 concerns (model + controller) — per-concern pages, search, and copyable examples.
+- SPA: shared/deep links to in-page section anchors (e.g. `#api`, `#features`) now render the page instead of hanging on the loading placeholder.
+- Landing page: corrected the `SoftDeletable` example to `#soft_delete!` / `#restore!` (instance `destroy` is a hard delete — only the class `destroy_all` soft-deletes), and replaced a non-existent `respond_*` reference with the real `render_success` / `render_error` helpers.
+- Fixed two `Includable` doc examples that used an invalid controller constructor; added Open Graph / Twitter Card metadata for link previews.
+
 ## 1.14.0 (2026-06-06)
 
 ### Added
