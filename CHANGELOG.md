@@ -1,5 +1,15 @@
 <!-- CHANGELOG.md -->
 
+## 1.12.0 (2026-06-06)
+
+### Added
+- **Models::Sanitizable**: opt-in HTML sanitization for string attributes — defense-in-depth on top of Rails' default output escaping (not a replacement for it). `sanitizable :body, with: :safe_list` is **non-destructive by default** (`on: :read`): it adds a `sanitized_<field>` reader and leaves the stored column raw. `on: :write` is an explicit, lossy opt-in that overwrites the column in `before_validation` (so presence/length validations see the cleaned value). Presets: `:strip` (remove all tags), `:safe_list` (Rails' allow-list), `:no_links`, `:none`, plus custom `Array` / `Hash` (`{ tags:, attributes: }`) allow-lists and a `Proc` escape hatch. Schema-checked via `ColumnGuard`. Zero new runtime dependencies.
+- **Controllers::SecureHeadable**: modern security response headers + a thin delegation to Rails' native Content-Security-Policy DSL. `secure_headers :nosniff, :sameorigin_frame, :no_referrer_leak, :no_cross_domain, :disable_legacy_xss` (and custom `"Header-Name" => "value"` pairs), applied in an `after_action`. `content_security_policy_for(report_only:, only:, except:, …, &block)` forwards straight to Rails. Ships `X-XSS-Protection: 0` (the only correct modern value) and deliberately does **not** scrub params. Zero new runtime dependencies.
+- **Support::HtmlSanitizers**: shared, lazily-memoized, feature-detected (HTML5/HTML4) `FullSanitizer` / `SafeListSanitizer` / `LinkSanitizer` instances backing `Models::Sanitizable`, reusing the `rails-html-sanitizer` that already ships with Action View.
+
+### Notes
+- All changes are additive and backward-compatible. `ConcernsOnRails::Sanitizable` is aliased to `Models::Sanitizable`; the controller concern stays namespace-only (`ConcernsOnRails::Controllers::SecureHeadable`), matching the existing controller concerns.
+
 ## 1.11.2 (2026-06-06)
 
 ### Added

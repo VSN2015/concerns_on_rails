@@ -40,6 +40,7 @@ Article.published.without_deleted.find("hello-world")
   - [Stateable](#-stateable) — lightweight string-backed state machine
   - [Addressable](#-addressable) — postal address normalization + format validation
   - [Taggable](#-taggable) — lightweight tagging over a single column
+  - [Sanitizable](#-sanitizable) — opt-in HTML sanitization (XSS defense-in-depth)
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
   - [Filterable](#-filterable) — declarative URL-param filters
@@ -47,6 +48,7 @@ Article.published.without_deleted.find("hello-world")
   - [Respondable](#-respondable) — standardized JSON envelopes
   - [ErrorHandleable](#-errorhandleable) — JSON `rescue_from` handlers for common controller errors
   - [Includable](#-includable) — whitelisted association sideloading + sparse fieldsets
+  - [SecureHeadable](#-secureheadable) — security response headers + native CSP DSL
 - [Module paths & namespacing](#-module-paths--namespacing)
 - [Development](#-development)
 - [Contributing](#-contributing)
@@ -56,7 +58,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Fifteen model concerns + six controller concerns**, all production-ready
+- **Sixteen model concerns + seven controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -827,6 +829,48 @@ Article.all_tags                               # => sorted unique tags in use
 
 ---
 
+## 🧼 Sanitizable
+
+Opt-in HTML sanitization for string attributes — **defense-in-depth, not a replacement for Rails' default output escaping** (`<%= %>` already escapes). Reach for it on the rare column you render as trusted HTML (`raw` / `html_safe`) or that must stay plain text. Zero extra dependencies — it uses the `rails-html-sanitizer` that already ships with Action View.
+
+```ruby
+class Article < ApplicationRecord
+  include ConcernsOnRails::Sanitizable
+
+  # DEFAULT (on: :read) — non-destructive. The column stays raw; a
+  # `sanitized_<field>` reader returns the cleaned value:
+  sanitizable :body, with: :safe_list            # => article.sanitized_body
+  sanitizable :summary, with: :strip             # => article.sanitized_summary
+  sanitizable :body, with: { tags: %w[b i a], attributes: %w[href] }
+
+  # EXPLICIT destructive opt-in — for plain-text-only columns only:
+  sanitizable :title, with: :strip, on: :write   # overwrites in before_validation
+end
+
+article = Article.new(body: "<b>Hi</b><script>alert(1)</script>")
+article.body            # => "<b>Hi</b><script>alert(1)</script>"  (raw, intact)
+article.sanitized_body  # => "<b>Hi</b>alert(1)"                    (script tag dropped)
+```
+
+**Presets** (`with:`)
+
+| Preset       | Behavior                                                               |
+|--------------|------------------------------------------------------------------------|
+| `:strip`     | Remove all tags, keep inner text (the default).                        |
+| `:safe_list` | Rails' allow-list: keep formatting tags, drop `<script>` / `<iframe>`. |
+| `:no_links`  | Strip only `<a>` tags, keep their text.                                |
+| `:none`      | No-op (declare the field / reader without transforming).               |
+| `Array`      | Custom tag allow-list, e.g. `with: %w[b i a]`.                         |
+| `Hash`       | `{ tags: [...], attributes: [...] }` allow-list.                       |
+| `Proc`       | Used as-is (you own the non-String guard).                             |
+
+**Notes**
+- `on: :read` (default) is **non-destructive**: it adds a `sanitized_<field>` reader and leaves the stored column untouched.
+- `on: :write` overwrites the column in `before_validation` — **lossy and irreversible** (never use it on code, Markdown, math, or prices), and bypassed by `update_column` / `update_all` / raw SQL.
+- For full user-authored rich text, prefer [Action Text](https://guides.rubyonrails.org/action_text_overview.html).
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -1047,6 +1091,46 @@ GET /articles?include=author,comments&fields[articles]=id,title&fields[authors]=
 - Non-whitelisted associations are **silently dropped** — no error, no arbitrary eager-loading.
 - Non-whitelisted tables in `params[:fields]` are dropped; non-whitelisted columns within an allowed table are dropped.
 - Pass `requested_fields` to your serializer (e.g. AMS / Blueprinter) — `Includable` itself does not alter the JSON output, only the query.
+
+---
+
+## 🛡️ SecureHeadable
+
+Modern security response headers + a thin wrapper over Rails' native Content-Security-Policy DSL. Defense-in-depth on top of output escaping — it does **not** scrub request params and never re-enables the deprecated X-XSS-Protection auditor. Zero extra dependencies.
+
+```ruby
+class ApplicationController < ActionController::Base
+  include ConcernsOnRails::Controllers::SecureHeadable
+
+  # Preset headers, plus any custom "Header-Name" => "value" pairs:
+  secure_headers :nosniff, :sameorigin_frame, :no_referrer_leak, :disable_legacy_xss
+  secure_headers "Permissions-Policy" => "geolocation=()"
+
+  # Delegates to Rails' native CSP DSL — roll out report-only FIRST:
+  content_security_policy_for(report_only: true) do |policy|
+    policy.default_src :self
+    policy.script_src  :self
+    policy.object_src  :none
+  end
+end
+```
+
+**Header presets** (`secure_headers`)
+
+| Preset                | Header                                                 |
+|-----------------------|--------------------------------------------------------|
+| `:nosniff`            | `X-Content-Type-Options: nosniff`                      |
+| `:sameorigin_frame`   | `X-Frame-Options: SAMEORIGIN`                          |
+| `:deny_frame`         | `X-Frame-Options: DENY`                                |
+| `:no_referrer_leak`   | `Referrer-Policy: strict-origin-when-cross-origin`     |
+| `:no_cross_domain`    | `X-Permitted-Cross-Domain-Policies: none`              |
+| `:disable_legacy_xss` | `X-XSS-Protection: 0` (the only correct modern value)  |
+
+**Notes**
+- Headers are applied in an `after_action`, so they reinforce Rails' middleware defaults; later `secure_headers` declarations win on a colliding name.
+- `content_security_policy_for` forwards `report_only:` and per-action `only:` / `except:` / `if:` / `unless:` straight to Rails — it never re-implements CSP. Per-controller CSP overrides the global initializer for that controller.
+- CSP nonce generation (`content_security_policy_nonce_generator`) is app-wide initializer config and intentionally stays out of the concern.
+- These headers mitigate clickjacking / MIME-sniffing and (via CSP) XSS as **defense-in-depth** — output escaping remains the primary defense.
 
 ---
 

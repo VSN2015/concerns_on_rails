@@ -17,4 +17,5 @@ module ConcernsOnRails
   Addressable   = Models::Addressable
   Sequenceable  = Models::Sequenceable
   Taggable      = Models::Taggable
+  Sanitizable   = Models::Sanitizable
 end

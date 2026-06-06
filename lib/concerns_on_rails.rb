@@ -12,6 +12,7 @@ require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/random_value"
 require "concerns_on_rails/support/address_data"
 require "concerns_on_rails/support/sequence_calculator"
+require "concerns_on_rails/support/html_sanitizers"
 
 # Model concerns
 require "concerns_on_rails/models/sluggable"
@@ -29,6 +30,7 @@ require "concerns_on_rails/models/stateable"
 require "concerns_on_rails/models/addressable"
 require "concerns_on_rails/models/sequenceable"
 require "concerns_on_rails/models/taggable"
+require "concerns_on_rails/models/sanitizable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"
@@ -37,6 +39,7 @@ require "concerns_on_rails/controllers/sortable"
 require "concerns_on_rails/controllers/respondable"
 require "concerns_on_rails/controllers/error_handleable"
 require "concerns_on_rails/controllers/includable"
+require "concerns_on_rails/controllers/secure_headable"
 
 # Backwards compatibility (top-level aliases for pre-1.6 module paths)
 require "concerns_on_rails/legacy_aliases"
