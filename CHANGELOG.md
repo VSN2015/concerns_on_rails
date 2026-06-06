@@ -1,5 +1,15 @@
 <!-- CHANGELOG.md -->
 
+## 1.14.0 (2026-06-06)
+
+### Added
+- **Controllers::Authorizable**: declarative, block-only per-action authorization gate. `authorize_by { current_user.admin? }` (arity-safe — also `|action|` / `|action, user|`) halts the first failing rule with 403; `require_role :admin, :editor, only: :publish` is sugar over the common role check. `only:` / `except:` scope a rule to a subset of actions. When `Respondable` is included the denial delegates to `render_error` (`code: "forbidden"`), otherwise the same envelope is rendered inline. Deliberately not a policy/ability framework (no policy objects, no ability DSL, no resource inference). Zero new runtime dependencies.
+- **Controllers::Throttleable**: per-request rate limiting with a store-agnostic, injectable backend. `throttle_by limit: 100, period: 1.minute` (bucketed per-IP by default, or by any `by:` lambda) halts an over-limit request with 429 plus `Retry-After` and `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`. Fixed-window counter keyed by a floored time bucket; requires an explicit atomic store (`self.throttleable_store = Rails.cache`) — there is no silent in-process default, so the first throttled request raises until one is configured. Backports the essentials of Rails 7.2's `rate_limit` (with standardized headers) to Rails 5.0+. Zero new runtime dependencies.
+- **Controllers::Timezoneable**: per-request `Time.zone` selection via an `around_action` (`Time.use_zone`) — the time analogue of `Controllers::Localizable`. `timezoneable available: [...], default: "UTC"` resolves from `params` → `Time-Zone` header → cookie → default, every candidate validated through `ActiveSupport::TimeZone[...]` so it can never raise at request time; an unknown configured zone fails fast at declaration. Options `param:` / `header:` / `cookie:`. Zero new runtime dependencies.
+
+### Notes
+- All changes are additive and backward-compatible, with zero new runtime dependencies. The three new controller concerns stay namespace-only (`ConcernsOnRails::Controllers::*`), matching the existing controller concerns.
+
 ## 1.13.0 (2026-06-06)
 
 ### Added

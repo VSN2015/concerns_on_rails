@@ -45,6 +45,9 @@ require "concerns_on_rails/controllers/error_handleable"
 require "concerns_on_rails/controllers/includable"
 require "concerns_on_rails/controllers/secure_headable"
 require "concerns_on_rails/controllers/localizable"
+require "concerns_on_rails/controllers/authorizable"
+require "concerns_on_rails/controllers/throttleable"
+require "concerns_on_rails/controllers/timezoneable"
 
 # Backwards compatibility (top-level aliases for pre-1.6 module paths)
 require "concerns_on_rails/legacy_aliases"

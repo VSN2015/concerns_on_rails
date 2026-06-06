@@ -52,6 +52,9 @@ Article.published.without_deleted.find("hello-world")
   - [Includable](#-includable) — whitelisted association sideloading + sparse fieldsets
   - [SecureHeadable](#-secureheadable) — security response headers + native CSP DSL
   - [Localizable](#-localizable) — per-request locale from params / Accept-Language
+  - [Authorizable](#-authorizable) — per-action 403 authorization gate (block-based)
+  - [Throttleable](#-throttleable) — rate limiting with 429 + `X-RateLimit-*` headers
+  - [Timezoneable](#-timezoneable) — per-request `Time.zone` from params / header / cookie
 - [Module paths & namespacing](#-module-paths--namespacing)
 - [Development](#-development)
 - [Contributing](#-contributing)
@@ -1211,6 +1214,88 @@ end
 Resolution order: `params[param]` → first match in `Accept-Language` → `default` → `I18n.default_locale`. The chosen locale is always validated against `I18n.available_locales`, so a stray param or a mismatched `available:` list can never raise `I18n::InvalidLocale`.
 
 **Options**: `available:` (allow-list for matching; defaults to `I18n.available_locales`), `default:`, `param:` (default `:locale`), `header:` (default `true`).
+
+---
+
+## 🔒 Authorizable
+
+A declarative, **block-only** per-action authorization gate. Each rule is a predicate; the first one that applies to the current action and returns falsey halts the request with **403**. Deliberately small — not a Pundit/CanCan replacement.
+
+```ruby
+class Api::BaseController < ApplicationController
+  include ConcernsOnRails::Controllers::Authorizable
+
+  authorize_by { current_user.present? }                          # every action
+  authorize_by(only: %i[update destroy]) { |_action, user| user.admin? }
+  require_role :admin, :editor, only: :publish                    # role sugar
+end
+```
+
+The predicate runs via `instance_exec`, so `current_user` (and any helper) resolves on the controller. It is **arity-safe** — write it with zero, one (`|action|`), or two (`|action, user|`) parameters.
+
+**API**
+
+| Method         | Signature                                                                                  |
+|----------------|--------------------------------------------------------------------------------------------|
+| `authorize_by` | `authorize_by(only: nil, except: nil, status: :forbidden, message: "Forbidden", &block)`   |
+| `require_role` | `require_role(*roles, via: :current_user, role_method: :role, only:, except:, status:, message:)` |
+
+**Notes**
+- Rules run in declaration order; the first failing rule renders and halts.
+- When `Respondable` is also included, denials delegate to `render_error` (envelope `{ success: false, error: { message:, code: "forbidden" } }`); otherwise the same envelope is rendered inline.
+- `only:` / `except:` are mutually exclusive (passing both raises `ArgumentError`); `authorize_by` requires a block and `require_role` requires at least one role.
+- **Non-goals**: no policy objects, no ability DSL, no resource inference — reach for [`pundit`](https://github.com/varvet/pundit) / [`cancancan`](https://github.com/CanCanCommunity/cancancan) when you outgrow a predicate per action.
+
+---
+
+## 🚦 Throttleable
+
+Per-request rate limiting with a **store-agnostic, injectable** backend — no `rack-attack` needed. When a rule's limit is exceeded the request is halted with **429** plus `Retry-After` and `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`.
+
+```ruby
+class Api::BaseController < ApplicationController
+  include ConcernsOnRails::Controllers::Throttleable
+
+  self.throttleable_store = Rails.cache               # must support atomic #increment
+
+  throttle_by limit: 100, period: 1.minute                          # by IP (default)
+  throttle_by limit: 5,   period: 1.minute, only: :create,
+              by: -> { current_user&.id || request.remote_ip }
+end
+```
+
+Fixed-window counter: the key embeds a floored time bucket (`epoch / period`) so each window starts clean and `X-RateLimit-Reset` is exact.
+
+**Options**: `limit:` (positive integer), `period:` (a `Duration` or seconds), `by:` (discriminator lambda, default per-IP), `only:` / `except:` (mutually exclusive action scoping), `name:` (disambiguates the counter key).
+
+**Notes**
+- The store MUST support **atomic increment-with-expiry** (`Rails.cache` with `#increment`, or Redis) — a non-atomic store under-counts under concurrency.
+- There is **no in-process default store** on purpose: the first throttled request raises `ArgumentError` until you set `throttleable_store`, so you never silently rate-limit per-process.
+- When `Respondable` is included, the 429 body delegates to `render_error` (`code: "rate_limited"`).
+- Backports the essentials of Rails 7.2's `rate_limit` (with standardized headers) to Rails 5.0+. For richer rules (fail2ban, allow/deny lists, exponential backoff) reach for [`rack-attack`](https://github.com/rack/rack-attack).
+
+---
+
+## 🕒 Timezoneable
+
+Per-request `Time.zone` selection wrapped in an `around_action` (`Time.use_zone`) — the time analogue of [Localizable](#-localizable). Dependency-free.
+
+```ruby
+class ApplicationController < ActionController::Base
+  include ConcernsOnRails::Controllers::Timezoneable
+
+  timezoneable available: ["UTC", "Eastern Time (US & Canada)"], default: "UTC"
+  # timezoneable param: :tz, header: false, cookie: :time_zone
+end
+```
+
+Resolution order: `params[param]` → `Time-Zone` header → cookie (if enabled) → `default` → the current `Time.zone`. Every value — the configured `available:` / `default:` **and** each request candidate — is resolved through `ActiveSupport::TimeZone[...]`, so a zone accepted at boot can never be rejected at request time.
+
+**Options**: `available:` (allow-list applied to param/header/cookie matching; `default:` bypasses it, mirroring Localizable), `default:`, `param:` (default `:time_zone`), `header:` (default `true`, reads the `Time-Zone` header), `cookie:` (default `false`; `true` reads the `:time_zone` cookie, or pass a cookie name).
+
+**Notes**
+- An unknown `available:` / `default:` zone raises `ArgumentError` at declaration time (fail-fast on misconfiguration).
+- Pairs naturally with the model concerns that read the clock (`Schedulable`, `Publishable`, `Expirable`, `SoftDeletable`).
 
 ---
 
