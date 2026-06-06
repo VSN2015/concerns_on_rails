@@ -20,6 +20,7 @@
   var mdCache = {};
   var tocObserver = null;
   var toastTimer = null;
+  var routed = false;
 
   /* ---------- helpers ---------- */
   function esc(s) { return String(s).replace(/[&<>"']/g, function (m) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[m]; }); }
@@ -138,7 +139,7 @@
       "# everything below now just works\n" +
       'article.slug              # => "hello-world"\n' +
       'Article.search("rails")   # LIKE/ILIKE across :title, :body\n' +
-      "article.destroy           # soft-delete: sets deleted_at, hides it";
+      "article.soft_delete!      # soft-delete: sets deleted_at, hides it";
 
     var modelsCode =
       "class Product < ApplicationRecord\n" +
@@ -223,7 +224,7 @@
         featureRow(false, "01 · Models", "Drop-in model concerns", "Slugs, soft deletes, ordering, tagging, state machines, money columns. Each concern adds scopes, a declarative macro and instance methods with sensible defaults — and stays out of your way until you call it.",
           ["Zero ceremony — <code>include</code> and go", "Composable — stack as many as you like", "Override any default via a single macro"], "app/models/product.rb", modelsCode) +
         featureRow(true, "02 · Controllers", "Controller concerns that compose", "Pagination, query-param filtering, JSON envelopes and content negotiation, ready to chain. Keep your actions to one expressive line instead of a pile of before-actions.",
-          ["<code>paginated</code> / <code>filtered</code> / <code>respond_*</code> helpers", "Whitelisted, injection-safe filters", "Standard pagination headers out of the box"], "app/controllers/articles_controller.rb", ctrlCode) +
+          ["<code>paginated</code> / <code>filtered</code> / <code>render_success</code> / <code>render_error</code> helpers", "Whitelisted, injection-safe filters", "Standard pagination headers out of the box"], "app/controllers/articles_controller.rb", ctrlCode) +
         featureRow(false, "03 · Security &amp; integrity", "Hardening, built in", "Security headers with a native CSP DSL, rate limiting with <code>429</code> + <code>X-RateLimit-*</code>, block-based authorization, HTML sanitization and display masking — defense-in-depth without extra gems.",
           ["CSP, HSTS &amp; frame headers via <code>secure_headers</code>", "Rate limit any action with <code>throttle_by</code>", "Per-action <code>authorize_by</code> 403 gate"], "app/controllers/api/base_controller.rb", secCode) +
       '</div>' +
@@ -266,7 +267,7 @@
         '<h2 style="font-size:2.2rem;font-weight:800;margin:.6rem 0 1.4rem">The methods you\'ll reach for.</h2>' +
         '<div class="api-list">' +
           apiCard("include Sluggable · sluggable_by :title", 'Adds <code>#slug</code> via <code>friendly_id</code> and finds records by their slug.') +
-          apiCard("include SoftDeletable", 'Soft-delete via <code>destroy</code>; <code>.without_deleted</code> / <code>.with_deleted</code> / <code>.only_deleted</code> scopes and <code>#restore</code>.') +
+          apiCard("include SoftDeletable", 'Soft-delete via <code>#soft_delete!</code> (or class <code>destroy_all</code>); <code>.without_deleted</code> / <code>.with_deleted</code> / <code>.only_deleted</code> scopes and <code>#restore!</code>.') +
           apiCard("include Searchable · searchable_by *cols", 'A chainable <code>.search("query")</code> scope (LIKE/ILIKE) across the listed columns.') +
           apiCard("include Publishable", 'Publish via a <code>published_at</code> timestamp; <code>.published</code> / <code>.unpublished</code> scopes.') +
           apiCard("include Controllers::Paginatable · paginate_by", '<code>paginated(scope)</code> returns a page and sets pagination response headers.') +
@@ -480,10 +481,17 @@
   function currentSlug() { var m = location.hash.replace(/^#\/?/, "").match(/^c\/([^:/]+)/); return m ? m[1] : null; }
   function route() {
     var h = location.hash;
-    if (h && h !== "#/" && h.indexOf("#/") !== 0) return; // in-page anchor (#features) — ignore
+    var inPageAnchor = h && h !== "#/" && h.indexOf("#/") !== 0; // e.g. #features, #api
+    // Once a view is rendered, ignore in-page anchor changes — let the data-scroll
+    // handler / browser do the scroll without re-routing. But the FIRST route() call
+    // (initial load, including a shared deep link like …/#api) must still render,
+    // otherwise the page is stuck on the "Loading…" placeholder.
+    if (inPageAnchor && routed) return;
+    routed = true;
     closeNav();
     var slug = currentSlug();
     if (slug) renderConcern(slug); else renderHome();
+    if (inPageAnchor) { var target = h.slice(1); setTimeout(function () { jumpTo(target); }, 60); }
   }
 
   /* ---------- theme ---------- */

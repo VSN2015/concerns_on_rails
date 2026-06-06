@@ -82,11 +82,11 @@ end
 # Request: GET /stories?include=writer,secret_association
 # params[:include] => "writer,secret_association"
 
-controller = StoriesController.new(params: { include: "writer,secret_association" })
-controller.requested_includes
+# Inside the controller action, the concern's instance helpers return:
+requested_includes
 # => [:writer]   — :secret_association is silently dropped
 
-controller.with_includes(Story.all).includes_values
+with_includes(Story.all).includes_values
 # => [:writer]   — only the whitelisted association is eager-loaded
 ```
 
@@ -96,10 +96,8 @@ controller.with_includes(Story.all).includes_values
 # Request: GET /stories?fields[stories]=id,title,secret_column&fields[unknown_table]=x
 # params[:fields] => { "stories" => "id,title,secret_column", "unknown_table" => "x" }
 
-controller = StoriesController.new(
-  params: { fields: { stories: "id,title,secret_column", unknown_table: "x" } }
-)
-controller.requested_fields
+# Inside the controller action:
+requested_fields
 # => { stories: [:id, :title] }
 # :secret_column is dropped (not in allow-list); :unknown_table is dropped entirely
 ```

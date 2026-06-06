@@ -24,7 +24,7 @@ Gem::Specification.new do |spec|
 
   spec.metadata = {
     "homepage_uri" => spec.homepage,
-    "source_code_uri" => spec.homepage,
+    "source_code_uri" => "https://github.com/VSN2015/concerns_on_rails",
     "changelog_uri" => "https://github.com/VSN2015/concerns_on_rails/blob/master/CHANGELOG.md"
   }
 end
