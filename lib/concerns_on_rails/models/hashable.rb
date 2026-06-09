@@ -7,12 +7,14 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       VALID_TYPES = %i[hex uuid integer custom].freeze
+      MAX_GENERATION_ATTEMPTS = 10
 
       included do
         class_attribute :hashable_field, instance_accessor: false
         class_attribute :hashable_type, instance_accessor: false, default: :hex
         class_attribute :hashable_length, instance_accessor: false, default: 16
         class_attribute :hashable_alphabet, instance_accessor: false, default: nil
+        class_attribute :hashable_unique, instance_accessor: false, default: false
       end
 
       class_methods do
@@ -25,11 +27,12 @@ module ConcernsOnRails
         #   hashable_by :external_id, type: :uuid
         #   hashable_by :code, type: :integer, length: 6
         #   hashable_by :code, type: :custom, length: 8, alphabet: "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-        def hashable_by(field, type: :hex, length: 16, alphabet: nil)
+        def hashable_by(field, type: :hex, length: 16, alphabet: nil, unique: false)
           self.hashable_field = field.to_sym
           self.hashable_type = type.to_sym
           self.hashable_length = length.to_i
           self.hashable_alphabet = alphabet
+          self.hashable_unique = unique
 
           ensure_columns!("ConcernsOnRails::Models::Hashable", hashable_field)
           validate_hashable_options!
@@ -81,7 +84,22 @@ module ConcernsOnRails
         field = self.class.hashable_field
         return if self[field].present?
 
-        self[field] = self.class.generate_hashable_value
+        self[field] = if self.class.hashable_unique
+                        unique_hashable_value(field)
+                      else
+                        self.class.generate_hashable_value
+                      end
+      end
+
+      # Best-effort uniqueness: retry on an in-Ruby collision before insert. Pair
+      # with a unique DB index for the real guarantee (mirrors Tokenizable).
+      def unique_hashable_value(field)
+        ConcernsOnRails::Models::Hashable::MAX_GENERATION_ATTEMPTS.times do
+          candidate = self.class.generate_hashable_value
+          return candidate unless self.class.unscoped.exists?(field => candidate)
+        end
+        raise "ConcernsOnRails::Models::Hashable: could not generate a unique value for '#{field}' " \
+              "after #{ConcernsOnRails::Models::Hashable::MAX_GENERATION_ATTEMPTS} attempts"
       end
     end
   end

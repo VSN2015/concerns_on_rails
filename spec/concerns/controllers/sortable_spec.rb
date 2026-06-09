@@ -90,4 +90,13 @@ describe ConcernsOnRails::Controllers::Sortable do
     # title ASC win.
     expect(controller.sorted(pre_ordered).pluck(:title)).to eq(%w[Alice Bob Charlie])
   end
+
+  it "applies multiple whitelisted columns from a comma-separated sort param" do
+    a = Article.create!(title: "Same", created_at: 1.day.ago)
+    b = Article.create!(title: "Same", created_at: 2.days.ago)
+    controller = controller_class.new(params: { sort: "title,created_at", direction: "asc" })
+    # title ties, so created_at asc breaks the tie (older record first)
+    result = controller.sorted(Article.where(title: "Same")).to_a
+    expect(result).to eq([b, a])
+  end
 end

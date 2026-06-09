@@ -207,4 +207,26 @@ describe ConcernsOnRails::Publishable do
       expect(FlagArticle.scheduled.to_a).to be_empty
     end
   end
+
+  describe "lifecycle callbacks" do
+    it "fires before/after_publish and before/after_unpublish" do
+      klass = Class.new(TestModel) do
+        self.table_name = "articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by :published_at
+
+        attr_reader :log
+        def before_publish; (@log ||= []) << :before_publish; end
+        def after_publish; (@log ||= []) << :after_publish; end
+        def before_unpublish; (@log ||= []) << :before_unpublish; end
+        def after_unpublish; (@log ||= []) << :after_unpublish; end
+      end
+
+      article = klass.create!(title: "t")
+      article.publish!
+      article.unpublish!
+      expect(article.log).to eq(%i[before_publish after_publish before_unpublish after_unpublish])
+    end
+  end
 end

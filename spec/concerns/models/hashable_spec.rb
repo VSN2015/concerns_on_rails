@@ -183,4 +183,26 @@ describe ConcernsOnRails::Hashable do
       end.to raise_error(ArgumentError, /length must be a positive integer/)
     end
   end
+
+  describe "unique: true" do
+    it "retries past an already-taken value, then succeeds" do
+      ActiveRecord::Schema.define do
+        create_table :unique_orders, force: true do |t|
+          t.string :token
+        end
+      end
+
+      klass = Class.new(TestModel) do
+        self.table_name = "unique_orders"
+        include ConcernsOnRails::Hashable
+
+        hashable_by :token, unique: true
+      end
+
+      klass.create!(token: "taken-value")
+      allow(SecureRandom).to receive(:hex).and_return("taken-value", "fresh-value")
+      record = klass.create!
+      expect(record.token).to eq("fresh-value")
+    end
+  end
 end

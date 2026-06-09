@@ -195,4 +195,26 @@ describe ConcernsOnRails::Expirable do
     ReconfigToken.expirable_by :valid_until
     expect(ReconfigToken.expirable_field).to eq(:valid_until)
   end
+
+  describe "prefix / suffix scope names" do
+    it "affixes the scope names to avoid collisions" do
+      ActiveRecord::Schema.define do
+        create_table :coupons, force: true do |t|
+          t.datetime :expires_at
+        end
+      end
+
+      klass = Class.new(TestModel) do
+        self.table_name = "coupons"
+        include ConcernsOnRails::Expirable
+
+        expirable_by :expires_at, prefix: :coupon
+      end
+
+      live = klass.create!(expires_at: 1.hour.from_now)
+      klass.create!(expires_at: 1.hour.ago)
+      expect(klass.coupon_active.to_a).to eq([live])
+      expect(klass.respond_to?(:active)).to be(false)
+    end
+  end
 end

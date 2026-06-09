@@ -74,15 +74,27 @@ module ConcernsOnRails
       # Publish the record
       # Example:
       #   record.publish!
+      # Lifecycle hooks — override in the model (mirrors SoftDeletable's hooks).
+      def before_publish; end
+      def after_publish; end
+      def before_unpublish; end
+      def after_unpublish; end
+
       def publish!
-        update(self.class.publishable_field => Time.zone.now)
+        before_publish
+        result = update(self.class.publishable_field => Time.zone.now)
+        after_publish if result
+        result
       end
 
       # Unpublish the record
       # Example:
       #   record.unpublish!
       def unpublish!
-        update(self.class.publishable_field => nil)
+        before_unpublish
+        result = update(self.class.publishable_field => nil)
+        after_unpublish if result
+        result
       end
 
       # Check if the record is published

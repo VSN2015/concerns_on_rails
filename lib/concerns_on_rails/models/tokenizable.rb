@@ -25,6 +25,9 @@ module ConcernsOnRails
     # Unlike Hashable, one model can declare multiple token fields, generation is
     # URL-safe by default, and `assign_tokenizable_value` retries on uniqueness
     # collisions before insert (best-effort; pair with a unique DB index).
+    #
+    # For stateless / self-expiring tokens (password resets, email confirmations)
+    # on Rails 7.1+, consider the framework-native `generates_token_for` instead.
     module Tokenizable
       extend ActiveSupport::Concern
 

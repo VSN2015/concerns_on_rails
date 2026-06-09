@@ -53,6 +53,21 @@ module ConcernsOnRails
         records
       end
 
+      # Pagination metadata for a relation WITHOUT applying limit/offset — handy
+      # for body-based pagination (compose with Respondable's `meta:`).
+      def pagination_meta(relation)
+        page = pagination_page
+        per_page = pagination_per_page
+        counted = relation.except(:order, :limit, :offset).count
+        total = counted.is_a?(Hash) ? counted.length : counted
+        {
+          total: total,
+          page: page,
+          per_page: per_page,
+          total_pages: per_page.positive? ? (total.to_f / per_page).ceil : 0
+        }
+      end
+
       private
 
       def pagination_page
