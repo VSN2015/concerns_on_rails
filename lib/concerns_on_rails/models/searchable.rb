@@ -23,6 +23,9 @@ module ConcernsOnRails
     #                   :all splits on whitespace and requires every term to match.
     #   match:          :contains (default, "%q%"), :prefix ("q%"), or :exact ("q").
     #   case_sensitive: false (default) emits ILIKE on Postgres; true emits LIKE.
+    #                   NOTE: this only affects Postgres. On MySQL/SQLite, LIKE
+    #                   case sensitivity is governed by the column collation, so
+    #                   the flag is effectively a no-op there.
     #
     # Uses Arel's `matches`. The query is escaped before interpolation, so
     # `%` / `_` / `\` from user input are treated as literals.

@@ -47,7 +47,7 @@ module ConcernsOnRails
           case hashable_type
           when :hex     then SecureRandom.hex(hashable_length)
           when :uuid    then SecureRandom.uuid
-          when :integer then SecureRandom.random_number(10**hashable_length).to_s.rjust(hashable_length, "0").to_i
+          when :integer then SecureRandom.random_number(10**hashable_length)
           when :custom  then ConcernsOnRails::Support::RandomValue.from_alphabet(hashable_alphabet, hashable_length)
           end
         end
@@ -60,9 +60,18 @@ module ConcernsOnRails
                   "ConcernsOnRails::Models::Hashable: unknown type '#{hashable_type}'. Valid types: #{VALID_TYPES.join(', ')}"
           end
 
+          if length_bearing_hashable_type? && !hashable_length.positive?
+            raise ArgumentError, "ConcernsOnRails::Models::Hashable: length must be a positive integer"
+          end
+
           return unless hashable_type == :custom && (!hashable_alphabet.is_a?(String) || hashable_alphabet.empty?)
 
           raise ArgumentError, "ConcernsOnRails::Models::Hashable: type :custom requires a non-empty alphabet: String"
+        end
+
+        # :uuid ignores length; the others derive their size from it.
+        def length_bearing_hashable_type?
+          %i[hex integer custom].include?(hashable_type)
         end
       end
 

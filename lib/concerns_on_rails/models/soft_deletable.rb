@@ -51,7 +51,10 @@ module ConcernsOnRails
 
         # Soft-delete every matching record, wrapped in a transaction so the batch is atomic.
         def soft_delete_all
-          transaction { all.each(&:soft_delete!) }
+          # Roll the whole batch back if any record fails to soft-delete, so the
+          # documented atomicity actually holds (soft_delete! returns falsey on a
+          # validation failure rather than raising).
+          transaction { all.each { |record| record.soft_delete! || raise(ActiveRecord::Rollback) } }
         end
 
         # Override destroy_all to soft delete. Kept for backwards compatibility, but prefer the

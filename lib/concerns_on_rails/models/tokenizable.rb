@@ -20,7 +20,7 @@ module ConcernsOnRails
     #   user.api_token?                           # true if present
     #
     #   User.find_by_api_token(token)             # Rails default
-    #   User.authenticate_by_api_token(token)     # timing-safe lookup, returns record or nil
+    #   User.authenticate_by_api_token(token)     # constant-time compare; returns record or nil
     #
     # Unlike Hashable, one model can declare multiple token fields, generation is
     # URL-safe by default, and `assign_tokenizable_value` retries on uniqueness
@@ -88,6 +88,10 @@ module ConcernsOnRails
           define_singleton_method("authenticate_by_#{field}") { |value| timing_safe_find(field, value) }
         end
 
+        # NOTE: the find_by below is an indexed SQL equality, which is not itself
+        # timing-safe; secure_compare only hardens the in-Ruby comparison of the
+        # already-fetched candidate. For a truly constant-time lookup, store and
+        # query a digest instead of the raw token.
         def timing_safe_find(field, value)
           return nil if value.blank?
 

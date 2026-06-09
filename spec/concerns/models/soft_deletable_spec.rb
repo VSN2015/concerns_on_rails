@@ -428,6 +428,14 @@ describe ConcernsOnRails::SoftDeletable do
       expect(r1.reload).to be_deleted
       expect(r2.reload).to be_deleted
     end
+
+    it 'rolls the whole batch back when one record fails to soft-delete' do
+      allow_any_instance_of(dummy_class).to receive(:soft_delete!) do |rec|
+        rec.name != 'y' && rec.update_column(:deleted_at, Time.zone.now)
+      end
+      dummy_class.soft_delete_all
+      expect(r1.reload).not_to be_deleted
+    end
   end
 
   describe 'transactional hooks (1.12)' do

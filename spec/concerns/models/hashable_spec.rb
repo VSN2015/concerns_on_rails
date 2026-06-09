@@ -165,5 +165,22 @@ describe ConcernsOnRails::Hashable do
         end
       end.to raise_error(ArgumentError, /requires a non-empty alphabet/)
     end
+
+    it "raises when length is not positive" do
+      ActiveRecord::Schema.define do
+        create_table :bad_length_orders, force: true do |t|
+          t.string :token
+        end
+      end
+
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "bad_length_orders"
+          include ConcernsOnRails::Hashable
+
+          hashable_by :token, length: 0
+        end
+      end.to raise_error(ArgumentError, /length must be a positive integer/)
+    end
   end
 end

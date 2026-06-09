@@ -67,7 +67,14 @@ module ConcernsOnRails
       # during before_create — fall back to the current time, which is what the
       # timestamp will resolve to anyway.
       def base_time(record)
-        record&.created_at || Time.current
+        return Time.current unless record
+
+        # Memoize the fallback "now" on the record so every base_time call within a
+        # single create resolves to the SAME instant — otherwise two Time.current
+        # reads could straddle a period boundary (year/month/day) and disagree.
+        record.created_at ||
+          record.instance_variable_get(:@_sequenceable_now) ||
+          record.instance_variable_set(:@_sequenceable_now, Time.current)
       end
     end
   end

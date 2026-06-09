@@ -56,7 +56,9 @@ module ConcernsOnRails
       end
 
       def toggle_active!
-        active? ? deactivate! : activate!
+        # Lock the row for the read-modify-write so concurrent toggles don't lose
+        # an update (with_lock wraps a transaction + SELECT ... FOR UPDATE).
+        with_lock { active? ? deactivate! : activate! }
       end
     end
   end

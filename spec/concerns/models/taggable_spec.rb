@@ -134,6 +134,11 @@ describe ConcernsOnRails::Taggable do
       expect(TagArticle.tagged_with("ruby_on_rails")).to contain_exactly(under)
       expect(TagArticle.tagged_with("ruby")).to contain_exactly(a1, a2)
     end
+
+    it "matches a single-tag column case-insensitively (consistent with the LIKE branches)" do
+      mixed = TagArticle.create!(title: "mixed", tag_list: "Elixir")
+      expect(TagArticle.tagged_with("elixir")).to contain_exactly(mixed)
+    end
   end
 
   describe ".all_tags" do
@@ -192,6 +197,30 @@ describe ConcernsOnRails::Taggable do
       expect(p.reload[:keywords]).to eq("ruby|rails")
       expect(p.tag_list).to eq(%w[ruby rails])
       expect(TagPost.tagged_with("rails")).to contain_exactly(p)
+    end
+  end
+
+  context "with a LIKE-wildcard delimiter" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :tag_docs, force: true do |t|
+          t.string :labels
+        end
+      end
+
+      class TagDoc < TestModel
+        include ConcernsOnRails::Taggable
+
+        taggable_by :labels, delimiter: "%"
+      end
+    end
+
+    after { Object.send(:remove_const, :TagDoc) if defined?(TagDoc) }
+
+    it "treats a wildcard delimiter literally (no false positives)" do
+      hit = TagDoc.create!(tag_list: %w[ruby rails]) # stored "ruby%rails"
+      TagDoc.create!(tag_list: ["rubyXrails"])        # single tag, must NOT match
+      expect(TagDoc.tagged_with("ruby")).to contain_exactly(hit)
     end
   end
 end
