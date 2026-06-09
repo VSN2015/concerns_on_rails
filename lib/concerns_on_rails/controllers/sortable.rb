@@ -47,7 +47,10 @@ module ConcernsOnRails
         field = sort_field
         return relation unless field
 
-        relation.order(field => sort_direction)
+        # reorder (not order) so the user-requested column REPLACES any prior
+        # ORDER BY — including a model default_scope order — instead of being
+        # appended as a silent secondary key.
+        relation.reorder(field => sort_direction)
       end
 
       private

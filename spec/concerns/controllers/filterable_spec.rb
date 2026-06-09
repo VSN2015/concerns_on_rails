@@ -60,6 +60,12 @@ describe ConcernsOnRails::Controllers::Filterable do
       controller = controller_class.new
       expect(controller.filtered(Article.all).count).to eq(4)
     end
+
+    it "ignores a nested-hash param instead of raising (no 500)" do
+      controller = controller_class.new(params: { status: { gt: "5" } })
+      expect { controller.filtered(Article.all).to_a }.not_to raise_error
+      expect(controller.filtered(Article.all).count).to eq(4)
+    end
   end
 
   describe "scope mode" do

@@ -98,4 +98,12 @@ describe ConcernsOnRails::Controllers::Paginatable do
     records = controller.paginated(Widget.all)
     expect(records.size).to eq(5)
   end
+
+  it "counts groups (not a raw Hash) for a grouped relation" do
+    controller = controller_class.new(params: { per_page: 10 })
+    records = controller.paginated(Widget.group(:name))
+    expect { records.to_a }.not_to raise_error
+    # 50 distinct names => 50 groups
+    expect(controller.response.headers["X-Total-Count"]).to eq("50")
+  end
 end

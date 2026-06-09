@@ -366,6 +366,12 @@ describe ConcernsOnRails::SoftDeletable do
       expect(dummy_class.deleted_within(1.day)).not_to include(old)
     end
 
+    it '.deleted_within uses a bounded >= predicate (no endless range; Rails 5.x safe)' do
+      sql = dummy_class.deleted_within(1.day).to_sql
+      expect(sql).to include('>=')
+      expect(sql).to include('deleted_at')
+    end
+
     it '.restore_all restores every soft-deleted record' do
       dummy_class.restore_all
       expect(removed.reload).not_to be_deleted

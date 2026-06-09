@@ -22,9 +22,10 @@ Gem::Specification.new do |spec|
   spec.add_runtime_dependency 'acts_as_list', '~> 0.7.5'
   spec.add_runtime_dependency 'friendly_id', '~> 5.4'
 
-  spec.metadata = {
+  # Merge (not reassign) so the "license" key set above is preserved.
+  spec.metadata.merge!(
     "homepage_uri" => spec.homepage,
     "source_code_uri" => "https://github.com/VSN2015/concerns_on_rails",
     "changelog_uri" => "https://github.com/VSN2015/concerns_on_rails/blob/master/CHANGELOG.md"
-  }
+  )
 end

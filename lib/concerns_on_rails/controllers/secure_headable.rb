@@ -85,11 +85,13 @@ module ConcernsOnRails
                   "ActionController::ContentSecurityPolicy (Rails 5.2+)"
           end
 
-          if report_only
-            content_security_policy_report_only(true, **action_opts, &block)
-          else
-            content_security_policy(**action_opts, &block)
-          end
+          # The policy block is ONLY accepted by content_security_policy; the
+          # report-only variant is a flag toggle that takes no block. So always
+          # define the policy via content_security_policy, then additionally mark
+          # it report-only when requested — otherwise a report-only rollout would
+          # silently register no policy at all (the block would be dropped).
+          content_security_policy(**action_opts, &block)
+          content_security_policy_report_only(true, **action_opts) if report_only
         end
       end
 

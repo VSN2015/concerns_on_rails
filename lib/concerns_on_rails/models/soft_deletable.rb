@@ -23,7 +23,12 @@ module ConcernsOnRails
         # `with_deleted` peels off the default scope so deleted + non-deleted are both returned.
         scope :with_deleted, -> { unscope(where: soft_delete_field) }
         # Records soft-deleted within the last `duration` (e.g. `deleted_within(7.days)`).
-        scope :deleted_within, ->(duration) { soft_deleted.where(soft_delete_field => duration.ago..) }
+        # Uses an explicit `>=` rather than an endless range (`x..`): AR only
+        # translates an endless range to a `>=` predicate on Rails 6.0+, but this
+        # gem supports Rails >= 5.0.
+        scope :deleted_within, lambda { |duration|
+          soft_deleted.where("#{connection.quote_column_name(soft_delete_field.to_s)} >= ?", duration.ago)
+        }
 
         # Hide soft-deleted rows from `.all` only when enabled (the default). The block is
         # evaluated lazily, so toggling `soft_delete_default_scope` via the macro takes effect.

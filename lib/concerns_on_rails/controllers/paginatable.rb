@@ -41,7 +41,10 @@ module ConcernsOnRails
         per_page = pagination_per_page
         offset = (page - 1) * per_page
 
-        total = relation.except(:order, :limit, :offset).count
+        counted = relation.except(:order, :limit, :offset).count
+        # `.count` on a grouped relation returns a Hash (group => count); for
+        # offset pagination the meaningful total is the number of groups.
+        total = counted.is_a?(Hash) ? counted.length : counted
         total_pages = per_page.positive? ? (total.to_f / per_page).ceil : 0
 
         records = relation.limit(per_page).offset(offset)
