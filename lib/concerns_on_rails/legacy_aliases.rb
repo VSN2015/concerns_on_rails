@@ -20,4 +20,5 @@ module ConcernsOnRails
   Sanitizable   = Models::Sanitizable
   Maskable      = Models::Maskable
   Monetizable   = Models::Monetizable
+  Auditable     = Models::Auditable
 end

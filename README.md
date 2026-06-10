@@ -43,6 +43,7 @@ Article.published.without_deleted.find("hello-world")
   - [Sanitizable](#-sanitizable) — opt-in HTML sanitization (XSS defense-in-depth)
   - [Maskable](#-maskable) — non-destructive display masking of sensitive fields
   - [Monetizable](#-monetizable) — integer-cents money columns (BigDecimal)
+  - [Auditable](#-auditable) — single-column change history ("paper_trail-lite")
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
   - [Filterable](#-filterable) — declarative URL-param filters
@@ -55,6 +56,7 @@ Article.published.without_deleted.find("hello-world")
   - [Authorizable](#-authorizable) — per-action 403 authorization gate (block-based)
   - [Throttleable](#-throttleable) — rate limiting with 429 + `X-RateLimit-*` headers
   - [Timezoneable](#-timezoneable) — per-request `Time.zone` from params / header / cookie
+  - [Idempotentable](#-idempotentable) — `Idempotency-Key` request replay (409 on concurrent duplicates)
 - [Module paths & namespacing](#-module-paths--namespacing)
 - [Development](#-development)
 - [Contributing](#-contributing)
@@ -64,7 +66,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Eighteen model concerns + eight controller concerns**, all production-ready
+- **Nineteen model concerns + twelve controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -935,6 +937,39 @@ product.formatted_price # => "$19.99"
 
 ---
 
+## 📜 Auditable
+
+Lightweight change history ("paper_trail-lite") stored as JSON entries in **one text column** on the same table — no extra tables, no versioning engine.
+
+```ruby
+class Product < ApplicationRecord
+  include ConcernsOnRails::Auditable
+
+  auditable_by :price, :status                       # default column :audit_log
+  # auditable_by :price, into: :history,
+  #              actor: -> { Current.user&.email },  # stamps "by" on each entry
+  #              max_entries: 50                     # keep the newest 50
+end
+
+product.update!(price: 200)
+product.audit_trail
+# => [{"field"=>"price", "from"=>100, "to"=>200, "at"=>"2026-06-10T12:34:56Z", "by"=>"admin@shop.com"}]
+product.last_change_for(:price)            # newest entry for one field
+product.audited_changes_since(1.day.ago)   # recent entries, oldest first
+product.clear_audit_trail!                 # wipe the column (skips callbacks)
+```
+
+One entry is recorded **per changed field per save** (creates record `"from" => nil`), appended in the same `INSERT`/`UPDATE` via `before_save` — zero extra queries.
+
+**Options**: `into:` (`:audit_log`), `actor:` (callable, `instance_exec`'d on the record; `"by"` omitted when absent), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited).
+
+**Notes**
+- Writes that skip callbacks (`update_column(s)`, `touch`, `increment!`) are **not** audited; `save(validate: false)` is.
+- Values are JSON-coerced (times → ISO8601 UTC strings, `BigDecimal` → precision-safe numeric string); a corrupt column decodes as `[]` and is replaced on the next tracked save.
+- Per-record and bounded by design — reach for [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) when you need reify/undo or audit queries across models.
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -1299,6 +1334,32 @@ Resolution order: `params[param]` → `Time-Zone` header → cookie (if enabled)
 
 ---
 
+## 🔁 Idempotentable
+
+Stripe-style **`Idempotency-Key`** support for mutating endpoints, with a **store-agnostic, injectable** backend. The first request with a key runs the action and caches the response; a retry **replays** the cached response; a concurrent duplicate gets **409**.
+
+```ruby
+class PaymentsController < ApplicationController
+  include ConcernsOnRails::Controllers::Idempotentable
+
+  self.idempotency_store = Rails.cache    # must support #read / #write(expires_in:, unless_exist:) / #delete
+
+  idempotent_actions :create, ttl: 24.hours, required: true
+end
+```
+
+Per-key lifecycle: claim atomically (`write unless_exist`, TTL `lock_ttl:`) → run action → cache 2xx–4xx responses for `ttl:`; 5xx and raised exceptions release the claim so the client can retry. Replays carry `X-Idempotency-Replayed: true`; duplicates in flight get 409 + `Retry-After`; reusing a key with a **different payload** gets 422 (`idempotency_key_reuse`, fingerprint overridable via `idempotency_fingerprint`).
+
+**Options**: `*actions` (allow-list, required), `ttl:` (`24.hours`), `lock_ttl:` (`1.minute`), `header:` (`"Idempotency-Key"`), `required:` (`false`).
+
+**Notes**
+- Cache keys are scoped per `controller#action` and the client key is SHA256-hashed, so the same key on different endpoints never collides.
+- There is **no in-process default store** on purpose: the first keyed request raises `ArgumentError` until you set `idempotency_store`.
+- When `Respondable` is included, the 400/409/422 bodies delegate to `render_error`.
+- Include `Throttleable` first so a 429 halts before a claim is written; responses rendered by `rescue_from` handlers are never cached.
+
+---
+
 ## 🗂️ Module paths & namespacing
 
 Every concern is available under two paths:
@@ -1334,7 +1395,7 @@ Both forms reference the same module, so you can freely mix them.
 | Association-cascade soft delete / sentinel-aware unique indexes | [`paranoia`](https://github.com/rubysherpas/paranoia) or [`discard`](https://github.com/jhawthorn/discard) |
 | Tagging with contexts, ownership, or tag clouds | [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) |
 | Full-text search with ranking / stemming | [`pg_search`](https://github.com/Casecommons/pg_search) / Elasticsearch |
-| Audit trails / version history | [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) |
+| Versioned audit trails with undo/reify, who-dunnit queries, or association tracking | [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) |
 
 `Sluggable` wraps [`friendly_id`](https://github.com/norman/friendly_id) and `Sortable` wraps [`acts_as_list`](https://github.com/brendon/acts_as_list), so you get those leaders' engines behind the declarative macro.
 
