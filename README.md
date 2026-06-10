@@ -961,7 +961,7 @@ product.clear_audit_trail!                 # wipe the column (skips callbacks)
 
 One entry is recorded **per changed field per save** (creates record `"from" => nil`), appended in the same `INSERT`/`UPDATE` via `before_save` — zero extra queries.
 
-**Options**: `into:` (`:audit_log`), `actor:` (callable, `instance_exec`'d on the record; `"by"` omitted when absent), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited).
+**Options**: `into:` (`:audit_log`), `actor:` (callable, `instance_exec`'d on the record; `"by"` omitted when absent), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited), `max_value_length:` (`nil`; truncates long String `from`/`to` values to the first N characters + `…`).
 
 **Notes**
 - Writes that skip callbacks (`update_column(s)`, `touch`, `increment!`) are **not** audited; `save(validate: false)` is.

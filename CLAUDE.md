@@ -88,8 +88,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Addressable`** — postal-address normalization + format validation across columns;
   `full_address`, `address_complete?`, `verify_with:`.
 - **`Auditable`** — single-column JSON change history ("paper_trail-lite"). `auditable_by
-  *fields, into:, actor:, max_entries:`; `audit_trail` / `last_change_for` /
-  `audited_changes_since` / `clear_audit_trail!`.
+  *fields, into:, actor:, max_entries:, max_value_length:`; `audit_trail` /
+  `last_change_for` / `audited_changes_since` / `clear_audit_trail!`.
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 

@@ -14,7 +14,8 @@ module ConcernsOnRails
     #     auditable_by :price, :status                       # default column :audit_log
     #     # auditable_by :price, into: :history,
     #     #              actor: -> { Current.user&.email },  # stamps "by"
-    #     #              max_entries: 50                     # keep the newest 50
+    #     #              max_entries: 50,                    # keep the newest 50
+    #     #              max_value_length: 120               # truncate long from/to strings
     #   end
     #
     #   product.update!(price: 200)
@@ -32,7 +33,9 @@ module ConcernsOnRails
     #     extra queries. Writes that skip callbacks (update_column(s), touch,
     #     increment!) are NOT audited.
     #   * Values are JSON-coerced: times → ISO8601 UTC strings, BigDecimal →
-    #     plain numeric string, symbols → strings.
+    #     plain numeric string, symbols → strings. With `max_value_length:`,
+    #     String values longer than the limit are stored as the first N
+    #     characters plus a trailing "…" (non-strings are never truncated).
     #   * A corrupt or non-array column decodes as [] and is overwritten on the
     #     next tracked save. Concurrent saves of one row are last-writer-wins.
     #   * Reach for paper_trail/audited when you need reify/undo, who-dunnit
@@ -49,21 +52,23 @@ module ConcernsOnRails
         class_attribute :auditable_into, instance_accessor: false, default: DEFAULT_INTO
         class_attribute :auditable_actor, instance_accessor: false, default: nil
         class_attribute :auditable_max_entries, instance_accessor: false, default: DEFAULT_MAX_ENTRIES
+        class_attribute :auditable_max_value_length, instance_accessor: false, default: nil
       end
 
       module ClassMethods
         include ConcernsOnRails::Support::ColumnGuard
 
         # Configure the tracked fields and the audit column. See the module docs.
-        def auditable_by(*fields, into: DEFAULT_INTO, actor: nil, max_entries: DEFAULT_MAX_ENTRIES)
+        def auditable_by(*fields, into: DEFAULT_INTO, actor: nil, max_entries: DEFAULT_MAX_ENTRIES, max_value_length: nil)
           fields = fields.flatten.map(&:to_sym).uniq
           into = into.to_sym
-          validate_auditable!(fields, into: into, actor: actor, max_entries: max_entries)
+          validate_auditable!(fields, into: into, actor: actor, max_entries: max_entries, max_value_length: max_value_length)
 
           self.auditable_fields = fields
           self.auditable_into = into
           self.auditable_actor = actor
           self.auditable_max_entries = max_entries
+          self.auditable_max_value_length = max_value_length
           ensure_columns!(LABEL, into, *fields)
 
           before_save :auditable_capture_changes
@@ -71,14 +76,17 @@ module ConcernsOnRails
 
         private
 
-        def validate_auditable!(fields, into:, actor:, max_entries:)
+        def validate_auditable!(fields, into:, actor:, max_entries:, max_value_length:)
           raise ArgumentError, "#{LABEL}: auditable_by requires at least one field" if fields.empty?
           raise ArgumentError, "#{LABEL}: cannot track the audit column ':#{into}' itself" if fields.include?(into)
-          raise ArgumentError, "#{LABEL}: max_entries must be a positive Integer or nil" unless valid_max_entries?(max_entries)
+          raise ArgumentError, "#{LABEL}: max_entries must be a positive Integer or nil" unless positive_integer_or_nil?(max_entries)
+          unless positive_integer_or_nil?(max_value_length)
+            raise ArgumentError, "#{LABEL}: max_value_length must be a positive Integer or nil"
+          end
           raise ArgumentError, "#{LABEL}: actor must be callable (respond to #call)" unless actor.nil? || actor.respond_to?(:call)
         end
 
-        def valid_max_entries?(value)
+        def positive_integer_or_nil?(value)
           value.nil? || (value.is_a?(Integer) && value.positive?)
         end
       end
@@ -133,7 +141,7 @@ module ConcernsOnRails
         at = Time.now.utc.iso8601
         by = auditable_resolve_actor
         tracked.map do |field, (from, to)|
-          entry = { "field" => field, "from" => auditable_json_value(from), "to" => auditable_json_value(to), "at" => at }
+          entry = { "field" => field, "from" => auditable_entry_value(from), "to" => auditable_entry_value(to), "at" => at }
           entry["by"] = by unless by.nil?
           entry
         end
@@ -144,6 +152,20 @@ module ConcernsOnRails
         return nil unless actor
 
         auditable_json_value(instance_exec(&actor))
+      end
+
+      # from/to pipeline: JSON coercion, then opt-in truncation.
+      def auditable_entry_value(value)
+        auditable_truncate(auditable_json_value(value))
+      end
+
+      # Keep the first max_value_length characters and mark the cut with "…".
+      # Only String values are truncated — numbers, booleans, arrays pass through.
+      def auditable_truncate(value)
+        limit = self.class.auditable_max_value_length
+        return value unless limit && value.is_a?(String) && value.length > limit
+
+        "#{value[0, limit]}…"
       end
 
       # Coerce a Ruby value to a JSON-safe primitive. Times → ISO8601 UTC,

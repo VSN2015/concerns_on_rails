@@ -94,6 +94,19 @@ describe ConcernsOnRails::Auditable do
       end
     end
 
+    it "raises when max_value_length is not a positive Integer or nil" do
+      [0, "10"].each do |bad|
+        expect do
+          Class.new(TestModel) do
+            self.table_name = "audit_products"
+            include ConcernsOnRails::Auditable
+
+            auditable_by :price, max_value_length: bad
+          end
+        end.to raise_error(ArgumentError, /max_value_length must be a positive Integer or nil/)
+      end
+    end
+
     it "raises when actor is not callable" do
       expect do
         Class.new(TestModel) do
@@ -287,6 +300,43 @@ describe ConcernsOnRails::Auditable do
       p = klass.create!(price: 1)
       210.times { |i| p.update!(price: i + 2) }
       expect(p.audit_trail.size).to eq(211)
+    end
+  end
+
+  describe "max_value_length truncation" do
+    before do
+      class AuditNote < TestModel
+        self.table_name = "audit_products"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :status, max_value_length: 4
+      end
+    end
+
+    after { Object.send(:remove_const, :AuditNote) if defined?(AuditNote) }
+
+    it "truncates long string values to the limit with a trailing ellipsis" do
+      n = AuditNote.create!(status: "approved")
+      n.update!(status: "rejected")
+      entry = n.audit_trail.last
+      expect(entry["from"]).to eq("appr…")
+      expect(entry["to"]).to eq("reje…")
+    end
+
+    it "leaves values at or under the limit unchanged" do
+      n = AuditNote.create!(status: "done")
+      expect(n.audit_trail.first["to"]).to eq("done")
+    end
+
+    it "does not truncate non-string values" do
+      klass = Class.new(TestModel) do
+        self.table_name = "audit_products"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :price, max_value_length: 2
+      end
+      rec = klass.create!(price: 12_345)
+      expect(rec.audit_trail.first["to"]).to eq(12_345)
     end
   end
 
