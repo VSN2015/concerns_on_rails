@@ -134,6 +134,40 @@ describe ConcernsOnRails::Stateable do
     end
   end
 
+  describe "transition callbacks" do
+    it "fires before/after_transition around a guarded transition" do
+      ActiveRecord::Schema.define do
+        create_table :orders, force: true do |t|
+          t.string :status
+        end
+      end
+
+      klass = Class.new(TestModel) do
+        self.table_name = "orders"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[pending shipped], default: :pending,
+                              transitions: { ship: { from: :pending, to: :shipped } }
+
+        attr_reader :log
+
+        def before_transition(event, from, to)
+          (@log ||= []) << [:before, event, from, to]
+        end
+
+        def after_transition(event, from, to)
+          (@log ||= []) << [:after, event, from, to]
+        end
+      end
+
+      order = klass.create!
+      order.ship!
+      expect(order.log).to eq(
+        [[:before, :ship, "pending", "shipped"], [:after, :ship, "pending", "shipped"]]
+      )
+    end
+  end
+
   describe "validation" do
     def define_model(table, &block)
       ActiveRecord::Schema.define do

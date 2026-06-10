@@ -131,4 +131,26 @@ describe ConcernsOnRails::Activatable do
       end.to raise_error(ArgumentError, /does not exist/)
     end
   end
+
+  describe "prefix / suffix scope names" do
+    it "affixes the scope names so they don't collide with sibling concerns" do
+      ActiveRecord::Schema.define do
+        create_table :memberships, force: true do |t|
+          t.boolean :active
+        end
+      end
+
+      klass = Class.new(TestModel) do
+        self.table_name = "memberships"
+        include ConcernsOnRails::Activatable
+
+        activatable_by :active, prefix: :membership
+      end
+
+      on = klass.create!(active: true)
+      klass.create!(active: false)
+      expect(klass.membership_active.to_a).to eq([on])
+      expect(klass.respond_to?(:active)).to be(false)
+    end
+  end
 end

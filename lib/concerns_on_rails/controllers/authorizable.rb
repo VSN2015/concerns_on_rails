@@ -50,8 +50,11 @@ module ConcernsOnRails
 
           wanted = roles.map(&:to_s)
           check = proc do
-            actor = respond_to?(via) ? send(via) : nil
-            actor.respond_to?(role_method) && wanted.include?(actor.public_send(role_method).to_s)
+            # respond_to?(via, true): current_user is usually private (Devise) or
+            # a helper_method (which keeps it private on the instance), so the
+            # default public-only check would resolve nil and deny everyone.
+            actor = respond_to?(via, true) ? send(via) : nil
+            actor.respond_to?(role_method, true) && wanted.include?(actor.send(role_method).to_s)
           end
           add_authorization_rule(check: check, only: only, except: except, status: status, message: message)
         end
@@ -113,7 +116,8 @@ module ConcernsOnRails
       end
 
       def authorization_actor
-        respond_to?(:current_user) ? current_user : nil
+        # include_private: true — current_user is typically private/helper_method.
+        respond_to?(:current_user, true) ? current_user : nil
       end
 
       def authorization_action_name

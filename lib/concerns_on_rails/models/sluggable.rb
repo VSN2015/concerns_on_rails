@@ -23,7 +23,21 @@ module ConcernsOnRails
         # if we don't override this method, friendly_id will not generate the new slug when update
         define_method :should_generate_new_friendly_id? do
           field = self.class.sluggable_field
-          respond_to?("will_save_change_to_#{field}?") && send("will_save_change_to_#{field}?")
+          slug_column = self.class.friendly_id_config.slug_column
+
+          # An explicitly-assigned slug wins — don't overwrite it with a generated
+          # one when the slug column itself is being changed in this save.
+          changing_slug = respond_to?("will_save_change_to_#{slug_column}?") &&
+                          send("will_save_change_to_#{slug_column}?")
+          return false if changing_slug
+
+          source_changed = respond_to?("will_save_change_to_#{field}?") &&
+                           send("will_save_change_to_#{field}?")
+          # Backfill a missing slug even when the source did not change, so
+          # legacy/imported rows with a NULL slug still self-heal.
+          slug_missing = send(slug_column).blank? && slug_source.present?
+
+          source_changed || slug_missing
         end
       end
 

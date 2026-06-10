@@ -66,6 +66,20 @@ describe ConcernsOnRails::Controllers::Localizable do
       I18n.available_locales = %i[en] # fr no longer configured in the app
       expect(c.resolved_locale).to eq(:en)
     end
+
+    it "rejects a header locale with q=0 (not acceptable)" do
+      c = controller(accept_language: "fr;q=0,de") do
+        localizable available: %i[en fr de], default: :en
+      end
+      expect(c.resolved_locale).to eq(:de)
+    end
+
+    it "honors q-value preference order, not header order" do
+      c = controller(accept_language: "en;q=0.8,fr;q=0.9") do
+        localizable available: %i[en fr de], default: :en
+      end
+      expect(c.resolved_locale).to eq(:fr)
+    end
   end
 
   describe "#switch_locale" do

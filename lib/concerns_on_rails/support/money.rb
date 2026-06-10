@@ -26,7 +26,10 @@ module ConcernsOnRails
         whole = delimit(whole, delimiter)
         number = precision.positive? ? "#{whole}#{separator}#{frac.ljust(precision, '0')[0, precision]}" : whole
 
-        "#{'-' if decimal.negative?}#{unit}#{number}"
+        # Take the sign from the ROUNDED magnitude so a value that rounds to zero
+        # (e.g. -0.001 at precision 2) never prints a spurious "-".
+        sign = decimal.negative? && !rounded.zero? ? "-" : ""
+        "#{sign}#{unit}#{number}"
       end
 
       # Insert the thousands delimiter into a non-negative integer string.

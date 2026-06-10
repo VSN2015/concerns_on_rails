@@ -23,7 +23,12 @@ module ConcernsOnRails
         # `with_deleted` peels off the default scope so deleted + non-deleted are both returned.
         scope :with_deleted, -> { unscope(where: soft_delete_field) }
         # Records soft-deleted within the last `duration` (e.g. `deleted_within(7.days)`).
-        scope :deleted_within, ->(duration) { soft_deleted.where(soft_delete_field => duration.ago..) }
+        # Uses an explicit `>=` rather than an endless range (`x..`): AR only
+        # translates an endless range to a `>=` predicate on Rails 6.0+, but this
+        # gem supports Rails >= 5.0.
+        scope :deleted_within, lambda { |duration|
+          soft_deleted.where("#{connection.quote_column_name(soft_delete_field.to_s)} >= ?", duration.ago)
+        }
 
         # Hide soft-deleted rows from `.all` only when enabled (the default). The block is
         # evaluated lazily, so toggling `soft_delete_default_scope` via the macro takes effect.
@@ -46,7 +51,10 @@ module ConcernsOnRails
 
         # Soft-delete every matching record, wrapped in a transaction so the batch is atomic.
         def soft_delete_all
-          transaction { all.each(&:soft_delete!) }
+          # Roll the whole batch back if any record fails to soft-delete, so the
+          # documented atomicity actually holds (soft_delete! returns falsey on a
+          # validation failure rather than raising).
+          transaction { all.each { |record| record.soft_delete! || raise(ActiveRecord::Rollback) } }
         end
 
         # Override destroy_all to soft delete. Kept for backwards compatibility, but prefer the

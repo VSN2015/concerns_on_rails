@@ -96,11 +96,15 @@ module ConcernsOnRails
         # LIKE escape), so a tag containing `_` or `%` matches literally.
         def taggable_clause(tag)
           column = "#{connection.quote_table_name(table_name)}.#{connection.quote_column_name(taggable_field)}"
-          delim = taggable_delimiter
+          # Escape the delimiter too (not just the tag): a delimiter that is a LIKE
+          # wildcard (% or _) must match literally. Use LIKE for the whole-column
+          # branch as well, so casing is uniform across all four branches — the
+          # previous `= ?` was case-sensitive while LIKE is not.
+          delim = taggable_escape_like(taggable_delimiter)
           escaped = taggable_escape_like(tag)
           esc = " ESCAPE '\\'"
-          ["(#{column} = ? OR #{column} LIKE ?#{esc} OR #{column} LIKE ?#{esc} OR #{column} LIKE ?#{esc})",
-           [tag, "#{escaped}#{delim}%", "%#{delim}#{escaped}", "%#{delim}#{escaped}#{delim}%"]]
+          ["(#{column} LIKE ?#{esc} OR #{column} LIKE ?#{esc} OR #{column} LIKE ?#{esc} OR #{column} LIKE ?#{esc})",
+           [escaped, "#{escaped}#{delim}%", "%#{delim}#{escaped}", "%#{delim}#{escaped}#{delim}%"]]
         end
 
         # Treat the user's tag as a LIKE literal: %, _ and \ are not wildcards.

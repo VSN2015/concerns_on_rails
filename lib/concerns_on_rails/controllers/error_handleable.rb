@@ -30,9 +30,12 @@ module ConcernsOnRails
         rescue_from "ActiveRecord::RecordInvalid",        with: :handle_record_invalid
       end
 
-      def handle_record_not_found(error)
+      def handle_record_not_found(_error)
+        # Use a generic message: the raw RecordNotFound message leaks the model
+        # class name and the queried attribute/value to API clients. Subclasses
+        # can override this method to surface detail in non-production envs.
         render_error_envelope(
-          message: error.message,
+          message: "Resource not found",
           code: "not_found",
           status: :not_found
         )

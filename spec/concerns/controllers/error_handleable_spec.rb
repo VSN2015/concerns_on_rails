@@ -36,7 +36,7 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
       expect(controller.rendered[:status]).to eq(:not_found)
       expect(controller.rendered[:json]).to eq(
         success: false,
-        error: { message: "Couldn't find User with 'id'=99", code: "not_found" }
+        error: { message: "Resource not found", code: "not_found" }
       )
     end
 
@@ -138,7 +138,7 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
       # Same envelope shape — Respondable's render_error is in charge.
       expect(instance.rendered[:json]).to eq(
         success: false,
-        error: { message: "missing", code: "not_found" }
+        error: { message: "Resource not found", code: "not_found" }
       )
       expect(instance.rendered[:status]).to eq(:not_found)
     end

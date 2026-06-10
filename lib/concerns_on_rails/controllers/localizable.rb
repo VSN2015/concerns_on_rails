@@ -77,12 +77,29 @@ module ConcernsOnRails
       end
 
       def parse_accept_language(header, allowed)
-        header.split(",").each do |part|
-          lang = part.split(";").first.to_s.strip.split("-").first
+        ranked = header.split(",").filter_map do |part|
+          token, *params = part.split(";").map(&:strip)
+          quality = accept_language_quality(params)
+          next if quality <= 0.0
+
+          lang = token.to_s.split("-").first
+          lang.present? ? [lang, quality] : nil
+        end
+        # Honor client preference order (RFC 7231): highest q first.
+        ranked.sort_by { |(_lang, quality)| -quality }.each do |(lang, _quality)|
           match = match_locale(lang, allowed)
           return match if match
         end
         nil
+      end
+
+      # The q-value (relative quality) of an Accept-Language part: 1.0 when
+      # absent, 0.0 when malformed. q=0 means "not acceptable" and is dropped.
+      def accept_language_quality(params)
+        qparam = params.find { |p| p.start_with?("q=") }
+        return 1.0 unless qparam
+
+        Float(qparam[2..], exception: false) || 0.0
       end
 
       def match_locale(candidate, allowed)

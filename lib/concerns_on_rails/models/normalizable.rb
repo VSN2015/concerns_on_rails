@@ -2,6 +2,10 @@ require "active_support/concern"
 
 module ConcernsOnRails
   module Models
+    # Declarative attribute normalization that runs in before_validation.
+    #
+    # On Rails 7.1+ you may prefer the framework-native `normalizes` macro for
+    # new code; this concern provides the same ergonomics on Rails 5.0–7.0.
     module Normalizable
       extend ActiveSupport::Concern
 

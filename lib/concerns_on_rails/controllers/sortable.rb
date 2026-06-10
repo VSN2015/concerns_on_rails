@@ -44,21 +44,27 @@ module ConcernsOnRails
       # Apply ordering to a relation based on params[:sort] / params[:direction].
       # Falls back to defaults; never orders by a non-whitelisted column.
       def sorted(relation)
-        field = sort_field
-        return relation unless field
+        fields = sort_fields
+        return relation if fields.empty?
 
-        relation.order(field => sort_direction)
+        # reorder (not order) so the user-requested columns REPLACE any prior
+        # ORDER BY — including a model default_scope order. Multiple whitelisted
+        # columns (comma-separated in params[:sort]) are applied in request order.
+        direction = sort_direction
+        ordering = fields.each_with_object({}) { |field, memo| memo[field] = direction }
+        relation.reorder(ordering)
       end
 
       private
 
-      def sort_field
-        requested = params[:sort]&.to_sym
-        if requested && self.class.sortable_allowed_fields.include?(requested)
-          requested
-        else
-          self.class.sortable_default_field
-        end
+      # Whitelisted sort columns from params[:sort] (comma-separated), preserving
+      # request order; falls back to the configured default when none are valid.
+      def sort_fields
+        requested = params[:sort].to_s.split(",").map { |token| token.strip.to_sym }
+        allowed = requested & self.class.sortable_allowed_fields
+        return allowed unless allowed.empty?
+
+        Array(self.class.sortable_default_field).compact
       end
 
       def sort_direction

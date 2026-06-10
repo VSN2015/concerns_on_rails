@@ -108,5 +108,16 @@ describe ConcernsOnRails::Models::Monetizable do
       expect { product_class { monetizable :missing_cents } }
         .to raise_error(ArgumentError, /does not exist in the database/)
     end
+
+    it "raises when :subunit_to_unit is not positive" do
+      expect { product_class { monetizable :price_cents, subunit_to_unit: 0 } }
+        .to raise_error(ArgumentError, /:subunit_to_unit must be a positive integer/)
+    end
+  end
+
+  describe "Support::Money formatting edge cases" do
+    it "does not print a spurious minus for an amount that rounds to zero" do
+      expect(ConcernsOnRails::Support::Money.format(-1, subunit_to_unit: 100_000)).to eq("$0.00")
+    end
   end
 end

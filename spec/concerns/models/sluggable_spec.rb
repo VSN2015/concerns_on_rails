@@ -115,6 +115,19 @@ describe ConcernsOnRails::Sluggable do
     expect(page.slug).to eq(original_slug)
   end
 
+  it "backfills a NULL slug on save even when the source field did not change" do
+    page = Page.create!(title: "Backfill Me")
+    page.update_column(:slug, nil) # legacy/imported row with no slug
+    page.update!(updated_at: Time.now)
+    expect(page.reload.slug).to eq("backfill-me")
+  end
+
+  it "does not overwrite an explicitly-assigned slug when the source also changes" do
+    page = Page.create!(title: "Original")
+    page.update!(title: "Brand New Title", slug: "custom-slug")
+    expect(page.reload.slug).to eq("custom-slug")
+  end
+
   describe "scoped slugs (1.9)" do
     before do
       ActiveRecord::Schema.define do

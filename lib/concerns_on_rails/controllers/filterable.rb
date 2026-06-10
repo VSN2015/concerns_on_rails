@@ -60,9 +60,23 @@ module ConcernsOnRails
           options[:with].call(relation, value)
         elsif options[:scope]
           relation.public_send(options[:scope])
-        else
+        elsif filterable_scalar?(value)
           relation.where(field => value)
+        else
+          # A nested/structured param (e.g. ?status[gt]=5) in direct-where mode
+          # would raise TypeError ("can't quote Hash") and surface as a 500.
+          # Ignore it instead — hash/array shaping must go through a `with:` lambda.
+          relation
         end
+      end
+
+      # Scalars (and arrays, which AR turns into `IN (...)`) are safe to pass to
+      # .where; a Hash / ActionController::Parameters is not.
+      def filterable_scalar?(value)
+        return false if value.is_a?(Hash)
+        return false if defined?(ActionController::Parameters) && value.is_a?(ActionController::Parameters)
+
+        true
       end
     end
   end

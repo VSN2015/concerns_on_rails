@@ -8,15 +8,39 @@ module ConcernsOnRails
       included do
         class_attribute :publishable_field, instance_accessor: false, default: :published_at
 
-        scope :published, -> { where(arel_table[publishable_field].lteq(Time.zone.now)) }
-        scope :unpublished, lambda {
-          column = arel_table[publishable_field]
-          unscope(where: publishable_field).where(column.eq(nil).or(column.gt(Time.zone.now)))
+        # All scopes branch on the column type: a boolean publishable column (which
+        # the macro and instance methods also accept) needs equality predicates,
+        # not the timestamp `<= now` / `> now` comparisons that produce nonsensical
+        # SQL against a boolean.
+        scope :published, lambda {
+          if publishable_boolean_column?
+            where(publishable_field => true)
+          else
+            where(arel_table[publishable_field].lteq(Time.zone.now))
+          end
         }
-        # Set, but the publish time is still in the future.
-        scope :scheduled, -> { unscope(where: publishable_field).where(arel_table[publishable_field].gt(Time.zone.now)) }
-        # Never set — a true draft.
-        scope :draft, -> { unscope(where: publishable_field).where(publishable_field => nil) }
+        scope :unpublished, lambda {
+          if publishable_boolean_column?
+            unscope(where: publishable_field).where(publishable_field => [nil, false])
+          else
+            column = arel_table[publishable_field]
+            unscope(where: publishable_field).where(column.eq(nil).or(column.gt(Time.zone.now)))
+          end
+        }
+        # Set, but the publish time is still in the future (timestamp columns only).
+        scope :scheduled, lambda {
+          next none if publishable_boolean_column?
+
+          unscope(where: publishable_field).where(arel_table[publishable_field].gt(Time.zone.now))
+        }
+        # Never published — a true draft.
+        scope :draft, lambda {
+          if publishable_boolean_column?
+            unscope(where: publishable_field).where(publishable_field => [nil, false])
+          else
+            unscope(where: publishable_field).where(publishable_field => nil)
+          end
+        }
       end
 
       class_methods do
@@ -29,6 +53,12 @@ module ConcernsOnRails
           self.publishable_field = field || :published_at
           ensure_columns!("ConcernsOnRails::Models::Publishable", publishable_field)
           enable_published_default_scope if default_scope
+        end
+
+        # True when the configured column is a boolean (vs a datetime timestamp);
+        # the scopes use this to pick equality vs time-comparison predicates.
+        def publishable_boolean_column?
+          columns_hash[publishable_field.to_s]&.type == :boolean
         end
 
         private
@@ -44,15 +74,27 @@ module ConcernsOnRails
       # Publish the record
       # Example:
       #   record.publish!
+      # Lifecycle hooks — override in the model (mirrors SoftDeletable's hooks).
+      def before_publish; end
+      def after_publish; end
+      def before_unpublish; end
+      def after_unpublish; end
+
       def publish!
-        update(self.class.publishable_field => Time.zone.now)
+        before_publish
+        result = update(self.class.publishable_field => Time.zone.now)
+        after_publish if result
+        result
       end
 
       # Unpublish the record
       # Example:
       #   record.unpublish!
       def unpublish!
-        update(self.class.publishable_field => nil)
+        before_unpublish
+        result = update(self.class.publishable_field => nil)
+        after_unpublish if result
+        result
       end
 
       # Check if the record is published

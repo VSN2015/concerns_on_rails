@@ -99,7 +99,7 @@ describe ConcernsOnRails::Controllers::SecureHeadable do
       end.to raise_error(ArgumentError, /CSP requires/)
     end
 
-    it "delegates to content_security_policy_report_only when report_only: true" do
+    it "defines the policy via content_security_policy AND marks it report-only when report_only: true" do
       calls = []
       base = Class.new(base_class) do
         define_singleton_method(:content_security_policy) { |*a, **k, &b| calls << [:enforce, a, k, b] }
@@ -110,11 +110,15 @@ describe ConcernsOnRails::Controllers::SecureHeadable do
 
       klass.content_security_policy_for(report_only: true, &block)
 
-      expect(calls.size).to eq(1)
-      kind, args, _opts, forwarded = calls.first
-      expect(kind).to eq(:report)
-      expect(args).to eq([true])
-      expect(forwarded).to eq(block)
+      # The block MUST reach content_security_policy (the only block-accepting
+      # method); report-only is an additional flag call that takes no block.
+      enforce = calls.find { |c| c.first == :enforce }
+      report  = calls.find { |c| c.first == :report }
+      expect(enforce).not_to be_nil
+      expect(enforce[3]).to eq(block)
+      expect(report).not_to be_nil
+      expect(report[1]).to eq([true])
+      expect(report[3]).to be_nil
     end
 
     it "delegates to content_security_policy (enforcing) by default and forwards per-action options" do

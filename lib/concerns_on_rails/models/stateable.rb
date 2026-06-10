@@ -60,6 +60,11 @@ module ConcernsOnRails
         update!(self.class.stateable_field => state.to_s)
       end
 
+      # Transition lifecycle hooks — override in the model. Fired by guarded
+      # <event>! transitions (not by direct <state>! setters or transition_to!).
+      def before_transition(_event, _from, _to); end
+      def after_transition(_event, _from, _to); end
+
       # Defined as a real module (not `class_methods do`) so all the private
       # builder helpers live under a single `private` and aren't constrained by
       # Metrics/BlockLength. ActiveSupport::Concern auto-extends `ClassMethods`.
@@ -154,11 +159,15 @@ module ConcernsOnRails
 
       # Instance-level guarded transition body, shared by every `<event>!`.
       def stateable_perform_transition!(field, to, from, event)
-        unless from.empty? || from.include?(self[field].to_s)
+        current = self[field].to_s
+        unless from.empty? || from.include?(current)
           raise InvalidTransition, "#{self.class.name}: cannot #{event} from '#{self[field]}'"
         end
 
-        update!(field => to)
+        before_transition(event, current, to)
+        result = update!(field => to)
+        after_transition(event, current, to)
+        result
       end
     end
   end

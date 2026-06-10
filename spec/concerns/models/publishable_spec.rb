@@ -179,4 +179,54 @@ describe ConcernsOnRails::Publishable do
       expect(ScopedPost.unscoped.count).to eq(3)
     end
   end
+
+  describe "boolean publishable column" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :flag_articles, force: true do |t|
+          t.string :title
+          t.boolean :is_published
+        end
+      end
+
+      class FlagArticle < TestModel
+        include ConcernsOnRails::Publishable
+
+        publishable_by :is_published
+      end
+    end
+
+    it "uses equality predicates for the scopes (not a time comparison)" do
+      FlagArticle.create!(title: "live",  is_published: true)
+      FlagArticle.create!(title: "off",   is_published: false)
+      FlagArticle.create!(title: "blank", is_published: nil)
+
+      expect(FlagArticle.published.map(&:title)).to eq(["live"])
+      expect(FlagArticle.unpublished.map(&:title)).to match_array(%w[off blank])
+      expect(FlagArticle.draft.map(&:title)).to match_array(%w[off blank])
+      expect(FlagArticle.scheduled.to_a).to be_empty
+    end
+  end
+
+  describe "lifecycle callbacks" do
+    it "fires before/after_publish and before/after_unpublish" do
+      klass = Class.new(TestModel) do
+        self.table_name = "articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by :published_at
+
+        attr_reader :log
+        def before_publish; (@log ||= []) << :before_publish; end
+        def after_publish; (@log ||= []) << :after_publish; end
+        def before_unpublish; (@log ||= []) << :before_unpublish; end
+        def after_unpublish; (@log ||= []) << :after_unpublish; end
+      end
+
+      article = klass.create!(title: "t")
+      article.publish!
+      article.unpublish!
+      expect(article.log).to eq(%i[before_publish after_publish before_unpublish after_unpublish])
+    end
+  end
 end

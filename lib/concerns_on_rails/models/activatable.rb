@@ -30,12 +30,20 @@ module ConcernsOnRails
       class_methods do
         include ConcernsOnRails::Support::ColumnGuard
 
-        def activatable_by(field = DEFAULT_FIELD)
+        def activatable_by(field = DEFAULT_FIELD, prefix: nil, suffix: nil)
           self.activatable_field = field.to_sym
           ensure_columns!("ConcernsOnRails::Models::Activatable", activatable_field)
 
-          scope :active,   -> { where(activatable_field => true) }
-          scope :inactive, -> { where(activatable_field => [false, nil]) }
+          # Affix the scope names so two concerns that each define `.active`
+          # (e.g. SoftDeletable / Expirable) can coexist on one model.
+          scope activatable_scope_name(:active, prefix, suffix),   -> { where(activatable_field => true) }
+          scope activatable_scope_name(:inactive, prefix, suffix), -> { where(activatable_field => [false, nil]) }
+        end
+
+        private
+
+        def activatable_scope_name(base, prefix, suffix)
+          [prefix, base, suffix].compact.join("_").to_sym
         end
       end
 
@@ -56,7 +64,9 @@ module ConcernsOnRails
       end
 
       def toggle_active!
-        active? ? deactivate! : activate!
+        # Lock the row for the read-modify-write so concurrent toggles don't lose
+        # an update (with_lock wraps a transaction + SELECT ... FOR UPDATE).
+        with_lock { active? ? deactivate! : activate! }
       end
     end
   end

@@ -112,6 +112,24 @@ describe ConcernsOnRails::Controllers::Authorizable do
       c.enforce_authorization
       expect(c.rendered[:status]).to eq(:forbidden)
     end
+
+    it "resolves a private/helper_method current_user instead of denying" do
+      klass = Class.new(base_class) do
+        include ConcernsOnRails::Controllers::Authorizable
+
+        require_role :admin
+
+        private
+
+        def current_user
+          AuthzActor.new("admin")
+        end
+      end
+      c = klass.new
+      c.define_singleton_method(:action_name) { "index" }
+      c.enforce_authorization
+      expect(c.rendered).to be_nil
+    end
   end
 
   describe "delegation to Respondable" do
