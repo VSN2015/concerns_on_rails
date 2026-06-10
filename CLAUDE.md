@@ -90,6 +90,11 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Auditable`** — single-column JSON change history ("paper_trail-lite"). `auditable_by
   *fields, into:, actor:, max_entries:, max_value_length:`; `audit_trail` /
   `last_change_for` / `audited_changes_since` / `clear_audit_trail!`.
+- **`Lockable`** — failed-attempt tracking + account lockout ("Devise lockable-lite").
+  `lockable_by attempts:, locked_at:, max_attempts:, unlock_in:, prefix:/suffix:`;
+  `register_failed_attempt!` (atomic SQL increment), `access_locked?` (lazy expiry),
+  `lock_access!`/`unlock_access!` (update_columns + before/after hooks),
+  `reset_failed_attempts!`; expiry-aware `.locked`/`.unlocked` scopes.
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 
@@ -107,6 +112,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Timezoneable`** — per-request `Time.zone` from params / header / cookie.
 - **`Idempotentable`** — `Idempotency-Key` response replay with an injectable store
   (`idempotent_actions`); 409 on in-flight duplicates, 422 on payload mismatch.
+- **`WebhookVerifiable`** — HMAC verification for inbound webhooks (`verify_webhook`):
+  scheme presets `:stripe`/`:github`/`:shopify`/`:hex`/`:base64`, constant-time compare,
+  Stripe timestamp tolerance, secret rotation; 401/400 before the action runs.
 
 ### Support modules (`lib/concerns_on_rails/support/`)
 

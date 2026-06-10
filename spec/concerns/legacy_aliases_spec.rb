@@ -15,7 +15,8 @@ describe "Legacy top-level concern aliases (pre-1.6 paths)" do
     "Sanitizable" => "Models::Sanitizable",
     "Maskable" => "Models::Maskable",
     "Monetizable" => "Models::Monetizable",
-    "Auditable" => "Models::Auditable"
+    "Auditable" => "Models::Auditable",
+    "Lockable" => "Models::Lockable"
   }.each do |legacy, canonical|
     it "ConcernsOnRails::#{legacy} is the same module as ConcernsOnRails::#{canonical}" do
       legacy_mod    = ConcernsOnRails.const_get(legacy)

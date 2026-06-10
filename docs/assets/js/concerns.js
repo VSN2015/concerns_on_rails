@@ -1,7 +1,7 @@
 /* Concern manifest — drives the sidebar nav, home cards, search, and source links.
    `tags` are refined from the doc-generation workflow; everything else is static metadata. */
 window.COR_META = {
-  version: "1.16.0",
+  version: "1.17.0",
   repo: "https://github.com/VSN2015/concerns_on_rails",
   branch: "master",
   rubygems: "https://rubygems.org/gems/concerns_on_rails"
@@ -28,6 +28,7 @@ window.CONCERNS = [
   { slug: "maskable",       name: "Maskable",       category: "model", icon: "🙈", tagline: "Non-destructive display masking",           include: "ConcernsOnRails::Maskable",       src: "lib/concerns_on_rails/models/maskable.rb",       tags: ["mask","pii","redact","privacy","display","maskable","masking","credit-card"] },
   { slug: "monetizable",    name: "Monetizable",    category: "model", icon: "💰", tagline: "Integer-cents money columns (BigDecimal)",  include: "ConcernsOnRails::Monetizable",    src: "lib/concerns_on_rails/models/monetizable.rb",    tags: ["money","currency","cents","bigdecimal","price","monetizable","concern","rails"] },
   { slug: "auditable",      name: "Auditable",      category: "model", icon: "📜", tagline: "Single-column change history (paper_trail-lite)", include: "ConcernsOnRails::Auditable", src: "lib/concerns_on_rails/models/auditable.rb",      tags: ["audit","history","changes","paper_trail","versioning","auditable","change-log","rails-concern"] },
+  { slug: "lockable",       name: "Lockable",       category: "model", icon: "🔐", tagline: "Failed-attempt tracking + account lockout", include: "ConcernsOnRails::Lockable",       src: "lib/concerns_on_rails/models/lockable.rb",       tags: ["lockout","brute force","failed attempts","devise","authentication","lockable","security","unlock_in"] },
 
   // ---- Controller concerns ----
   { slug: "paginatable",        name: "Paginatable",          category: "controller", icon: "📄", tagline: "Offset pagination with headers",             include: "ConcernsOnRails::Controllers::Paginatable",     src: "lib/concerns_on_rails/controllers/paginatable.rb",     tags: ["pagination","page","per_page","offset","headers","paginatable","controller-concern","per-page"] },
@@ -41,5 +42,6 @@ window.CONCERNS = [
   { slug: "authorizable",       name: "Authorizable",         category: "controller", icon: "🔒", tagline: "Per-action 403 authorization gate",          include: "ConcernsOnRails::Controllers::Authorizable",    src: "lib/concerns_on_rails/controllers/authorizable.rb",    tags: ["authorization","403","forbidden","policy","access control","authorizable","controller","before_action"] },
   { slug: "throttleable",       name: "Throttleable",         category: "controller", icon: "🚦", tagline: "Rate limiting (429 + X-RateLimit-*)",        include: "ConcernsOnRails::Controllers::Throttleable",    src: "lib/concerns_on_rails/controllers/throttleable.rb",    tags: ["rate limit","throttle","429","x-ratelimit","abuse","throttleable","rate-limit","rails-controller"] },
   { slug: "timezoneable",       name: "Timezoneable",         category: "controller", icon: "🕒", tagline: "Per-request Time.zone from params / header", include: "ConcernsOnRails::Controllers::Timezoneable",    src: "lib/concerns_on_rails/controllers/timezoneable.rb",    tags: ["timezone","time.zone","per-request","params","cookie","timezoneable","time-zone","around_action"] },
-  { slug: "idempotentable",     name: "Idempotentable",       category: "controller", icon: "🔁", tagline: "Idempotency-Key replay for mutating endpoints", include: "ConcernsOnRails::Controllers::Idempotentable", src: "lib/concerns_on_rails/controllers/idempotentable.rb",  tags: ["idempotency","idempotency-key","retry","replay","409","stripe","idempotentable","around_action"] }
+  { slug: "idempotentable",     name: "Idempotentable",       category: "controller", icon: "🔁", tagline: "Idempotency-Key replay for mutating endpoints", include: "ConcernsOnRails::Controllers::Idempotentable", src: "lib/concerns_on_rails/controllers/idempotentable.rb",  tags: ["idempotency","idempotency-key","retry","replay","409","stripe","idempotentable","around_action"] },
+  { slug: "webhook-verifiable", name: "WebhookVerifiable",    category: "controller", icon: "🪝", tagline: "HMAC verification for inbound webhooks",     include: "ConcernsOnRails::Controllers::WebhookVerifiable", src: "lib/concerns_on_rails/controllers/webhook_verifiable.rb", tags: ["webhook","hmac","signature","stripe","github","shopify","webhookverifiable","security"] }
 ];

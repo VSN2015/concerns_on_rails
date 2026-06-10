@@ -44,6 +44,7 @@ Article.published.without_deleted.find("hello-world")
   - [Maskable](#-maskable) — non-destructive display masking of sensitive fields
   - [Monetizable](#-monetizable) — integer-cents money columns (BigDecimal)
   - [Auditable](#-auditable) — single-column change history ("paper_trail-lite")
+  - [Lockable](#-lockable) — failed-attempt tracking + account lockout
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
   - [Filterable](#-filterable) — declarative URL-param filters
@@ -57,6 +58,7 @@ Article.published.without_deleted.find("hello-world")
   - [Throttleable](#-throttleable) — rate limiting with 429 + `X-RateLimit-*` headers
   - [Timezoneable](#-timezoneable) — per-request `Time.zone` from params / header / cookie
   - [Idempotentable](#-idempotentable) — `Idempotency-Key` request replay (409 on concurrent duplicates)
+  - [WebhookVerifiable](#-webhookverifiable) — HMAC verification for inbound webhooks (Stripe/GitHub/Shopify)
 - [Module paths & namespacing](#-module-paths--namespacing)
 - [Development](#-development)
 - [Contributing](#-contributing)
@@ -66,7 +68,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Nineteen model concerns + twelve controller concerns**, all production-ready
+- **Twenty model concerns + thirteen controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -970,6 +972,38 @@ One entry is recorded **per changed field per save** (creates record `"from" => 
 
 ---
 
+## 🔐 Lockable
+
+Failed-attempt tracking + **account lockout** ("Devise lockable-lite") for apps rolling their own authentication (Rails 8 auth generator / `has_secure_password`) — which ships **no brute-force protection** out of the box. Two columns on the model's own table; no tokens, no mailers.
+
+```ruby
+class User < ApplicationRecord
+  include ConcernsOnRails::Lockable
+
+  lockable_by max_attempts: 5, unlock_in: 15.minutes
+  # lockable_by attempts: :failed_logins, locked_at: :locked_until_at,
+  #             prefix: :account          # => .account_locked / .account_unlocked
+end
+
+user.register_failed_attempt!   # atomic SQL increment; locks at max_attempts
+user.access_locked?             # true while locked (lapses after unlock_in)
+user.attempts_remaining         # => 3   (for "3 attempts remaining" messaging)
+user.reset_failed_attempts!     # call on successful login
+user.lock_access!               # manual lock     (hooks: before/after_lock)
+user.unlock_access!             # manual unlock   (hooks: before/after_unlock)
+User.locked / User.unlocked     # expiry-aware scopes
+```
+
+**Options**: `attempts:` (`:failed_attempts`, must be an integer column), `locked_at:` (`:locked_at`, datetime column), `max_attempts:` (`5`; `nil` = count but never auto-lock), `unlock_in:` (`nil` = locked until manual unlock; a duration makes the lock lapse by itself), `prefix:` / `suffix:` (affix the scope names).
+
+**Notes**
+- The increment is SQL-side (`COALESCE(attempts, 0) + 1` via `update_counters`), so concurrent failures never lose updates and a NULL counter needs no column default; a locked account stops counting.
+- Expiry is **lazy**: readers and scopes treat a stale lock as unlocked but never write. The column is cleared by the next `unlock_access!` or failed attempt (quietly there — no unlock hooks fire from a failed login).
+- `lock_access!` / `unlock_access!` persist via `update_columns` — validations and AR callbacks deliberately bypassed so an otherwise-invalid record can still be locked (this also skips `updated_at`/`Auditable`). The `before/after_lock`, `before/after_unlock` hooks run in a transaction; `after_lock` is the place for the "account locked" email.
+- Reach for Devise's `lockable` when you need unlock tokens, unlock emails, or per-strategy unlocks.
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -1358,6 +1392,45 @@ Per-key lifecycle: claim atomically (`write unless_exist`, TTL `lock_ttl:`) → 
 - When `Respondable` is included, the 400/409/422 bodies delegate to `render_error`.
 - Declare halting filters (authentication, `Throttleable`) **before** including this concern — a 401/403 rendered by an inner filter would be cached and replayed for the full TTL. Responses rendered by `rescue_from` handlers are never cached.
 - Keys must be ≤255 chars with no control characters (the raw key is echoed in `X-Idempotency-Key`); set `lock_ttl:` above the slowest declared action's worst case.
+
+---
+
+## 🪝 WebhookVerifiable
+
+HMAC **signature verification for inbound webhooks** — the receiving side of Stripe/GitHub/Shopify-style integrations. The action runs only when the signature over the **raw request body** verifies; otherwise a 401/400 is rendered and the action never executes.
+
+```ruby
+class WebhooksController < ApplicationController
+  include ConcernsOnRails::Controllers::WebhookVerifiable   # declare BEFORE Idempotentable
+
+  verify_webhook :stripe,  secret: -> { ENV["STRIPE_WEBHOOK_SECRET"] },    scheme: :stripe
+  verify_webhook :github,  secret: -> { ENV["GITHUB_WEBHOOK_SECRET"] },    scheme: :github
+  verify_webhook :shopify, secret: [ENV["NEW_SECRET"], ENV["OLD_SECRET"]], scheme: :shopify  # rotation
+  verify_webhook :custom,  secret: "s3cr3t", scheme: :hex, header: "X-Acme-Signature"
+  # verify_webhook secret: ...   # no actions = catch-all (declare specific rules first)
+
+  def stripe
+    event = JSON.parse(request.raw_post)   # parse the raw body — it is what was signed
+    # ...
+  end
+end
+```
+
+| Scheme | Header (default) | Format |
+|--------|------------------|--------|
+| `:github` | `X-Hub-Signature-256` | `sha256=<hex>` |
+| `:shopify` | `X-Shopify-Hmac-Sha256` | strict Base64 of the binary HMAC |
+| `:stripe` | `Stripe-Signature` | `t=<unix>,v1=<hex>[,v1=…]` — signs `"#{t}.#{body}"`, every `v1` tried, `tolerance:` rejects stale **and** future timestamps |
+| `:hex` / `:base64` | — (`header:` required) | plain hex / strict Base64 HMAC of the body |
+
+**Options**: `*actions` (none = catch-all; the first matching rule wins), `secret:` (String, callable `instance_exec`'d per request, or Array for rotation — any match passes), `scheme:` (`:hex`), `header:` (overrides the preset), `tolerance:` (Stripe only, `300`s default), `digest:` (`:sha256`; `:sha1`/`:sha512` for `:hex`/`:base64` only).
+
+**Notes**
+- Comparison is constant-time and the attacker-controlled header is **never decoded** — garbage (including invalid UTF-8 bytes) just fails with 401, it cannot raise.
+- A secret that resolves **blank at request time raises `ArgumentError`** — a misconfigured endpoint should page you, not 401 into the provider's silent retry loop.
+- Failure codes: `webhook_signature_missing` / `webhook_signature_invalid` / `webhook_timestamp_stale` → 401; `webhook_signature_malformed` (unparseable Stripe header) → 400. With `Respondable`, bodies delegate to `render_error`; override `webhook_verification_failed` to customize.
+- Declare **before** `Idempotentable` (a 401 cached by its around filter would be replayed) and before `Throttleable` (forged traffic shouldn't burn rate budget). Webhook endpoints also need `skip_before_action :verify_authenticity_token`.
+- In tests: `skip_before_action :verify_webhook_signature!`, or sign payloads for real with `OpenSSL::HMAC`. After a pass, `webhook_verified?` is true.
 
 ---
 
