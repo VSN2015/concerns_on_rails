@@ -1,7 +1,7 @@
 /* Concern manifest — drives the sidebar nav, home cards, search, and source links.
    `tags` are refined from the doc-generation workflow; everything else is static metadata. */
 window.COR_META = {
-  version: "1.15.0",
+  version: "1.16.0",
   repo: "https://github.com/VSN2015/concerns_on_rails",
   branch: "master",
   rubygems: "https://rubygems.org/gems/concerns_on_rails"

@@ -1,8 +1,8 @@
 <!-- CHANGELOG.md -->
 
-## 1.16.0 (unreleased)
+## 1.16.0 (2026-06-10)
 
-Two new concerns. 564 examples, 0 failures.
+Two new concerns, hardened by an adversarial edge-case review. 574 examples, 0 failures.
 
 ### Added
 - **Models::Auditable**: lightweight single-column change history ("paper_trail-lite"). `auditable_by :price, :status, into: :audit_log, actor: -> { Current.user&.email }, max_entries: 100` appends one JSON entry per changed field per save (creates record `from: nil`) into one text column — no extra tables, written in the same INSERT/UPDATE via `before_save`. Readers: `audit_trail`, `last_change_for(:field)`, `audited_changes_since(time)`, `clear_audit_trail!`. Tolerant JSON decode (corrupt column → `[]`), newest-N trimming (default 200), opt-in value truncation (`max_value_length:` stores the first N characters of long String values + `…`), values JSON-coerced (times → ISO8601 UTC, BigDecimal → precision-safe string, non-finite floats → `"NaN"`/`"Infinity"` strings), `"by"` omitted when no actor. Entries build on the persisted trail, so a save aborted by a later callback cannot duplicate entries on retry. Zero new runtime dependencies.
