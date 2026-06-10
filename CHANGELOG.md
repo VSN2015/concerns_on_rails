@@ -1,5 +1,13 @@
 <!-- CHANGELOG.md -->
 
+## 1.16.0 (unreleased)
+
+Two new concerns. 564 examples, 0 failures.
+
+### Added
+- **Models::Auditable**: lightweight single-column change history ("paper_trail-lite"). `auditable_by :price, :status, into: :audit_log, actor: -> { Current.user&.email }, max_entries: 100` appends one JSON entry per changed field per save (creates record `from: nil`) into one text column — no extra tables, written in the same INSERT/UPDATE via `before_save`. Readers: `audit_trail`, `last_change_for(:field)`, `audited_changes_since(time)`, `clear_audit_trail!`. Tolerant JSON decode (corrupt column → `[]`), newest-N trimming (default 200), opt-in value truncation (`max_value_length:` stores the first N characters of long String values + `…`), values JSON-coerced (times → ISO8601 UTC, BigDecimal → precision-safe string, non-finite floats → `"NaN"`/`"Infinity"` strings), `"by"` omitted when no actor. Entries build on the persisted trail, so a save aborted by a later callback cannot duplicate entries on retry. Zero new runtime dependencies.
+- **Controllers::Idempotentable**: Stripe-style `Idempotency-Key` support with an injectable store (`self.idempotency_store = Rails.cache`; contract: `#read`, `#write(expires_in:, unless_exist:)`, `#delete` — no in-process default on purpose). `idempotent_actions :create, ttl: 24.hours, lock_ttl: 1.minute, header: "Idempotency-Key", required: false` claims each key atomically, caches 2xx–4xx responses and replays them with `X-Idempotency-Replayed: true`; concurrent duplicates get 409 + `Retry-After`, payload mismatches get 422 (`idempotency_key_reuse`, fingerprint overridable), 5xx/exceptions release the claim so retries re-execute. Keys are validated (≤255 chars, control characters rejected to prevent response-header injection via the echoed `X-Idempotency-Key`), SHA256-hashed, and scoped per `controller#action`. Error bodies delegate to `render_error` when Respondable is present. Zero new runtime dependencies.
+
 ## 1.15.0 (2026-06-10)
 
 A review-driven release: 23 correctness/safety fixes (each with a regression spec) and 7 backward-compatible enhancements. 510 examples, 0 failures.

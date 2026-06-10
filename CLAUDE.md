@@ -87,6 +87,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `formatted_<name>`; `unit:`, `precision:`, `delimiter:`, `separator:`, `subunit_to_unit:`.
 - **`Addressable`** — postal-address normalization + format validation across columns;
   `full_address`, `address_complete?`, `verify_with:`.
+- **`Auditable`** — single-column JSON change history ("paper_trail-lite"). `auditable_by
+  *fields, into:, actor:, max_entries:, max_value_length:`; `audit_trail` /
+  `last_change_for` / `audited_changes_since` / `clear_audit_trail!`.
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 
@@ -102,6 +105,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Authorizable`** — declarative per-action authorization (`authorize_by`, `require_role`).
 - **`Throttleable`** — fixed-window rate limiting with an injectable atomic store.
 - **`Timezoneable`** — per-request `Time.zone` from params / header / cookie.
+- **`Idempotentable`** — `Idempotency-Key` response replay with an injectable store
+  (`idempotent_actions`); 409 on in-flight duplicates, 422 on payload mismatch.
 
 ### Support modules (`lib/concerns_on_rails/support/`)
 
