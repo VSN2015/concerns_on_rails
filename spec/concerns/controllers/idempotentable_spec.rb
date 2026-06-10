@@ -113,6 +113,17 @@ describe ConcernsOnRails::Controllers::Idempotentable do
       expect(c.rendered[:json][:error][:code]).to eq("idempotency_key_invalid")
     end
 
+    it "renders 400 idempotency_key_invalid for keys containing control characters (header-injection guard)" do
+      ["k\r\nSet-Cookie: x=1", "k\nv", "k\x00v", "k\tv"].each do |bad|
+        c = instance(idempotent_class(store) { idempotent_actions :create }, key: bad)
+
+        expect(perform(c)).to eq(0), "expected rejection for #{bad.inspect}"
+        expect(c.rendered[:json][:error][:code]).to eq("idempotency_key_invalid")
+        expect(c.response.headers).not_to have_key("X-Idempotency-Key")
+      end
+      expect(store.data).to be_empty
+    end
+
     it "executes the first request, stores the response and marks it as not replayed" do
       c = instance(idempotent_class(store) { idempotent_actions :create }, key: "abc-123")
 
@@ -287,6 +298,13 @@ describe ConcernsOnRails::Controllers::Idempotentable do
       c = instance(klass, key: "k", params: { amount: 1, controller: "b" })
       expect(perform(c)).to eq(0)
       expect(c.rendered[:status]).to eq(201)
+    end
+
+    it "does not raise when params contain non-finite floats" do
+      c = instance(idempotent_class(store) { idempotent_actions :create }, key: "nan", params: { score: Float::NAN })
+
+      expect { perform(c) }.not_to raise_error
+      expect(c.rendered).to be_nil
     end
 
     it "can be overridden to disable payload-mismatch detection" do

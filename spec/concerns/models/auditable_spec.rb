@@ -348,6 +348,64 @@ describe ConcernsOnRails::Auditable do
       expect(p.reload[:audit_log]).to be_nil
       expect(p.audit_trail).to eq([])
     end
+
+    it "raises a labeled error on a new record" do
+      expect { AuditProduct.new.clear_audit_trail! }
+        .to raise_error(ArgumentError, /clear_audit_trail! cannot be called on a new record/)
+    end
+  end
+
+  describe "aborted saves" do
+    it "does not duplicate entries when a later before_save aborts and the save is retried" do
+      klass = Class.new(TestModel) do
+        self.table_name = "audit_products"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :price
+
+        attr_accessor :block_save
+
+        before_save { throw :abort if block_save }
+      end
+
+      rec = klass.create!(price: 1)
+      rec.block_save = true
+      rec.price = 2
+      expect(rec.save).to be(false)
+      rec.block_save = false
+      rec.save!
+      expect(rec.audit_trail.map { |e| e["to"] }).to eq([1, 2])
+    end
+  end
+
+  context "with non-finite float values" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :audit_metrics, force: true do |t|
+          t.float :score
+          t.text :audit_log
+        end
+      end
+
+      class AuditMetric < TestModel
+        include ConcernsOnRails::Auditable
+
+        auditable_by :score
+      end
+    end
+
+    after { Object.send(:remove_const, :AuditMetric) if defined?(AuditMetric) }
+
+    it "stores NaN and Infinity as strings instead of raising" do
+      m = AuditMetric.create!(score: 1.0)
+      m.score = Float::NAN
+      expect { m.save! }.not_to raise_error
+      expect(m.audit_trail.last["to"]).to eq("NaN")
+
+      m.score = Float::INFINITY
+      m.save!
+      expect(m.audit_trail.last["to"]).to eq("Infinity")
+    end
   end
 
   describe "callback-skipping writes (gotcha)" do

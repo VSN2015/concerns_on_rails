@@ -35,8 +35,17 @@ module ConcernsOnRails
     # default store on purpose — configure one explicitly or the first keyed
     # request raises ArgumentError. Note that responses rendered by
     # `rescue_from` handlers bypass the around filter's success path and are
-    # never cached. When combining with Throttleable, include Throttleable
-    # first so rate limiting halts before a claim is written.
+    # never cached.
+    #
+    # IMPORTANT — callback ordering: declare halting filters (authentication,
+    # authorization, rate limiting) BEFORE including this module. A
+    # before_action that runs *inside* the around filter and halts (401/403)
+    # has its response cached and replayed for the full `ttl:` — the client
+    # cannot fix credentials and retry until it expires. Rails offers no
+    # reliable way for the around filter to detect a halted inner chain.
+    # Likewise set `lock_ttl:` above the worst-case duration of the slowest
+    # declared action — if the action outlasts the claim, a concurrent retry
+    # can win the expired key and execute the action a second time.
     module Idempotentable
       extend ActiveSupport::Concern
 
@@ -103,6 +112,9 @@ module ConcernsOnRails
       # Digest of the request payload, used to reject reusing one key for a
       # different request. Public override point — e.g. for raw-body APIs:
       #   def idempotency_fingerprint = Digest::SHA256.hexdigest(request.raw_post)
+      # Override it for multipart endpoints too: an uploaded file stringifies
+      # with its object id, so retried uploads never match and 422 — digest
+      # stable parts instead (e.g. params[:file]&.original_filename).
       def idempotency_fingerprint
         raw = params.respond_to?(:to_unsafe_h) ? params.to_unsafe_h : params.to_h
         filtered = raw.reject { |k, _| IGNORED_FINGERPRINT_KEYS.include?(k.to_s) }
@@ -146,7 +158,10 @@ module ConcernsOnRails
       end
 
       def valid_idempotency_key?(key)
-        !key.empty? && key.length <= MAX_KEY_LENGTH
+        # Control characters are rejected because the raw key is echoed in the
+        # X-Idempotency-Key response header — CR/LF would enable header
+        # injection on servers that don't validate header values (Rack 2).
+        !key.empty? && key.length <= MAX_KEY_LENGTH && !key.match?(/[[:cntrl:]]/)
       end
 
       def run_with_idempotency(rule, key, &)
@@ -269,7 +284,14 @@ module ConcernsOnRails
         case value
         when Hash then value.map { |k, v| [k.to_s, idempotency_deep_sort(v)] }.sort_by(&:first)
         when Array then value.map { |v| idempotency_deep_sort(v) }
-        when nil, true, false, Integer, Float, String then value
+        else idempotency_scalar(value)
+        end
+      end
+
+      def idempotency_scalar(value)
+        case value
+        when Float then value.finite? ? value : value.to_s # JSON.generate raises on NaN/Infinity
+        when nil, true, false, Integer, String then value
         else value.to_s
         end
       end

@@ -127,5 +127,7 @@ order.audited_changes_since(1.day.ago).map { |e| "#{e['field']}: #{e['from']} �
 - **Corrupt JSON is tolerated, then replaced.** A hand-edited or truncated column decodes as `[]` and is overwritten by a fresh trail on the next tracked save.
 - **Values come back as primitives.** `from`/`to` are JSON values, not typed Ruby objects — a `Time` round-trips as an ISO8601 string, a `BigDecimal` as a numeric string.
 - **Not concurrency-safe.** The read-modify-write of the JSON column means two simultaneous saves of the same row are last-writer-wins for the entries added in that race.
+- **Entries build on the persisted trail.** New entries are appended to the column's *database* value, so a save aborted by a later callback can't duplicate entries when retried. The flip side: assigning the audit column by hand in the same save as a tracked change is ignored — use `clear_audit_trail!` to reset the trail.
+- **Non-finite floats are stored as strings.** `NaN`/`Infinity` in a tracked float column serialize as `"NaN"`/`"Infinity"` instead of raising inside `before_save`.
 - **The actor proc runs on the record.** It is `instance_exec`'d, so both globals (`Current.user`) and the record's own attributes are in scope. Exceptions raised inside the proc propagate (fail-fast).
 - **Non-goals**: no reify/undo, no who-dunnit queries across models, no association tracking — reach for [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) or [`audited`](https://github.com/collectiveidea/audited) when you need a real audit store.

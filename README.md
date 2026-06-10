@@ -1356,7 +1356,8 @@ Per-key lifecycle: claim atomically (`write unless_exist`, TTL `lock_ttl:`) → 
 - Cache keys are scoped per `controller#action` and the client key is SHA256-hashed, so the same key on different endpoints never collides.
 - There is **no in-process default store** on purpose: the first keyed request raises `ArgumentError` until you set `idempotency_store`.
 - When `Respondable` is included, the 400/409/422 bodies delegate to `render_error`.
-- Include `Throttleable` first so a 429 halts before a claim is written; responses rendered by `rescue_from` handlers are never cached.
+- Declare halting filters (authentication, `Throttleable`) **before** including this concern — a 401/403 rendered by an inner filter would be cached and replayed for the full TTL. Responses rendered by `rescue_from` handlers are never cached.
+- Keys must be ≤255 chars with no control characters (the raw key is echoed in `X-Idempotency-Key`); set `lock_ttl:` above the slowest declared action's worst case.
 
 ---
 

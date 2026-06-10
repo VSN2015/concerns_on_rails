@@ -38,6 +38,10 @@ module ConcernsOnRails
     #     characters plus a trailing "…" (non-strings are never truncated).
     #   * A corrupt or non-array column decodes as [] and is overwritten on the
     #     next tracked save. Concurrent saves of one row are last-writer-wins.
+    #   * New entries are built on the PERSISTED trail (so an aborted save
+    #     can't duplicate entries on retry). Assigning the audit column by
+    #     hand in the same save as a tracked change is therefore ignored —
+    #     use clear_audit_trail! to reset it.
     #   * Reach for paper_trail/audited when you need reify/undo, who-dunnit
     #     queries across models, or association tracking.
     module Auditable
@@ -116,6 +120,8 @@ module ConcernsOnRails
       # Wipe the trail with a single UPDATE. Deliberately uses update_column so
       # clearing can never itself be captured or run other callbacks/validations.
       def clear_audit_trail!
+        raise ArgumentError, "#{LABEL}: clear_audit_trail! cannot be called on a new record" if new_record?
+
         update_column(self.class.auditable_into, nil)
       end
 
@@ -131,10 +137,20 @@ module ConcernsOnRails
         tracked = pending.slice(*fields.map(&:to_s))
         return if tracked.empty?
 
-        entries = audit_trail + auditable_build_entries(tracked)
+        entries = auditable_persisted_trail + auditable_build_entries(tracked)
         max = self.class.auditable_max_entries
         entries = entries.last(max) if max
         self[self.class.auditable_into] = JSON.generate(entries)
+      end
+
+      # Base the new trail on the PERSISTED column value, not the in-memory
+      # attribute: an aborted save leaves the in-memory column holding the
+      # entry it appended, and reading it back on retry would duplicate the
+      # change. (attribute_in_database is Rails 5.1+; fall back for 5.0.)
+      def auditable_persisted_trail
+        into = self.class.auditable_into
+        raw = respond_to?(:attribute_in_database) ? attribute_in_database(into.to_s) : self[into]
+        auditable_decode(raw)
       end
 
       def auditable_build_entries(tracked)
@@ -173,13 +189,19 @@ module ConcernsOnRails
       # TimeWithZone is caught by `when Time` (it masquerades via #is_a?).
       def auditable_json_value(value)
         case value
-        when nil, true, false, Integer, Float, String then value
+        when nil, true, false, Integer, String then value
+        when Float then auditable_float_value(value)
         when BigDecimal then value.to_s("F")
         when Time, DateTime then value.to_time.utc.iso8601
         when Date then value.iso8601
         when Symbol then value.to_s
         else value.as_json
         end
+      end
+
+      # JSON.generate raises on non-finite floats — store NaN/Infinity as strings.
+      def auditable_float_value(value)
+        value.finite? ? value : value.to_s
       end
 
       def auditable_parse_time(raw)
