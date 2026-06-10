@@ -43,12 +43,12 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
     [OpenSSL::HMAC.digest(OpenSSL::Digest.new("SHA256"), secret, body)].pack("m0")
   end
 
-  def stripe_sig(secret, body, t:)
-    hex_hmac(secret, "#{t}.#{body}")
+  def stripe_sig(secret, body, at:)
+    hex_hmac(secret, "#{at}.#{body}")
   end
 
-  def stripe_header(secret, body, t:)
-    "t=#{t},v1=#{stripe_sig(secret, body, t: t)}"
+  def stripe_header(secret, body, at:)
+    "t=#{at},v1=#{stripe_sig(secret, body, at: at)}"
   end
 
   def expect_failure(controller, status, code)
@@ -151,7 +151,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
     end
 
     it "fails when the body was tampered with" do
-      c = instance(hex_class, body: WH_BODY + "x", headers: { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) })
+      c = instance(hex_class, body: "#{WH_BODY}x", headers: { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) })
 
       c.verify_webhook_signature!
       expect_failure(c, :unauthorized, "webhook_signature_invalid")
@@ -285,7 +285,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
     def now_i = Time.now.to_i
 
     it "passes a freshly signed header within the default tolerance" do
-      c = instance(stripe_class, headers: { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, t: now_i) })
+      c = instance(stripe_class, headers: { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, at: now_i) })
 
       c.verify_webhook_signature!
       expect(c.rendered).to be_nil
@@ -300,7 +300,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
     end
 
     it "passes when any one of multiple v1 values matches (key roll)" do
-      header = "t=#{now_i},v1=#{'0' * 64},v1=#{stripe_sig(WH_SECRET, WH_BODY, t: now_i)}"
+      header = "t=#{now_i},v1=#{'0' * 64},v1=#{stripe_sig(WH_SECRET, WH_BODY, at: now_i)}"
       c = instance(stripe_class, headers: { "Stripe-Signature" => header })
 
       c.verify_webhook_signature!
@@ -308,7 +308,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
     end
 
     it "ignores unknown keys (v0=, junk) and verifies via v1" do
-      header = "t=#{now_i},v0=ignored,junk,v1=#{stripe_sig(WH_SECRET, WH_BODY, t: now_i)}"
+      header = "t=#{now_i},v0=ignored,junk,v1=#{stripe_sig(WH_SECRET, WH_BODY, at: now_i)}"
       c = instance(stripe_class, headers: { "Stripe-Signature" => header })
 
       c.verify_webhook_signature!
@@ -317,7 +317,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
 
     it "renders 401 webhook_timestamp_stale for a t older than the tolerance" do
       stale = now_i - 301
-      c = instance(stripe_class, headers: { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, t: stale) })
+      c = instance(stripe_class, headers: { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, at: stale) })
 
       c.verify_webhook_signature!
       expect_failure(c, :unauthorized, "webhook_timestamp_stale")
@@ -325,7 +325,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
 
     it "renders 401 webhook_timestamp_stale for a t in the future beyond the tolerance" do
       future = now_i + 301
-      c = instance(stripe_class, headers: { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, t: future) })
+      c = instance(stripe_class, headers: { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, at: future) })
 
       c.verify_webhook_signature!
       expect_failure(c, :unauthorized, "webhook_timestamp_stale")
@@ -335,12 +335,12 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       two_minutes_old = now_i - 120
 
       lenient = instance(stripe_class(tolerance: 5.minutes),
-                         headers: { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, t: two_minutes_old) })
+                         headers: { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, at: two_minutes_old) })
       lenient.verify_webhook_signature!
       expect(lenient.webhook_verified?).to be(true)
 
       strict = instance(stripe_class(tolerance: 1.minute),
-                        headers: { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, t: two_minutes_old) })
+                        headers: { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, at: two_minutes_old) })
       strict.verify_webhook_signature!
       expect_failure(strict, :unauthorized, "webhook_timestamp_stale")
     end
@@ -353,7 +353,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
     end
 
     it "renders 400 webhook_signature_malformed when t is missing" do
-      c = instance(stripe_class, headers: { "Stripe-Signature" => "v1=#{stripe_sig(WH_SECRET, WH_BODY, t: now_i)}" })
+      c = instance(stripe_class, headers: { "Stripe-Signature" => "v1=#{stripe_sig(WH_SECRET, WH_BODY, at: now_i)}" })
 
       c.verify_webhook_signature!
       expect_failure(c, :bad_request, "webhook_signature_malformed")
@@ -384,7 +384,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
 
     it "uses the first t for both checks: appending a fresh t cannot resurrect a stale header" do
       stale = now_i - 3600
-      replayed = "#{stripe_header(WH_SECRET, WH_BODY, t: stale)},t=#{now_i}"
+      replayed = "#{stripe_header(WH_SECRET, WH_BODY, at: stale)},t=#{now_i}"
       c = instance(stripe_class, headers: { "Stripe-Signature" => replayed })
 
       c.verify_webhook_signature!
@@ -393,7 +393,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
 
     it "ignores v1 values past the signature cap" do
       junk = Array.new(16) { "v1=#{'0' * 64}" }.join(",")
-      header = "t=#{now_i},#{junk},v1=#{stripe_sig(WH_SECRET, WH_BODY, t: now_i)}"
+      header = "t=#{now_i},#{junk},v1=#{stripe_sig(WH_SECRET, WH_BODY, at: now_i)}"
       c = instance(stripe_class, headers: { "Stripe-Signature" => header })
 
       c.verify_webhook_signature!
@@ -401,7 +401,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
     end
 
     it "verifies an empty raw body (payload 't.')" do
-      c = instance(stripe_class, body: "", headers: { "Stripe-Signature" => stripe_header(WH_SECRET, "", t: now_i) })
+      c = instance(stripe_class, body: "", headers: { "Stripe-Signature" => stripe_header(WH_SECRET, "", at: now_i) })
 
       c.verify_webhook_signature!
       expect(c.webhook_verified?).to be(true)
@@ -437,7 +437,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       klass = verifiable_class do
         verify_webhook :receive, secret: WH_SECRET, scheme: :hex, header: "X-Sig"
 
-        def webhook_verification_failed(message:, status:, code:)
+        def webhook_verification_failed(code:, **)
           render json: { custom: code }, status: :forbidden
         end
       end
@@ -459,7 +459,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       expect(gh.webhook_verified?).to be(true)
 
       shop = instance(klass, action: "shopify_hook",
-                      headers: { "X-Shopify-Hmac-Sha256" => shopify_sig("shop-secret", WH_BODY) })
+                             headers: { "X-Shopify-Hmac-Sha256" => shopify_sig("shop-secret", WH_BODY) })
       shop.verify_webhook_signature!
       expect(shop.webhook_verified?).to be(true)
 

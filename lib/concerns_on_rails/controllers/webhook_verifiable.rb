@@ -108,12 +108,11 @@ module ConcernsOnRails
         private
 
         def validate_verify_webhook!(secret:, scheme:, header:, tolerance:, digest:)
-          unless SCHEMES.key?(scheme)
-            raise ArgumentError, "#{LABEL}: unknown scheme :#{scheme} (supported: #{SCHEMES.keys.join(', ')})"
-          end
+          raise ArgumentError, "#{LABEL}: unknown scheme :#{scheme} (supported: #{SCHEMES.keys.join(', ')})" unless SCHEMES.key?(scheme)
           unless valid_webhook_secret?(secret)
             raise ArgumentError, "#{LABEL}: :secret must be a non-blank String, a callable, or a non-empty Array of those"
           end
+
           validate_webhook_header!(scheme, header)
           validate_webhook_tolerance!(scheme, tolerance)
           validate_webhook_digest!(scheme, digest)
@@ -257,21 +256,26 @@ module ConcernsOnRails
       # payload, so appending a fresh t to a captured stale header cannot
       # resurrect it (its v1 was computed over the original t).
       def parse_stripe_header(value)
-        timestamp = nil
-        signatures = []
-        value.split(",").each do |pair|
+        pairs = value.split(",").map do |pair|
           key, val = pair.split("=", 2)
-          key = key.to_s.strip
-          val = val.to_s.strip
-          if key == "t" && timestamp.nil? && val.match?(STRIPE_TIMESTAMP_FORMAT)
-            timestamp = val.to_i
-          elsif key == "v1" && !val.empty? && signatures.length < MAX_STRIPE_SIGNATURES
-            signatures << val
-          end
+          [key.to_s.strip, val.to_s.strip]
         end
+        timestamp = stripe_timestamp(pairs)
+        signatures = stripe_signatures(pairs)
         return nil unless timestamp && signatures.any?
 
         { timestamp: timestamp, signatures: signatures }
+      end
+
+      def stripe_timestamp(pairs)
+        _, value = pairs.find { |key, val| key == "t" && val.match?(STRIPE_TIMESTAMP_FORMAT) }
+        value&.to_i
+      end
+
+      def stripe_signatures(pairs)
+        pairs.select { |key, val| key == "v1" && !val.empty? }
+             .first(MAX_STRIPE_SIGNATURES)
+             .map { |_, val| val }
       end
 
       def read_webhook_header(rule)
@@ -297,20 +301,22 @@ module ConcernsOnRails
         resolved = Array(rule[:secret]).flat_map do |candidate|
           Array(candidate.respond_to?(:call) ? instance_exec(&candidate) : candidate)
         end
-        if resolved.empty? || resolved.any? { |secret| secret.to_s.strip.empty? }
-          action = respond_to?(:action_name) ? action_name : "unknown"
-          raise ArgumentError, "#{LABEL}: :secret resolved blank for action '#{action}' — " \
-                               "verification cannot proceed with an empty secret."
-        end
+        raise_blank_webhook_secret! if resolved.empty? || resolved.any? { |secret| secret.to_s.strip.empty? }
         resolved.map(&:to_s)
+      end
+
+      def raise_blank_webhook_secret!
+        action = respond_to?(:action_name) ? action_name : "unknown"
+        raise ArgumentError, "#{LABEL}: :secret resolved blank for action '#{action}' — " \
+                             "verification cannot proceed with an empty secret."
       end
 
       # Constant-time comparison, portable across Rails 5.0-8: both sides are
       # collapsed to fixed-length SHA256 digests first (pre-5.2 secure_compare
       # short-circuited on length mismatch; 5.2+ digests internally — double
       # digesting is harmless).
-      def webhook_secure_compare(a, b)
-        ActiveSupport::SecurityUtils.secure_compare(::Digest::SHA256.digest(a), ::Digest::SHA256.digest(b))
+      def webhook_secure_compare(given, expected)
+        ActiveSupport::SecurityUtils.secure_compare(::Digest::SHA256.digest(given), ::Digest::SHA256.digest(expected))
       end
     end
   end

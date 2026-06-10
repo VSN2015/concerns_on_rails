@@ -207,7 +207,7 @@ describe ConcernsOnRails::Lockable do
       user = LockUser.create!(email: "a@b.c")
       3.times { user.register_failed_attempt! }
 
-      expect(user.events).to eq([:before_lock, :after_lock])
+      expect(user.events).to eq(%i[before_lock after_lock])
     end
 
     it "locks on the first failure with max_attempts: 1" do
@@ -371,7 +371,7 @@ describe ConcernsOnRails::Lockable do
 
       expect(user.lock_access!).to be(true)
       expect(user.reload.locked_at).to eq(first_locked_at)
-      expect(user.events).to eq([:before_lock, :after_lock])
+      expect(user.events).to eq(%i[before_lock after_lock])
     end
 
     it "re-locks an expired lock with a fresh timestamp" do
@@ -430,10 +430,10 @@ describe ConcernsOnRails::Lockable do
         lockable_by
       end
       klass.define_method(:after_lock) do
-        if raise_once
-          raise_once = false
-          raise "boom"
-        end
+        return unless raise_once
+
+        raise_once = false
+        raise "boom"
       end
       user = klass.create!(email: "a@b.c")
 
@@ -468,7 +468,7 @@ describe ConcernsOnRails::Lockable do
       user.events.clear
 
       user.unlock_access!
-      expect(user.events).to eq([:before_unlock, :after_unlock])
+      expect(user.events).to eq(%i[before_unlock after_unlock])
     end
 
     it "is a hook-free no-op when not locked" do
@@ -505,10 +505,10 @@ describe ConcernsOnRails::Lockable do
         lockable_by
       end
       klass.define_method(:after_unlock) do
-        if raise_once
-          raise_once = false
-          raise "boom"
-        end
+        return unless raise_once
+
+        raise_once = false
+        raise "boom"
       end
       user = klass.create!(email: "a@b.c")
       user.lock_access!

@@ -86,9 +86,9 @@ module ConcernsOnRails
           unless positive_integer_or_nil?(max_attempts)
             raise ArgumentError, "#{LABEL}: max_attempts must be a positive Integer or nil (nil = never auto-lock)"
           end
-          unless positive_duration_or_nil?(unlock_in)
-            raise ArgumentError, "#{LABEL}: unlock_in must be a positive duration (e.g. 15.minutes) or nil"
-          end
+          return if positive_duration_or_nil?(unlock_in)
+
+          raise ArgumentError, "#{LABEL}: unlock_in must be a positive duration (e.g. 15.minutes) or nil"
         end
 
         # The increment happens in SQL arithmetic, so the column must really be

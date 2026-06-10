@@ -62,3 +62,8 @@ Lint/ConstantDefinitionInBlock:
 # `is_soft_deleted?` / `is_really_deleted?` are part of the gem's public API.
 Naming/PredicatePrefix:
   Enabled: false
+
+# Bang commands (soft_delete!, reset_failed_attempts!) return success booleans
+# by gem convention; they are commands, not predicates.
+Naming/PredicateMethod:
+  AllowBangMethods: true
