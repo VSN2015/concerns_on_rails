@@ -1,5 +1,41 @@
 <!-- CHANGELOG.md -->
 
+## 1.15.0 (2026-06-10)
+
+A review-driven release: 23 correctness/safety fixes (each with a regression spec) and 7 backward-compatible enhancements. 510 examples, 0 failures.
+
+### Fixed
+- **Controllers::SecureHeadable**: `content_security_policy_for(report_only: true)` no longer silently drops the policy block — the policy is defined via `content_security_policy` and report-only mode is toggled separately (a report-only rollout previously registered no policy at all).
+- **Controllers::Authorizable**: `require_role` / actor resolution now find a private or `helper_method` `current_user` (`respond_to?(.., true)`), so Devise-style private `current_user` is no longer denied.
+- **Controllers::Sortable**: uses `reorder` so the requested sort replaces a model `default_scope` ORDER BY instead of becoming a silent secondary key.
+- **Controllers::Paginatable**: the total count no longer breaks on grouped relations (it returned a Hash); it collapses to the group count.
+- **Controllers::Filterable**: a nested-hash param in direct-where mode no longer raises a user-triggerable 500 — non-scalar values are ignored.
+- **Controllers::Localizable**: the `Accept-Language` parser honors q-values (rejects `q=0`, orders by preference) per RFC 7231.
+- **Controllers::ErrorHandleable**: the 404 handler renders a generic message instead of the raw `RecordNotFound` message, which leaked the model class name and queried attribute/value.
+- **Models::SoftDeletable**: `deleted_within` uses an explicit `>=` predicate (the previous endless range was unsupported on Rails 5.x); `soft_delete_all` / `restore_all` roll the whole batch back when a record fails.
+- **Models::Sluggable**: backfills a blank slug on save even when the source is unchanged, and no longer overwrites an explicitly-assigned slug.
+- **Models::Publishable**: scopes branch on the column type so a boolean publishable column uses equality predicates instead of nonsensical timestamp comparisons.
+- **Models::Hashable**: validates that `length` is positive; `:integer` drops dead padding code.
+- **Models::Taggable**: `tagged_with` matches consistently (all branches use LIKE) and escapes the delimiter so a wildcard delimiter matches literally.
+- **Models::Monetizable** / **Support::Money**: no spurious `-` for amounts that round to zero; `subunit_to_unit: 0` is rejected.
+- **Models::Sequenceable**: the generation-time clock is memoized so a record's period anchor stays consistent (no boundary straddle).
+- **gemspec**: `spec.metadata` is merged rather than reassigned, preserving the `license` key.
+
+### Added
+- **Models::Activatable** / **Models::Expirable**: `prefix:` / `suffix:` options to affix scope names, so `.active` / `.expired` can coexist with the same-named scopes from sibling concerns on one model.
+- **Models::Publishable**: `before/after_publish` and `before/after_unpublish` lifecycle hooks.
+- **Models::Stateable**: `before/after_transition` hooks fired by guarded `<event>!` transitions.
+- **Models::Hashable**: `unique: true` retries on an in-Ruby collision before insert (parity with Tokenizable).
+- **Controllers::Sortable**: applies multiple whitelisted columns from a comma-separated `params[:sort]`.
+- **Controllers::Paginatable**: `pagination_meta(relation)` for body-based pagination (composes with `Respondable`'s `meta:`).
+
+### Changed
+- **Controllers::ErrorHandleable**: the default 404 message is now generic (`"Resource not found"`); override `handle_record_not_found` to surface detail in non-production environments.
+
+### Docs
+- Rewrote `CLAUDE.md` to cover all 29 concerns and 7 support modules, the model/controller layout, the macro conventions, the supported dependency ranges, and the release process.
+- Noted native Rails 7.1+ alternatives (`normalizes`, `generates_token_for`) in `Normalizable` / `Tokenizable`.
+
 ## 1.14.1 (2026-06-07)
 
 ### Fixed
