@@ -219,7 +219,7 @@ describe ConcernsOnRails::Taggable do
 
     it "treats a wildcard delimiter literally (no false positives)" do
       hit = TagDoc.create!(tag_list: %w[ruby rails]) # stored "ruby%rails"
-      TagDoc.create!(tag_list: ["rubyXrails"])        # single tag, must NOT match
+      TagDoc.create!(tag_list: ["rubyXrails"]) # single tag, must NOT match
       expect(TagDoc.tagged_with("ruby")).to contain_exactly(hit)
     end
   end

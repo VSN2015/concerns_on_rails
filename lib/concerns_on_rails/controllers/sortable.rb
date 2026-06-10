@@ -51,7 +51,7 @@ module ConcernsOnRails
         # ORDER BY — including a model default_scope order. Multiple whitelisted
         # columns (comma-separated in params[:sort]) are applied in request order.
         direction = sort_direction
-        ordering = fields.each_with_object({}) { |field, memo| memo[field] = direction }
+        ordering = fields.to_h { |field| [field, direction] }
         relation.reorder(ordering)
       end
 
