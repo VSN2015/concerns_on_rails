@@ -5,7 +5,7 @@ module ConcernsOnRails
     module Publishable
       extend ActiveSupport::Concern
 
-      included do
+      included do # rubocop:disable Metrics/BlockLength
         class_attribute :publishable_field, instance_accessor: false, default: :published_at
 
         # All scopes branch on the column type: a boolean publishable column (which

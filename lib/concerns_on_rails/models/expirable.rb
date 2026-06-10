@@ -84,8 +84,6 @@ module ConcernsOnRails
         (value - now).seconds
       end
 
-      private
-
       def expiry_extension_base
         value = self[self.class.expirable_field]
         now = Time.zone.now

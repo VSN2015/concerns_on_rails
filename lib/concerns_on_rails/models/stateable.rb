@@ -160,9 +160,7 @@ module ConcernsOnRails
       # Instance-level guarded transition body, shared by every `<event>!`.
       def stateable_perform_transition!(field, to, from, event)
         current = self[field].to_s
-        unless from.empty? || from.include?(current)
-          raise InvalidTransition, "#{self.class.name}: cannot #{event} from '#{self[field]}'"
-        end
+        raise InvalidTransition, "#{self.class.name}: cannot #{event} from '#{self[field]}'" unless from.empty? || from.include?(current)
 
         before_transition(event, current, to)
         result = update!(field => to)

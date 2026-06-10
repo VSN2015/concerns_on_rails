@@ -217,10 +217,11 @@ describe ConcernsOnRails::Publishable do
         publishable_by :published_at
 
         attr_reader :log
-        def before_publish; (@log ||= []) << :before_publish; end
-        def after_publish; (@log ||= []) << :after_publish; end
-        def before_unpublish; (@log ||= []) << :before_unpublish; end
-        def after_unpublish; (@log ||= []) << :after_unpublish; end
+
+        def before_publish = (@log ||= []) << :before_publish
+        def after_publish = (@log ||= []) << :after_publish
+        def before_unpublish = (@log ||= []) << :before_unpublish
+        def after_unpublish = (@log ||= []) << :after_unpublish
       end
 
       article = klass.create!(title: "t")
