@@ -42,7 +42,8 @@ describe ConcernsOnRails::Aliasable do
       ActiveRecord::Base.connection.drop_table(table)
     end
     %i[Author Book SoloAuthor ShelfAuthor GhostBook VirtualBook HabtmAuthor Label
-       PhantomBook TrackedBook DestroyAuthor FancyAuthor Note].each do |const|
+       PhantomBook TrackedBook DestroyAuthor FancyAuthor Note Review LazyAuthor
+       LazyBook].each do |const|
       Object.send(:remove_const, const) if Object.const_defined?(const)
     end
   end
@@ -185,6 +186,19 @@ describe ConcernsOnRails::Aliasable do
       expect(Author.alias_association(:publications, :books)).to eq(:publications)
       expect(Author.aliasable_aliases[:works]).to eq(:books)
       expect(Author.aliasable_aliases[:publications]).to eq(:books)
+    end
+
+    it "raises when repointing an existing alias at a different source" do
+      Author.has_many :tomes, class_name: "Book", foreign_key: :author_id
+
+      expect do
+        Author.alias_association(:works, :tomes)
+      end.to raise_error(ArgumentError, /'works' is already aliased to 'books'/)
+    end
+
+    it "allows re-declaring an alias with the same source (idempotent)" do
+      expect { Author.alias_association(:works, :books) }.not_to raise_error
+      expect(Author.aliasable_aliases[:works]).to eq(:books)
     end
 
     it "does not raise when no table exists (column sweep is best-effort)" do
@@ -430,6 +444,100 @@ describe ConcernsOnRails::Aliasable do
       expect(note.notable_type).to eq("Author")
       expect(note).not_to respond_to(:build_subject)
       expect(note).not_to respond_to(:create_subject)
+    end
+  end
+
+  describe "has_many :through aliases" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :reviews, force: true do |t|
+          t.string :body
+          t.integer :book_id
+          t.integer :author_id
+        end
+      end
+
+      class Review < TestModel
+        belongs_to :book
+        belongs_to :author
+      end
+
+      Book.has_many :reviews, foreign_key: :book_id
+      Author.has_many :reviews, through: :books
+      Author.alias_association :critiques, :reviews
+    end
+
+    def create_reviewed_author
+      author = Author.create!(name: "Jane")
+      book = Book.create!(title: "Intro", author_id: author.id)
+      Review.create!(body: "great", book_id: book.id, author_id: author.id)
+      author
+    end
+
+    it "reads the same through proxy and registers a source-pinned reflection copy" do
+      author = create_reviewed_author
+
+      expect(author.critiques.map(&:body)).to eq(["great"])
+      expect(author.critiques).to equal(author.reviews)
+
+      reflection = Author.reflect_on_association(:critiques)
+      expect(reflection.klass).to eq(Review)
+      expect(reflection.options[:source]).to eq(:reviews)
+    end
+
+    it "joins, filters, and includes through the alias" do
+      author = create_reviewed_author
+
+      expect(Author.joins(:critiques).where(critiques: { body: "great" })).to eq([author])
+
+      loaded = Author.includes(:critiques).first
+      expect(loaded.critiques.loaded?).to be(true)
+    end
+
+    it "declares safely in a class body before the through model's class is loaded" do
+      class LazyAuthor < TestModel
+        self.table_name = "authors"
+        include ConcernsOnRails::Aliasable
+
+        has_many :lazy_books, class_name: "LazyBook", foreign_key: :author_id
+        has_many :reviews, through: :lazy_books
+        alias_association :critiques, :reviews # LazyBook is not defined yet
+      end
+
+      class LazyBook < TestModel
+        self.table_name = "books"
+
+        has_many :reviews, foreign_key: :book_id
+      end
+
+      author = LazyAuthor.create!(name: "Jane")
+      book = LazyBook.create!(title: "Intro", author_id: author.id)
+      Review.create!(body: "deep", book_id: book.id)
+
+      expect(author.critiques.map(&:body)).to eq(["deep"])
+      expect(LazyAuthor.joins(:critiques).where(critiques: { body: "deep" })).to eq([author])
+    end
+
+    it "pins a singular-form source resolved from the loaded through model" do
+      Book.has_many :authors, through: :reviews
+      Book.alias_association(:reviewers, :authors)
+
+      author = create_reviewed_author
+      book = Book.find_by!(title: "Intro")
+
+      expect(Book.reflect_on_association(:reviewers).options[:source]).to eq(:author)
+      expect(book.reviewers).to eq([author])
+      expect(Book.joins(:reviewers).where(reviewers: { name: "Jane" })).to eq([book])
+    end
+
+    it "copies an explicit source: option verbatim" do
+      Author.has_many :remarks, through: :books, source: :reviews
+      Author.alias_association(:commentary, :remarks)
+
+      author = create_reviewed_author
+
+      expect(Author.reflect_on_association(:commentary).options[:source]).to eq(:reviews)
+      expect(author.commentary.map(&:body)).to eq(["great"])
     end
   end
 

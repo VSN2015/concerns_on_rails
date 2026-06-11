@@ -42,10 +42,17 @@ module ConcernsOnRails
     #   * The belongs_to foreign-key attribute is NOT aliased — pair with
     #     Rails' alias_attribute (e.g. :writer_id, :author_id) if needed.
     #   * has_and_belongs_to_many cannot be aliased — use has_many :through.
+    #   * has_many/has_one :through CAN be aliased (the copy pins `source:`
+    #     so it is not re-derived from the alias name). One caveat: when the
+    #     alias is declared before the through model's class has loaded AND
+    #     the through model defines the source under a different name (e.g.
+    #     belongs_to :author behind has_many :authors), declare `source:`
+    #     explicitly on the original association.
     #   * Subclasses inherit aliases. If a subclass redefines the source
-    #     association, re-declare the alias there (re-declaring an existing
-    #     alias is allowed and idempotent) so the query side picks up the
-    #     new reflection.
+    #     association, re-declare the alias there (re-declaring with the SAME
+    #     source is allowed and idempotent) so the query side picks up the
+    #     new reflection. Repointing an existing alias at a DIFFERENT source
+    #     raises.
     module Aliasable
       extend ActiveSupport::Concern
 
@@ -70,14 +77,23 @@ module ConcernsOnRails
         # Register `new_name` as a full alias of the existing association
         # `source_name`. Argument order mirrors `alias_method new, old`.
         # Callable many times; aliases of aliases collapse to the terminal
-        # source; re-declaring an existing alias (the STI subclass path)
-        # refreshes its reflection in place instead of raising.
+        # source; re-declaring an existing alias WITH THE SAME SOURCE (the
+        # STI subclass path) refreshes its reflection in place instead of
+        # raising, while repointing it at a different source raises — that is
+        # almost always an accident, and the generated methods/reflection
+        # would silently change meaning.
         def alias_association(new_name, source_name)
           new_name = new_name.to_sym
           source = aliasable_aliases[source_name.to_sym] || source_name.to_sym # collapse alias-of-alias
+          existing = aliasable_aliases[new_name]
+          if existing && existing != source
+            raise ArgumentError,
+                  "#{LABEL}: '#{new_name}' is already aliased to '#{existing}' (model: #{name}) — " \
+                  "repointing an alias is not allowed; remove the original declaration first"
+          end
           reflection = aliasable_validate!(new_name, source)
           method_map = aliasable_method_map(new_name, source, reflection)
-          aliasable_check_collisions!(new_name, method_map) unless aliasable_aliases.key?(new_name)
+          aliasable_check_collisions!(new_name, method_map) unless existing
 
           self.aliasable_aliases = aliasable_aliases.merge(new_name => source)
           aliasable_register_reflection(new_name, source, reflection)
@@ -158,20 +174,48 @@ module ConcernsOnRails
           aliasable_clear_reflection_caches
         end
 
-        # class_name uses the lazy string (NOT src.klass.name — calling klass
-        # at macro time raises NameError while the target class is unloaded).
-        # belongs_to derives its FK from the association name, so the copy
-        # must pin the source's FK (and foreign_type when polymorphic).
-        # class_name is also pinned for has_many :through copies, whose klass
-        # would otherwise re-derive from the alias name.
+        # Every option a reflection copy would re-derive from the ALIAS name
+        # must be pinned to what the source derived.
+        #   * through: pin :source (Rails derives it from the association
+        #     name — the copy would look for the alias on the through model).
+        #     class_name is NOT touched: ThroughReflection#class_name resolves
+        #     the source-reflection chain eagerly, raising NameError at macro
+        #     time while the through/target classes are still unloaded, and
+        #     with :source pinned the copy derives its klass correctly anyway.
+        #   * direct: pin class_name via the lazy string (NOT src.klass.name —
+        #     calling klass at macro time raises NameError while the target
+        #     class is unloaded). belongs_to also derives its FK from the
+        #     association name, so pin foreign_key (and foreign_type when
+        #     polymorphic).
         def aliasable_copy_options(src)
           opts = src.options.dup
-          opts[:class_name] ||= src.class_name.to_s unless src.polymorphic?
-          if src.belongs_to?
-            opts[:foreign_key] ||= src.foreign_key
-            opts[:foreign_type] ||= src.foreign_type if src.polymorphic?
+          if opts[:through]
+            opts[:source] ||= aliasable_through_source_name(src)
+          else
+            aliasable_pin_direct_options!(opts, src)
           end
           opts
+        end
+
+        def aliasable_pin_direct_options!(opts, src)
+          opts[:class_name] ||= src.class_name.to_s unless src.polymorphic?
+          return unless src.belongs_to?
+
+          opts[:foreign_key] ||= src.foreign_key
+          opts[:foreign_type] ||= src.foreign_type if src.polymorphic?
+        end
+
+        # Exact resolution (src.source_reflection.name) handles sources the
+        # through model defines under a different form (e.g. belongs_to
+        # :author behind has_many :authors), but it loads the through class —
+        # impossible while classes are still loading. Fall back to the source
+        # association's own name, Rails' derivation anchor; a lazily-loading
+        # app whose source lives under a different name must declare `source:`
+        # on the original association (standard Rails practice).
+        def aliasable_through_source_name(src)
+          src.source_reflection&.name || src.name
+        rescue NameError, ActiveRecord::ActiveRecordError
+          src.name
         end
 
         # The memoized reflections cache is per-class; descendants that have

@@ -99,8 +99,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (alias_method argument order, repeatable, declared after the source). Read/write/
   build_/create_/ids delegators + a renamed reflection copy so joins/includes/
   where-hash resolve; one loaded cache (`#association` override routes the alias to
-  the source proxy), callbacks run once. HABTM rejected; aliases inherited;
-  re-declaring in a subclass refreshes.
+  the source proxy), callbacks run once. HABTM rejected; `:through` supported
+  (`source:` pinned on the copy); aliases inherited; re-declaring with the same
+  source in a subclass refreshes; repointing at a different source raises.
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 

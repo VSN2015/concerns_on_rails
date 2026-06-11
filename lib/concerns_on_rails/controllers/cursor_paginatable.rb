@@ -25,7 +25,11 @@ module ConcernsOnRails
     # Malformed or mismatched cursors raise CursorPaginatable::InvalidCursor;
     # on real controllers a rescue_from is registered automatically and renders
     # a 400 (via Respondable's render_error when included). Override
-    # #render_invalid_cursor to customize the body.
+    # #render_invalid_cursor to customize the body. Cursors are opaque but NOT
+    # signed — boundary values are cast through the model's attribute types
+    # and bound by Arel (no injection) and the relation's scoping still
+    # applies, so treat a cursor as a page position, never an authorization
+    # boundary.
     #
     # Do not combine with Controllers::Sortable#sorted — cursor_paginated uses
     # reorder, which replaces any prior ORDER BY (including Models::Sortable's

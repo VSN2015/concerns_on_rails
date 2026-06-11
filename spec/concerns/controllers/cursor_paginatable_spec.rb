@@ -125,6 +125,21 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       expect(ids.uniq.size).to eq(20)
     end
 
+    it "walks mixed-direction multi-column orderings without skips or repeats" do
+      collected = []
+      cursor = nil
+      loop do
+        controller = make_controller({ per_page: 7, cursor: cursor }.compact)
+        records = controller.cursor_paginated(Item.all, order: { score: :desc, name: :asc })
+        collected.concat(records.map(&:id))
+        cursor = controller.response.headers["X-Next-Cursor"]
+        break unless cursor
+      end
+
+      # PK tiebreaker inherits the LAST column's direction (:asc here)
+      expect(collected).to eq(Item.order(score: :desc, name: :asc, id: :asc).pluck(:id))
+    end
+
     it "never duplicates or skips rows across ties (tiebreaker proof)" do
       collected = []
       cursor = nil

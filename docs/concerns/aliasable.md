@@ -38,8 +38,9 @@ Class-level macro, callable any number of times. The argument order mirrors `ali
 | Source must already exist | Raises `ArgumentError` (“does not exist”) when called before the source association is declared. |
 | Collisions are rejected | The **full** derived method map (reader, writer, `build_`/`create_`/`create_!`/`reload_`/`reset_`, the `_ids` pair) is swept against existing associations, methods, columns, and virtual attributes. |
 | Aliases of aliases collapse | `alias_association :catalog, :works` (where `:works` already aliases `:books`) maps `:catalog` straight to `:books`. |
-| Re-declaring is allowed | Declaring an existing alias again (the subclass path — see Notes) refreshes its reflection instead of raising. |
+| Re-declaring is allowed | Declaring an existing alias again **with the same source** (the subclass path — see Notes) refreshes its reflection instead of raising. Repointing an alias at a *different* source raises. |
 | HABTM is rejected | `has_and_belongs_to_many` sources raise `ArgumentError` — use `has_many :through`. |
+| `:through` is supported | `has_many`/`has_one :through` sources work — the reflection copy pins `source:` so it is not re-derived from the alias name (see Notes for the lazy-loading caveat). |
 
 ## Methods
 
@@ -108,6 +109,7 @@ end
 - **The where-hash key must match the name you joined under** (the same rule stock Rails applies to any renamed association): `joins(:works).where(works: {...})` works; `joins(:books).where(works: {...})` raises `StatementInvalid`.
 - **SQL naming.** A bare `joins(:works)` joins `"books"` directly; pairing it with `where(works: {...})` makes Rails alias the join (`INNER JOIN "books" "works"`). Raw SQL fragments must reference the name actually joined.
 - **The `belongs_to` foreign-key attribute is not aliased.** `book.writer_id` is not defined — pair with Rails' `alias_attribute :writer_id, :author_id` when needed.
+- **`:through` aliases and lazy loading.** When the alias is declared before the through model's class has loaded (the usual class-body + autoloading case), the copy pins `source:` to the source association's own name — Rails' derivation anchor. If the through model defines the source under a *different* name (e.g. `belongs_to :author` behind `has_many :authors`), declare `source:` explicitly on the original association; it is copied verbatim.
 - **Subclasses inherit aliases.** If a subclass redefines the source association, re-declare the alias there (allowed and idempotent) so the query side picks up the new reflection. Declaring aliases on *anonymous* classes hits stock Rails' anonymous-class limitation for the query side, exactly like declaring any association on one.
 - **The reflection is a macro-time snapshot.** The renamed copy captures the source's scope and options when `alias_association` runs; redefine-then-re-declare is the supported refresh path.
 - **`_reflections` key form is probed at runtime** (String-keyed on Rails <= 7.x, Symbol-keyed on newer releases), so the concern works across the gem's supported range without version checks.
