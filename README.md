@@ -1029,7 +1029,7 @@ book.section_ids              # ids reader/writer (collection)
 Book.joins(:sections).where(sections: { title: "Intro" })
 ```
 
-**Options**: `alias_association new_name, source_name` — repeatable; declare it **after** the source association; re-declaring an existing alias with the **same** source (e.g. in a subclass that redefined the source) is allowed and refreshes it, while repointing an alias at a *different* source raises.
+**Options**: `alias_association new_name, source_name` — repeatable; declare it **after** the source association; re-declaring an existing alias with the **same** source (e.g. in a subclass that redefined the source) is allowed and refreshes it, while repointing an alias at a *different* source raises. Keyword options: `only:`/`except:` narrow the generated methods by group (`:reader`, `:writer`, `:build`, `:reload`, `:ids`); `deprecated: true` (or a String hint) makes every delegator warn through `ConcernsOnRails.deprecator` — the gradual-rename story; `alias_foreign_key: true` (`belongs_to` only) also aliases `<alias>_id` (and `<alias>_type` when polymorphic) via `alias_attribute`.
 
 **Notes**
 - One loaded cache under two names: `record.association(:alias)` IS `record.association(:source)`, and only the source macro installs callbacks — `dependent:`, counter caches, autosave and validations run exactly once.
@@ -1092,14 +1092,16 @@ end
 |--------------|---------|----------------------------------------------------------|
 | `?cursor=`   | —       | The opaque token from `X-Next-Cursor` (omit for page 1)  |
 | `?per_page=` | `25`    | Capped at `max_per_page` (default 200; `0` disables the cap) |
+| `?order=`    | first preset | With `order_presets:` only — selects a named ordering from the allow-list (unknown names → 400 `invalid_order_preset`) |
 
-**Response headers**: `X-Per-Page`, `X-Count` (rows on **this** page — totals are deliberately not computed), `X-Has-More`, `X-Next-Cursor` (only while more pages exist).
+**Response headers**: `X-Per-Page`, `X-Count` (rows on **this** page — totals are deliberately not computed), `X-Has-More`, `X-Next-Cursor` (only while more pages exist). With `bidirectional: true`: also `X-Has-Prev`, `X-Prev-Cursor`.
 
 **Notes**
 - The primary key is always appended as a tiebreaker, so duplicate values never skip or repeat rows; ordering columns are chosen **in code** (never from params) and should be `NOT NULL` (a NULL boundary value raises rather than silently dropping rows).
 - Cursors are opaque, table/order-pinned tokens — a malformed, cross-endpoint, or stale-config cursor renders a 400 (`invalid_cursor`; override `render_invalid_cursor` to customize, delegates to Respondable's `render_error` when present). They are **not signed**: a client can mint different boundary values, but values are cast through the model's attribute types and bound by Arel (no injection) and the relation's own scoping still applies — treat a cursor as a page position, never an authorization boundary.
 - `cursor_paginated` uses `reorder` (replaces any `default_scope` ORDER BY) and returns a loaded Array. Don't wrap it with the controller Sortable's `sorted` — pass `order:` per call instead.
-- Forward-only by design; use Paginatable when you need page numbers and totals.
+- Forward-only by default — `bidirectional: true` (macro or per call) adds prev cursors and `X-Has-Prev`/`X-Prev-Cursor`; direction is pinned in the token, so prev tokens replayed on forward-only endpoints 400 and old direction-less tokens stay valid. `order_presets: { newest: {...}, top: {...} }` (+ `default_preset:`, `order_param:`) lets clients pick a **named** ordering from an allow-list. `predicate: :auto` upgrades the keyset WHERE to a row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when directions are uniform — composite-index friendly — falling back to the portable OR-expansion (`:row`/`:or` force a strategy).
+- Use Paginatable when you need page numbers and totals.
 
 ---
 

@@ -1,10 +1,22 @@
 require "active_support/concern"
+require "active_support/deprecation"
 require "concerns_on_rails/version"
 
 module ConcernsOnRails
   module Models; end
   module Controllers; end
   module Support; end
+
+  # Gem-wide deprecator backing `alias_association ..., deprecated:` (and any
+  # future deprecation surface). A dedicated instance — not the global
+  # ActiveSupport::Deprecation singleton, whose direct use is itself
+  # deprecated on Rails 7.1+. Default behavior prints to $stderr; Rails apps
+  # can re-route it (e.g. `config.active_support.deprecation` style):
+  #
+  #   ConcernsOnRails.deprecator.behavior = :log
+  def self.deprecator
+    @deprecator ||= ActiveSupport::Deprecation.new("2.0", "concerns_on_rails")
+  end
 end
 
 # Shared internal helpers (must load before the concerns that use them)

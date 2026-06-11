@@ -337,6 +337,260 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
     end
   end
 
+  describe "bidirectional pagination" do
+    let(:bidi_class) do
+      Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order: :id, bidirectional: true
+      end
+    end
+
+    def bidi_controller(params = {})
+      bidi_class.new(params: params)
+    end
+
+    it "mints no prev cursor on the first page" do
+      controller = bidi_controller(per_page: 10)
+      controller.cursor_paginated(Item.all)
+
+      headers = controller.response.headers
+      expect(headers["X-Has-Prev"]).to eq("false")
+      expect(headers).not_to have_key("X-Prev-Cursor")
+      expect(controller.cursor_pagination_meta[:has_prev]).to be(false)
+      expect(controller.cursor_pagination_meta[:prev_cursor]).to be_nil
+    end
+
+    it "returns to the previous page exactly via the prev cursor" do
+      page1 = bidi_controller(per_page: 10)
+      records1 = page1.cursor_paginated(Item.all)
+
+      page2 = bidi_controller(per_page: 10, cursor: page1.response.headers["X-Next-Cursor"])
+      page2.cursor_paginated(Item.all)
+
+      back = bidi_controller(per_page: 10, cursor: page2.response.headers["X-Prev-Cursor"])
+      records_back = back.cursor_paginated(Item.all)
+
+      expect(records_back.map(&:id)).to eq(records1.map(&:id))
+      # back at the true first page: nothing before it, plenty after it
+      expect(back.response.headers["X-Has-Prev"]).to eq("false")
+      expect(back.response.headers).not_to have_key("X-Prev-Cursor")
+      expect(back.response.headers["X-Has-More"]).to eq("true")
+      expect(back.response.headers["X-Next-Cursor"]).not_to be_nil
+    end
+
+    it "walks backward across pages in canonical order (desc ordering)" do
+      page1 = bidi_controller(per_page: 15)
+      r1 = page1.cursor_paginated(Item.all, order: { id: :desc })
+
+      page2 = bidi_controller(per_page: 15, cursor: page1.response.headers["X-Next-Cursor"])
+      r2 = page2.cursor_paginated(Item.all, order: { id: :desc })
+
+      page3 = bidi_controller(per_page: 15, cursor: page2.response.headers["X-Next-Cursor"])
+      page3.cursor_paginated(Item.all, order: { id: :desc })
+
+      back2 = bidi_controller(per_page: 15, cursor: page3.response.headers["X-Prev-Cursor"])
+      rb2 = back2.cursor_paginated(Item.all, order: { id: :desc })
+      expect(rb2.map(&:id)).to eq(r2.map(&:id))
+
+      back1 = bidi_controller(per_page: 15, cursor: back2.response.headers["X-Prev-Cursor"])
+      rb1 = back1.cursor_paginated(Item.all, order: { id: :desc })
+      expect(rb1.map(&:id)).to eq(r1.map(&:id))
+      expect(back1.response.headers["X-Has-Prev"]).to eq("false")
+    end
+
+    it "honors a per-call bidirectional override" do
+      controller = make_controller(per_page: 10)
+      controller.cursor_paginated(Item.all, bidirectional: true)
+
+      expect(controller.cursor_pagination_meta).to have_key(:has_prev)
+      expect(controller.response.headers["X-Has-Prev"]).to eq("false")
+    end
+
+    it "rejects prev cursors on forward-only configurations" do
+      page1 = bidi_controller(per_page: 10)
+      page1.cursor_paginated(Item.all)
+      page2 = bidi_controller(per_page: 10, cursor: page1.response.headers["X-Next-Cursor"])
+      page2.cursor_paginated(Item.all)
+      prev_token = page2.response.headers["X-Prev-Cursor"]
+
+      expect do
+        make_controller(cursor: prev_token).cursor_paginated(Item.all)
+      end.to raise_error(described_class::InvalidCursor, /does not match/)
+    end
+
+    it "treats direction-less (pre-bidirectional) cursors as forward cursors" do
+      boundary_id = Item.order(:id).pluck(:id)[9]
+      token = encode("t" => "items", "o" => ["id:asc"], "v" => [boundary_id])
+
+      records = make_controller(per_page: 10, cursor: token).cursor_paginated(Item.all)
+      expect(records.first.id).to eq(Item.order(:id).pluck(:id)[10])
+    end
+  end
+
+  describe "order presets" do
+    let(:preset_class) do
+      Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order_presets: { newest: { id: :desc }, alpha: { name: :asc } }, per_page: 10
+      end
+    end
+
+    it "uses the first preset as the default when the param is absent" do
+      records = preset_class.new(params: {}).cursor_paginated(Item.all)
+
+      expect(records.first.id).to eq(Item.maximum(:id))
+    end
+
+    it "honors an explicit default_preset" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order_presets: { newest: { id: :desc }, alpha: { name: :asc } },
+                           default_preset: :alpha, per_page: 10
+      end
+
+      records = klass.new(params: {}).cursor_paginated(Item.all)
+      expect(records.map(&:name)).to eq(records.map(&:name).sort)
+    end
+
+    it "applies the preset named by the order param" do
+      records = preset_class.new(params: { order: "alpha" }).cursor_paginated(Item.all)
+
+      expect(records.map(&:name)).to eq(records.map(&:name).sort)
+    end
+
+    it "raises InvalidOrderPreset for unknown names, listing the presets" do
+      controller = preset_class.new(params: { order: "bogus" })
+
+      expect do
+        controller.cursor_paginated(Item.all)
+      end.to raise_error(described_class::InvalidOrderPreset,
+                         /Unknown order preset 'bogus'. Available: newest, alpha/)
+    end
+
+    it "invalidates in-flight cursors when the client switches presets" do
+      minted = preset_class.new(params: { order: "newest", per_page: 10 })
+      minted.cursor_paginated(Item.all)
+      token = minted.response.headers["X-Next-Cursor"]
+
+      expect do
+        preset_class.new(params: { order: "alpha", cursor: token }).cursor_paginated(Item.all)
+      end.to raise_error(described_class::InvalidCursor, /does not match/)
+    end
+
+    it "reads the preset from a custom order_param" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order_presets: { newest: { id: :desc } }, order_param: :sort
+      end
+
+      records = klass.new(params: { sort: "newest" }).cursor_paginated(Item.all)
+      expect(records.first.id).to eq(Item.maximum(:id))
+    end
+
+    it "validates the macro configuration" do
+      base = Class.new(FakeController) { include ConcernsOnRails::Controllers::CursorPaginatable }
+
+      expect { base.cursor_paginate_by(order: :id, order_presets: { a: :id }) }
+        .to raise_error(ArgumentError, /not both/)
+      expect { base.cursor_paginate_by(per_page: 5) }
+        .to raise_error(ArgumentError, /order: or order_presets: is required/)
+      expect { base.cursor_paginate_by(order_presets: { a: :id }, default_preset: :b) }
+        .to raise_error(ArgumentError, /default_preset 'b' is not one of/)
+      expect { base.cursor_paginate_by(order: :id, default_preset: :a) }
+        .to raise_error(ArgumentError, /default_preset: requires order_presets:/)
+    end
+  end
+
+  describe "predicate strategies" do
+    def capture_sql(&block)
+      queries = []
+      callback = lambda do |_name, _start, _finish, _id, payload|
+        queries << payload[:sql] unless payload[:name] == "SCHEMA"
+      end
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record", &block)
+      queries
+    end
+
+    def second_page_sql(controller_klass, order)
+      page1 = controller_klass.new(params: { per_page: 10 })
+      page1.cursor_paginated(Item.all, order: order)
+      token = page1.response.headers["X-Next-Cursor"]
+      capture_sql do
+        controller_klass.new(params: { per_page: 10, cursor: token }).cursor_paginated(Item.all, order: order)
+      end.join("\n")
+    end
+
+    it ":auto uses a row-value tuple for uniform multi-column orders on SQLite" do
+      sql = second_page_sql(controller_class, { score: :desc })
+
+      expect(sql).to include('("items"."score", "items"."id") <')
+      expect(sql).not_to include(" OR ")
+    end
+
+    it ":auto falls back to OR-expansion for mixed directions" do
+      sql = second_page_sql(controller_class, { score: :desc, name: :asc })
+
+      expect(sql).to include(" OR ")
+    end
+
+    it "row and OR strategies paginate identically across ties" do
+      walk = lambda do |klass|
+        collected = []
+        cursor = nil
+        loop do
+          controller = klass.new(params: { per_page: 7, cursor: cursor }.compact)
+          collected.concat(controller.cursor_paginated(Item.all, order: { score: :desc }).map(&:id))
+          cursor = controller.response.headers["X-Next-Cursor"]
+          break unless cursor
+        end
+        collected
+      end
+
+      row_class = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order: :id, predicate: :row
+      end
+      or_class = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order: :id, predicate: :or
+      end
+
+      expect(walk.call(row_class)).to eq(walk.call(or_class))
+    end
+
+    it "predicate: :row raises on mixed directions instead of silently changing strategy" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order: :id, predicate: :row
+      end
+      page1 = klass.new(params: { per_page: 10 })
+      page1.cursor_paginated(Item.all, order: { score: :desc, name: :asc })
+      token = page1.response.headers["X-Next-Cursor"]
+
+      expect do
+        klass.new(params: { per_page: 10, cursor: token })
+             .cursor_paginated(Item.all, order: { score: :desc, name: :asc })
+      end.to raise_error(ArgumentError, /requires uniform order directions/)
+    end
+
+    it "rejects unknown predicate modes at macro time" do
+      expect do
+        Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::CursorPaginatable
+
+          cursor_paginate_by order: :id, predicate: :fancy
+        end
+      end.to raise_error(ArgumentError, /predicate: must be one of/)
+    end
+  end
+
   describe "NULL ordering values" do
     it "raises loudly when the page-boundary row has a NULL ordering value" do
       Item.delete_all
@@ -399,6 +653,27 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       expect(controller.rescue_with_handler(error)).to be_truthy
       expect(controller.rendered[:status]).to eq(:bad_request)
       expect(controller.rendered[:json][:error][:code]).to eq("invalid_cursor")
+    end
+
+    it "registers and renders the InvalidOrderPreset handler" do
+      rescuable = rescuable_base
+      klass = Class.new(rescuable) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order_presets: { newest: { id: :desc } }
+      end
+
+      controller = klass.new(params: { order: "bogus" })
+      error = begin
+        controller.cursor_paginated(Item.all)
+        nil
+      rescue described_class::InvalidOrderPreset => e
+        e
+      end
+
+      expect(controller.rescue_with_handler(error)).to be_truthy
+      expect(controller.rendered[:status]).to eq(:bad_request)
+      expect(controller.rendered[:json][:error][:code]).to eq("invalid_order_preset")
     end
 
     it "delegates to render_error when Respondable is included" do

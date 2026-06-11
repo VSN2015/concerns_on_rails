@@ -445,6 +445,17 @@ describe ConcernsOnRails::Aliasable do
       expect(note).not_to respond_to(:build_subject)
       expect(note).not_to respond_to(:create_subject)
     end
+
+    it "aliases the foreign key and type attributes with alias_foreign_key:" do
+      Note.alias_association(:topic, :notable, alias_foreign_key: true)
+
+      author = Author.create!(name: "Jane")
+      note = Note.new(body: "memo")
+      note.topic = author
+
+      expect(note.topic_id).to eq(author.id)
+      expect(note.topic_type).to eq("Author")
+    end
   end
 
   describe "has_many :through aliases" do
@@ -653,6 +664,125 @@ describe ConcernsOnRails::Aliasable do
       author.save!
 
       expect(author.reload.books.map(&:title)).to eq(["Nested"])
+    end
+  end
+
+  describe "method-map options (only:/except:)" do
+    it "only: :reader generates just the reader, query side intact" do
+      Book.alias_association(:penman, :author, only: :reader)
+      author = Author.create!(name: "Jane")
+      book = Book.create!(title: "Solo", author_id: author.id)
+
+      expect(book.penman).to eq(author)
+      expect(book).not_to respond_to(:penman=)
+      expect(book).not_to respond_to(:build_penman)
+      expect(book).not_to respond_to(:reload_penman)
+      expect(Book.joins(:penman).where(penman: { name: "Jane" })).to eq([book])
+    end
+
+    it "except: :ids skips the ids pair on collections" do
+      Author.alias_association(:publications, :books, except: :ids)
+      author = create_author_with_books
+
+      expect(author.publications).to eq(author.books)
+      expect(author).not_to respond_to(:publication_ids)
+      expect(author).not_to respond_to(:publication_ids=)
+    end
+
+    it "ignores groups that do not apply to the reflection type" do
+      Author.alias_association(:publications, :books, only: %i[reader build])
+      author = create_author_with_books
+
+      expect(author.publications).to eq(author.books)
+      expect(author).not_to respond_to(:publications=)
+    end
+
+    it "raises when only: and except: are combined" do
+      expect do
+        Book.alias_association(:penman, :author, only: :reader, except: :writer)
+      end.to raise_error(ArgumentError, /not both/)
+    end
+
+    it "raises on unknown method groups" do
+      expect do
+        Book.alias_association(:penman, :author, only: :everything)
+      end.to raise_error(ArgumentError, /unknown method group/)
+    end
+
+    it "re-declaring with narrower options prunes the stale delegators" do
+      Book.alias_association(:penman, :author)
+      expect(Book.new).to respond_to(:penman=)
+
+      Book.alias_association(:penman, :author, only: :reader)
+      book = Book.new
+
+      expect(book).to respond_to(:penman)
+      expect(book).not_to respond_to(:penman=)
+      expect(book).not_to respond_to(:build_penman)
+    end
+  end
+
+  describe "deprecated: option" do
+    it "warns on use and still delegates" do
+      Book.alias_association(:penman, :author, deprecated: true)
+      author = Author.create!(name: "Jane")
+      book = Book.create!(title: "Solo", author_id: author.id)
+
+      expect { expect(book.penman).to eq(author) }
+        .to output(/Book#penman is a deprecated alias of #author/).to_stderr
+    end
+
+    it "appends a custom message" do
+      Book.alias_association(:penman, :author, deprecated: "use #author; removed in 2.0")
+      book = Book.create!(title: "Solo")
+
+      expect { book.penman }.to output(/use #author; removed in 2\.0/).to_stderr
+    end
+
+    it "does not warn for plain aliases" do
+      book = Book.create!(title: "Solo")
+
+      expect { book.writer }.not_to output.to_stderr
+    end
+  end
+
+  describe "alias_foreign_key: option" do
+    it "aliases the foreign-key attribute for belongs_to" do
+      Book.alias_association(:penman, :author, alias_foreign_key: true)
+      author = Author.create!(name: "Jane")
+
+      book = Book.new(title: "Solo")
+      book.penman_id = author.id
+      book.save!
+
+      expect(book.reload.author).to eq(author)
+      expect(book.penman_id).to eq(author.id)
+    end
+
+    it "raises for non-belongs_to associations" do
+      expect do
+        Author.alias_association(:library, :books, alias_foreign_key: true)
+      end.to raise_error(ArgumentError, /only supported for belongs_to/)
+    end
+
+    it "raises when the aliased FK collides with a column" do
+      ActiveRecord::Schema.define do
+        create_table :ghost_books, force: true do |t|
+          t.string :title
+          t.integer :author_id
+          t.integer :penman_id
+        end
+      end
+
+      class GhostBook < TestModel
+        include ConcernsOnRails::Aliasable
+
+        belongs_to :author
+      end
+
+      expect do
+        GhostBook.alias_association(:penman, :author, alias_foreign_key: true)
+      end.to raise_error(ArgumentError, /'penman_id' is already a column/)
     end
   end
 end

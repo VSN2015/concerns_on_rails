@@ -33,6 +33,11 @@ end
 | `order` | Symbol / Array / Hash | — | Ordering columns: `:created_at`, `[:kind, :created_at]` (all ascending), or `{ created_at: :desc, kind: :asc }` for per-column directions. Columns are chosen **in code** — params can never pick them. The primary key is always appended as a tiebreaker (inheriting the last column's direction) unless you list it yourself. |
 | `per_page` | Integer | `25` | Default page size when the caller supplies no `?per_page=` (or a value below 1). |
 | `max_per_page` | Integer | `200` | Hard cap on `per_page` (`0`/negative disables the cap — same semantics as Paginatable). |
+| `order_presets` | Hash | — | Named, allow-listed orderings the client selects via `?<order_param>=` (e.g. `{ newest: { created_at: :desc }, top: { score: :desc } }`). Mutually exclusive with `order:` (exactly one is required). Unknown names raise `InvalidOrderPreset` → 400 `invalid_order_preset`; switching presets mid-walk invalidates the cursor. |
+| `default_preset` | Symbol | first preset | Preset used when the param is absent. Must name a configured preset. |
+| `order_param` | Symbol | `:order` | Query param that selects the preset. |
+| `bidirectional` | Boolean | `false` | Mints `X-Prev-Cursor` / `X-Has-Prev` (and `prev_cursor` / `has_prev` in meta) so clients can page backward. Also a per-call override on `cursor_paginated`. |
+| `predicate` | Symbol | `:auto` | Keyset WHERE strategy. `:auto`: row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when all directions are uniform (walks a composite index directly), otherwise the portable OR-expansion. `:row` forces tuples (raises on mixed directions); `:or` forces the expansion. |
 
 `order:` and `per_page:` can also be passed per call: `cursor_paginated(scope, order: { score: :desc }, per_page: 50)`.
 
@@ -42,12 +47,13 @@ end
 |---|---|---|
 | `?cursor=` | — | The opaque token from `X-Next-Cursor`. Omit (or blank) for the first page. |
 | `?per_page=` | value of `cursor_paginatable_per_page` | Values below 1 fall back to the default; values above `max_per_page` are capped. |
+| `?order=` (configurable via `order_param:`) | `default_preset` | Only with `order_presets:` — selects a named ordering from the allow-list. |
 
 ## Methods
 
 ### Instance methods
 
-**`cursor_paginated(relation, order: nil, per_page: nil) → Array`**
+**`cursor_paginated(relation, order: nil, per_page: nil, bidirectional: nil) → Array`**
 
 Runs the keyset query (`LIMIT per_page + 1` to detect whether more rows exist), sets the response headers, and returns the page as a **loaded Array** (the one deliberate divergence from Paginatable — has-more detection requires materializing the rows). Accepts a relation or a bare model class. Raises `CursorPaginatable::InvalidCursor` on malformed or mismatched cursors — see below.
 
@@ -69,6 +75,8 @@ With no arguments: the meta Hash memoized by the last `cursor_paginated` call (n
 | `X-Count` | Rows on **this** page — *not* Paginatable's `X-Total-Count`; totals are deliberately never computed. |
 | `X-Has-More` | `"true"` / `"false"`. |
 | `X-Next-Cursor` | Opaque token for the next page. Only set while more pages exist. |
+| `X-Has-Prev` | `"true"` / `"false"` — bidirectional mode only. |
+| `X-Prev-Cursor` | Opaque token for the previous page — bidirectional mode only, set when the page has something before it. |
 
 ### Invalid cursors → 400
 
@@ -76,7 +84,8 @@ Cursors are URL-safe Base64 of a JSON payload that pins the **table** and the **
 
 - malformed tokens (bad Base64, non-JSON, non-Hash payloads),
 - cursors minted on another model or under a different `order:` configuration,
-- tampered values (non-scalar entries, wrong value count).
+- tampered values (non-scalar entries, wrong value count),
+- `prev`-direction cursors replayed against a forward-only configuration.
 
 On real controllers a `rescue_from InvalidCursor, with: :render_invalid_cursor` is registered automatically (exactly like ErrorHandleable's handlers), so a garbage `?cursor=` becomes a clean 400 instead of a 500. On bare objects without `rescue_from`, the error propagates.
 
@@ -115,7 +124,7 @@ end
 ## Notes & gotchas
 
 - **No database columns required**, but ordering columns should be `NOT NULL`. A NULL value on a page-boundary row raises a descriptive `ArgumentError` instead of silently corrupting the walk; on NULLs-last databases (PostgreSQL ASC), NULL-valued tail rows are skipped by the strict keyset comparison without ever reaching a boundary. Use NOT NULL columns or COALESCE in a view.
-- **Forward-only.** There is no `before`/previous-page support; clients keep earlier cursors to go back. The pinned payload format leaves room to add it without breaking existing cursors.
+- **Forward-only by default.** `bidirectional: true` adds prev cursors: a backward fetch runs the inverted ordering and flips the page back to canonical order, the `limit+1` probe detects `has_prev`, and cursors are minted only from non-empty pages (an over-walked empty page returns no cursors — clients keep their previous tokens). Direction is pinned inside the token: prev tokens replayed against a forward-only endpoint get a 400, and pre-bidirectional (direction-less) tokens stay valid as forward cursors.
 - **Cursors are readable, not secret.** The token is Base64 JSON — the boundary row's values are visible to anyone holding it. Don't order by sensitive columns (emails, balances). Tampering is detected structurally; HMAC signing is out of scope.
 - **`reorder` semantics.** The keyset columns *replace* any prior ORDER BY — including a model `default_scope` order (e.g. the model Sortable concern's). Don't wrap `cursor_paginated` with the controller Sortable's `sorted` (its ordering would be silently discarded); pass `order:` per call instead.
 - **Base-table columns only.** The keyset predicate is built on the model's own table; joined/qualified ordering columns are unsupported.

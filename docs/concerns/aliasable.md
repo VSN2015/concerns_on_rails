@@ -42,6 +42,14 @@ Class-level macro, callable any number of times. The argument order mirrors `ali
 | HABTM is rejected | `has_and_belongs_to_many` sources raise `ArgumentError` — use `has_many :through`. |
 | `:through` is supported | `has_many`/`has_one :through` sources work — the reflection copy pins `source:` so it is not re-derived from the alias name (see Notes for the lazy-loading caveat). |
 
+### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `only:` / `except:` | all groups | Narrow the generated methods by group: `:reader`, `:writer`, `:build`, `:reload` (singular), `:ids` (collection). Unknown groups raise; groups that don't apply to the reflection type are ignored. The query side (`joins`/`includes`/`where`-hash) is always registered. Re-declaring with narrower groups prunes the now-unwanted delegators. |
+| `deprecated:` | `nil` | `true` or a String hint. Every generated delegator warns through `ConcernsOnRails.deprecator` before delegating — the gradual-rename story (alias the old name to the renamed association and deprecate it). Configure the channel with `ConcernsOnRails.deprecator.behavior = :log` etc. The query side and `alias_foreign_key` attribute aliases do not warn. |
+| `alias_foreign_key:` | `false` | `belongs_to` only — also aliases the FK attribute via Rails' `alias_attribute`: `<alias>_id`, plus `<alias>_type` when polymorphic. The names join the collision sweep. |
+
 ## Methods
 
 For `alias_association :works, :books` (collection) and `alias_association :writer, :author` (singular):
