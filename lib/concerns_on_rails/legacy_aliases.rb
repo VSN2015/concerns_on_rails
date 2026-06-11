@@ -22,4 +22,5 @@ module ConcernsOnRails
   Monetizable   = Models::Monetizable
   Auditable     = Models::Auditable
   Lockable      = Models::Lockable
+  Aliasable     = Models::Aliasable
 end
