@@ -45,8 +45,10 @@ Article.published.without_deleted.find("hello-world")
   - [Monetizable](#-monetizable) — integer-cents money columns (BigDecimal)
   - [Auditable](#-auditable) — single-column change history ("paper_trail-lite")
   - [Lockable](#-lockable) — failed-attempt tracking + account lockout
+  - [Aliasable](#-aliasable) — full read/write/query aliases for associations
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
+  - [CursorPaginatable](#-cursorpaginatable) — cursor (keyset) pagination with headers
   - [Filterable](#-filterable) — declarative URL-param filters
   - [Sortable (controller)](#-sortable-controller) — URL-param ordering with allow-list
   - [Respondable](#-respondable) — standardized JSON envelopes
@@ -68,7 +70,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Twenty model concerns + thirteen controller concerns**, all production-ready
+- **Twenty-one model concerns + fourteen controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -1004,6 +1006,39 @@ User.locked / User.unlocked     # expiry-aware scopes
 
 ---
 
+## 🪞 Aliasable
+
+Alias an existing association under a second name with **full** semantics — read, write/assign, build/create, and the query side (`joins` / `includes` / `where`-hash) — not just a delegated reader. (`alias_attribute` covers columns only; Rails has no built-in association aliasing.)
+
+```ruby
+class Book < ApplicationRecord
+  include ConcernsOnRails::Aliasable
+
+  belongs_to :author
+  has_many :chapters
+
+  alias_association :writer,   :author      # alias_method order: new, old
+  alias_association :sections, :chapters
+end
+
+book.writer                   # same cached object as book.author
+book.writer = user            # assigns through the original association
+book.build_writer(...)        # build_ / create_ / create_! / reload_ (singular)
+book.sections << chapter      # the same CollectionProxy as book.chapters
+book.section_ids              # ids reader/writer (collection)
+Book.joins(:sections).where(sections: { title: "Intro" })
+```
+
+**Options**: `alias_association new_name, source_name` — repeatable; declare it **after** the source association; re-declaring an existing alias with the **same** source (e.g. in a subclass that redefined the source) is allowed and refreshes it, while repointing an alias at a *different* source raises. Keyword options: `only:`/`except:` narrow the generated methods by group (`:reader`, `:writer`, `:build`, `:reload`, `:ids`); `deprecated: true` (or a String hint) makes every delegator warn through `ConcernsOnRails.deprecator` — the gradual-rename story; `alias_foreign_key: true` (`belongs_to` only) also aliases `<alias>_id` (and `<alias>_type` when polymorphic) via `alias_attribute`.
+
+**Notes**
+- One loaded cache under two names: `record.association(:alias)` IS `record.association(:source)`, and only the source macro installs callbacks — `dependent:`, counter caches, autosave and validations run exactly once.
+- The where-hash key must match the name you joined under (stock-Rails rule): `joins(:sections).where(sections: {...})` works; `joins(:chapters).where(sections: {...})` does not.
+- The `belongs_to` foreign-key **attribute** is not aliased — pair with `alias_attribute :writer_id, :author_id` if you need it.
+- `has_and_belongs_to_many` cannot be aliased (use `has_many :through`). `has_many`/`has_one :through` **can** — the copy pins `source:` so it is not re-derived from the alias name; if your classes load lazily and the through model names the source differently (e.g. `belongs_to :author` behind `has_many :authors`), declare `source:` explicitly on the original association. Aliases are inherited by subclasses.
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -1032,6 +1067,41 @@ end
 | `?per_page=` | `25`    | Capped at `max_per_page` (default 200) |
 
 **Response headers**: `X-Total-Count`, `X-Page`, `X-Per-Page`, `X-Total-Pages`.
+
+---
+
+## 🧭 CursorPaginatable
+
+Cursor (keyset) pagination — the constant-time complement to Paginatable: **no COUNT query**, stable under concurrent inserts, ideal for infinite scroll and sync feeds.
+
+```ruby
+class ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::CursorPaginatable
+
+  cursor_paginate_by order: { created_at: :desc }, per_page: 25, max_per_page: 200
+
+  def index
+    render json: cursor_paginated(Article.all)   # bad cursors are rescued to a 400 automatically
+  end
+end
+```
+
+**URL params**
+
+| Param        | Default | Notes                                                    |
+|--------------|---------|----------------------------------------------------------|
+| `?cursor=`   | —       | The opaque token from `X-Next-Cursor` (omit for page 1)  |
+| `?per_page=` | `25`    | Capped at `max_per_page` (default 200; `0` disables the cap) |
+| `?order=`    | first preset | With `order_presets:` only — selects a named ordering from the allow-list (unknown names → 400 `invalid_order_preset`) |
+
+**Response headers**: `X-Per-Page`, `X-Count` (rows on **this** page — totals are deliberately not computed), `X-Has-More`, `X-Next-Cursor` (only while more pages exist). With `bidirectional: true`: also `X-Has-Prev`, `X-Prev-Cursor`.
+
+**Notes**
+- The primary key is always appended as a tiebreaker, so duplicate values never skip or repeat rows; ordering columns are chosen **in code** (never from params) and should be `NOT NULL` (a NULL boundary value raises rather than silently dropping rows).
+- Cursors are opaque, table/order-pinned tokens — a malformed, cross-endpoint, or stale-config cursor renders a 400 (`invalid_cursor`; override `render_invalid_cursor` to customize, delegates to Respondable's `render_error` when present). They are **not signed**: a client can mint different boundary values, but values are cast through the model's attribute types and bound by Arel (no injection) and the relation's own scoping still applies — treat a cursor as a page position, never an authorization boundary.
+- `cursor_paginated` uses `reorder` (replaces any `default_scope` ORDER BY) and returns a loaded Array. Don't wrap it with the controller Sortable's `sorted` — pass `order:` per call instead.
+- Forward-only by default — `bidirectional: true` (macro or per call) adds prev cursors and `X-Has-Prev`/`X-Prev-Cursor`; direction is pinned in the token, so prev tokens replayed on forward-only endpoints 400 and old direction-less tokens stay valid. `order_presets: { newest: {...}, top: {...} }` (+ `default_preset:`, `order_param:`) lets clients pick a **named** ordering from an allow-list. `predicate: :auto` upgrades the keyset WHERE to a row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when directions are uniform — composite-index friendly — falling back to the portable OR-expansion (`:row`/`:or` force a strategy).
+- Use Paginatable when you need page numbers and totals.
 
 ---
 

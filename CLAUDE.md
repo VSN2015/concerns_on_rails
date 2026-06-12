@@ -95,6 +95,15 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `register_failed_attempt!` (atomic SQL increment), `access_locked?` (lazy expiry),
   `lock_access!`/`unlock_access!` (update_columns + before/after hooks),
   `reset_failed_attempts!`; expiry-aware `.locked`/`.unlocked` scopes.
+- **`Aliasable`** — full association aliasing: `alias_association :new, :old`
+  (alias_method argument order, repeatable, declared after the source). Read/write/
+  build_/create_/ids delegators + a renamed reflection copy so joins/includes/
+  where-hash resolve; one loaded cache (`#association` override routes the alias to
+  the source proxy), callbacks run once. HABTM rejected; `:through` supported
+  (`source:` pinned on the copy); aliases inherited; re-declaring with the same
+  source in a subclass refreshes; repointing at a different source raises. Options:
+  `only:`/`except:` (method groups), `deprecated:` (warns via
+  `ConcernsOnRails.deprecator`), `alias_foreign_key:` (belongs_to `_id`/`_type` pair).
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 
@@ -115,6 +124,14 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`WebhookVerifiable`** — HMAC verification for inbound webhooks (`verify_webhook`):
   scheme presets `:stripe`/`:github`/`:shopify`/`:hex`/`:base64`, constant-time compare,
   Stripe timestamp tolerance, secret rotation; 401/400 before the action runs.
+- **`CursorPaginatable`** — cursor/keyset pagination (no COUNT; `cursor_paginate_by
+  order:, per_page:, max_per_page:`; `cursor_paginated`/`cursor_pagination_meta`;
+  `X-Per-Page`/`X-Count`/`X-Has-More`/`X-Next-Cursor` headers). Opaque table+order-pinned
+  Base64 cursors, PK tiebreaker appended, Arel OR-expansion WHERE, `reorder`; bad cursors
+  raise `InvalidCursor` → auto `rescue_from` renders 400. Opt-in: `bidirectional:`
+  (prev cursors + `X-Prev-Cursor`/`X-Has-Prev`), `order_presets:`/`default_preset:`/
+  `order_param:` (allow-listed client ordering; `InvalidOrderPreset` → 400),
+  `predicate: :auto` (row-value tuple WHERE on PG/MySQL/SQLite, else OR-expansion).
 
 ### Support modules (`lib/concerns_on_rails/support/`)
 

@@ -1,10 +1,22 @@
 require "active_support/concern"
+require "active_support/deprecation"
 require "concerns_on_rails/version"
 
 module ConcernsOnRails
   module Models; end
   module Controllers; end
   module Support; end
+
+  # Gem-wide deprecator backing `alias_association ..., deprecated:` (and any
+  # future deprecation surface). A dedicated instance — not the global
+  # ActiveSupport::Deprecation singleton, whose direct use is itself
+  # deprecated on Rails 7.1+. Default behavior prints to $stderr; Rails apps
+  # can re-route it (e.g. `config.active_support.deprecation` style):
+  #
+  #   ConcernsOnRails.deprecator.behavior = :log
+  def self.deprecator
+    @deprecator ||= ActiveSupport::Deprecation.new("2.0", "concerns_on_rails")
+  end
 end
 
 # Shared internal helpers (must load before the concerns that use them)
@@ -37,6 +49,7 @@ require "concerns_on_rails/models/maskable"
 require "concerns_on_rails/models/monetizable"
 require "concerns_on_rails/models/auditable"
 require "concerns_on_rails/models/lockable"
+require "concerns_on_rails/models/aliasable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"
@@ -52,6 +65,7 @@ require "concerns_on_rails/controllers/throttleable"
 require "concerns_on_rails/controllers/timezoneable"
 require "concerns_on_rails/controllers/idempotentable"
 require "concerns_on_rails/controllers/webhook_verifiable"
+require "concerns_on_rails/controllers/cursor_paginatable"
 
 # Backwards compatibility (top-level aliases for pre-1.6 module paths)
 require "concerns_on_rails/legacy_aliases"
