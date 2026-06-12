@@ -1,6 +1,6 @@
 <!-- CHANGELOG.md -->
 
-## Unreleased
+## 1.18.0 (2026-06-12)
 
 Two new concerns, designed and hardened through adversarial design- and code-review rounds (a shared-reflection registration strategy that produced invalid SQL was caught and replaced before implementation; a time-serialization path that silently lost sub-second precision likewise; a NULL page-boundary value that would have silently dropped rows now raises; a post-review pass fixed `has_many :through` aliasing, which crashed at macro time under lazy class loading and re-derived its `source:` from the alias name at query time). A follow-up enhancement round added bidirectional cursors, allow-listed order presets, and row-value predicates to CursorPaginatable, and `only:`/`except:`/`deprecated:`/`alias_foreign_key:` to Aliasable. 793 examples, 0 failures.
 
