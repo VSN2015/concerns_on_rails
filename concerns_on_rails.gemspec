@@ -19,7 +19,7 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_runtime_dependency 'rails', '>= 5.0', '< 9'
-  spec.add_runtime_dependency 'acts_as_list', '~> 0.7.5'
+  spec.add_runtime_dependency 'acts_as_list', '>= 0.7.5', '< 1.3.0'
   spec.add_runtime_dependency 'friendly_id', '~> 5.4'
 
   # Merge (not reassign) so the "license" key set above is preserved.
