@@ -23,4 +23,5 @@ module ConcernsOnRails
   Auditable     = Models::Auditable
   Lockable      = Models::Lockable
   Aliasable     = Models::Aliasable
+  Storable      = Models::Storable
 end

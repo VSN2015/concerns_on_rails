@@ -46,6 +46,7 @@ Article.published.without_deleted.find("hello-world")
   - [Auditable](#-auditable) — single-column change history ("paper_trail-lite")
   - [Lockable](#-lockable) — failed-attempt tracking + account lockout
   - [Aliasable](#-aliasable) — full read/write/query aliases for associations
+  - [Storable](#-storable) — typed accessors over one JSON settings column ("store_attribute-lite")
 - **Controller concerns**
   - [Paginatable](#-paginatable) — offset pagination with headers
   - [CursorPaginatable](#-cursorpaginatable) — cursor (keyset) pagination with headers
@@ -61,6 +62,7 @@ Article.published.without_deleted.find("hello-world")
   - [Timezoneable](#-timezoneable) — per-request `Time.zone` from params / header / cookie
   - [Idempotentable](#-idempotentable) — `Idempotency-Key` request replay (409 on concurrent duplicates)
   - [WebhookVerifiable](#-webhookverifiable) — HMAC verification for inbound webhooks (Stripe/GitHub/Shopify)
+  - [Deprecatable](#-deprecatable) — RFC `Deprecation`/`Sunset` headers + 410 sunset enforcement
 - [Module paths & namespacing](#-module-paths--namespacing)
 - [Development](#-development)
 - [Contributing](#-contributing)
@@ -1039,6 +1041,42 @@ Book.joins(:sections).where(sections: { title: "Intro" })
 
 ---
 
+## ⚙️ Storable
+
+Typed, defaulted, optionally-validated accessors over a **single JSON (or text) column** ("store_attribute-lite"). Rails' native `store_accessor` is untyped on every supported version — a form-submitted `"true"` stays the String `"true"` — with no defaults and no per-key dirty tracking; that gap is why the `store_attribute` / `jsonb_accessor` gems exist.
+
+```ruby
+class Account < ApplicationRecord
+  include ConcernsOnRails::Storable
+
+  storable_by :settings,
+    theme:          { type: :string,  default: "light", in: %w[light dark] },
+    notifications:  { type: :boolean, default: true },
+    items_per_page: { type: :integer, default: 25 },
+    trial_ends_at:  { type: :datetime }
+  storable_by :flags, { beta: { type: :boolean, default: false } }, prefix: :flag
+end
+
+account.theme                     # => "light"  (virtual default; nothing persisted)
+account.notifications = "0"       # params arrive as strings…
+account.notifications            # => false    (…and read back cast)
+account.notifications?           # boolean keys get a predicate
+account.items_per_page_changed?  # per-key dirty (and items_per_page_was)
+account.reset_theme              # drop the key → the default applies again
+account.flag_beta                # affixed accessor
+```
+
+**Options** (per key): `type:` (`:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`, `:json`), `default:` (a value, or a Proc `instance_exec`'d per read), `in:` (inclusion validation, errors on the accessor name). Macro options: `prefix:` / `suffix:` affix the generated method names (the collision escape hatch). The macro is repeatable — repeat calls for the same column merge keys, different columns are independent, and subclasses can add keys without affecting the parent.
+
+**Notes**
+- Works on a plain `text` column (JSON encoded/decoded internally), a native `json`/`jsonb` column, or a column the host app already `serialize`d — detected automatically. `serialize` itself is never used, so the Rails 7.1 API drift is irrelevant.
+- nil vs unset: a written `nil` (explicit JSON null) reads back as `nil` and does **not** fall back to the default; `reset_<key>` removes the key so the default applies again. `:decimal` is stored as a precision-safe string, `:date`/`:datetime` as ISO8601 (datetime in UTC at microsecond precision).
+- Writing one key dirties (and saves) the **whole column** — concurrent writers to different keys are last-write-wins on the hash. Undeclared keys are preserved. `:json` readers return a dup: reassign, don't mutate in place.
+- Generated names are collision-checked against existing methods and columns at macro time (`ArgumentError`; affix to escape). Read-side casting never raises — corrupt column JSON decodes as `{}`, garbage values cast to `nil`.
+- Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) when you need to **query** into the store (jsonb operators, store-backed scopes).
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -1501,6 +1539,39 @@ end
 - Failure codes: `webhook_signature_missing` / `webhook_signature_invalid` / `webhook_timestamp_stale` → 401; `webhook_signature_malformed` (unparseable Stripe header) → 400. With `Respondable`, bodies delegate to `render_error`; override `webhook_verification_failed` to customize.
 - Declare **before** `Idempotentable` (a 401 cached by its around filter would be replayed) and before `Throttleable` (forged traffic shouldn't burn rate budget). Webhook endpoints also need `skip_before_action :verify_authenticity_token`.
 - In tests: `skip_before_action :verify_webhook_signature!`, or sign payloads for real with `OpenSSL::HMAC`. After a pass, `webhook_verified?` is true.
+
+---
+
+## 🌅 Deprecatable
+
+Standards-based **API endpoint deprecation**: the RFC 9745 `Deprecation` and RFC 8594 `Sunset` headers, `Link` rels pointing at the migration docs and the successor endpoint, an instrumentation hook to measure who still calls the endpoint, and optional **410 Gone** enforcement once the sunset instant passes. This is how Stripe/GitHub/Zalando retire API versions — and nothing native exists on any Rails version.
+
+```ruby
+class Api::V1::OrdersController < ApplicationController
+  include ConcernsOnRails::Controllers::Deprecatable
+
+  deprecate_actions :index, :show,
+    deprecated_at: "2026-06-01",
+    sunset_at:     "2026-12-31T00:00:00Z",
+    link:          "https://docs.example.com/v1-migration",
+    successor:     "https://api.example.com/v2/orders",
+    after_sunset:  :gone,         # default :headers — announce, never block
+    notify:        -> { StatsD.increment("api.v1.orders.deprecated") }
+end
+
+# Every matching response then carries:
+#   Deprecation: @1780272000
+#   Sunset: Thu, 31 Dec 2026 00:00:00 GMT
+#   Link: <https://docs.example.com/v1-migration>; rel="deprecation", <https://api.example.com/v2/orders>; rel="successor-version"
+```
+
+**Options**: `deprecated_at:` (required; Time/Date/String — parsed eagerly, normalized to UTC), `sunset_at:` (optional, must be ≥ `deprecated_at`; a bare date means **00:00 UTC that day** — sunset is an instant, not end-of-day), `link:` / `successor:` (URLs), `after_sunset:` (`:headers` default | `:gone` → 410 with code `endpoint_sunset` at/after the sunset instant), `header_format:` (`:rfc9745` default, `@<unix>` | `:legacy`, the widely-deployed draft literal `true`), `notify:` (callable, `instance_exec`'d per matching request — a raising notify propagates on purpose). No positional actions = catch-all for the whole controller. **The last matching rule wins**, so an action-specific declaration naturally overrides a base controller's catch-all.
+
+**Notes**
+- Headers go out on every matching response — **including the 410 itself**, so the cut-off self-documents. `Link` values are appended to any existing `Link` header (pagination, CDN), never clobbered.
+- Each hit instruments `deprecated_endpoint.concerns_on_rails` (`ActiveSupport::Notifications`) with `{controller:, action:, deprecated_at:, sunset_at:}` — subscribe to count stragglers *before* flipping `after_sunset: :gone`. Override `on_deprecated_access(rule)` to replace the default instrumentation.
+- 410 bodies delegate to `Respondable`'s `render_error` when present (inline JSON envelope otherwise). `skip_before_action :apply_api_deprecations` opts an action out; `deprecation_active?` / `sunset_passed?` are available for serializers/response bodies.
+- Flipping `:gone` is a deliberate, customer-facing cut-off — coordinate it with `notify:`-driven outreach, and mind CDN-cached responses that may outlive the headers.
 
 ---
 

@@ -104,6 +104,13 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   source in a subclass refreshes; repointing at a different source raises. Options:
   `only:`/`except:` (method groups), `deprecated:` (warns via
   `ConcernsOnRails.deprecator`), `alias_foreign_key:` (belongs_to `_id`/`_type` pair).
+- **`Storable`** — typed/defaulted/validated accessors over one JSON-or-text column
+  ("store_attribute-lite"). `storable_by :settings, theme: {type:, default:, in:}`
+  (repeatable, merges per column; `prefix:`/`suffix:` affix accessors); per key:
+  reader/writer/`?` (boolean)/`_changed?`/`_was`/`reset_`. Manual JSON codec (never
+  `serialize`; native-json and host-serialized columns auto-detected), nil-vs-unset
+  semantics, macro-time collision/type validation, ActiveModel::Type casting
+  (`:decimal` stored as string, `:datetime` ISO8601 UTC microseconds).
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 
@@ -132,6 +139,14 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (prev cursors + `X-Prev-Cursor`/`X-Has-Prev`), `order_presets:`/`default_preset:`/
   `order_param:` (allow-listed client ordering; `InvalidOrderPreset` → 400),
   `predicate: :auto` (row-value tuple WHERE on PG/MySQL/SQLite, else OR-expansion).
+- **`Deprecatable`** — standards-based endpoint deprecation. `deprecate_actions *actions,
+  deprecated_at:, sunset_at:, link:, successor:, after_sunset:, header_format:, notify:`
+  (repeatable; no actions = catch-all; LAST matching rule wins). Emits RFC 9745
+  `Deprecation` (`@<unix>`, or `:legacy` `true`), RFC 8594 `Sunset` (httpdate),
+  RFC 8288 `Link` rels (appended, never clobbered); `after_sunset: :gone` → 410
+  (`endpoint_sunset`, inclusive boundary, headers still emitted, Respondable-aware);
+  instruments `deprecated_endpoint.concerns_on_rails` via `on_deprecated_access`
+  override point; `deprecation_active?`/`sunset_passed?` predicates.
 
 ### Support modules (`lib/concerns_on_rails/support/`)
 
