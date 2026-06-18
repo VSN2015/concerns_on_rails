@@ -1,4 +1,20 @@
+<div align="center">
+
 # 🧩 ConcernsOnRails
+
+**Plug-and-play ActiveSupport concerns for Rails models &amp; controllers.**<br/>
+One `include`, one declarative macro — done.
+
+[![Gem Version](https://img.shields.io/gem/v/concerns_on_rails?logo=rubygems&logoColor=white&color=CC342D)](https://rubygems.org/gems/concerns_on_rails)
+[![Downloads](https://img.shields.io/gem/dt/concerns_on_rails?color=1f6feb)](https://rubygems.org/gems/concerns_on_rails)
+[![CI](https://github.com/VSN2015/concerns_on_rails/actions/workflows/ci.yml/badge.svg)](https://github.com/VSN2015/concerns_on_rails/actions/workflows/ci.yml)
+[![Ruby](https://img.shields.io/badge/ruby-%3E%3D%203.2-CC342D?logo=ruby&logoColor=white)](https://www.ruby-lang.org)
+[![Rails](https://img.shields.io/badge/rails-5.0--8.x-CC0000?logo=rubyonrails&logoColor=white)](https://rubyonrails.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-3fb950.svg)](#-license)
+
+🧩 **23 model concerns** &nbsp;·&nbsp; 🎮 **16 controller concerns** &nbsp;·&nbsp; 🪶 **lean deps** &nbsp;·&nbsp; ✅ **schema-validated**
+
+</div>
 
 > 🇻🇳 **Hoàng Sa and Trường Sa belong to Việt Nam.**
 
@@ -20,59 +36,62 @@ Article.published.without_deleted.find("hello-world")
 
 ## 📚 Table of Contents
 
-- [Why this gem?](#-why-this-gem)
-- [Installation](#-installation)
-- [Compatibility](#-compatibility)
-- [Quick Start](#-quick-start)
-- **Model concerns**
-  - [Sluggable](#-sluggable) — URL-friendly slugs
-  - [Sortable](#-sortable) — list ordering via `acts_as_list`
-  - [Publishable](#-publishable) — `published_at` timestamp publishing
-  - [SoftDeletable](#-softdeletable) — soft delete with scopes & hooks
-  - [Hashable](#-hashable) — auto-generate tokens / UUIDs / codes
-  - [Schedulable](#-schedulable) — `starts_at` / `ends_at` time windows
-  - [Expirable](#-expirable) — single-timestamp expiry
-  - [Normalizable](#-normalizable) — attribute normalization (`:email`, `:phone`, …)
-  - [Searchable](#-searchable) — LIKE/ILIKE search across configured columns
-  - [Activatable](#-activatable) — boolean active/inactive toggle
-  - [Tokenizable](#-tokenizable) — security tokens with timing-safe lookup
-  - [Sequenceable](#-sequenceable) — ordered, human-friendly reference numbers
-  - [Stateable](#-stateable) — lightweight string-backed state machine
-  - [Addressable](#-addressable) — postal address normalization + format validation
-  - [Taggable](#-taggable) — lightweight tagging over a single column
-  - [Sanitizable](#-sanitizable) — opt-in HTML sanitization (XSS defense-in-depth)
-  - [Maskable](#-maskable) — non-destructive display masking of sensitive fields
-  - [Monetizable](#-monetizable) — integer-cents money columns (BigDecimal)
-  - [Auditable](#-auditable) — single-column change history ("paper_trail-lite")
-  - [Lockable](#-lockable) — failed-attempt tracking + account lockout
-  - [Aliasable](#-aliasable) — full read/write/query aliases for associations
-  - [Storable](#-storable) — typed accessors over one JSON settings column ("store_attribute-lite")
-- **Controller concerns**
-  - [Paginatable](#-paginatable) — offset pagination with headers
-  - [CursorPaginatable](#-cursorpaginatable) — cursor (keyset) pagination with headers
-  - [Filterable](#-filterable) — declarative URL-param filters
-  - [Sortable (controller)](#-sortable-controller) — URL-param ordering with allow-list
-  - [Respondable](#-respondable) — standardized JSON envelopes
-  - [ErrorHandleable](#-errorhandleable) — JSON `rescue_from` handlers for common controller errors
-  - [Includable](#-includable) — whitelisted association sideloading + sparse fieldsets
-  - [SecureHeadable](#-secureheadable) — security response headers + native CSP DSL
-  - [Localizable](#-localizable) — per-request locale from params / Accept-Language
-  - [Authorizable](#-authorizable) — per-action 403 authorization gate (block-based)
-  - [Throttleable](#-throttleable) — rate limiting with 429 + `X-RateLimit-*` headers
-  - [Timezoneable](#-timezoneable) — per-request `Time.zone` from params / header / cookie
-  - [Idempotentable](#-idempotentable) — `Idempotency-Key` request replay (409 on concurrent duplicates)
-  - [WebhookVerifiable](#-webhookverifiable) — HMAC verification for inbound webhooks (Stripe/GitHub/Shopify)
-  - [Deprecatable](#-deprecatable) — RFC `Deprecation`/`Sunset` headers + 410 sunset enforcement
-- [Module paths & namespacing](#-module-paths--namespacing)
-- [Development](#-development)
-- [Contributing](#-contributing)
-- [License](#-license)
+[Why this gem?](#-why-this-gem) &nbsp;·&nbsp; [Installation](#-installation) &nbsp;·&nbsp; [Compatibility](#-compatibility) &nbsp;·&nbsp; [Quick Start](#-quick-start) &nbsp;·&nbsp; [Module paths](#-module-paths--namespacing) &nbsp;·&nbsp; [Development](#-development) &nbsp;·&nbsp; [Contributing](#-contributing) &nbsp;·&nbsp; [License](#-license)
+
+### 🧱 Model concerns
+
+| Concern | What it does |
+|---------|--------------|
+| [📝 Sluggable](#-sluggable) | URL-friendly slugs |
+| [🔢 Sortable](#-sortable) | List ordering via `acts_as_list` |
+| [📤 Publishable](#-publishable) | `published_at` timestamp publishing |
+| [❌ SoftDeletable](#-softdeletable) | Soft delete with scopes &amp; hooks |
+| [🔐 Hashable](#-hashable) | Auto-generate tokens / UUIDs / codes |
+| [🗓️ Schedulable](#-schedulable) | `starts_at` / `ends_at` time windows |
+| [⏳ Expirable](#-expirable) | Single-timestamp expiry |
+| [✨ Normalizable](#-normalizable) | Attribute normalization (`:email`, `:phone`, …) |
+| [🔍 Searchable](#-searchable) | LIKE / ILIKE search across columns |
+| [✅ Activatable](#-activatable) | Boolean active / inactive toggle |
+| [🔑 Tokenizable](#-tokenizable) | Security tokens with timing-safe lookup |
+| [🧾 Sequenceable](#-sequenceable) | Ordered, human-friendly reference numbers |
+| [🔄 Stateable](#-stateable) | Lightweight string-backed state machine |
+| [🏠 Addressable](#-addressable) | Postal address normalization + validation |
+| [🏷️ Taggable](#-taggable) | Lightweight tagging over a single column |
+| [🧼 Sanitizable](#-sanitizable) | Opt-in HTML sanitization (XSS defense) |
+| [🙈 Maskable](#-maskable) | Non-destructive display masking |
+| [💰 Monetizable](#-monetizable) | Integer-cents money columns (BigDecimal) |
+| [📜 Auditable](#-auditable) | Single-column change history ("paper_trail-lite") |
+| [🔐 Lockable](#-lockable) | Failed-attempt tracking + account lockout |
+| [🪞 Aliasable](#-aliasable) | Full read / write / query association aliases |
+| [⚙️ Storable](#-storable) | Typed accessors over one JSON column ("store_attribute-lite") |
+| [🧮 CounterCacheable](#-countercacheable) | Conditional denormalized counters ("counter_culture-lite") |
+
+### 🎮 Controller concerns
+
+| Concern | What it does |
+|---------|--------------|
+| [📄 Paginatable](#-paginatable) | Offset pagination with headers |
+| [🧭 CursorPaginatable](#-cursorpaginatable) | Cursor (keyset) pagination with headers |
+| [🔎 Filterable](#-filterable) | Declarative URL-param filters |
+| [↕️ Sortable (controller)](#-sortable-controller) | URL-param ordering with allow-list |
+| [📦 Respondable](#-respondable) | Standardized JSON envelopes |
+| [🛟 ErrorHandleable](#-errorhandleable) | JSON `rescue_from` handlers |
+| [🔗 Includable](#-includable) | Association sideloading + sparse fieldsets |
+| [🛡️ SecureHeadable](#-secureheadable) | Security response headers + native CSP DSL |
+| [🌐 Localizable](#-localizable) | Per-request locale from params / `Accept-Language` |
+| [🔒 Authorizable](#-authorizable) | Per-action 403 authorization gate |
+| [🚦 Throttleable](#-throttleable) | Rate limiting (429 + `X-RateLimit-*`) |
+| [🕒 Timezoneable](#-timezoneable) | Per-request `Time.zone` from params / header / cookie |
+| [🔁 Idempotentable](#-idempotentable) | `Idempotency-Key` request replay |
+| [🪝 WebhookVerifiable](#-webhookverifiable) | HMAC verification for inbound webhooks |
+| [🌅 Deprecatable](#-deprecatable) | RFC `Deprecation` / `Sunset` headers + 410 |
+| [🗄️ Cacheable](#-cacheable) | HTTP conditional GET (ETag / 304) + `Cache-Control` |
 
 ---
 
 ## ✨ Why this gem?
 
-- **Twenty-one model concerns + fourteen controller concerns**, all production-ready
+- **Twenty-three model concerns + sixteen controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -1077,6 +1096,39 @@ account.flag_beta                # affixed accessor
 
 ---
 
+## 🧮 CounterCacheable
+
+Conditional, denormalized association counters ("counter_culture-lite"). Rails' built-in `belongs_to ..., counter_cache: true` maintains exactly one column counting *every* child — it can't keep an `approved_comments_count` next to a `comments_count`, and has no way to repair drift. Declared on the **child**, this keeps one or many parent columns in sync, each with an optional condition.
+
+```ruby
+class Comment < ApplicationRecord
+  include ConcernsOnRails::CounterCacheable
+
+  belongs_to :post                       # declare the belongs_to FIRST
+  belongs_to :author, class_name: "User"
+
+  counter_cacheable_by :post                                          # posts.comments_count
+  counter_cacheable_by :post, count: :approved_comments_count,
+                              if: -> { approved? }                    # conditional
+  counter_cacheable_by :author, count: :posts_count, touch: true
+end
+
+post.comments_count                # maintained on create / destroy / update
+Comment.recount_counter_caches!    # repair drift / backfill every counter
+```
+
+Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose.
+
+**Options** (`counter_cacheable_by association, …`, repeatable): `count:` (the parent column; default `"<table_name>_count"`), `if:` (a callable evaluated against the record — counts only when truthy; the previous state is reconstructed for updates), `touch:` (`false`; also bump the parent's `updated_at`).
+
+**Notes**
+- The `belongs_to` must be declared **before** the macro (the reflection is validated at declaration). Polymorphic associations are not supported.
+- Don't also set native `counter_cache: true` on the same column — both would fire and double-count.
+- Counters track the **persisted** record; writes that skip callbacks (`update_column(s)`, `update_all`, `delete`) are not tracked — run `recount_counter_caches!` to reconcile. It rewrites every parent (portable across adapters, but O(n) for conditional counters) — a maintenance operation, run it offline.
+- Reach for [`counter_culture`](https://github.com/magnusvk/counter_culture) when you need multi-level rollups, delta columns, or after-commit execution.
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -1572,6 +1624,43 @@ end
 - Each hit instruments `deprecated_endpoint.concerns_on_rails` (`ActiveSupport::Notifications`) with `{controller:, action:, deprecated_at:, sunset_at:}` — subscribe to count stragglers *before* flipping `after_sunset: :gone`. Override `on_deprecated_access(rule)` to replace the default instrumentation.
 - 410 bodies delegate to `Respondable`'s `render_error` when present (inline JSON envelope otherwise). `skip_before_action :apply_api_deprecations` opts an action out; `deprecation_active?` / `sunset_passed?` are available for serializers/response bodies.
 - Flipping `:gone` is a deliberate, customer-facing cut-off — coordinate it with `notify:`-driven outreach, and mind CDN-cached responses that may outlive the headers.
+
+---
+
+## 🗄️ Cacheable
+
+HTTP conditional GET + declarative `Cache-Control` ("fresh_when/stale?-lite" for JSON APIs). The method names are deliberately distinct from Rails' `ActionController::ConditionalGet`, so including it never shadows `fresh_when` / `stale?` / `expires_in`.
+
+```ruby
+class Api::ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Cacheable
+
+  http_cache_actions :index, :show, max_age: 5.minutes,
+                     visibility: :public, vary: "Accept"
+
+  def show
+    @article = Article.find(params[:id])
+    return unless stale_resource?(@article)   # 304 + halt when the client copy is fresh
+    render json: @article
+  end
+end
+
+# A matching response then carries:
+#   Cache-Control: public, max-age=300
+#   Vary: Accept
+#   ETag: W/"…"
+#   Last-Modified: Thu, 01 Jan 2026 12:00:00 GMT
+```
+
+`http_cache_actions` declares the `Cache-Control`/`Vary` policy (emitted via `after_action` — it rides a 304 too); `stale_resource?` sets the ETag/Last-Modified validators and, on a safe request whose precondition matches, sends `304 Not Modified` and returns `false`.
+
+**Options** (`http_cache_actions *actions, …`, repeatable; no actions = catch-all; **last matching rule wins**): `visibility:` (`:private` default | `:public`), `max_age:` (Integer/Duration), `must_revalidate:`, `no_store:` (overrides everything → bare `no-store`), `stale_while_revalidate:`, `vary:` (String or Array, appended to any existing `Vary`).
+
+**Conditional-GET correctness**
+- Weak ETag `W/"<md5>"` from the resource's cache key (collections fold their members' keys + size); `If-None-Match` is matched with **weak comparison**, honours `*`, and accepts a comma-separated list.
+- `Last-Modified` is an IMF-fixdate via `Time#httpdate` (not hand-rolled ISO 8601); `If-Modified-Since` is compared at whole-second granularity.
+- When both are sent, `If-None-Match` wins and the date is ignored (RFC 7232 §3.3); a 304 is only sent for safe (GET/HEAD) requests, and still carries the validators and the `Cache-Control` policy.
+- Override `cache_etag_for` / `cache_last_modified_for` to customise validator derivation. For write-side preconditions (`If-Match` → 412), reach for Rails' own helpers.
 
 ---
 

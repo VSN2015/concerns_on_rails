@@ -1,7 +1,7 @@
 /* Concern manifest — drives the sidebar nav, home cards, search, and source links.
    `tags` are refined from the doc-generation workflow; everything else is static metadata. */
 window.COR_META = {
-  version: "1.19.0",
+  version: "1.20.0",
   repo: "https://github.com/VSN2015/concerns_on_rails",
   branch: "master",
   rubygems: "https://rubygems.org/gems/concerns_on_rails"
@@ -31,6 +31,7 @@ window.CONCERNS = [
   { slug: "lockable",       name: "Lockable",       category: "model", icon: "🔐", tagline: "Failed-attempt tracking + account lockout", include: "ConcernsOnRails::Lockable",       src: "lib/concerns_on_rails/models/lockable.rb",       tags: ["lockout","brute force","failed attempts","devise","authentication","lockable","security","unlock_in"] },
   { slug: "aliasable",      name: "Aliasable",      category: "model", icon: "🪞", tagline: "Full read/write/query aliases for associations", include: "ConcernsOnRails::Aliasable",  src: "lib/concerns_on_rails/models/aliasable.rb",      tags: ["alias","association","rename","reflection","joins","refactoring","aliasable","alias_association"] },
   { slug: "storable",       name: "Storable",       category: "model", icon: "⚙️", tagline: "Typed accessors over one JSON settings column", include: "ConcernsOnRails::Storable",   src: "lib/concerns_on_rails/models/storable.rb",       tags: ["settings","preferences","json","store_accessor","typed","defaults","storable","store-attribute"] },
+  { slug: "counter-cacheable", name: "CounterCacheable", category: "model", icon: "🧮", tagline: "Conditional denormalized association counters", include: "ConcernsOnRails::CounterCacheable", src: "lib/concerns_on_rails/models/counter_cacheable.rb", tags: ["counter cache","counter_culture","denormalized","comments_count","conditional","countercacheable","update_counters","association"] },
 
   // ---- Controller concerns ----
   { slug: "paginatable",        name: "Paginatable",          category: "controller", icon: "📄", tagline: "Offset pagination with headers",             include: "ConcernsOnRails::Controllers::Paginatable",     src: "lib/concerns_on_rails/controllers/paginatable.rb",     tags: ["pagination","page","per_page","offset","headers","paginatable","controller-concern","per-page"] },
@@ -47,5 +48,6 @@ window.CONCERNS = [
   { slug: "timezoneable",       name: "Timezoneable",         category: "controller", icon: "🕒", tagline: "Per-request Time.zone from params / header", include: "ConcernsOnRails::Controllers::Timezoneable",    src: "lib/concerns_on_rails/controllers/timezoneable.rb",    tags: ["timezone","time.zone","per-request","params","cookie","timezoneable","time-zone","around_action"] },
   { slug: "idempotentable",     name: "Idempotentable",       category: "controller", icon: "🔁", tagline: "Idempotency-Key replay for mutating endpoints", include: "ConcernsOnRails::Controllers::Idempotentable", src: "lib/concerns_on_rails/controllers/idempotentable.rb",  tags: ["idempotency","idempotency-key","retry","replay","409","stripe","idempotentable","around_action"] },
   { slug: "webhook-verifiable", name: "WebhookVerifiable",    category: "controller", icon: "🪝", tagline: "HMAC verification for inbound webhooks",     include: "ConcernsOnRails::Controllers::WebhookVerifiable", src: "lib/concerns_on_rails/controllers/webhook_verifiable.rb", tags: ["webhook","hmac","signature","stripe","github","shopify","webhookverifiable","security"] },
-  { slug: "deprecatable",       name: "Deprecatable",         category: "controller", icon: "🌅", tagline: "RFC Deprecation/Sunset headers + 410 enforcement", include: "ConcernsOnRails::Controllers::Deprecatable", src: "lib/concerns_on_rails/controllers/deprecatable.rb", tags: ["deprecation","sunset","rfc-9745","rfc-8594","api-versioning","410-gone","deprecatable","lifecycle"] }
+  { slug: "deprecatable",       name: "Deprecatable",         category: "controller", icon: "🌅", tagline: "RFC Deprecation/Sunset headers + 410 enforcement", include: "ConcernsOnRails::Controllers::Deprecatable", src: "lib/concerns_on_rails/controllers/deprecatable.rb", tags: ["deprecation","sunset","rfc-9745","rfc-8594","api-versioning","410-gone","deprecatable","lifecycle"] },
+  { slug: "cacheable", name: "Cacheable", category: "controller", icon: "🗄️", tagline: "HTTP conditional GET (ETag / 304) + Cache-Control", include: "ConcernsOnRails::Controllers::Cacheable", src: "lib/concerns_on_rails/controllers/cacheable.rb", tags: ["http cache","etag","last-modified","304","cache-control","conditional-get","cacheable","stale"] }
 ];

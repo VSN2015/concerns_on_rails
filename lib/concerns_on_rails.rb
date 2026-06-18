@@ -51,6 +51,7 @@ require "concerns_on_rails/models/auditable"
 require "concerns_on_rails/models/lockable"
 require "concerns_on_rails/models/aliasable"
 require "concerns_on_rails/models/storable"
+require "concerns_on_rails/models/counter_cacheable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"
@@ -68,6 +69,7 @@ require "concerns_on_rails/controllers/idempotentable"
 require "concerns_on_rails/controllers/webhook_verifiable"
 require "concerns_on_rails/controllers/cursor_paginatable"
 require "concerns_on_rails/controllers/deprecatable"
+require "concerns_on_rails/controllers/cacheable"
 
 # Backwards compatibility (top-level aliases for pre-1.6 module paths)
 require "concerns_on_rails/legacy_aliases"
