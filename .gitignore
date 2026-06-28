@@ -11,3 +11,6 @@
 .rspec_status
 .byebug_history
 *.gem
+
+# gem-docs-review skill: rebuildable local doc cache
+/.gem-docs-cache/
