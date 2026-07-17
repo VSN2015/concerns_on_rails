@@ -25,4 +25,5 @@ module ConcernsOnRails
   Aliasable     = Models::Aliasable
   Storable      = Models::Storable
   CounterCacheable = Models::CounterCacheable
+  Encryptable = Models::Encryptable
 end

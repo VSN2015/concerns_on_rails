@@ -17,7 +17,25 @@ module ConcernsOnRails
   def self.deprecator
     @deprecator ||= ActiveSupport::Deprecation.new("2.0", "concerns_on_rails")
   end
+
+  # Gem-wide encryption configuration backing Models::Encryptable. Memoized like
+  # `deprecator`; the host app supplies the key (see ConcernsOnRails::Encryption):
+  #
+  #   ConcernsOnRails.configure_encryption do |c|
+  #     c.key = -> { Rails.application.credentials.dig(:encryption, :key) }
+  #   end
+  def self.encryption
+    @encryption ||= Encryption::Config.new
+  end
+
+  def self.configure_encryption
+    yield encryption if block_given?
+    encryption
+  end
 end
+
+# Encryption config + error types (loaded before the support codec that uses them)
+require "concerns_on_rails/encryption"
 
 # Shared internal helpers (must load before the concerns that use them)
 require "concerns_on_rails/support/column_guard"
@@ -27,6 +45,7 @@ require "concerns_on_rails/support/sequence_calculator"
 require "concerns_on_rails/support/html_sanitizers"
 require "concerns_on_rails/support/masker"
 require "concerns_on_rails/support/money"
+require "concerns_on_rails/support/encryptor"
 
 # Model concerns
 require "concerns_on_rails/models/sluggable"
@@ -52,6 +71,7 @@ require "concerns_on_rails/models/lockable"
 require "concerns_on_rails/models/aliasable"
 require "concerns_on_rails/models/storable"
 require "concerns_on_rails/models/counter_cacheable"
+require "concerns_on_rails/models/encryptable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"

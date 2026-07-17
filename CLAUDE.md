@@ -111,6 +111,18 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `serialize`; native-json and host-serialized columns auto-detected), nil-vs-unset
   semantics, macro-time collision/type validation, ActiveModel::Type casting
   (`:decimal` stored as string, `:datetime` ISO8601 UTC microseconds).
+- **`Encryptable`** — transparent per-field encryption for sensitive columns
+  (AES-256-GCM, stdlib OpenSSL, no deps) via a custom `ActiveModel::Type` on the
+  declared column, so reads/writes stay plaintext and siblings compose.
+  `encryptable :ssn, :dob, type:, key:` (repeatable; column stores a versioned
+  Base64 envelope — use `text`). Immutable value type ⇒ dirty tracking on
+  plaintext (random IV never re-encrypts unchanged data); `type:` reuses the
+  Storable casters; keys from `ConcernsOnRails.configure_encryption` / per-field
+  `key:` (PBKDF2, lazy Proc), missing key raises at first use. `<field>_ciphertext`
+  / `<field>_encrypted?` readers; wrong-key/tamper/malformed → `DecryptionError`.
+  Normalizes-before-encrypt and masks-decrypted for free; RAISES if a field is
+  also `auditable_by`. Non-deterministic ⇒ unsearchable (deterministic queries +
+  rotation planned; envelope reserves the bytes).
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 
