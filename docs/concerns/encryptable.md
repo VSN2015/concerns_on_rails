@@ -52,7 +52,7 @@ end
 
 ## Configuration
 
-### `encryptable(*fields, type: :string, key: nil)`
+### `encryptable(*fields, type: :string, key: nil, blind_index: nil)`
 
 Repeatable — each call declares more encrypted fields. Rules accumulate (reassigned, never mutated, so subclasses inherit). All configuration errors raise `ArgumentError` at declaration time.
 
@@ -61,6 +61,7 @@ Repeatable — each call declares more encrypted fields. Rules accumulate (reass
 | `*fields` | `Symbol…` | — (required) | One or more `text`/`binary` columns to encrypt. |
 | `type:` | `Symbol` | `:string` | Casts the decrypted value: `:string`, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime` (the Storable caster set; `:decimal` precision-safe, `:datetime` UTC microseconds). |
 | `key:` | `String` / `Proc` / `nil` | `nil` | Per-field key override (raw / hex / passphrase, or a lazy Proc). Falls back to the gem-level `ConcernsOnRails.encryption` key. |
+| `blind_index:` | `true` / `Hash` / `nil` | `nil` | Maintain a deterministic fingerprint column for exact-match lookups. `true` uses `<field>_bidx`; a Hash accepts `column:` and `expression:` (a callable normalizer applied on write and query). See below. |
 
 ### Gem-level configuration — `ConcernsOnRails.encryption`
 
@@ -77,12 +78,61 @@ Repeatable — each call declares more encrypted fields. Rules accumulate (reass
 - `field_ciphertext` — the raw stored envelope once persisted (for migrations, debugging, and asserting no plaintext is at rest).
 - `field_encrypted?` — whether a value is currently stored.
 
+## Querying encrypted fields (blind index)
+
+Encrypted columns are **not** directly queryable — the ciphertext is non-deterministic (a fresh random IV per write), so `where(email: "a@b.com")` re-encrypts the value with a *different* IV and matches nothing. To look up records by an encrypted value, opt into a **blind index**: a deterministic keyed HMAC of the value, stored in a companion column and indexed.
+
+```ruby
+# migration
+add_column :users, :email_bidx, :string
+add_index  :users, :email_bidx
+
+class User < ApplicationRecord
+  include ConcernsOnRails::Encryptable
+
+  # case/space-insensitive lookups: normalize on both write and query
+  encryptable :email, blind_index: { expression: ->(v) { v.to_s.downcase.strip } }
+end
+
+user = User.create!(email: "Alice@Example.com")
+
+User.find_by_email("alice@example.com")   # => #<User ...>   (exact-match, indexed)
+User.where_email("alice@example.com")     # => ActiveRecord::Relation
+User.email_fingerprint("alice@example.com") # => "e7f3…"  (the stored digest)
+```
+
+`where_<field>` returns a plain Relation, so every standard composition works:
+
+```ruby
+# chaining with scopes and further conditions (either order)
+User.active.where_email("alice@example.com")
+User.where_email("alice@example.com").where(active: true)
+
+# multiple values -> one IN query
+User.where_email("alice@example.com", "bob@example.com")
+User.where_email(emails_array)
+
+# OR / NOT
+User.where_email("a@x.com").or(User.where_email("b@x.com"))
+User.where.not(email_bidx: User.email_fingerprint("a@x.com"))
+
+# joins from another model: merge the relation, or target the bidx column
+Order.joins(:user).merge(User.where_email("alice@example.com"))
+Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@example.com") })
+```
+
+- `blind_index: true` uses a `<field>_bidx` column and no normalization; pass a Hash to set `column:` and/or `expression:`.
+- The fingerprint's HMAC key is **domain-separated** from the encryption key (derived via a labeled HMAC), so the two are independent even though both come from your configured key.
+- The index is recomputed automatically in `before_save`, but only when the field actually changes; a `nil` value yields a `nil` fingerprint.
+- **Only exact match** is possible — no `LIKE`, ranges, or `ORDER BY` on the value. A deterministic index **leaks equality** (identical values share a digest), so use it for lookup keys, not low-entropy fields.
+- Backfilling existing rows: re-save them (`User.find_each(&:save!)`) so the index populates.
+
 ## Composition with other concerns
 
 - **Normalizable** — normalization runs `before_validation` on the plaintext; encryption happens later, at the DB-serialization boundary. So the stored ciphertext is always of the *normalized* value, regardless of `include` order.
 - **Maskable** — `masked_<field>` masks the *decrypted* value; the column stays ciphertext. Order-independent.
 - **Auditable** — auditing an encrypted field would persist its plaintext into the audit column, so declaring a field with **both** `encryptable` and `auditable_by` **raises**. Audit a non-sensitive companion column instead.
-- **Searchable / Filterable** — encrypted columns are **not** searchable: non-deterministic ciphertext (random IV) means the same plaintext never produces the same bytes, so `where(:ssn)`, `LIKE`, and prefix matching cannot work.
+- **Searchable / Filterable** — encrypted columns are **not** searchable: non-deterministic ciphertext (random IV) means the same plaintext never produces the same bytes, so `where(:ssn)`, `LIKE`, and prefix matching cannot work. For exact-match lookups, add a [blind index](#querying-encrypted-fields-blind-index) and query the `<field>_bidx` column (via `find_by_<field>` / `where_<field>`).
 
 ## Security notes
 

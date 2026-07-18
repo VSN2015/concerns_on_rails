@@ -19,8 +19,9 @@ module ConcernsOnRails
     #   class Patient < ApplicationRecord
     #     include ConcernsOnRails::Models::Encryptable
     #
-    #     encryptable :ssn, :notes          # transparent string encryption
-    #     encryptable :dob, type: :date     # decrypts back to a Date
+    #     encryptable :ssn, :notes              # transparent string encryption
+    #     encryptable :dob, type: :date         # decrypts back to a Date
+    #     encryptable :email, blind_index: true # + a queryable fingerprint column
     #   end
     #
     #   p = Patient.create!(ssn: "123-45-6789", dob: Date.new(1990, 1, 1))
@@ -28,22 +29,34 @@ module ConcernsOnRails
     #   p.reload.dob          # => Wed, 01 Jan 1990
     #   p.ssn_ciphertext      # => "AQEA..." (Base64 envelope; no plaintext at rest)
     #   p.ssn_encrypted?      # => true
+    #   Patient.find_by_email("a@b.com")  # exact-match lookup via the blind index
     #
     # `type:` casts the decrypted value (reuses the Storable caster set:
     # :string default, :integer, :float, :decimal, :boolean, :date, :datetime).
     # `key:` overrides the gem-level key per field (a String or a Proc).
     #
+    # BLIND INDEX (`blind_index: true` or a Hash): because encryption is
+    # non-deterministic, encrypted columns are not directly queryable. Opt into
+    # a blind index and the concern maintains a deterministic keyed HMAC of the
+    # value in a companion `<field>_bidx` column (override with `column:`), and
+    # generates `find_by_<field>` / `where_<field>` / `<field>_fingerprint`
+    # class methods for exact-match lookups. Pass `expression:` (a callable) to
+    # normalize before hashing (e.g. `->(v) { v.to_s.downcase }`) — it is applied
+    # on BOTH write and query so they stay symmetric. The index leaks equality
+    # (identical values share a digest); use it only for lookup keys.
+    #
     # Notes:
     #   * The declared column must be `text` (or binary): it stores an opaque
     #     Base64 envelope, not the logical type. `nil` stays `nil` (never an
-    #     encrypted blank).
-    #   * Non-deterministic by design (random IV) — the same plaintext yields
-    #     different ciphertext every write, so encrypted columns are NOT
-    #     queryable/searchable (`where(:ssn)` matches ciphertext). Deterministic,
-    #     queryable fields and multi-key rotation are planned follow-ups; the
-    #     envelope already reserves the bytes for them.
+    #     encrypted blank). A blind-index column is `string`/`text` (a 64-char
+    #     hex digest) — add an index on it.
+    #   * The ciphertext itself is non-deterministic (random IV) — the same
+    #     plaintext yields different ciphertext every write, so `where(:ssn)`
+    #     matches nothing. Query through a blind index instead. Presence/NULL
+    #     checks (`where.not(ssn: nil)`) work normally.
     #   * Never `update_column`/`update_columns` an encrypted field — those
-    #     bypass the type and write raw plaintext to the column.
+    #     bypass the type and write raw plaintext to the column (and skip the
+    #     blind-index refresh).
     #   * Auditing an encrypted field would persist its plaintext to the audit
     #     column, so declaring a field with BOTH `encryptable` and `auditable_by`
     #     raises. Maskable masks the decrypted value; Normalizable normalizes the
@@ -66,11 +79,33 @@ module ConcernsOnRails
       }.freeze
 
       included do
-        # { field => { type:, key: } }. Subclasses inherit and may add fields.
+        # { field => { type:, key:, blind_index: } }. Subclasses inherit and may
+        # add fields.
         class_attribute :encryptable_rules, instance_accessor: false, default: {}
         # Backstop for the reverse declaration order (Auditable added AFTER
         # Encryptable): the macro-time guard can't see a not-yet-declared audit.
         before_save :encryptable_guard_audited_plaintext!
+        before_save :encryptable_refresh_blind_indexes
+      end
+
+      # Deterministic blind-index fingerprint for a field's value, applying the
+      # field's normalization `expression:`. Shared by the generated class
+      # finders and the before_save refresh. Returns nil for a nil value.
+      def self.blind_fingerprint(rule, value)
+        bi = rule[:blind_index]
+        return nil unless bi
+        return nil if value.nil?
+
+        normalized = bi[:expression] ? bi[:expression].call(value) : value
+        return nil if normalized.nil?
+
+        config = ConcernsOnRails.encryption
+        material = config.resolve_material(rule[:key])
+        return normalized.to_s if material == ConcernsOnRails::Encryption::PASSTHROUGH
+
+        ConcernsOnRails::Support::Encryptor.blind_index(
+          normalized, key: material, salt: config.key_derivation_salt
+        )
       end
 
       # Custom type registered on each encrypted column. cast handles user input
@@ -79,8 +114,6 @@ module ConcernsOnRails
       # so dirty tracking compares the cast plaintext — a re-save of unchanged
       # data is not dirtied by GCM's random IV.
       class EncryptedType < ActiveModel::Type::Value
-        PASSTHROUGH = :__concerns_on_rails_passthrough__
-
         def initialize(type: :string, key: nil)
           @type = type
           @key = key
@@ -168,8 +201,8 @@ module ConcernsOnRails
 
         def write_ciphertext(plaintext)
           config = ConcernsOnRails.encryption
-          material = resolve_key_material(config)
-          return plaintext if material == PASSTHROUGH
+          material = config.resolve_material(@key)
+          return plaintext if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
           ConcernsOnRails::Support::Encryptor.encrypt(
             plaintext, key: material, salt: config.key_derivation_salt
@@ -178,8 +211,8 @@ module ConcernsOnRails
 
         def read_plaintext(stored)
           config = ConcernsOnRails.encryption
-          material = resolve_key_material(config)
-          return stored if material == PASSTHROUGH
+          material = config.resolve_material(@key)
+          return stored if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
           ConcernsOnRails::Support::Encryptor.decrypt(
             stored, key: material, salt: config.key_derivation_salt
@@ -189,47 +222,52 @@ module ConcernsOnRails
 
           nil
         end
-
-        # Per-field key: wins; else the gem-level key; else raise (or the
-        # passthrough sentinel in the dev/test escape-hatch mode).
-        def resolve_key_material(config)
-          material = @key.respond_to?(:call) ? @key.call : @key
-          material = material.to_s unless material.nil?
-          return material if material && !material.empty?
-
-          global = config.key_material
-          return global unless global.nil?
-          return PASSTHROUGH if config.on_missing_key == :passthrough
-
-          raise ConcernsOnRails::Encryption::MissingKeyError,
-                "#{LABEL}: no encryption key configured. Set " \
-                "ConcernsOnRails.configure_encryption { |c| c.key = ... } or pass key: to the macro."
-        end
       end
 
       module ClassMethods
         include ConcernsOnRails::Support::ColumnGuard
 
         # Declare one or more encrypted fields. Repeatable; per-field options.
-        def encryptable(*fields, type: :string, key: nil)
-          raise ArgumentError, "#{LABEL}: at least one field is required" if fields.empty?
-
+        def encryptable(*fields, type: :string, key: nil, blind_index: nil)
           type = type.to_sym
-          raise ArgumentError, "#{LABEL}: unknown type ':#{type}' (valid: #{VALID_TYPES.join(', ')})" unless VALID_TYPES.include?(type)
-
+          encryptable_validate!(fields, type, blind_index)
           ensure_columns!(LABEL, *fields)
 
           fields.each do |field|
             field = field.to_sym
             encryptable_guard_auditable!(field)
-            self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key })
+            bi = encryptable_normalize_blind_index(field, blind_index)
+            ensure_columns!(LABEL, bi[:column]) if bi
+            self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
             attribute field, EncryptedType.new(type: type, key: key)
             encryptable_define_helpers(field)
+            encryptable_define_blind_index(field, bi) if bi
             encryptable_register_filter_parameter(field)
           end
         end
 
         private
+
+        def encryptable_validate!(fields, type, blind_index)
+          raise ArgumentError, "#{LABEL}: at least one field is required" if fields.empty?
+          raise ArgumentError, "#{LABEL}: unknown type ':#{type}' (valid: #{VALID_TYPES.join(', ')})" unless VALID_TYPES.include?(type)
+          return unless blind_index.is_a?(Hash) && blind_index[:column] && fields.size > 1
+
+          raise ArgumentError, "#{LABEL}: blind_index column: cannot be combined with multiple fields"
+        end
+
+        # nil/false -> no index; true -> defaults; Hash -> { column:, expression: }.
+        def encryptable_normalize_blind_index(field, option)
+          return nil unless option
+
+          option = {} if option == true
+          raise ArgumentError, "#{LABEL}: blind_index: must be true or a Hash" unless option.is_a?(Hash)
+
+          expression = option[:expression]
+          raise ArgumentError, "#{LABEL}: blind_index expression: must be callable" if expression && !expression.respond_to?(:call)
+
+          { column: (option[:column] || "#{field}_bidx").to_sym, expression: expression }
+        end
 
         def encryptable_define_helpers(field)
           # Raw stored value: the DB ciphertext once persisted (before the type
@@ -237,6 +275,26 @@ module ConcernsOnRails
           # plaintext is at rest.
           define_method("#{field}_ciphertext") { read_attribute_before_type_cast(field) }
           define_method("#{field}_encrypted?") { read_attribute_before_type_cast(field).present? }
+        end
+
+        # find_by_<field> / where_<field> / <field>_fingerprint for equality
+        # lookups through the deterministic blind-index column.
+        def encryptable_define_blind_index(field, blind_index)
+          column = blind_index[:column]
+
+          define_singleton_method("#{field}_fingerprint") do |value|
+            ConcernsOnRails::Models::Encryptable.blind_fingerprint(encryptable_rules.fetch(field), value)
+          end
+          # Accepts one value, several, or an array — multiple values become an
+          # IN query on the fingerprint column. Returns a Relation, so it chains
+          # with scopes, `.or`, `.merge` (for joins), and further `.where`.
+          define_singleton_method("where_#{field}") do |*values|
+            fingerprints = values.flatten.map { |v| public_send("#{field}_fingerprint", v) }
+            where(column => fingerprints.length == 1 ? fingerprints.first : fingerprints)
+          end
+          define_singleton_method("find_by_#{field}") do |value|
+            find_by(column => public_send("#{field}_fingerprint", value))
+          end
         end
 
         # Macro-time guard for the common order (Encryptable declared after
@@ -273,6 +331,18 @@ module ConcernsOnRails
         raise ArgumentError,
               "#{LABEL}: #{overlap.map { |f| ":#{f}" }.join(', ')} declared with both Encryptable and " \
               "Auditable; auditing would persist decrypted plaintext. Remove them from auditable_by."
+      end
+
+      # Recompute each blind-index column from the (changed) plaintext just
+      # before the row is written, so the fingerprint always matches the value.
+      def encryptable_refresh_blind_indexes
+        self.class.encryptable_rules.each do |field, rule|
+          bi = rule[:blind_index]
+          next unless bi
+          next unless public_send("#{field}_changed?")
+
+          self[bi[:column]] = ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, public_send(field))
+        end
       end
     end
   end

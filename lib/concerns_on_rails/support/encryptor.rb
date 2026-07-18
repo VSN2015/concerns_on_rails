@@ -29,6 +29,9 @@ module ConcernsOnRails
       KEY_BYTES = 32       # AES-256
       CIPHER = "aes-256-gcm".freeze
       MIN_ENVELOPE_BYTES = HEADER_LEN + IV_LEN + TAG_LEN
+      # Domain-separation label so the blind-index HMAC key differs from the AES
+      # key even when both derive from the same configured secret.
+      BLIND_INDEX_INFO = "concerns_on_rails/blind_index/v1".freeze
 
       # Encrypt a String, returning a Base64 envelope. nil passes through as nil
       # (a blank column stays blank / NULL-able), never an encrypted empty value.
@@ -77,6 +80,18 @@ module ConcernsOnRails
       rescue OpenSSL::Cipher::CipherError
         raise ConcernsOnRails::Encryption::DecryptionError,
               "could not decrypt value (wrong key or tampered ciphertext)"
+      end
+
+      # Deterministic keyed fingerprint (lowercase hex) for equality lookups — a
+      # "blind index". The HMAC key is domain-separated from the AES key via
+      # BLIND_INDEX_INFO, so the two are cryptographically independent. The same
+      # value + key always yields the same digest, enabling an indexed WHERE.
+      def blind_index(value, key:, salt: ConcernsOnRails::Encryption::DEFAULT_KDF_SALT)
+        return nil if value.nil?
+
+        master = normalize_key(key, salt: salt)
+        subkey = OpenSSL::HMAC.digest("SHA256", master, BLIND_INDEX_INFO)
+        OpenSSL::HMAC.hexdigest("SHA256", subkey, value.to_s)
       end
 
       # Coerce key material to a 32-byte AES key: raw 32-byte binary as-is, a

@@ -121,8 +121,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `key:` (PBKDF2, lazy Proc), missing key raises at first use. `<field>_ciphertext`
   / `<field>_encrypted?` readers; wrong-key/tamper/malformed → `DecryptionError`.
   Normalizes-before-encrypt and masks-decrypted for free; RAISES if a field is
-  also `auditable_by`. Non-deterministic ⇒ unsearchable (deterministic queries +
-  rotation planned; envelope reserves the bytes).
+  also `auditable_by`. Ciphertext is non-deterministic ⇒ unsearchable; opt into
+  `blind_index: true` (or `{ column:, expression: }`) for a deterministic-HMAC
+  companion column + `find_by_<field>`/`where_<field>`/`<field>_fingerprint`
+  finders (key rotation still planned; envelope reserves the bytes).
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 

@@ -21,6 +21,10 @@ module ConcernsOnRails
     DEFAULT_KDF_SALT = "concerns_on_rails/encryptable/v1".freeze
     KDF_ITERATIONS = 65_536
 
+    # Sentinel returned by Config#resolve_material when no key is configured and
+    # on_missing_key is :passthrough — callers then store/read plaintext.
+    PASSTHROUGH = :__concerns_on_rails_passthrough__
+
     # Base class so callers can `rescue ConcernsOnRails::Encryption::Error`.
     class Error < StandardError; end
 
@@ -59,6 +63,24 @@ module ConcernsOnRails
 
       def key?
         !key_material.nil?
+      end
+
+      # Resolve the effective key material for a field: a per-field override
+      # (String or Proc) wins, else the global key. Returns PASSTHROUGH in the
+      # escape-hatch mode, or raises MissingKeyError. Shared by encryption and
+      # blind indexing so both derive from the same key.
+      def resolve_material(field_key = nil)
+        material = field_key.respond_to?(:call) ? field_key.call : field_key
+        material = material.to_s unless material.nil?
+        return material if material && !material.empty?
+
+        global = key_material
+        return global unless global.nil?
+        return PASSTHROUGH if on_missing_key == :passthrough
+
+        raise MissingKeyError,
+              "ConcernsOnRails::Models::Encryptable: no encryption key configured. Set " \
+              "ConcernsOnRails.configure_encryption { |c| c.key = ... } or pass key: to the macro."
       end
     end
   end

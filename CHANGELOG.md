@@ -1,5 +1,12 @@
 <!-- CHANGELOG.md -->
 
+## 1.21.1 (2026-07-18)
+
+Blind-index support for Models::Encryptable, making encrypted fields queryable by exact match — the follow-up promised in 1.21.0. 991 examples, 0 failures.
+
+### Added
+- **Models::Encryptable**: `blind_index:` option for exact-match lookups on otherwise-unqueryable encrypted columns. Encryption stays non-deterministic by design, so opting in with `encryptable :email, blind_index: true` maintains a deterministic keyed HMAC of the value in a companion `<field>_bidx` column and generates `find_by_<field>` / `where_<field>` / `<field>_fingerprint` class methods. `where_<field>` accepts one value, several, or an array (multiple become an IN query) and returns a plain Relation, so it chains with scopes, `.or`, and `.merge` for joins (`Order.joins(:user).merge(User.where_email(...))`). The fingerprint HMAC key is domain-separated from the AES key (a labeled-HMAC subkey via `Support::Encryptor.blind_index`), so the two are cryptographically independent while both driven from the configured key. `blind_index: { column:, expression: }` overrides the companion column and supplies a normalization callable (e.g. `->(v) { v.to_s.downcase }`) applied symmetrically on write and query for case-insensitive lookups. The index is recomputed in `before_save` only when the plaintext changes, stores `nil` for a nil value, and never contains plaintext. Macro-time `ArgumentError` validation: the blind-index column must exist, a custom `column:` cannot combine with multiple fields, and `expression:` must be callable. Key resolution was extracted to `Encryption::Config#resolve_material` so encryption and blind indexing share one path. Deterministic equality leaks (identical values share a digest) — documented; use it only for lookup keys. Zero new runtime dependencies.
+
 ## 1.21.0 (2026-07-01)
 
 A new model concern for transparent field-level encryption — the "encrypt SSN/DOB at rest" capability the sensitive-data toolkit (Maskable, Sanitizable, Tokenizable) was missing. Hand-rolled on stdlib OpenSSL so it behaves identically on Rails 5.0–8, rather than delegating to Rails 7.1+ native `encrypts`. 978 examples, 0 failures.

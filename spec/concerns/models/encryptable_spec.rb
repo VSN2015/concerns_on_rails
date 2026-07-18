@@ -16,6 +16,8 @@ describe ConcernsOnRails::Models::Encryptable do
         t.text :age
         t.text :amount
         t.text :meeting_at
+        t.text :email
+        t.text :email_bidx
         t.string :name
         t.text :audit_log
       end
@@ -279,6 +281,100 @@ describe ConcernsOnRails::Models::Encryptable do
       record = klass.create!(ssn: "plain").reload
       expect(record.ssn).to eq("plain")
       expect(record.ssn_ciphertext).to eq("plain")
+    end
+  end
+
+  describe "blind index" do
+    let(:klass) { model_class { encryptable :email, blind_index: true } }
+
+    it "stores a 64-char hex fingerprint, not the plaintext" do
+      record = klass.create!(email: "a@b.com").reload
+      expect(record.email_bidx).to match(/\A\h{64}\z/)
+      expect(record.email_bidx).not_to include("a@b.com")
+    end
+
+    it "finds a record by exact value via find_by_<field>" do
+      record = klass.create!(email: "a@b.com")
+      expect(klass.find_by_email("a@b.com")).to eq(record)
+      expect(klass.find_by_email("nope@b.com")).to be_nil
+    end
+
+    it "builds a relation via where_<field>" do
+      record = klass.create!(email: "a@b.com")
+      klass.create!(email: "c@d.com")
+      expect(klass.where_email("a@b.com").to_a).to eq([record])
+    end
+
+    it "accepts multiple values (IN query) via where_<field>" do
+      a = klass.create!(email: "a@b.com")
+      c = klass.create!(email: "c@d.com")
+      klass.create!(email: "e@f.com")
+      expect(klass.where_email("a@b.com", "c@d.com")).to contain_exactly(a, c)
+      expect(klass.where_email(["a@b.com", "c@d.com"])).to contain_exactly(a, c)
+    end
+
+    it "chains with scopes, where, and or" do
+      a = klass.create!(email: "a@b.com", name: "keep")
+      klass.create!(email: "a@b.com", name: "drop")
+      b = klass.create!(email: "c@d.com", name: "keep")
+      expect(klass.where(name: "keep").where_email("a@b.com").to_a).to eq([a])
+      expect(klass.where_email("a@b.com").where(name: "keep").to_a).to eq([a])
+      expect(klass.where_email("a@b.com").or(klass.where_email("c@d.com")).where(name: "keep"))
+        .to contain_exactly(a, b)
+    end
+
+    it "exposes a deterministic <field>_fingerprint equal to the stored digest" do
+      record = klass.create!(email: "a@b.com").reload
+      expect(klass.email_fingerprint("a@b.com")).to eq(record.email_bidx)
+      expect(klass.email_fingerprint("a@b.com")).to eq(klass.email_fingerprint("a@b.com"))
+    end
+
+    it "stores a nil fingerprint for a nil value" do
+      record = klass.create!(email: nil).reload
+      expect(record.email_bidx).to be_nil
+    end
+
+    it "records the blind_index config in the rules" do
+      expect(klass.encryptable_rules[:email][:blind_index][:column]).to eq(:email_bidx)
+    end
+
+    it "refreshes the index only when the field changes" do
+      record = klass.create!(email: "a@b.com", name: "x").reload
+      before = record.email_bidx
+      record.update!(name: "y")
+      expect(record.reload.email_bidx).to eq(before)
+
+      record.update!(email: "z@b.com")
+      expect(klass.find_by_email("a@b.com")).to be_nil
+      expect(klass.find_by_email("z@b.com")).to eq(record)
+    end
+
+    context "with a normalization expression" do
+      let(:klass) do
+        model_class { encryptable :email, blind_index: { expression: ->(v) { v.to_s.downcase.strip } } }
+      end
+
+      it "matches case- and whitespace-insensitively on write and query" do
+        record = klass.create!(email: "  Alice@Example.COM ")
+        expect(klass.find_by_email("alice@example.com")).to eq(record)
+      end
+    end
+
+    describe "macro-time validation" do
+      it "raises when the blind-index column does not exist" do
+        expect { model_class { encryptable :email, blind_index: { column: :missing_bidx } } }
+          .to raise_error(ArgumentError, /does not exist/)
+      end
+
+      it "raises when a custom column is combined with multiple fields" do
+        expect { model_class { encryptable :ssn, :email, blind_index: { column: :x } } }
+          .to raise_error(ArgumentError, /cannot be combined with multiple fields/)
+      end
+
+      it "raises when the expression is not callable" do
+        expect { model_class { encryptable :email, blind_index: { expression: 42 } } }
+          .to raise_error(ArgumentError, /must be callable/)
+      end
     end
   end
 end
