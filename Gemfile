@@ -10,8 +10,8 @@ gem "faker", "~> 3.8"
 gem "friendly_id", "~> 5.4"
 gem "rspec", "~> 3.12"
 gem "simplecov", "~> 0.22"
-gem "sqlite3", "~> 2.9.4"
+gem "sqlite3", "~> 2.9.5"
 
 group :development, :test do
-  gem 'rubocop', '~> 1.87', require: false
+  gem 'rubocop', '~> 1.88', require: false
 end
