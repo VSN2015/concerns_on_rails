@@ -98,10 +98,10 @@ Article.deleted_within(30.days)    # => deleted in the last 30 days
 | Signature | Description |
 |---|---|
 | `soft_deletable_by(field = nil, touch: true, default_scope: true)` | Configuration macro. Sets the soft-delete column (defaulting to `:deleted_at` when `field` is `nil`) and options; validates the column exists. |
-| `soft_delete_all` | Soft-deletes every record in the current scope, atomically (single transaction). Preferred over `destroy_all`. |
-| `destroy_all` | Overrides ActiveRecord's `destroy_all` to call `soft_delete_all` instead of issuing `DELETE`. Kept for backwards compatibility. |
-| `really_destroy_all` | Hard-deletes every record using `unscoped.delete_all` — bypasses soft-delete, default scope, and all callbacks. |
-| `restore_all` | Restores every soft-deleted record in the current scope, atomically (single transaction). |
+| `soft_delete_all` | Soft-deletes every record in the current scope and returns the Integer count. A failing record raises `ActiveRecord::RecordNotSaved` and rolls the whole batch back. With `touch: false` and no overridden hooks it collapses to a single `UPDATE`. Preferred over `destroy_all`. |
+| `destroy_all` | Overrides ActiveRecord's `destroy_all` to call `soft_delete_all` instead of issuing `DELETE`. Kept for backwards compatibility — note it returns a count, not the records. |
+| `really_destroy_all` | Hard-deletes the records matching the **current relation** (soft-deleted included — only the soft-delete column's predicates are peeled off). Bypasses callbacks via `delete_all`. |
+| `restore_all` | Restores every matching soft-deleted record and returns the Integer count (mirror of `soft_delete_all`: `RecordNotSaved` + rollback on failure, single-`UPDATE` fast path). |
 
 ## Examples
 
@@ -184,7 +184,7 @@ order.restore!       # raises if fulfilled?, deleted_at stays set
 
 - **`really_delete!` freezes the instance.** After calling `really_delete!`, the Ruby object is frozen and cannot be modified. `is_really_deleted?` will return `true`.
 
-- **`really_destroy_all` uses `unscoped`.** It ignores any current scope and deletes every row in the table. Call it on a scoped relation (e.g. `Article.where(user_id: 42).really_destroy_all`) — but note that the underlying implementation calls `unscoped.delete_all`, so the scope may not be respected as expected. Prefer explicit `where` + `delete_all` for scoped hard-deletes.
+- **`really_destroy_all` peels off the soft-delete predicate.** Since 1.22 it honors the calling relation (`Article.where(user_id: 42).really_destroy_all` deletes only that user's rows, soft-deleted included) — but `unscope(where: <field>)` also drops a caller's own condition on the soft-delete column, so `only_deleted.really_destroy_all` widens to the whole relation. Purge trash with `Article.soft_deleted.delete_all` instead.
 
 - **Custom field names are fully supported.** Any `datetime` column works: `soft_deletable_by :removed_on`. All scopes and methods adapt to the configured field. Multiple models can use different field names independently — `class_attribute` ensures isolation between classes.
 
@@ -193,3 +193,9 @@ order.restore!       # raises if fulfilled?, deleted_at stays set
 - **Column must exist at class-load time.** `soft_deletable_by` validates the column via `ConcernsOnRails::Support::ColumnGuard#ensure_columns!` and raises `ArgumentError` with the message `"does not exist in the database"` if the column is missing. This means running the model before running migrations will fail fast rather than silently.
 
 - **`.active` scope conflict.** If `Activatable` and `SoftDeletable` are both included in the same model, both define an `.active` scope. The last `include` statement wins. Stick to one concern or rely on `.without_deleted` to avoid ambiguity.
+
+## Changed in 1.22.0
+
+- `really_destroy_all` now honors the calling relation (previously it hard-deleted the entire table regardless of scope).
+- `soft_delete_all` / `restore_all` / `destroy_all` return Integer counts and raise `ActiveRecord::RecordNotSaved` (rolling the batch back) on failure — previously the rollback was silent and returned nil.
+- With `touch: false` and no overridden hooks, the batch methods collapse to a single `UPDATE` statement.

@@ -148,3 +148,10 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - Dirty tracking works on the decrypted plaintext: reassigning the same value is **not** dirty, and an unchanged field is not re-encrypted on save, despite the random IV.
 - The envelope is versioned (`ver`/`alg`/`key_id` bytes reserved), so **deterministic (queryable) fields and multi-key rotation** can be added later without a data migration.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need blind indexes, deterministic search, or built-in key rotation today.
+
+## Changed in 1.22.0
+
+- `where_<field>(nil)` / `find_by_<field>(nil)` return `none`/nil instead of matching every row without a fingerprint (`bidx IS NULL`).
+- Encrypted field names register with Rails parameter filtering through a live registry consulted by a proc the gem's railtie appends at boot — redaction now works with boot-time filter snapshots (ActiveRecord `filter_attributes`, lograge-style initializers) and lazily-loaded model classes.
+- PBKDF2-derived keys are memoized (bounded, mutex-guarded); previously every encrypt/decrypt/blind-index call re-ran the 65,536-iteration KDF.
+- The encrypted×audited overlap raises at macro time from both declaration orders.

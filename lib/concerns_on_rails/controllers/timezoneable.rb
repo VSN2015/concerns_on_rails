@@ -79,7 +79,7 @@ module ConcernsOnRails
       # request: resolution costs up to three TimeZone lookups plus an
       # allow-list scan.
       def resolved_time_zone
-        @timezoneable_resolved_zone ||= begin
+        @resolved_time_zone ||= begin
           opts = self.class.timezoneable_options
           allowed = opts[:available]
           candidate = zone_from_param(opts, allowed) ||

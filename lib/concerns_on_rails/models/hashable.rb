@@ -74,7 +74,9 @@ module ConcernsOnRails
           min = hashable_length == 1 ? 0 : 10**(hashable_length - 1)
           SecureRandom.random_number((10**hashable_length) - min) + min
         end
+      end
 
+      class_methods do
         def validate_hashable_options!
           unless VALID_TYPES.include?(hashable_type)
             raise ArgumentError,

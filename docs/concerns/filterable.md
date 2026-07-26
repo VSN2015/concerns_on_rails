@@ -131,3 +131,7 @@ end
 - **SQL injection via `with:` lambda is the caller's responsibility.** The `with:` lambda receives the raw string value from `params`; the developer must use parameterized queries or sanitize input inside the lambda.
 - **Scope mode delegates via `public_send`.** The named scope must be publicly accessible on the relation. Private or protected scopes will raise `NoMethodError` at request time.
 - **Filter composition order matches declaration order.** Filters are applied in the order they appear in `filterable_rules`, which is insertion order (Ruby `Hash`). For most queries this is irrelevant, but lambda-based filters that mutate the relation in non-commutative ways should account for it.
+
+## Changed in 1.22.0
+
+- The direct-where scalar guard now also rejects arrays *containing* nested hashes (`?status[][x]=1` previously slipped through as `[Parameters]` and raised a `TypeError` 500). Shared as `Support::ScalarParam.where_safe?`.

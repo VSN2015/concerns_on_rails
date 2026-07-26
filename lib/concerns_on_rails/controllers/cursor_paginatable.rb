@@ -58,6 +58,9 @@ module ConcernsOnRails
       CURSOR_DIRECTIONS = %w[next prev].freeze
       # Adapters whose SQL supports row-value (tuple) comparison: (a, b) > (x, y).
       ROW_PREDICATE_ADAPTERS = /postgres|mysql|trilogy|sqlite/i
+      # Deliberately mutable: memoizes adapter row-predicate support per model
+      # class — stable for the life of the process, benign write race.
+      ROW_PREDICATE_SUPPORT_CACHE = {} # rubocop:disable Style/MutableConstant
 
       # Raised when params[:cursor] is malformed, tampered with, or was minted
       # under a different table/order configuration. Auto-rescued to a 400 when
@@ -456,10 +459,6 @@ module ConcernsOnRails
       # columns) and the adapter supports tuples, silently falling back
       # otherwise; an explicit :row raises on mixed directions instead of
       # silently changing strategy.
-      # Adapter capability is stable for the life of the process; memoized so
-      # :auto mode doesn't pay a connection checkout + regex on every request.
-      ROW_PREDICATE_SUPPORT_CACHE = {}
-
       def cursor_row_predicate?(model, pairs)
         mode = self.class.cursor_paginatable_predicate
         return false if mode == :or || pairs.size < 2

@@ -158,12 +158,7 @@ module ConcernsOnRails
       def auditable_capture_changes
         fields = self.class.auditable_fields
         return if fields.blank?
-
-        # Cheap pre-check before materializing the full changes hash — most
-        # saves don't touch a tracked field.
-        if respond_to?(:will_save_change_to_attribute?)
-          return unless fields.any? { |f| will_save_change_to_attribute?(f) }
-        end
+        return unless auditable_any_tracked_change?(fields)
 
         pending = respond_to?(:changes_to_save) ? changes_to_save : changes
         tracked = pending.slice(*fields.map(&:to_s))
@@ -173,6 +168,15 @@ module ConcernsOnRails
         max = self.class.auditable_max_entries
         entries = entries.last(max) if max
         self[self.class.auditable_into] = JSON.generate(entries)
+      end
+
+      # Cheap pre-check before materializing the full changes hash — most saves
+      # don't touch a tracked field. (Rails < 5.1 lacks the predicate; fall
+      # through to the full hash there.)
+      def auditable_any_tracked_change?(fields)
+        return true unless respond_to?(:will_save_change_to_attribute?)
+
+        fields.any? { |f| will_save_change_to_attribute?(f) }
       end
 
       # Base the new trail on the PERSISTED column value, not the in-memory

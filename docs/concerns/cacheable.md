@@ -95,3 +95,8 @@ end
 - `Vary` is **appended**, never clobbered — coordinate with pagination/CORS headers that may also set it.
 - Every `request`/`response` touch is guarded, so the concern runs on bare objects and is testable without the full Rails stack.
 - For **write-side** preconditions (`If-Match` / `If-Unmodified-Since` → `412 Precondition Failed`), reach for Rails' own conditional-GET helpers; this concern covers the read path.
+
+## Changed in 1.22.0
+
+- `no_store` policies are also applied via `prepend_before_action`, so rescue_from-rendered errors on `no_store` endpoints carry `Cache-Control: no-store`. Positive freshness policies deliberately stay post-action — a rescued error must never become CDN-cacheable.
+- `stale_resource?` no longer writes ETag/Last-Modified validators for unsafe (non-GET/HEAD) requests — a POST response must not advertise an ETag a client could replay against GET.

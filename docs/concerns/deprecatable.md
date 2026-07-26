@@ -92,3 +92,8 @@ After the sunset instant with `after_sunset: :gone`, the action is halted with:
 - `header_format: :legacy` exists because pre-RFC tooling parses the draft boolean form; the RFC 9745 `@<unix>` form is the default and the right choice for new rollouts.
 - CDN/proxy-cached responses can outlive the headers' accuracy — pair enforcement with cache invalidation.
 - Clock skew across app servers makes the 410 flip non-simultaneous for a few seconds; comparisons run in UTC through one overridable seam (`deprecation_now`).
+
+## Changed in 1.22.0
+
+- `link:` / `successor:` values are validated at macro time against control characters and `<`/`>` (Link-header injection).
+- The matched rule is memoized per request (the before_action plus both public predicates previously re-scanned the rule list).

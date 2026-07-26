@@ -151,3 +151,7 @@ account.email   # => "alice@example.com"
 - **`normalizable_rules` is a `class_attribute`.** It is inherited by subclasses. Rules defined on a parent class apply to all subclasses via normal Ruby inheritance; subclasses can add their own rules without affecting the parent.
 - **Works on Rails 5+.** The concern intentionally does not depend on Rails 7.1's built-in `normalizes` API, making it usable in projects that cannot upgrade to a recent Rails version.
 - **No external gem dependency.** Unlike `Sluggable` or `Sortable`, `Normalizable` requires only `active_support/concern` and the `squish` method available in ActiveSupport, which is already a Rails dependency.
+
+## Changed in 1.22.0
+
+- On persisted records, fields that are not part of the current save are skipped (their stored value already went through normalization when written), and no-op reassignments are avoided.

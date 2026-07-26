@@ -113,13 +113,7 @@ module ConcernsOnRails
       # a scoped unique index is the real concurrency guarantee.
       def assign_sequenceable_value(field)
         cfg = self.class.sequenceable_config.fetch(field)
-
-        # Pin the row inside the period its number is drawn from: with reset:
-        # enabled the period is computed from "now" during before_create, but
-        # created_at is stamped later, at INSERT time — across a year/month/day
-        # boundary the row would carry a number from the old period with a
-        # timestamp in the new one. AR honors a pre-set created_at.
-        self.created_at = self.class.send(:base_time, self) if cfg[:reset] != :never && created_at.nil?
+        sequenceable_pin_created_at(cfg)
 
         if self[field].blank?
           candidate = self.class.send(:sequence_base_value, field, self, {})
@@ -139,6 +133,18 @@ module ConcernsOnRails
 
         self[cfg[:into]] = self.class.send(:format_sequence, field, self[field], self)
       end
+
+      # Pin the row inside the period its number is drawn from: with reset:
+      # enabled the period is computed from "now" during before_create, but
+      # created_at is stamped later, at INSERT time — across a year/month/day
+      # boundary the row would carry a number from the old period with a
+      # timestamp in the new one. AR honors a pre-set created_at.
+      def sequenceable_pin_created_at(cfg)
+        return if cfg[:reset] == :never || !created_at.nil?
+
+        self.created_at = self.class.send(:base_time, self)
+      end
+      private :sequenceable_pin_created_at
     end
   end
 end

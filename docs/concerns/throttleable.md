@@ -131,3 +131,8 @@ end
 - **Rules are inherited but not shared.** `throttleable_rules` is a `class_attribute`. Subclasses inherit the parent's rules array but appending a rule in a subclass does not mutate the parent class's array (the macro does `self.throttleable_rules = throttleable_rules + [rule]`).
 
 - **Counter key format.** Cache keys follow the pattern `throttleable:<name>:<discriminator>:<window_bucket>`. Changing `name:`, the discriminator, or the `period` effectively resets all existing counters for that rule.
+
+## Changed in 1.22.0
+
+- The first-hit seed uses `write(..., unless_exist: true)`, so two concurrent first requests can no longer under-count the window.
+- A nil/blank discriminator (e.g. `by: -> { current_user&.id }` for an anonymous request) raises `ArgumentError` instead of collapsing every client into one shared bucket — fall back explicitly: `by: -> { current_user&.id || request.remote_ip }`.

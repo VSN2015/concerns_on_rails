@@ -133,3 +133,9 @@ end
 - **Changing `order:` invalidates in-flight cursors** — clients mid-walk get a 400 and restart from page 1. Intended: silently reinterpreting a cursor under a new ordering would skip or repeat rows.
 - **Timestamps round-trip at microsecond precision** (ISO 8601 with 6 fractional digits, cast back through the model's attribute types so each adapter quotes natively).
 - **Zero new runtime dependencies** (URL-safe Base64 via `pack("m0")`, same as WebhookVerifiable — no base64 gem needed on Ruby 3.4).
+
+## Changed in 1.22.0
+
+- `?per_page[]=50` no longer raises (shared `Support::ScalarParam` coercion, mirroring Paginatable).
+- The row-value predicate adapter check is memoized per model class (was a connection checkout + regex on every `:auto`-mode request).
+- The 400 error bodies render through the shared `Support::ErrorEnvelope` (same shape; one place to customize).

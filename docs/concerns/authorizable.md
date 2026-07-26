@@ -151,6 +151,12 @@ end
 - **Arity slicing is proc-based, not lambda-based.** The internal check is stored as a `proc` (never a `lambda`), which means Ruby's strict arity enforcement does not apply — a block written with any number of args from zero to two will work safely. Blocks with a splat or optional parameters receive all two args.
 - **`current_user` resolution in `require_role`.** The method named by `via:` is called with `respond_to?` first; if the controller does not expose that method, `nil` is used as the actor, which causes the role check to fail and the request to be denied.
 - **Respondable integration.** When `ConcernsOnRails::Controllers::Respondable` is also included in the controller, `authorization_denied` delegates to `render_error`, which produces a consistent `{ success: false, error: { message:, code: "forbidden" } }` envelope. Without Respondable the same shape is rendered inline directly.
-- **`authorization_denied` is a no-op when `response` is nil or absent.** The method guards with `respond_to?(:response) && response` before attempting to render, so it will not raise in test harnesses or middleware-level stubs that lack a full response object.
+- **`authorization_denied` fails CLOSED when `response` is nil or absent (since 1.22).** A denial that cannot be rendered raises instead of returning nil — pre-1.22 the silent no-op let the action run unauthorized. Test harnesses driving `enforce_authorization` directly must provide a response object (or expect the raise).
 - **Subclass inheritance.** `authorizable_rules` is a `class_attribute`. Each call to `add_authorization_rule` replaces it with `authorizable_rules + [rule]` (a new array), so subclasses that add rules do not mutate the parent's array and the parent's rules are preserved at the front of the child's list.
 - **Not a policy framework.** There are no policy objects, resource inference, or ability DSL. For complex permission models, prefer [Pundit](https://github.com/varvet/pundit) or [CanCanCan](https://github.com/CanCanCommunity/cancancan).
+
+## Changed in 1.22.0
+
+- `authorization_denied` fails CLOSED: a denial that cannot be rendered raises instead of silently letting the action run.
+- `require_role` supports actors whose role method returns an Array (`roles: ["admin"]` previously stringified and was always denied).
+- Denials render through the shared `Support::ErrorEnvelope` (same shape).

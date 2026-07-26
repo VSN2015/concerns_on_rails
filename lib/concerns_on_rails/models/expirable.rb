@@ -85,14 +85,15 @@ module ConcernsOnRails
         (value - now).seconds
       end
 
-      private
-
-      # Internal helper for extend_expiry! — not part of the public API.
+      # Internal helper for extend_expiry! — not part of the public API
+      # (postfix private: the keyword form trips RuboCop's scope analysis
+      # against the `private` inside the class_methods block).
       def expiry_extension_base
         value = self[self.class.expirable_field]
         now = Time.zone.now
         value.nil? || value <= now ? now : value
       end
+      private :expiry_extension_base
     end
   end
 end

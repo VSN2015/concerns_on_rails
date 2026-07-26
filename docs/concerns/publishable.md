@@ -176,3 +176,9 @@ Post.unscoped.count         # => 3
 - **`publishable_by` can be called multiple times.** Each subsequent call overwrites `publishable_field`. Only the final configuration is active. Re-calling with `default_scope: true` will stack an additional `default_scope` onto the class, which Rails evaluates as an AND of all default scopes — avoid re-calling in production code.
 
 - **No persistence of transition history.** The concern stores only the current timestamp; it does not record a log of publish/unpublish events. Pair with an auditing gem if a history trail is required.
+
+## Changed in 1.22.0
+
+- `publish!` / `unpublish!` hooks now share one transaction with the timestamp write, so a raising `after_publish` rolls the change back.
+- `publish_at!` now fires the publish lifecycle hooks (same state change as `publish!`).
+- The boolean-vs-timestamp column detection is memoized per class (was a `columns_hash` lookup on every scope evaluation).

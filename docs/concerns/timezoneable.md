@@ -128,3 +128,7 @@ end
 - **`switch_time_zone` is public by design.** Subclasses can override it to add logging, metrics, or additional fallback logic while still calling `super` to retain the zone-switching behavior.
 
 - **Cookie reading requires the controller to expose `cookies`.** If the controller does not respond to `cookies` (e.g., an API-mode controller that does not include the cookie middleware), the cookie source is silently skipped. The same applies to `params` for the param source and `request` for the header source.
+
+## Changed in 1.22.0
+
+- `resolved_time_zone` is memoized per request, and the `Time.use_zone` wrapper is skipped when it would be a no-op (resolved zone equals the current `Time.zone`).

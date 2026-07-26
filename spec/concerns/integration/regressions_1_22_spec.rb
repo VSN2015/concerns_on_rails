@@ -4,7 +4,8 @@ require "support/integration_harness"
 # End-to-end proofs through the REAL ActionController stack for the 1.22
 # fixes that the FakeController harness structurally could not catch.
 RSpec.describe "1.22 regressions through real ActionController dispatch" do
-  BoomIntegrationError = Class.new(StandardError)
+  class BoomIntegrationError < StandardError
+  end
 
   def dispatch(controller, action, **options)
     IntegrationHarness.dispatch(controller, action, **options)
@@ -14,6 +15,7 @@ RSpec.describe "1.22 regressions through real ActionController dispatch" do
     let(:controller) do
       IntegrationHarness.build_controller do
         include ConcernsOnRails::Controllers::Includable
+
         includable :author, fields: { articles: %i[id title] }
 
         def show
@@ -51,6 +53,7 @@ RSpec.describe "1.22 regressions through real ActionController dispatch" do
     let(:controller) do
       IntegrationHarness.build_controller do
         include ConcernsOnRails::Controllers::SecureHeadable
+
         secure_headers :nosniff, :deny_frame
 
         rescue_from BoomIntegrationError do
@@ -85,6 +88,7 @@ RSpec.describe "1.22 regressions through real ActionController dispatch" do
     let(:no_store_controller) do
       IntegrationHarness.build_controller do
         include ConcernsOnRails::Controllers::Cacheable
+
         http_cache_actions no_store: true
 
         rescue_from BoomIntegrationError do
@@ -100,6 +104,7 @@ RSpec.describe "1.22 regressions through real ActionController dispatch" do
     let(:public_controller) do
       IntegrationHarness.build_controller do
         include ConcernsOnRails::Controllers::Cacheable
+
         http_cache_actions visibility: :public, max_age: 300
 
         rescue_from BoomIntegrationError do
@@ -129,14 +134,15 @@ RSpec.describe "1.22 regressions through real ActionController dispatch" do
     def role_controller(roles)
       IntegrationHarness.build_controller do
         include ConcernsOnRails::Controllers::Authorizable
+
         require_role :admin, role_method: :roles
 
         define_method(:current_user) { Struct.new(:roles).new(roles) }
         private :current_user
 
-        def show
-          render json: { ok: true }
-        end
+        # define_method (not def): this block runs inside a helper method, and
+        # Lint/NestedMethodDefinition can't see build_controller's class_eval.
+        define_method(:show) { render json: { ok: true } }
       end
     end
 

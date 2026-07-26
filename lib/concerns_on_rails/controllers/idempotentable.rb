@@ -212,9 +212,7 @@ module ConcernsOnRails
       end
 
       def idempotency_conflict_response(rule, record = nil)
-        if respond_to?(:response) && response
-          response.set_header("Retry-After", idempotency_retry_after(rule, record).to_s)
-        end
+        response.set_header("Retry-After", idempotency_retry_after(rule, record).to_s) if respond_to?(:response) && response
         idempotency_error_response(message: "A request with this #{rule[:header]} is already in progress.",
                                    status: :conflict, code: "idempotency_conflict")
       end

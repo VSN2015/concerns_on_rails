@@ -112,3 +112,7 @@ requested_fields
 - **`includable_associations` and `includable_fields` are `class_attribute`s.** Subclassing a controller that has already called `includable` inherits the parent's allow-lists but can override them independently by calling `includable` again in the subclass.
 - **The concern does not serialize or render anything.** `with_includes` only affects the ActiveRecord query. `requested_includes` and `requested_fields` return plain Ruby values for the caller to pass to `render json:` or a serializer. The concern has no knowledge of the serializer in use.
 - **No runtime dependencies beyond `ActiveSupport::Concern`.** There are no gem dependencies beyond Rails itself; the concern works with any serializer.
+
+## Changed in 1.22.0
+
+- Sparse fieldsets no longer 500: in a real controller `params[:fields]` is an `ActionController::Parameters` (no `each_with_object`), so every `?fields[...]=` request raised `NoMethodError` before 1.22.

@@ -1,5 +1,3 @@
-require "set"
-
 module ConcernsOnRails
   module Support
     # Registry of sensitive parameter names (populated by Models::Encryptable)

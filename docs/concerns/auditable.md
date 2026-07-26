@@ -131,3 +131,9 @@ order.audited_changes_since(1.day.ago).map { |e| "#{e['field']}: #{e['from']} �
 - **Non-finite floats are stored as strings.** `NaN`/`Infinity` in a tracked float column serialize as `"NaN"`/`"Infinity"` instead of raising inside `before_save`.
 - **The actor proc runs on the record.** It is `instance_exec`'d, so both globals (`Current.user`) and the record's own attributes are in scope. Exceptions raised inside the proc propagate (fail-fast).
 - **Non-goals**: no reify/undo, no who-dunnit queries across models, no association tracking — reach for [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) or [`audited`](https://github.com/collectiveidea/audited) when you need a real audit store.
+
+## Changed in 1.22.0
+
+- Saves that touch no tracked field skip building the changes hash entirely (cheap `will_save_change_to_attribute?` pre-check).
+- `audit_trail` is memoized per raw column value and returns a fresh Array each call; the entry Hashes are shared — treat them as read-only.
+- Declaring `auditable_by` on a field that is already `encryptable` raises at macro time (previously only the reverse order was guarded, via a per-save callback).

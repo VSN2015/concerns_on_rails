@@ -139,3 +139,8 @@ invite.code  # => "K7M3PQ9A"  (8 chars, only from the given alphabet)
 - **`before_create` fires after `before_validation`** — if the model has `validates :token, presence: true`, the validation runs before the token is assigned, causing a false failure. Work around this by adding `before_validation { self.token ||= self.class.generate_hashable_value }` in your model, or by removing the presence validation (the concern guarantees assignment on create).
 - **`regenerate_<field>!` uses `update!`** — it will raise `ActiveRecord::RecordInvalid` if other model validations fail at that point.
 - **`generate_hashable_value` is a public class method** — it can be called directly in tests or console sessions without creating a record: `Order.generate_hashable_value`.
+
+## Changed in 1.22.0
+
+- `regenerate_<field>!` goes through the same uniqueness handling as create-time assignment (`unique:` precheck + bounded retry on `ActiveRecord::RecordNotUnique`).
+- `type: :integer` now generates fixed-width codes: `length: 6` is always 6 digits.

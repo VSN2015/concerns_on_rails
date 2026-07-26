@@ -132,3 +132,8 @@ end
 - **Per-controller CSP overrides the global initializer:** A `content_security_policy_for` call inside a controller class overrides the application-level CSP configured in `config/initializers/content_security_policy.rb` for requests handled by that controller, which is standard Rails behavior.
 - **`apply_secure_headers` is a public method:** Subclasses can override it. The guard `respond_to?(:response) && response` ensures it no-ops safely in test contexts where `response` is `nil`.
 - **No model columns, no migrations, no gem dependencies:** This is a pure controller concern. It depends only on `active_support/concern` and, for CSP delegation, on the Rails `ActionController::ContentSecurityPolicy` module available from Rails 5.2 onward.
+
+## Changed in 1.22.0
+
+- Headers are also applied via `prepend_before_action`: Rails skips `after_action` callbacks when `rescue_from` handles an exception, so handled 404/422/500 responses previously shipped with **no security headers**. The `after_action` remains for last-word semantics; both applications are idempotent.
+- Opting out per action now requires `skip_before_action :apply_secure_headers` alongside the existing `skip_after_action`.

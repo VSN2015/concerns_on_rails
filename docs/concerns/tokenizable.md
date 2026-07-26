@@ -169,3 +169,7 @@ device2.pin  # => "847203" (random 6-digit string)
 - **`:hex` token length.** `SecureRandom.hex` generates a string twice the byte count. The concern requests `(length + 1) / 2` bytes and then slices to `length`, ensuring both odd and even lengths are handled correctly.
 - **No ActiveRecord validations are added.** The concern does not add presence or uniqueness validations to the model. Add these manually if application logic requires them; rely on a unique database index for collision prevention rather than ActiveRecord-level uniqueness validators.
 - **`generate_tokenizable_value` is a public class method.** It can be called directly (e.g. in tests or seeds) without creating a record, but it raises `ArgumentError` if the field name is not registered via `tokenizable_by`.
+
+## Changed in 1.22.0
+
+- `regenerate_<field>!` routes through the same generate → uniqueness-precheck path as create-time assignment, with a bounded retry on `ActiveRecord::RecordNotUnique` from the real unique index.

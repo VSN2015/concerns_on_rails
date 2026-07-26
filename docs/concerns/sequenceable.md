@@ -192,3 +192,7 @@ Ticket.create!(department_code: "OPS").reference  # => "TKT-OPS-1001"
 **`template:` must be callable.** Passing a non-callable value (e.g. a plain string) raises `ArgumentError` with the message `"template must be callable (respond to #call)"` at class-load time.
 
 **`formatted_<field>` returns `nil` for unsaved or sequence-less records.** When the raw integer column is blank (e.g. on an unsaved record that has not gone through `before_create`), `formatted_<field>` returns `nil` rather than an empty string.
+
+## Changed in 1.22.0
+
+- With `reset:` enabled, `created_at` is pinned to the period-anchor instant during `before_create`, so a row can no longer be numbered for one period but timestamped into the next across a year/month/day boundary.

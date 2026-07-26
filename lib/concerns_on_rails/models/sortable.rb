@@ -38,7 +38,9 @@ module ConcernsOnRails
 
       # class methods
       # Example: Task.sortable_by(priority: :asc)
-      class_methods do
+      # A real module (not `class_methods do`) so the helpers aren't constrained
+      # by Metrics/BlockLength (the Stateable precedent).
+      module ClassMethods
         include ConcernsOnRails::Support::ColumnGuard
 
         # Define sortable field and direction.
@@ -53,20 +55,10 @@ module ConcernsOnRails
         #   sortable_by :position, default_scope: false   # no sticky ordering; chain .sorted
         def sortable_by(field_config = nil, use_acts_as_list: true, scope: nil, add_new_at: nil,
                         default_scope: true, **field_options)
-          field_config = field_options if field_config.nil? && field_options.any?
-          # A bare `sortable_by` keeps the documented defaults (:position asc)
-          # instead of crashing on nil (pre-1.22 NoMethodError).
-          field_config = sortable_field || :position if field_config.nil?
-
-          self.sortable_default_scope = default_scope ? true : false
-
-          # parse field_config
-          field, direction = parse_sortable_config(field_config)
-
-          # validate direction and must be :asc or :desc
-          direction = :asc unless %i[asc desc].include?(direction)
+          field, direction = resolve_sortable_config(field_config, field_options)
 
           # set class attributes
+          self.sortable_default_scope = default_scope ? true : false
           self.sortable_field = field
           self.sortable_direction = direction
 
@@ -83,6 +75,18 @@ module ConcernsOnRails
         end
 
         private
+
+        def resolve_sortable_config(field_config, field_options)
+          field_config = field_options if field_config.nil? && field_options.any?
+          # A bare `sortable_by` keeps the documented defaults (:position asc)
+          # instead of crashing on nil (pre-1.22 NoMethodError).
+          field_config = sortable_field || :position if field_config.nil?
+
+          field, direction = parse_sortable_config(field_config)
+          # validate direction and must be :asc or :desc
+          direction = :asc unless %i[asc desc].include?(direction)
+          [field, direction]
+        end
 
         def parse_sortable_config(config)
           if config.is_a?(Hash)

@@ -72,6 +72,7 @@ sortable_by position: :desc                      # hash form — explicit direct
 sortable_by :position, use_acts_as_list: false   # ordering only, no acts_as_list
 sortable_by :position, scope: :project_id        # per-scope position sequence
 sortable_by :position, add_new_at: :top          # new records land at position 1
+sortable_by :position, default_scope: false      # no sticky ordering; chain .sorted explicitly
 ```
 
 | Option | Type | Default | Description |
@@ -80,6 +81,7 @@ sortable_by :position, add_new_at: :top          # new records land at position 
 | `use_acts_as_list` | `Boolean` | `true` | When `true`, calls `acts_as_list(column: <field>)` on the model so automatic position management is enabled. Set to `false` to use only the `default_scope` ORDER BY without any `acts_as_list` behaviour. |
 | `scope` | `Symbol` or `String` | `nil` | Passed directly to `acts_as_list` as its `scope:` option. Restricts position numbering to a subset of rows sharing the same value in the named column. Ignored when `use_acts_as_list: false`. |
 | `add_new_at` | `Symbol` | `nil` | Passed directly to `acts_as_list` as its `add_new_at:` option. Accepts `:top` or `:bottom`. When `:top`, newly inserted records receive position `1` and existing records are shifted down. Ignored when `use_acts_as_list: false`. |
+| `default_scope` | `Boolean` | `true` | Since 1.22. When `false`, no sticky ORDER BY `default_scope` is applied — chain the `.sorted` scope where ordering matters. A sticky ordering `default_scope` breaks `.last`, `distinct.pluck`, and window queries, so new models are encouraged to opt out. |
 
 **Direction values.** Only `:asc` and `:desc` are accepted. Any other value silently falls back to `:asc`.
 
@@ -87,7 +89,11 @@ sortable_by :position, add_new_at: :top          # new records land at position 
 
 ## Scopes
 
-This concern adds no named ActiveRecord scopes. Ordering is applied through a `default_scope`, so it is active on every query that does not call `.unscoped`.
+| Scope | Description |
+|---|---|
+| `sorted` | Explicit `ORDER BY <field> <direction>` using the configured column — works whether or not the `default_scope` is enabled (since 1.22). |
+
+Default ordering is otherwise applied through a `default_scope` (unless disabled with `default_scope: false`), so it is active on every query that does not call `.unscoped`.
 
 ## Methods
 
@@ -108,7 +114,7 @@ Position values are automatically assigned on `create` and compacted on `destroy
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `sortable_by` | `sortable_by(field_config = nil, use_acts_as_list: true, scope: nil, add_new_at: nil, **field_options)` | Configures the sort column and direction, validates the column exists, and optionally sets up `acts_as_list`. |
+| `sortable_by` | `sortable_by(field_config = nil, use_acts_as_list: true, scope: nil, add_new_at: nil, default_scope: true, **field_options)` | Configures the sort column and direction, validates the column exists, optionally sets up `acts_as_list`, and (since 1.22) controls whether the sticky ordering `default_scope` is installed. |
 
 ## Examples
 
@@ -186,3 +192,9 @@ t3.position         # => 1  (own sequence inside Beta)
 - **`scope:` and `add_new_at:` are `acts_as_list` pass-throughs.** These options are forwarded verbatim to `acts_as_list(column:, scope:, add_new_at:)`. They have no effect when `use_acts_as_list: false`. Refer to the `acts_as_list` documentation for the full set of values each accepts.
 - **Calling `sortable_by` multiple times.** Each call overwrites `sortable_field` and `sortable_direction`. The `default_scope` reads these class attributes at query time, so the last call determines the actual ordering. However, each call also invokes `acts_as_list` again, which may result in duplicate callbacks being registered — prefer a single `sortable_by` call per model class.
 - **Thread safety.** `sortable_field` and `sortable_direction` are `class_attribute` values shared across threads. Mutating them at runtime (e.g., calling `sortable_by` after boot) is not thread-safe and is not supported in production.
+
+## Changed in 1.22.0
+
+- New `default_scope: false` option plus a `sorted` scope for explicit ordering.
+- A bare `sortable_by` no longer raises `NoMethodError` — it keeps the documented `:position` ascending defaults.
+- The `default_scope` no longer re-validates the schema on every relation construction (validation happens once, in the macro).

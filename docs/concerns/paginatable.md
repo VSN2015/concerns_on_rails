@@ -121,3 +121,9 @@ end
 - **`COUNT` strips ordering.** The total-count query calls `.except(:order, :limit, :offset)` before `.count`, so pre-applied `ORDER BY` clauses on the relation do not produce an extra subquery or count error.
 - **Integer coercion.** Both `per_page` and `max_per_page` arguments to `paginate_by` are coerced with `.to_i`. Passing a string (e.g., from an env variable) is safe. Similarly, `params[:page]` and `params[:per_page]` are coerced with `.to_i`, so string params from query strings work without manual conversion.
 - **No Kaminari or will_paginate dependency.** There is no gem dependency beyond `active_support/concern`. The concern implements LIMIT/OFFSET arithmetic directly.
+
+## Changed in 1.22.0
+
+- `?page[]=1` / `?per_page[x]=5` no longer raise — untrusted params are coerced through the shared `Support::ScalarParam` and fall back to defaults.
+- `pagination_meta` can now be called with no argument after `paginated` to reuse its memoized metadata — the records+meta composition previously ran the identical COUNT twice per request.
+- The COUNT strips a custom `SELECT` list and uses `count(:all)`, so `.select(...)`/`.distinct` relations no longer produce invalid SQL or skewed totals.

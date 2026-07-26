@@ -247,3 +247,7 @@ The verifier callable may return:
 - **Error messages are plain English strings without i18n lookup.** The concern does not use Rails' `I18n.t` for its messages, so no locale files are required. Messages mirror Rails' own length-error phrasing, including singular/plural: `"is too long (maximum is 1 character)"` vs `"is too long (maximum is 5 characters)"`.
 
 - **The concern has no runtime gem dependencies beyond ActiveSupport.** `friendly_id` and `acts_as_list` are not used here. The only requirement is Rails 5.0+ (for `class_attribute` and `before_validation`).
+
+## Changed in 1.22.0
+
+- `resolved_country` is memoized per raw country value (was computed three times per validation cycle), and normalization skips columns untouched by the current save on persisted records.

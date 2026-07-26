@@ -90,3 +90,8 @@ account.reset_theme           # key removed: reads back "light" again
 - **Read-side safety**: corrupt column JSON decodes as `{}` (defaults apply); garbage values cast to `nil`. Readers never raise.
 - **Undeclared keys** already in the column are preserved through typed writes.
 - Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) when you need to **query** into the store (jsonb operators, store-backed scopes).
+
+## Changed in 1.22.0
+
+- Per-record decode memoization: readers, writers, dirty-checks and validation share one `JSON.parse` per raw column value instead of re-parsing on every key access. Read-back semantics are unchanged (pinned by spec).
+- The native-hash column detection is mutex-guarded and no longer permanently caches a negative result taken while the schema was unreachable.

@@ -69,7 +69,7 @@ module ConcernsOnRails
         # ActionController::Parameters, which has each_pair but no Enumerable —
         # calling each_with_object directly on it was a guaranteed
         # NoMethodError 500 for every ?fields[...]= request.
-        raw.each_pair.each_with_object({}) do |(table, cols), memo|
+        raw.each_pair.with_object({}) do |(table, cols), memo|
           key = table.to_sym
           next unless allowed.key?(key)
 

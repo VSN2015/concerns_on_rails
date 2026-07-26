@@ -148,3 +148,7 @@ invoice.formatted_total # => "€1.999,99"
 - **No ActiveRecord validations are added.** The concern defines no presence, numericality, or format validations. Add those to your model manually if required.
 
 - **No scope or callback hooks are defined.** This concern is purely about accessor and formatting methods; it does not touch `default_scope`, `before_save`, or any other ActiveRecord callback.
+
+## Changed in 1.22.0
+
+- The generated money setter casts garbage input (`"abc"`, `""`) to nil — the ActiveModel convention — instead of raising `ArgumentError` out of a form assignment.

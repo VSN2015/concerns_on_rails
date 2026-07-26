@@ -23,8 +23,8 @@ module IntegrationHarness
   def dispatch(controller_class, action, method: "GET", query: "")
     env = Rack::MockRequest.env_for("/?#{query}", method: method)
     status, headers, body = controller_class.action(action).call(env)
-    chunks = []
-    body.each { |chunk| chunks << chunk }
+    # Rack bodies only guarantee #each (RackBody has no #map).
+    chunks = body.enum_for(:each).to_a
     body.close if body.respond_to?(:close)
     Result.new(status, headers, chunks.join)
   end

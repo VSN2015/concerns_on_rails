@@ -114,6 +114,11 @@ module ConcernsOnRails
           end
           raise ArgumentError, "#{LABEL}: polymorphic association `#{association}` is not supported" if reflection.polymorphic?
           raise ArgumentError, "#{LABEL}: :if must be callable (respond to #call)" unless condition.nil? || condition.respond_to?(:call)
+
+          validate_counter_cacheable_touch!(touch)
+        end
+
+        def validate_counter_cacheable_touch!(touch)
           raise ArgumentError, "#{LABEL}: :touch must be true or false" unless [true, false].include?(touch)
           return unless touch && ActiveRecord::VERSION::MAJOR < 6
 
@@ -151,20 +156,25 @@ module ConcernsOnRails
                   end
 
           # One transaction so a crash mid-repair can't leave every counter at
-          # the zeroed intermediate state; grouped by tally value so the repair
-          # costs O(distinct counts) statements instead of one UPDATE per parent.
+          # the zeroed intermediate state.
           parent_class.transaction do
             parent_class.unscoped.update_all(column => 0)
-            tally.group_by { |_id, n| n.to_i }.each do |n, pairs|
-              next if n.zero?
-
-              ids = pairs.map(&:first).compact
-              next if ids.empty?
-
-              parent_class.unscoped.where(parent_class.primary_key => ids).update_all(column => n)
-            end
+            counter_cacheable_apply_tally(parent_class, column, tally)
           end
           tally.count { |_id, n| n.to_i.positive? }
+        end
+
+        # Grouped by tally value so the repair costs O(distinct counts)
+        # statements instead of one UPDATE per parent row.
+        def counter_cacheable_apply_tally(parent_class, column, tally)
+          tally.group_by { |_id, n| n.to_i }.each do |n, pairs|
+            next if n.zero?
+
+            ids = pairs.map(&:first).compact
+            next if ids.empty?
+
+            parent_class.unscoped.where(parent_class.primary_key => ids).update_all(column => n)
+          end
         end
 
         def counter_cacheable_recount_tally(foreign_key, condition)

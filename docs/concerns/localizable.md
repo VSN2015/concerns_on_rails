@@ -118,3 +118,8 @@ end
 **Thread safety.** `I18n.with_locale` is thread-safe by design (it uses a thread-local variable internally). The `localizable_options` class attribute is set once at class-load time via `class_attribute` and is never mutated at runtime, so concurrent requests share it safely.
 
 **Inheritance.** `class_attribute` inheritance means subcontrollers can call `localizable` again with different options (e.g. a narrower `available:` list) without affecting the parent class or sibling controllers.
+
+## Changed in 1.22.0
+
+- Regional tags match: `Accept-Language: fr-CA` tries the full tag before falling back to the primary subtag, so `available: [:"fr-CA"]` can now match.
+- `resolved_locale` is memoized per request.

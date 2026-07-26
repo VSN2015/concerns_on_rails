@@ -49,7 +49,7 @@ module ConcernsOnRails
       # Memoized per request (the wrapper plus any helpers may read it several
       # times; parsing the Accept-Language header repeatedly is waste).
       def resolved_locale
-        @localizable_resolved_locale ||= begin
+        @resolved_locale ||= begin
           opts = self.class.localizable_options
           allowed = opts[:available].presence || I18n.available_locales
           candidate = locale_from_param(opts, allowed) || locale_from_header(opts, allowed) || opts[:default]

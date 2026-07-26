@@ -140,12 +140,11 @@ module ConcernsOnRails
         publishable_write_with_hooks(time, :publish)
       end
 
-      private
-
       # Shared write path: hooks and the timestamp write in ONE transaction, so
       # a raising hook rolls the change back (SoftDeletable's pattern). Before
       # 1.22 a raising after_publish left the record published with the side
-      # effect half-done.
+      # effect half-done. (Postfix private — the keyword form trips RuboCop's
+      # scope analysis against the `private` inside the class_methods block.)
       def publishable_write_with_hooks(value, kind)
         result = false
         transaction do
@@ -155,6 +154,7 @@ module ConcernsOnRails
         end
         result
       end
+      private :publishable_write_with_hooks
     end
   end
 end

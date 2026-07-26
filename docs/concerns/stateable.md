@@ -192,3 +192,8 @@ ticket.transition_to!(:nope)
 - **`update!` is used throughout** — setters, event methods, and `transition_to!` all call `update!`. This means ActiveRecord validations run on every state change, and a `RecordInvalid` error can be raised if other validations on the model fail.
 
 - **`InvalidTransition` error class** — it is namespaced as `ConcernsOnRails::Stateable::InvalidTransition` (accessible via the shorter alias). Rescue this specific class rather than `StandardError` for state-transition failures.
+
+## Changed in 1.22.0
+
+- Guarded `<event>!` transitions wrap hooks and the state write in one transaction — a raising `after_transition` rolls the state change back.
+- The `default:` state uses an attribute-level default instead of an `after_initialize` that ran for every row loaded from the database. Edge: `Model.new(field => nil)` now keeps the explicit nil.

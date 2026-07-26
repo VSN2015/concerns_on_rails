@@ -36,7 +36,10 @@ module ConcernsOnRails
         default_scope { soft_delete_default_scope ? without_deleted : all }
       end
 
-      class_methods do
+      # A real module (not `class_methods do`) so the batch helpers and their
+      # private fast-path predicate aren't constrained by Metrics/BlockLength
+      # (the Stateable/Auditable precedent). ActiveSupport::Concern auto-extends it.
+      module ClassMethods
         include ConcernsOnRails::Support::ColumnGuard
 
         # Define soft delete field and options.

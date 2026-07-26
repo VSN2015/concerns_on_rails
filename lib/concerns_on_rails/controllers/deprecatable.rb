@@ -124,9 +124,7 @@ module ConcernsOnRails
         def validate_deprecation_link!(name, value)
           return if value.nil?
 
-          unless value.is_a?(String) && !value.strip.empty?
-            raise ArgumentError, "#{LABEL}: :#{name} must be a non-blank String"
-          end
+          raise ArgumentError, "#{LABEL}: :#{name} must be a non-blank String" unless value.is_a?(String) && !value.strip.empty?
           return unless value.match?(/[[:cntrl:]<>]/)
 
           # These values are interpolated into the Link header: a control
@@ -204,12 +202,12 @@ module ConcernsOnRails
       def deprecation_rule_for_action
         # Memoized (nil included) — the before_action plus the two public
         # predicates each re-scanned the rule list every request.
-        return @deprecatable_matched_rule if defined?(@deprecatable_matched_rule)
+        return @deprecation_rule_for_action if defined?(@deprecation_rule_for_action)
 
         action = deprecation_action_name
         # Last match wins — see the module comment. reverse_each.find returns the
         # most recently declared rule covering this action (catch-all or not).
-        @deprecatable_matched_rule =
+        @deprecation_rule_for_action =
           action && self.class.deprecatable_rules.reverse_each.find do |rule|
             rule[:actions].empty? || rule[:actions].include?(action)
           end

@@ -342,7 +342,12 @@ module ConcernsOnRails
 
           cache = @_storable_decoded = {}
         end
-        entries = (cache[column] ||= [])
+        storable_cache_fetch(cache[column] ||= [], raw)
+      end
+
+      # Entries validated against the exact raw value; at most two per column
+      # (the current value + the `_was` value).
+      def storable_cache_fetch(entries, raw)
         hit = entries.find { |r, _| r.equal?(raw) || r == raw }
         return hit[1] if hit
 

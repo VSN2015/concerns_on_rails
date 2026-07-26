@@ -144,3 +144,7 @@ end
 - **Response bodies live in your cache for `ttl`.** Large responses on idempotent actions consume cache memory accordingly.
 - **Rules are inherited but not shared.** `idempotency_rules` is a `class_attribute`; the macro appends copy-on-write, so subclass declarations never mutate the parent.
 - **Keys are validated, then hashed.** A key must be non-blank, at most 255 characters, and free of control characters (else 400) — the control-character check exists because the raw key is echoed in `X-Idempotency-Key`, and CR/LF would otherwise enable response-header injection on Rack 2. The cache key uses the key's SHA256.
+
+## Changed in 1.22.0
+
+- The 409 conflict's `Retry-After` reports the remaining lock time (computed from the claim's `claimed_at`) instead of the full `lock_ttl`, so clients stop over-backing-off.

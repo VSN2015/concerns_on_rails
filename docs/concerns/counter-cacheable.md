@@ -95,3 +95,8 @@ Comment.recount_counter_caches!     # => { comments_count: 0, approved_comments_
 - **`if:` should read the record's own columns.** The previous-state reconstruction restores the changed attributes, not the associations.
 - **`recount_counter_caches!` rewrites every parent** (zeroes the column, then applies the tally) and scans children in Ruby for conditional counters — portable, but O(n). Treat it as a maintenance task, not a request-path call.
 - **Standard primary keys assumed.** Custom-`primary_key` parents and `has_many :through` rollups are out of scope — reach for [`counter_culture`](https://github.com/magnusvk/counter_culture) when you need multi-level rollups, delta columns, or after-commit execution.
+
+## Changed in 1.22.0
+
+- `recount_counter_caches!` runs in a transaction (a crash mid-repair can no longer leave every counter zeroed) and groups parents by tally value — O(distinct counts) UPDATE statements instead of one per parent row.
+- `touch: true` raises at macro time on Rails < 6.0, where `update_counters` lacks the option.
