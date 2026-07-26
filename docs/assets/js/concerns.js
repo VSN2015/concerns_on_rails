@@ -1,7 +1,7 @@
 /* Concern manifest — drives the sidebar nav, home cards, search, and source links.
    `tags` are refined from the doc-generation workflow; everything else is static metadata. */
 window.COR_META = {
-  version: "1.22.0",
+  version: "1.23.0",
   repo: "https://github.com/VSN2015/concerns_on_rails",
   branch: "master",
   rubygems: "https://rubygems.org/gems/concerns_on_rails"
@@ -33,6 +33,8 @@ window.CONCERNS = [
   { slug: "storable",       name: "Storable",       category: "model", icon: "⚙️", tagline: "Typed accessors over one JSON settings column", include: "ConcernsOnRails::Storable",   src: "lib/concerns_on_rails/models/storable.rb",       tags: ["settings","preferences","json","store_accessor","typed","defaults","storable","store-attribute"] },
   { slug: "counter-cacheable", name: "CounterCacheable", category: "model", icon: "🧮", tagline: "Conditional denormalized association counters", include: "ConcernsOnRails::CounterCacheable", src: "lib/concerns_on_rails/models/counter_cacheable.rb", tags: ["counter cache","counter_culture","denormalized","comments_count","conditional","countercacheable","update_counters","association"] },
   { slug: "encryptable", name: "Encryptable", category: "model", icon: "🔒", tagline: "Transparent field-level encryption (AES-256-GCM)", include: "ConcernsOnRails::Encryptable", src: "lib/concerns_on_rails/models/encryptable.rb", tags: ["encryption","aes-256-gcm","ssn","pii","sensitive-data","encryptable","openssl","attr_encrypted","lockbox","at-rest"] },
+  { slug: "anonymizable", name: "Anonymizable", category: "model", icon: "🕵️", tagline: "GDPR right-to-erasure with per-field strategies", include: "ConcernsOnRails::Anonymizable", src: "lib/concerns_on_rails/models/anonymizable.rb", tags: ["gdpr","anonymize","right-to-erasure","pii","redact","privacy","anonymizable","erasure","forget-me"] },
+  { slug: "duplicable", name: "Duplicable", category: "model", icon: "🧬", tagline: "Concern-aware deep copy with association allow-list", include: "ConcernsOnRails::Duplicable", src: "lib/concerns_on_rails/models/duplicable.rb", tags: ["duplicate","deep copy","clone","amoeba","copy record","duplicable","dup","template"] },
 
   // ---- Controller concerns ----
   { slug: "paginatable",        name: "Paginatable",          category: "controller", icon: "📄", tagline: "Offset pagination with headers",             include: "ConcernsOnRails::Controllers::Paginatable",     src: "lib/concerns_on_rails/controllers/paginatable.rb",     tags: ["pagination","page","per_page","offset","headers","paginatable","controller-concern","per-page"] },

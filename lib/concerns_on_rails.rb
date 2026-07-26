@@ -96,6 +96,8 @@ require "concerns_on_rails/models/aliasable"
 require "concerns_on_rails/models/storable"
 require "concerns_on_rails/models/counter_cacheable"
 require "concerns_on_rails/models/encryptable"
+require "concerns_on_rails/models/anonymizable"
+require "concerns_on_rails/models/duplicable"
 
 # Controller concerns
 require "concerns_on_rails/controllers/paginatable"
