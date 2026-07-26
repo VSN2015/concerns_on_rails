@@ -1,4 +1,6 @@
 require "active_support/concern"
+require "concerns_on_rails/support/error_envelope"
+require "concerns_on_rails/support/scalar_param"
 require "json"
 require "time" # Time#iso8601(fraction_digits) lives in the stdlib time library
 
@@ -195,16 +197,16 @@ module ConcernsOnRails
       # Public override point (mirrors ErrorHandleable's public handlers):
       # delegates to Respondable#render_error when available.
       def render_invalid_cursor(error)
-        return render_error(message: error.message, status: :bad_request, code: "invalid_cursor") if respond_to?(:render_error)
-
-        render json: { success: false, error: { message: error.message, code: "invalid_cursor" } }, status: :bad_request
+        ConcernsOnRails::Support::ErrorEnvelope.render(
+          self, message: error.message, status: :bad_request, code: "invalid_cursor"
+        )
       end
 
       # Same override contract for unknown ?order= preset names.
       def render_invalid_order_preset(error)
-        return render_error(message: error.message, status: :bad_request, code: "invalid_order_preset") if respond_to?(:render_error)
-
-        render json: { success: false, error: { message: error.message, code: "invalid_order_preset" } }, status: :bad_request
+        ConcernsOnRails::Support::ErrorEnvelope.render(
+          self, message: error.message, status: :bad_request, code: "invalid_order_preset"
+        )
       end
 
       private
@@ -311,7 +313,9 @@ module ConcernsOnRails
       end
 
       def cursor_per_page(override)
-        requested = (override || params[:per_page]).to_i
+        # ScalarParam: `?per_page[]=50` arrives as an Array and .to_i on it was
+        # a 500 (mirrors Paginatable).
+        requested = ConcernsOnRails::Support::ScalarParam.to_i(override || params[:per_page], default: 0)
         requested = self.class.cursor_paginatable_per_page if requested < 1
         cap = self.class.cursor_paginatable_max_per_page
         cap.positive? ? [requested, cap].min : requested
@@ -452,6 +456,10 @@ module ConcernsOnRails
       # columns) and the adapter supports tuples, silently falling back
       # otherwise; an explicit :row raises on mixed directions instead of
       # silently changing strategy.
+      # Adapter capability is stable for the life of the process; memoized so
+      # :auto mode doesn't pay a connection checkout + regex on every request.
+      ROW_PREDICATE_SUPPORT_CACHE = {}
+
       def cursor_row_predicate?(model, pairs)
         mode = self.class.cursor_paginatable_predicate
         return false if mode == :or || pairs.size < 2
@@ -462,7 +470,15 @@ module ConcernsOnRails
 
           return true
         end
-        uniform && model.connection.adapter_name.match?(ROW_PREDICATE_ADAPTERS)
+        uniform && cursor_adapter_row_predicate?(model)
+      end
+
+      def cursor_adapter_row_predicate?(model)
+        key = model.name || model.table_name
+        cached = ROW_PREDICATE_SUPPORT_CACHE[key]
+        return cached unless cached.nil?
+
+        ROW_PREDICATE_SUPPORT_CACHE[key] = model.connection.adapter_name.match?(ROW_PREDICATE_ADAPTERS)
       end
 
       def cursor_row_predicate(model, pairs, values)

@@ -1,4 +1,6 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/address_data"
 
 module ConcernsOnRails
   module Models
@@ -182,8 +184,13 @@ module ConcernsOnRails
         self.class.addressable_fields.each do |part, column|
           value = self[column]
           next unless value.is_a?(String)
+          # Persisted records: untouched columns were already normalized when
+          # they were written — skip the rewrite.
+          next if persisted? && respond_to?(:will_save_change_to_attribute?) &&
+                  !will_save_change_to_attribute?(column)
 
-          self[column] = normalize_part(part, country, value)
+          normalized = normalize_part(part, country, value)
+          self[column] = normalized unless normalized == value
         end
       end
 
@@ -244,10 +251,21 @@ module ConcernsOnRails
       def resolved_country
         column = self.class.addressable_fields[:country]
         value = column && self[column]
-        return self.class.addressable_default_country if value.blank?
+        # Memoized per raw country value — normalization plus the postal and
+        # state validators each need it, which used to mean recomputing the
+        # strip/upcase/name-mapping three times per validation cycle.
+        cached = @_addressable_resolved_country
+        return cached[1] if cached && cached[0] == value
 
-        code = canonical_country_code(value)
-        ConcernsOnRails::Support::AddressData.valid_country?(code) ? code : nil
+        code =
+          if value.blank?
+            self.class.addressable_default_country
+          else
+            candidate = canonical_country_code(value)
+            ConcernsOnRails::Support::AddressData.valid_country?(candidate) ? candidate : nil
+          end
+        @_addressable_resolved_country = [value, code] unless frozen?
+        code
       end
 
       # The country value as an alpha-2 candidate, applying name/alpha-3 mapping

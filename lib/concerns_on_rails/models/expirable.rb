@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
   module Models
@@ -84,6 +85,9 @@ module ConcernsOnRails
         (value - now).seconds
       end
 
+      private
+
+      # Internal helper for extend_expiry! — not part of the public API.
       def expiry_extension_base
         value = self[self.class.expirable_field]
         now = Time.zone.now

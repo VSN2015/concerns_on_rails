@@ -65,20 +65,30 @@ module ConcernsOnRails
       # zone. UNGUARDED on purpose — it touches `Time` globally, not the response
       # (mirrors Localizable#switch_locale).
       def switch_time_zone(&)
-        Time.use_zone(resolved_time_zone, &)
+        zone = resolved_time_zone
+        # Skip the wrapper when it would be a no-op — with nothing configured
+        # (or the client asking for the current zone) every action used to run
+        # inside a pointless Time.use_zone block.
+        return yield if Time.zone && zone && zone.name == Time.zone.name
+
+        Time.use_zone(zone, &)
       end
 
       # The ActiveSupport::TimeZone chosen for this request — always one `Time`
-      # can switch to (falls back to the current `Time.zone`).
+      # can switch to (falls back to the current `Time.zone`). Memoized per
+      # request: resolution costs up to three TimeZone lookups plus an
+      # allow-list scan.
       def resolved_time_zone
-        opts = self.class.timezoneable_options
-        allowed = opts[:available]
-        candidate = zone_from_param(opts, allowed) ||
-                    zone_from_header(opts, allowed) ||
-                    zone_from_cookie(opts, allowed) ||
-                    opts[:default]
+        @timezoneable_resolved_zone ||= begin
+          opts = self.class.timezoneable_options
+          allowed = opts[:available]
+          candidate = zone_from_param(opts, allowed) ||
+                      zone_from_header(opts, allowed) ||
+                      zone_from_cookie(opts, allowed) ||
+                      opts[:default]
 
-        resolve_zone(candidate) || Time.zone
+          resolve_zone(candidate) || Time.zone
+        end
       end
 
       private

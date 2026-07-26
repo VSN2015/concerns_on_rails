@@ -54,8 +54,15 @@ module ConcernsOnRails
 
       included do
         class_attribute :secure_headable_headers, instance_accessor: false, default: {}
-        # after_action (not before) so the headers survive render and reinforce
-        # Rails' middleware defaults when a name collides.
+        # Two registrations, both idempotent (static strings):
+        #   * prepend_before_action — Rails SKIPS after_action callbacks when a
+        #     rescue_from handler captures an exception, so without the early
+        #     application every handled 404/422/500 shipped with NO security
+        #     headers. Headers set before the action survive into the rescue
+        #     render. (Opting out now needs skip_before_action too.)
+        #   * after_action — keeps the last word over anything the action set,
+        #     reinforcing Rails' middleware defaults when a name collides.
+        prepend_before_action :apply_secure_headers if respond_to?(:prepend_before_action)
         after_action :apply_secure_headers
       end
 

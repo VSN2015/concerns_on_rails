@@ -33,8 +33,10 @@ module ConcernsOnRails
       end
 
       # Insert the thousands delimiter into a non-negative integer string.
+      # Single lookahead pass — the old reverse/gsub/reverse allocated three
+      # strings per formatted amount.
       def delimit(integer_string, delimiter)
-        integer_string.reverse.gsub(/(\d{3})(?=\d)/, "\\1#{delimiter}").reverse
+        integer_string.gsub(/(\d)(?=(?:\d{3})+\z)/, "\\1#{delimiter}")
       end
     end
   end

@@ -3,10 +3,13 @@ require "concerns_on_rails/encryption"
 
 module ConcernsOnRails
   module Support
-    # Pure, stateless AES-256-GCM codec shared by Models::Encryptable. Like the
-    # other Support modules (Masker, Money) it holds no state — key material is
-    # always passed in — and uses only stdlib OpenSSL, matching the dependency
-    # -free crypto already in Controllers::WebhookVerifiable.
+    # Pure AES-256-GCM codec shared by Models::Encryptable. Like the other
+    # Support modules (Masker, Money) key material is always passed in, and it
+    # uses only stdlib OpenSSL, matching the dependency-free crypto already in
+    # Controllers::WebhookVerifiable. The one piece of state is a bounded,
+    # mutex-guarded memo of PBKDF2-derived keys (see KEY_CACHE_MAX below):
+    # without it every encrypt/decrypt/blind-index call re-runs the 65,536
+    # -iteration KDF, turning a 200-row load into seconds of key stretching.
     #
     # On-disk envelope (Base64 via pack("m0"), the gem's convention — avoids the
     # base64 gem, no longer default on Ruby 3.4):
@@ -105,13 +108,39 @@ module ConcernsOnRails
         return material.b if material.bytesize == KEY_BYTES && material.encoding == Encoding::BINARY
         return [material].pack("H*") if material.match?(/\A\h{64}\z/)
 
-        OpenSSL::KDF.pbkdf2_hmac(
-          material,
-          salt: salt.to_s,
-          iterations: ConcernsOnRails::Encryption::KDF_ITERATIONS,
-          length: KEY_BYTES,
-          hash: "SHA256"
-        )
+        derived_key(material, salt.to_s)
+      end
+
+      KEY_CACHE_MUTEX = Mutex.new
+      KEY_CACHE_MAX = 64
+
+      # PBKDF2 is deliberately slow; the derived key for a given
+      # (passphrase, salt, iterations) triple never changes, so memoize it.
+      # Keyed by the passphrase's SHA-256 digest rather than the passphrase
+      # itself to avoid retaining extra plaintext copies. Correctness never
+      # depends on invalidation — different material/salt is a different key —
+      # so `reset_key_cache!` (called from ConcernsOnRails.configure_encryption)
+      # is memory hygiene for rotated-away secrets, not a cache-coherence hook.
+      def derived_key(material, salt)
+        cache_key = [OpenSSL::Digest::SHA256.digest(material), salt,
+                     ConcernsOnRails::Encryption::KDF_ITERATIONS]
+        KEY_CACHE_MUTEX.synchronize do
+          cache = (@key_cache ||= {})
+          cache.fetch(cache_key) do
+            cache.shift if cache.size >= KEY_CACHE_MAX # FIFO eviction
+            cache[cache_key] = OpenSSL::KDF.pbkdf2_hmac(
+              material,
+              salt: salt,
+              iterations: ConcernsOnRails::Encryption::KDF_ITERATIONS,
+              length: KEY_BYTES,
+              hash: "SHA256"
+            )
+          end
+        end
+      end
+
+      def reset_key_cache!
+        KEY_CACHE_MUTEX.synchronize { @key_cache = {} }
       end
     end
   end

@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
   module Models
@@ -108,6 +109,8 @@ module ConcernsOnRails
       end
 
       module ClassMethods
+        include ConcernsOnRails::Support::ColumnGuard
+
         # Register `new_name` as a full alias of the existing association
         # `source_name`. Argument order mirrors `alias_method new, old`.
         # Callable many times; aliases of aliases collapse to the terminal
@@ -229,14 +232,11 @@ module ConcernsOnRails
 
         # Column collisions can only be checked against a live schema. Class
         # loading without a database (rake db:create, assets:precompile) must
-        # not crash, so the column/attribute sweep is best-effort. The rescue
-        # is scoped to AR's own error hierarchy (no connection, no database,
-        # statement errors) — a NameError/NoMethodError from a real bug must
-        # still surface.
+        # not crash, so the column/attribute sweep is best-effort. The
+        # skip-don't-crash rule now lives in Support::ColumnGuard, shared by
+        # every concern macro.
         def aliasable_schema_reachable?
-          table_exists?
-        rescue ActiveRecord::ActiveRecordError
-          false
+          schema_reachable?
         end
 
         # Register a RENAMED COPY of the source reflection under the alias.

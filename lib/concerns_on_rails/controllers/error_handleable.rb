@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/error_envelope"
 
 module ConcernsOnRails
   module Controllers
@@ -64,11 +65,9 @@ module ConcernsOnRails
       private
 
       def render_error_envelope(message:, code:, status:, errors: nil)
-        return render_error(message: message, code: code, status: status, errors: errors) if respond_to?(:render_error)
-
-        error = { message: message, code: code }
-        error[:details] = errors if errors
-        render json: { success: false, error: error }, status: status
+        ConcernsOnRails::Support::ErrorEnvelope.render(
+          self, message: message, code: code, status: status, details: errors
+        )
       end
     end
   end

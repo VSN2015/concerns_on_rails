@@ -423,17 +423,18 @@ describe ConcernsOnRails::SoftDeletable do
     let!(:r1) { dummy_class.create!(name: 'x') }
     let!(:r2) { dummy_class.create!(name: 'y') }
 
-    it 'soft-deletes every matching record' do
-      dummy_class.soft_delete_all
+    it 'soft-deletes every matching record and returns the count' do
+      expected = dummy_class.count # r1 + r2 + the outer let!(:record)
+      expect(dummy_class.soft_delete_all).to eq(expected)
       expect(r1.reload).to be_deleted
       expect(r2.reload).to be_deleted
     end
 
-    it 'rolls the whole batch back when one record fails to soft-delete' do
+    it 'raises RecordNotSaved and rolls the whole batch back when one record fails (1.22)' do
       allow_any_instance_of(dummy_class).to receive(:soft_delete!) do |rec|
         rec.name != 'y' && rec.update_column(:deleted_at, Time.zone.now)
       end
-      dummy_class.soft_delete_all
+      expect { dummy_class.soft_delete_all }.to raise_error(ActiveRecord::RecordNotSaved, /failed to soft-delete/)
       expect(r1.reload).not_to be_deleted
     end
   end

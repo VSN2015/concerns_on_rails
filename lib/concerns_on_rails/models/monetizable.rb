@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/money"
 
 module ConcernsOnRails
@@ -66,7 +67,19 @@ module ConcernsOnRails
           end
 
           define_method("#{name}=") do |amount|
-            self[cents_field] = amount.nil? ? nil : (BigDecimal(amount.to_s) * subunit).round
+            self[cents_field] = if amount.nil?
+                                  nil
+                                else
+                                  begin
+                                    (BigDecimal(amount.to_s) * subunit).round
+                                  rescue ArgumentError, TypeError
+                                    # Form garbage ("abc", "") casts to nil — the
+                                    # ActiveModel convention Storable/Encryptable
+                                    # follow — instead of raising out of the
+                                    # setter before validation can run.
+                                    nil
+                                  end
+                                end
           end
 
           define_method("formatted_#{name}") do

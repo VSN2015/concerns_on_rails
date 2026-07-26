@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
   module Models
@@ -149,22 +150,31 @@ module ConcernsOnRails
         def stateable_apply_default
           return unless stateable_default
 
-          field = stateable_field
-          default = stateable_default.to_s
-          after_initialize { self[field] = default if new_record? && self[field].blank? }
+          # Attribute-level default: applied when a new object is built, with no
+          # callback overhead — the previous after_initialize ran (and checked
+          # new_record?) for every row materialized from the database. Loaded
+          # records keep their stored value; `Model.new(field => nil)` keeps the
+          # explicit nil (assign the state or rely on the default, not both).
+          attribute stateable_field, :string, default: stateable_default.to_s
         end
       end
 
       private
 
       # Instance-level guarded transition body, shared by every `<event>!`.
+      # Hooks and the state write share ONE transaction, so a raising
+      # after_transition rolls the state change back instead of leaving it
+      # committed with the side effect half-done (SoftDeletable's pattern).
       def stateable_perform_transition!(field, to, from, event)
         current = self[field].to_s
         raise InvalidTransition, "#{self.class.name}: cannot #{event} from '#{self[field]}'" unless from.empty? || from.include?(current)
 
-        before_transition(event, current, to)
-        result = update!(field => to)
-        after_transition(event, current, to)
+        result = false
+        transaction do
+          before_transition(event, current, to)
+          result = update!(field => to)
+          after_transition(event, current, to)
+        end
         result
       end
     end

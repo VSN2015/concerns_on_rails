@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/error_envelope"
 
 module ConcernsOnRails
   module Controllers
@@ -93,9 +94,9 @@ module ConcernsOnRails
         return unless respond_to?(:response) && response
 
         message = "Rate limit exceeded. Retry in #{result[:retry_after]}s."
-        return render_error(message: message, status: :too_many_requests, code: "rate_limited") if respond_to?(:render_error)
-
-        render json: { success: false, error: { message: message, code: "rate_limited" } }, status: :too_many_requests
+        ConcernsOnRails::Support::ErrorEnvelope.render(
+          self, message: message, status: :too_many_requests, code: "rate_limited"
+        )
       end
 
       private
@@ -123,13 +124,30 @@ module ConcernsOnRails
         { count: count.to_i, reset_at: reset_at, retry_after: [reset_at - now, 0].max }
       end
 
+      # Seed with unless_exist so two concurrent first hits can't both write 1
+      # and under-count the window; when this seed loses that race, increment
+      # the winner's counter instead.
       def seed_throttle_key(store, key, period)
-        store.write(key, 1, expires_in: period) if store.respond_to?(:write)
-        1
+        return 1 unless store.respond_to?(:write)
+
+        if store.write(key, 1, expires_in: period, unless_exist: true)
+          1
+        else
+          store.increment(key, 1, expires_in: period) || 1
+        end
       end
 
       def throttle_discriminator(rule)
-        instance_exec(&rule[:by])
+        value = instance_exec(&rule[:by])
+        if value.blank?
+          # A nil/blank discriminator (e.g. `-> { current_user&.id }` for an
+          # anonymous request) would collapse every client into ONE shared
+          # bucket — fail loudly instead of throttling the whole site.
+          raise ArgumentError,
+                "ConcernsOnRails::Controllers::Throttleable: rule '#{rule[:name]}' discriminator " \
+                "resolved blank; fall back explicitly, e.g. `by: -> { current_user&.id || request.remote_ip }`"
+        end
+        value
       end
 
       def emit_throttle_headers(rule, result)

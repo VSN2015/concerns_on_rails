@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 require "bigdecimal"
 require "json"
 
@@ -74,11 +75,26 @@ module ConcernsOnRails
           self.auditable_max_entries = max_entries
           self.auditable_max_value_length = max_value_length
           ensure_columns!(LABEL, into, *fields)
+          auditable_guard_encryptable!(fields)
 
           before_save :auditable_capture_changes
         end
 
         private
+
+        # Mirror of Encryptable's macro-time guard, covering the reverse
+        # declaration order (auditable_by declared AFTER encryptable) —
+        # auditing an encrypted field would persist decrypted plaintext.
+        def auditable_guard_encryptable!(fields)
+          return unless respond_to?(:encryptable_rules)
+
+          overlap = fields.map(&:to_sym) & encryptable_rules.keys
+          return if overlap.empty?
+
+          raise ArgumentError,
+                "#{LABEL}: #{overlap.map { |f| ":#{f}" }.join(', ')} declared with both Encryptable and " \
+                "Auditable; auditing would persist decrypted plaintext. Remove them from auditable_by."
+        end
 
         def validate_auditable!(fields, into:, actor:, max_entries:, max_value_length:)
           raise ArgumentError, "#{LABEL}: auditable_by requires at least one field" if fields.empty?
@@ -98,8 +114,18 @@ module ConcernsOnRails
       # ---- instance methods ----
 
       # Decoded audit entries, oldest first. [] for blank/corrupt columns.
+      # Memoized per raw column value (rendering "last changed" for five fields
+      # used to decode the whole trail five times); the returned Array is a
+      # fresh copy each call, but the entry Hashes are shared — treat them as
+      # read-only.
       def audit_trail
-        auditable_decode(self[self.class.auditable_into])
+        raw = self[self.class.auditable_into]
+        cached = @_auditable_trail
+        return cached[1].dup if cached && (cached[0].equal?(raw) || cached[0] == raw)
+
+        decoded = auditable_decode(raw)
+        @_auditable_trail = [raw, decoded] unless frozen?
+        decoded.dup
       end
 
       # The most recent entry recorded for `field`, or nil.
@@ -132,6 +158,12 @@ module ConcernsOnRails
       def auditable_capture_changes
         fields = self.class.auditable_fields
         return if fields.blank?
+
+        # Cheap pre-check before materializing the full changes hash — most
+        # saves don't touch a tracked field.
+        if respond_to?(:will_save_change_to_attribute?)
+          return unless fields.any? { |f| will_save_change_to_attribute?(f) }
+        end
 
         pending = respond_to?(:changes_to_save) ? changes_to_save : changes
         tracked = pending.slice(*fields.map(&:to_s))

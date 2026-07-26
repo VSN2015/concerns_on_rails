@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
   module Models
@@ -98,12 +99,22 @@ module ConcernsOnRails
         update(field => time)
       end
 
-      def reschedule!(starts_at:, ends_at:)
-        attrs = {}
-        starts_field = self.class.schedulable_starts_at_field
-        ends_field = self.class.schedulable_ends_at_field
-        attrs[starts_field] = starts_at if starts_field
-        attrs[ends_field] = ends_at if ends_field
+      # Update either or both window columns: only the keywords you pass are
+      # written (nil clears a side). Passing a value for a column that isn't
+      # configured raises instead of silently dropping it (the pre-1.22
+      # behavior), and single-column models no longer have to fabricate the
+      # missing keyword.
+      def reschedule!(**changes)
+        extra = changes.keys - %i[starts_at ends_at]
+        raise ArgumentError, "ConcernsOnRails::Models::Schedulable: unknown option(s): #{extra.join(', ')}" if extra.any?
+        raise ArgumentError, "ConcernsOnRails::Models::Schedulable: reschedule! needs starts_at: and/or ends_at:" if changes.empty?
+
+        attrs = changes.to_h do |kind, value|
+          field = kind == :starts_at ? self.class.schedulable_starts_at_field : self.class.schedulable_ends_at_field
+          raise ArgumentError, "ConcernsOnRails::Models::Schedulable: #{kind} column is not configured" unless field
+
+          [field, value]
+        end
         update(attrs)
       end
 

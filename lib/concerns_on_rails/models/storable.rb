@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 require "active_support/core_ext/object/deep_dup"
 require "active_model/type"
 require "bigdecimal"
@@ -67,6 +68,7 @@ module ConcernsOnRails
 
       VALID_TYPES = %i[string integer float decimal boolean date datetime json].freeze
       ALLOWED_SPEC_KEYS = %i[type default in].freeze
+      STORABLE_NATIVE_HASH_MUTEX = Mutex.new
 
       # Reusable ActiveModel casters for the JSON-native types. :decimal,
       # :date and :datetime round-trip through Strings and are handled
@@ -116,12 +118,23 @@ module ConcernsOnRails
         # connection exists — whether the column's attribute type stores a Hash
         # natively (a :json column, or a host-app `serialize`d column) so we can
         # hand it the Hash; everything else gets a generated JSON String.
+        # Mutex-guarded (first writes can race on request threads), and a
+        # decision made *without* a reachable schema is never memoized — booting
+        # without a database must not pin a Hash-native column to the
+        # JSON-String path forever.
         def storable_native_hash_column?(column)
-          cache = (@storable_native_hash_cache ||= {})
           name = column.to_sym
-          return cache[name] if cache.key?(name)
+          cache = @storable_native_hash_cache
+          return cache[name] if cache&.key?(name)
 
-          cache[name] = storable_detect_native_hash(column)
+          STORABLE_NATIVE_HASH_MUTEX.synchronize do
+            cache = (@storable_native_hash_cache ||= {})
+            return cache[name] if cache.key?(name)
+
+            detected = storable_detect_native_hash(column)
+            cache[name] = detected if schema_reachable?
+            detected
+          end
         end
 
         private
@@ -200,9 +213,11 @@ module ConcernsOnRails
         end
 
         # A name is taken when it shadows a column's (lazily defined) attribute
-        # accessors or any already-defined instance method.
+        # accessors or any already-defined instance method. The column check
+        # needs a live schema; without one (db:create, precompile) it is
+        # skipped — the method checks below still run.
         def storable_method_taken?(method_name, accessor)
-          return true if column_names.include?(accessor.to_s)
+          return true if schema_reachable? && column_names.include?(accessor.to_s)
 
           method_defined?(method_name) || private_method_defined?(method_name)
         end
@@ -245,12 +260,12 @@ module ConcernsOnRails
 
       def storable_get(column, key)
         spec = storable_spec(column, key)
-        storable_resolve(spec, storable_decode(self[column]), key)
+        storable_resolve(spec, storable_decoded(column, self[column]), key)
       end
 
       def storable_set(column, key, value)
         spec = storable_spec(column, key)
-        hash = storable_decode(self[column]).dup
+        hash = storable_decoded(column, self[column]).dup
         hash[key.to_s] = storable_cast_write(spec[:type], value)
         storable_assign(column, hash)
       end
@@ -264,13 +279,13 @@ module ConcernsOnRails
 
       def storable_key_was(column, key)
         spec = storable_spec(column, key)
-        storable_resolve(spec, storable_decode(attribute_was(column.to_s)), key)
+        storable_resolve(spec, storable_decoded(column, attribute_was(column.to_s)), key)
       end
 
       # In-memory only (no save) — hence no bang. Removing the key lets the
       # reader fall back to the default again.
       def storable_reset(column, key)
-        hash = storable_decode(self[column])
+        hash = storable_decoded(column, self[column])
         return unless hash.key?(key.to_s)
 
         new_hash = hash.dup
@@ -307,6 +322,42 @@ module ConcernsOnRails
       end
 
       # ---- storage codec ----
+
+      # Memoizing decode funnel: without it, every key read/write/dirty-check
+      # re-parses the whole column, so a ten-key form save costs dozens of
+      # JSON.parse calls. The cache is per instance, keyed by column, holding at
+      # most two [raw, decoded] pairs (the current value + the `_was` value);
+      # entries are validated against the exact raw value, so any reassignment
+      # of the underlying attribute (a writer, reload, user code) misses and
+      # re-decodes. Deliberately never seeded after a write: an immediate
+      # read-back must parse the generated JSON so `:json` values keep their
+      # string-key semantics. Callers never mutate the returned hash (they dup
+      # first), which keeps the shared cached copy pristine.
+      def storable_decoded(column, raw)
+        return raw if raw.is_a?(Hash) # native json / serialized column — no parse needed
+
+        cache = @_storable_decoded
+        if cache.nil?
+          return storable_decode(raw) if frozen? # frozen record: decode uncached
+
+          cache = @_storable_decoded = {}
+        end
+        entries = (cache[column] ||= [])
+        hit = entries.find { |r, _| r.equal?(raw) || r == raw }
+        return hit[1] if hit
+
+        decoded = storable_decode(raw)
+        entries.unshift([raw, decoded])
+        entries.pop while entries.size > 2
+        decoded
+      end
+
+      # Belt-and-braces isolation for dup/clone (entries are validated by raw
+      # value, so even a shared cache would answer correctly).
+      def initialize_dup(other)
+        super
+        @_storable_decoded = nil
+      end
 
       # A native-json Hash is used as-is; a String is parsed tolerantly; anything
       # else (nil, an array, a stray scalar) decodes to {}.
@@ -415,7 +466,7 @@ module ConcernsOnRails
       # and nil values pass (compose with a presence validator if you need them).
       def storable_validate_inclusions
         self.class.storable_keys.each do |column, keys|
-          decoded = storable_decode(self[column])
+          decoded = storable_decoded(column, self[column])
           keys.each do |key, spec|
             allowed = spec[:in]
             next unless allowed

@@ -61,6 +61,13 @@ module ConcernsOnRails
 
       included do
         class_attribute :cacheable_rules, instance_accessor: false, default: []
+        # no_store is applied EARLY as well: rescue_from-rendered errors skip
+        # after_action entirely, and for a no_store endpoint (tokens, PII) even
+        # the error response must not be stored. Positive freshness policies
+        # deliberately do NOT move early — rescued errors already get Rails'
+        # safe `max-age=0, private` default, and emitting `public, max-age` on
+        # a rescued 500 would let shared caches serve the error.
+        prepend_before_action :apply_http_no_store if respond_to?(:prepend_before_action)
         after_action :apply_http_cache_headers
       end
 
@@ -143,12 +150,26 @@ module ConcernsOnRails
         nil
       end
 
+      # Early half of the policy (see the included block): only no_store, and
+      # idempotent with apply_http_cache_headers re-applying it after render.
+      def apply_http_no_store
+        rule = http_cache_rule_for_action
+        return unless rule && rule[:no_store]
+        return unless respond_to?(:response) && response
+
+        response.set_header("Cache-Control", "no-store")
+      end
+
       # Set ETag/Last-Modified validators for the resource, then — for a safe
       # request whose precondition matches — send 304 and return false. Returns
       # true when the client must be sent a fresh body. Mirrors Rails `stale?`.
       def stale_resource?(resource = nil, etag: nil, last_modified: nil)
-        validators = set_cache_validators(resource, etag: etag, last_modified: last_modified)
+        # Unsafe methods get neither a 304 nor validators: a POST response must
+        # not advertise an ETag a client could replay against GET (pre-1.22 the
+        # validators were written before the safe-method check).
         return true unless http_cache_safe_request?
+
+        validators = set_cache_validators(resource, etag: etag, last_modified: last_modified)
         return true unless request_matches_cache?(etag: validators[:etag], last_modified: validators[:last_modified])
 
         http_cache_send_not_modified
@@ -225,13 +246,10 @@ module ConcernsOnRails
       end
 
       def http_cache_send_not_modified
-        response.status = 304 if respond_to?(:response) && response
+        return head(:not_modified) if respond_to?(:head)
 
-        if respond_to?(:head)
-          head :not_modified
-        else
-          render(status: :not_modified)
-        end
+        response.status = 304 if respond_to?(:response) && response
+        render(status: :not_modified)
       end
 
       def http_cache_safe_request?

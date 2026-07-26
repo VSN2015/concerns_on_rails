@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
   module Models
@@ -65,8 +66,14 @@ module ConcernsOnRails
         self.class.normalizable_rules.each do |field, normalizer|
           value = self[field]
           next if value.nil?
+          # Persisted records: a field not part of this save already went
+          # through normalization when it was written — skip it instead of
+          # re-running every rule on every validation.
+          next if persisted? && respond_to?(:will_save_change_to_attribute?) &&
+                  !will_save_change_to_attribute?(field)
 
-          self[field] = normalizer.call(value)
+          normalized = normalizer.call(value)
+          self[field] = normalized unless normalized == value
         end
       end
     end

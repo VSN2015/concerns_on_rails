@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/error_envelope"
 require "active_support/security_utils"
 require "openssl"
 require "digest"
@@ -180,9 +181,7 @@ module ConcernsOnRails
       def webhook_verification_failed(message:, status:, code:)
         return unless respond_to?(:response) && response
 
-        return render_error(message: message, status: status, code: code) if respond_to?(:render_error)
-
-        render json: { success: false, error: { message: message, code: code } }, status: status
+        ConcernsOnRails::Support::ErrorEnvelope.render(self, message: message, status: status, code: code)
       end
 
       private

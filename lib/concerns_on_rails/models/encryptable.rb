@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 require "active_model/type"
 require "bigdecimal"
 require "time"
@@ -82,9 +83,9 @@ module ConcernsOnRails
         # { field => { type:, key:, blind_index: } }. Subclasses inherit and may
         # add fields.
         class_attribute :encryptable_rules, instance_accessor: false, default: {}
-        # Backstop for the reverse declaration order (Auditable added AFTER
-        # Encryptable): the macro-time guard can't see a not-yet-declared audit.
-        before_save :encryptable_guard_audited_plaintext!
+        # (The audited-plaintext overlap is guarded at macro time from BOTH
+        # declaration orders — here and in Auditable#auditable_by — so no
+        # per-save backstop is needed.)
         before_save :encryptable_refresh_blind_indexes
       end
 
@@ -289,11 +290,17 @@ module ConcernsOnRails
           # IN query on the fingerprint column. Returns a Relation, so it chains
           # with scopes, `.or`, `.merge` (for joins), and further `.where`.
           define_singleton_method("where_#{field}") do |*values|
-            fingerprints = values.flatten.map { |v| public_send("#{field}_fingerprint", v) }
+            fingerprints = values.flatten.map { |v| public_send("#{field}_fingerprint", v) }.compact
+            # A nil value has no fingerprint; passing it through would build
+            # `WHERE bidx IS NULL` and match every unfingerprinted row instead
+            # of "value is nil".
+            return none if fingerprints.empty?
+
             where(column => fingerprints.length == 1 ? fingerprints.first : fingerprints)
           end
           define_singleton_method("find_by_#{field}") do |value|
-            find_by(column => public_send("#{field}_fingerprint", value))
+            fingerprint = public_send("#{field}_fingerprint", value)
+            fingerprint.nil? ? nil : find_by(column => fingerprint)
           end
         end
 
@@ -308,9 +315,16 @@ module ConcernsOnRails
                 "decrypted plaintext to the audit column. Remove it from auditable_by."
         end
 
-        # Redact encrypted fields from Rails parameter logging when running
-        # inside a Rails app (guarded — no-op under bare ActiveRecord/tests).
+        # Redact encrypted fields from Rails parameter logging. The gem-level
+        # registry is consulted at filter time by the proc ConcernsOnRails::
+        # Railtie appends to config.filter_parameters at boot — so fields
+        # registered when the model class loads later (lazy loading in
+        # development) are still redacted, and boot-time snapshotters
+        # (ActiveRecord filter_attributes, lograge-style initializers) see the
+        # proc. The direct append remains as a fallback for apps that require
+        # the gem after boot and for non-String param values.
         def encryptable_register_filter_parameter(field)
+          ConcernsOnRails.filter_parameter_registry.add(field)
           return unless defined?(Rails) && Rails.respond_to?(:application) && Rails.application
 
           filters = Rails.application.config.filter_parameters
@@ -321,17 +335,6 @@ module ConcernsOnRails
       end
 
       private
-
-      def encryptable_guard_audited_plaintext!
-        return unless self.class.respond_to?(:auditable_fields)
-
-        overlap = self.class.encryptable_rules.keys & Array(self.class.auditable_fields).map(&:to_sym)
-        return if overlap.empty?
-
-        raise ArgumentError,
-              "#{LABEL}: #{overlap.map { |f| ":#{f}" }.join(', ')} declared with both Encryptable and " \
-              "Auditable; auditing would persist decrypted plaintext. Remove them from auditable_by."
-      end
 
       # Recompute each blind-index column from the (changed) plaintext just
       # before the row is written, so the fingerprint always matches the value.

@@ -65,6 +65,7 @@ Article.published.without_deleted.find("hello-world")
 | [🪞 Aliasable](#-aliasable) | Full read / write / query association aliases |
 | [⚙️ Storable](#-storable) | Typed accessors over one JSON column ("store_attribute-lite") |
 | [🧮 CounterCacheable](#-countercacheable) | Conditional denormalized counters ("counter_culture-lite") |
+| [🔏 Encryptable](#-encryptable) | Transparent field encryption (AES-256-GCM) + blind-index lookups |
 
 ### 🎮 Controller concerns
 
@@ -91,7 +92,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Twenty-three model concerns + sixteen controller concerns**, all production-ready
+- **Twenty-four model concerns + sixteen controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -104,7 +105,7 @@ Article.published.without_deleted.find("hello-world")
 Add to your application's `Gemfile`:
 
 ```ruby
-gem "concerns_on_rails", "~> 1.11"
+gem "concerns_on_rails", "~> 1.22"
 ```
 
 Or pull the latest from GitHub:
@@ -124,7 +125,7 @@ bundle install
 ## 🧪 Compatibility
 
 - **Ruby**: 3.2+
-- **Rails**: 5.0 through 8.x
+- **Rails**: declared 5.0 through 8.x — in practice the Ruby 3.2 requirement means Rails 7.0.4+ is what can actually install the gem; the test suite runs against Rails 7.1
 
 ---
 
@@ -325,13 +326,17 @@ User.unscoped             # everything (deleted + non-deleted)
 **Bulk operations**
 
 ```ruby
-User.soft_delete_all      # soft-deletes all matching records (explicit — preferred)
-User.destroy_all          # alias of soft_delete_all (kept for backwards compatibility)
-User.really_destroy_all   # hard-deletes all matching records
-User.restore_all          # restores all soft-deleted records
+User.soft_delete_all      # soft-deletes all matching records; returns the count (explicit — preferred)
+User.destroy_all          # alias of soft_delete_all (kept for backwards compatibility; returns a count, not records)
+User.really_destroy_all   # hard-deletes the records matching the CURRENT relation (soft-deleted included)
+User.restore_all          # restores the matching soft-deleted records; returns the count
 ```
 
-All of these run in a transaction, so a raising hook rolls the whole batch back.
+A record that fails to transition raises `ActiveRecord::RecordNotSaved` and rolls the whole
+batch back. With `touch: false` and no overridden hooks, `soft_delete_all` / `restore_all`
+collapse to a single `UPDATE`. Note that `really_destroy_all` peels the soft-delete
+predicate off the relation, so `only_deleted.really_destroy_all` widens to the whole
+relation — purge trash with `User.soft_deleted.delete_all` instead.
 
 **Lifecycle hooks** — override these methods on the model:
 
@@ -1129,6 +1134,39 @@ Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,
 
 ---
 
+## 🔏 Encryptable
+
+Transparent per-field encryption for sensitive columns (SSN, DOB, cards) — AES-256-GCM on stdlib OpenSSL, zero new dependencies. Reads and writes stay plaintext in memory; the DB column holds a versioned, authenticated Base64 envelope.
+
+```ruby
+ConcernsOnRails.configure_encryption { |c| c.key = ENV["ENCRYPTION_KEY"] }
+
+class Patient < ApplicationRecord
+  include ConcernsOnRails::Models::Encryptable
+
+  encryptable :ssn, :notes                 # transparent string encryption
+  encryptable :dob, type: :date            # decrypts back to a Date
+  encryptable :email, blind_index: true    # + a queryable fingerprint column
+end
+
+patient.ssn                          # => "123-45-6789" (plaintext in memory)
+patient.ssn_ciphertext               # => "AQEA..." (what's actually at rest)
+patient.ssn_encrypted?               # => true
+Patient.find_by_email("a@b.com")     # exact-match lookup via the blind index
+Patient.where_email("a@b.com")       # chainable Relation (accepts arrays too)
+```
+
+**Options** (`encryptable *fields, …`, repeatable): `type:` (cast the decrypted value — `:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`), `key:` (per-field override; a String or lazy Proc), `blind_index:` (`true`, or `{ column:, expression: }` — maintains a deterministic keyed-HMAC companion column, default `<field>_bidx`, for equality lookups; `expression:` normalizes symmetrically on write and query).
+
+**Notes**
+- The declared column must be `text`/binary (it stores an opaque envelope, not the logical type); a blind-index column holds a 64-char hex digest — add an index on it.
+- Ciphertext is non-deterministic (random IV), so `where(ssn: ...)` matches nothing — query through a blind index. `nil` stays `nil`; presence checks work normally.
+- Never `update_column(s)` an encrypted field — that bypasses the type and writes raw plaintext. Declaring a field with both `encryptable` and `auditable_by` raises (either order).
+- Wrong key / tampered ciphertext / malformed envelope raise `Encryption::DecryptionError`. Encrypted field names are auto-registered with Rails' `filter_parameters` (via the gem's railtie), so they're redacted from request logs.
+- Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need key rotation today or Rails-managed key infrastructure (rotation is planned — the envelope already reserves the `key_id` byte).
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -1700,6 +1738,7 @@ Both forms reference the same module, so you can freely mix them.
 | Tagging with contexts, ownership, or tag clouds | [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) |
 | Full-text search with ranking / stemming | [`pg_search`](https://github.com/Casecommons/pg_search) / Elasticsearch |
 | Versioned audit trails with undo/reify, who-dunnit queries, or association tracking | [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) |
+| Field encryption with managed key rotation / Rails-native key infrastructure | [`lockbox`](https://github.com/ankane/lockbox) / Rails 7+ native `encrypts` |
 
 `Sluggable` wraps [`friendly_id`](https://github.com/norman/friendly_id) and `Sortable` wraps [`acts_as_list`](https://github.com/brendon/acts_as_list), so you get those leaders' engines behind the declarative macro.
 
@@ -1711,7 +1750,7 @@ Both forms reference the same module, so you can freely mix them.
 bundle install                                  # install dev dependencies
 bundle exec rspec                               # run the test suite
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.11.2.gem      # install locally
+gem install ./concerns_on_rails-1.22.0.gem      # install locally
 ```
 
 The test suite uses an in-memory SQLite database and a lightweight `FakeController` harness for controller-concern specs — no Rails routes or boot required.

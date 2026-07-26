@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/error_envelope"
 require "digest"
 require "json"
 
@@ -136,9 +137,7 @@ module ConcernsOnRails
       def idempotency_error_response(message:, status:, code:)
         return unless respond_to?(:response) && response
 
-        return render_error(message: message, status: status, code: code) if respond_to?(:render_error)
-
-        render json: { success: false, error: { message: message, code: code } }, status: status
+        ConcernsOnRails::Support::ErrorEnvelope.render(self, message: message, status: status, code: code)
       end
 
       private
@@ -209,13 +208,25 @@ module ConcernsOnRails
 
         # In flight — or the claim expired between our failed write and this
         # read (rare); answering 409 is the conservative, retry-safe choice.
-        idempotency_conflict_response(rule)
+        idempotency_conflict_response(rule, record)
       end
 
-      def idempotency_conflict_response(rule)
-        response.set_header("Retry-After", rule[:lock_ttl].to_s) if respond_to?(:response) && response
+      def idempotency_conflict_response(rule, record = nil)
+        if respond_to?(:response) && response
+          response.set_header("Retry-After", idempotency_retry_after(rule, record).to_s)
+        end
         idempotency_error_response(message: "A request with this #{rule[:header]} is already in progress.",
                                    status: :conflict, code: "idempotency_conflict")
+      end
+
+      # Remaining lock time (floored at 1s), not the full lock TTL — the claim
+      # record carries when it was taken, so clients don't back off for a lock
+      # that is about to expire.
+      def idempotency_retry_after(rule, record)
+        claimed_at = record.is_a?(Hash) ? record["claimed_at"] : nil
+        return rule[:lock_ttl] unless claimed_at
+
+        [rule[:lock_ttl] - (Time.now.to_i - claimed_at.to_i), 1].max
       end
 
       def read_idempotency_header(rule)

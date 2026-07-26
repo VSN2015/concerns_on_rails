@@ -215,14 +215,15 @@ describe ConcernsOnRails::Models::Encryptable do
       end.to raise_error(ArgumentError, /Auditable/)
     end
 
-    it "raises on save when audited after encryption is declared" do
-      klass = model_class do
-        include ConcernsOnRails::Models::Auditable
+    it "raises at declaration when audited after encryption is declared (1.22: macro-time)" do
+      expect do
+        model_class do
+          include ConcernsOnRails::Models::Auditable
 
-        encryptable :ssn
-        auditable_by :ssn, into: :audit_log
-      end
-      expect { klass.create!(ssn: "secret") }.to raise_error(ArgumentError, /Auditable/)
+          encryptable :ssn
+          auditable_by :ssn, into: :audit_log
+        end
+      end.to raise_error(ArgumentError, /Auditable/)
     end
   end
 

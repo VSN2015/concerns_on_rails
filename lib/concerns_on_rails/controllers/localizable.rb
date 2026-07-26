@@ -46,12 +46,16 @@ module ConcernsOnRails
       end
 
       # The locale chosen for this request — always one I18n can switch to.
+      # Memoized per request (the wrapper plus any helpers may read it several
+      # times; parsing the Accept-Language header repeatedly is waste).
       def resolved_locale
-        opts = self.class.localizable_options
-        allowed = opts[:available].presence || I18n.available_locales
-        candidate = locale_from_param(opts, allowed) || locale_from_header(opts, allowed) || opts[:default]
+        @localizable_resolved_locale ||= begin
+          opts = self.class.localizable_options
+          allowed = opts[:available].presence || I18n.available_locales
+          candidate = locale_from_param(opts, allowed) || locale_from_header(opts, allowed) || opts[:default]
 
-        candidate && I18n.available_locales.include?(candidate.to_sym) ? candidate.to_sym : I18n.default_locale
+          candidate && I18n.available_locales.include?(candidate.to_sym) ? candidate.to_sym : I18n.default_locale
+        end
       end
 
       private
@@ -78,21 +82,26 @@ module ConcernsOnRails
 
       def parse_accept_language(header, allowed)
         ranked_accept_languages(header).each do |lang|
-          match = match_locale(lang, allowed)
+          # Full tag first (fr-CA matches an available :"fr-CA"), then the
+          # primary subtag (fr). Pre-1.22 the region was discarded outright,
+          # so a regional locale in available: could never match its own
+          # Accept-Language tag.
+          match = match_locale(lang, allowed) || match_locale(lang.split("-").first, allowed)
           return match if match
         end
         nil
       end
 
-      # Languages from an Accept-Language header, q=0 dropped, highest-q first
-      # (RFC 7231 preference order).
+      # Language tags from an Accept-Language header (kept whole — see
+      # parse_accept_language for region handling), q=0 dropped, highest-q
+      # first (RFC 7231 preference order).
       def ranked_accept_languages(header)
         pairs = header.split(",").filter_map do |part|
           token, *params = part.split(";").map(&:strip)
           quality = accept_language_quality(params)
           next if quality <= 0.0
 
-          lang = token.to_s.split("-").first
+          lang = token.to_s.strip
           [lang, quality] if lang.present?
         end
         pairs.sort_by { |(_lang, quality)| -quality }.map(&:first)

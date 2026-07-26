@@ -1,4 +1,7 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/random_value"
+require "concerns_on_rails/support/unique_retry"
 require "active_support/security_utils"
 require "securerandom"
 
@@ -85,7 +88,14 @@ module ConcernsOnRails
         private
 
         def define_tokenizable_methods(field)
-          define_method("regenerate_#{field}!") { update!(field => self.class.generate_tokenizable_value(field)) }
+          # Same uniqueness path as create-time assignment (pre-1.22 this wrote
+          # one blind candidate — a short :numeric invite code regenerated
+          # straight into RecordNotUnique with no retry).
+          define_method("regenerate_#{field}!") do
+            ConcernsOnRails::Support::UniqueRetry.with_retries(limit: MAX_GENERATION_ATTEMPTS) do
+              update!(field => tokenizable_unique_value(field))
+            end
+          end
           define_method("revoke_#{field}!")     { update!(field => nil) }
           define_method("#{field}?")            { self[field].present? }
           define_singleton_method("authenticate_by_#{field}") { |value| timing_safe_find(field, value) }
@@ -125,17 +135,19 @@ module ConcernsOnRails
       end
 
       # Assigns the generated value only when blank, so callers can pass an explicit one.
-      # Retries up to MAX_GENERATION_ATTEMPTS times if the in-Ruby uniqueness check hits a
-      # collision — useful for short codes; a unique DB index is still the real guarantee.
       def assign_tokenizable_value(field)
         return if self[field].present?
 
+        self[field] = tokenizable_unique_value(field)
+      end
+
+      # Generate → in-Ruby exists? precheck → retry, up to MAX_GENERATION_ATTEMPTS
+      # times — useful for short codes; a unique DB index is still the real
+      # guarantee. Shared by create-time assignment and regenerate_<field>!.
+      def tokenizable_unique_value(field)
         MAX_GENERATION_ATTEMPTS.times do
           candidate = self.class.generate_tokenizable_value(field)
-          unless self.class.unscoped.exists?(field => candidate)
-            self[field] = candidate
-            return
-          end
+          return candidate unless self.class.unscoped.exists?(field => candidate)
         end
 
         raise "ConcernsOnRails::Models::Tokenizable: could not generate a unique value for '#{field}' " \

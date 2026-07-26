@@ -1,4 +1,7 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/random_value"
+require "concerns_on_rails/support/unique_retry"
 require "securerandom"
 
 module ConcernsOnRails
@@ -38,8 +41,15 @@ module ConcernsOnRails
           validate_hashable_options!
           before_create :assign_hashable_value
 
+          # Same uniqueness handling as create-time assignment (pre-1.22 this
+          # wrote one blind candidate: no `unique:` precheck, no retry when the
+          # unique DB index rejected it).
           define_method("regenerate_#{hashable_field}!") do
-            update!(self.class.hashable_field => self.class.generate_hashable_value)
+            field = self.class.hashable_field
+            ConcernsOnRails::Support::UniqueRetry.with_retries(limit: MAX_GENERATION_ATTEMPTS) do
+              value = self.class.hashable_unique ? unique_hashable_value(field) : self.class.generate_hashable_value
+              update!(field => value)
+            end
           end
         end
       end
@@ -50,12 +60,20 @@ module ConcernsOnRails
           case hashable_type
           when :hex     then SecureRandom.hex(hashable_length)
           when :uuid    then SecureRandom.uuid
-          when :integer then SecureRandom.random_number(10**hashable_length)
+          when :integer then hashable_fixed_width_integer
           when :custom  then ConcernsOnRails::Support::RandomValue.from_alphabet(hashable_alphabet, hashable_length)
           end
         end
 
         private
+
+        # Fixed width: draw from [10^(n-1), 10^n) so a `length: 6` code is
+        # always 6 digits — SecureRandom.random_number(10**6) alone can return
+        # e.g. 4213. length: 1 keeps the full 0-9 range.
+        def hashable_fixed_width_integer
+          min = hashable_length == 1 ? 0 : 10**(hashable_length - 1)
+          SecureRandom.random_number((10**hashable_length) - min) + min
+        end
 
         def validate_hashable_options!
           unless VALID_TYPES.include?(hashable_type)

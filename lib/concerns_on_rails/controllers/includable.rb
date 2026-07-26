@@ -65,7 +65,11 @@ module ConcernsOnRails
         return {} unless raw.respond_to?(:each_pair)
 
         allowed = self.class.includable_fields
-        raw.each_with_object({}) do |(table, cols), memo|
+        # Iterate via each_pair: in a real controller `raw` is an
+        # ActionController::Parameters, which has each_pair but no Enumerable —
+        # calling each_with_object directly on it was a guaranteed
+        # NoMethodError 500 for every ?fields[...]= request.
+        raw.each_pair.each_with_object({}) do |(table, cols), memo|
           key = table.to_sym
           next unless allowed.key?(key)
 

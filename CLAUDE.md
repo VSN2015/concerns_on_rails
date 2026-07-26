@@ -121,10 +121,20 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `key:` (PBKDF2, lazy Proc), missing key raises at first use. `<field>_ciphertext`
   / `<field>_encrypted?` readers; wrong-key/tamper/malformed → `DecryptionError`.
   Normalizes-before-encrypt and masks-decrypted for free; RAISES if a field is
-  also `auditable_by`. Ciphertext is non-deterministic ⇒ unsearchable; opt into
-  `blind_index: true` (or `{ column:, expression: }`) for a deterministic-HMAC
-  companion column + `find_by_<field>`/`where_<field>`/`<field>_fingerprint`
-  finders (key rotation still planned; envelope reserves the bytes).
+  also `auditable_by` (either declaration order). Ciphertext is
+  non-deterministic ⇒ unsearchable; opt into `blind_index: true` (or
+  `{ column:, expression: }`) for a deterministic-HMAC companion column +
+  `find_by_<field>`/`where_<field>`/`<field>_fingerprint` finders (nil values
+  return none/nil, never `bidx IS NULL` matches; key rotation still planned —
+  envelope reserves the bytes). Fields auto-register with Rails
+  filter_parameters via `FilterParameterRegistry` + the railtie.
+- **`CounterCacheable`** — conditional denormalized counters ("counter_culture-lite"),
+  declared on the CHILD. `counter_cacheable_by association, count:, if:, touch:`
+  (repeatable; belongs_to must be declared first; polymorphic rejected;
+  `touch:` raises on Rails < 6). Atomic `update_counters` adjustments inside
+  the save transaction covering the reparent × condition-flip matrix;
+  `recount_counter_caches!` drift repair (transactional, one UPDATE per
+  distinct tally value).
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 
@@ -161,18 +171,38 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (`endpoint_sunset`, inclusive boundary, headers still emitted, Respondable-aware);
   instruments `deprecated_endpoint.concerns_on_rails` via `on_deprecated_access`
   override point; `deprecation_active?`/`sunset_passed?` predicates.
+- **`Cacheable`** — HTTP conditional GET + Cache-Control policies.
+  `http_cache_actions *actions, visibility:, max_age:, must_revalidate:,
+  no_store:, stale_while_revalidate:, vary:` (repeatable; no actions =
+  catch-all; LAST match wins). `stale_resource?`/`set_cache_validators` (weak
+  ETag, Last-Modified, RFC 7232 precedence; safe methods only — unsafe requests
+  get neither 304 nor validators). `no_store` is also applied via
+  prepend_before_action so rescue_from-rendered errors keep it; positive
+  freshness never emits on rescued errors.
 
 ### Support modules (`lib/concerns_on_rails/support/`)
 
-`ColumnGuard` (schema validation), `RandomValue`, `SequenceCalculator`, `HtmlSanitizers`,
-`Masker`, `Money`, `AddressData`.
+`ColumnGuard` (schema validation; skips — returns false — when the schema is unreachable
+so models stay loadable during `db:create`/`assets:precompile`), `ScalarParam` (untrusted
+query-param coercion shared by the paginators/Filterable), `UniqueRetry` (bounded
+`RecordNotUnique` retry), `ErrorEnvelope` (the shared `render_error`-or-inline error
+renderer used by seven controller concerns), `FilterParameterRegistry` (live
+filter_parameters registry consulted by the proc `ConcernsOnRails::Railtie` appends at
+boot), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,
+`SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`.
+`lib/concerns_on_rails/railtie.rb` loads only when `Rails::Railtie` is defined.
 
 ### Test structure
 
 Each spec recreates tables in a `before` block via `ActiveRecord::Schema.define` and drops
 them in `after(:each)`. Model classes are defined inline (named classes are removed in the
 `after`, or use anonymous `Class.new(TestModel)` to avoid const leakage). Controller specs
-subclass `FakeController`. SimpleCov writes coverage to `coverage/`.
+subclass `FakeController`; behaviors the fake structurally cannot reproduce
+(`ActionController::Parameters`, `rescue_from` callback skipping) go through
+`spec/support/integration_harness.rb`, which dispatches real `ActionController::Base`
+actions via `Metal.action` + `Rack::MockRequest` (see
+`spec/concerns/integration/regressions_1_22_spec.rb`). SimpleCov writes coverage to
+`coverage/`.
 
 ### Runtime dependencies
 
@@ -183,5 +213,7 @@ subclass `FakeController`. SimpleCov writes coverage to `coverage/`.
 
 ### Release process
 
-Bump `lib/concerns_on_rails/version.rb`, the `Gemfile.lock` PATH pin, `CHANGELOG.md`, and the
-docs version together; create a GitHub Release tag and attach the built `.gem`.
+Bump `lib/concerns_on_rails/version.rb`, the `Gemfile.lock` PATH pin, `CHANGELOG.md`,
+`README.md` (TOC row + section + version pins — its omission is how Encryptable shipped
+undocumented in 1.21), and the docs version (`docs/assets/js/concerns.js`) together;
+create a GitHub Release tag and attach the built `.gem`.

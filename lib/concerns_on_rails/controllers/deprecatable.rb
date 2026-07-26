@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/error_envelope"
 require "active_support/notifications"
 require "date"
 require "time"
@@ -122,9 +123,16 @@ module ConcernsOnRails
 
         def validate_deprecation_link!(name, value)
           return if value.nil?
-          return if value.is_a?(String) && !value.strip.empty?
 
-          raise ArgumentError, "#{LABEL}: :#{name} must be a non-blank String"
+          unless value.is_a?(String) && !value.strip.empty?
+            raise ArgumentError, "#{LABEL}: :#{name} must be a non-blank String"
+          end
+          return unless value.match?(/[[:cntrl:]<>]/)
+
+          # These values are interpolated into the Link header: a control
+          # character would split the header (response splitting), and <> would
+          # terminate or forge the URI-Reference delimiters.
+          raise ArgumentError, "#{LABEL}: :#{name} must not contain control characters or '<'/'>'"
         end
 
         # Eager parse to a UTC Time. A bare Date (or date-only String) becomes
@@ -194,14 +202,17 @@ module ConcernsOnRails
       private
 
       def deprecation_rule_for_action
-        action = deprecation_action_name
-        return nil unless action
+        # Memoized (nil included) — the before_action plus the two public
+        # predicates each re-scanned the rule list every request.
+        return @deprecatable_matched_rule if defined?(@deprecatable_matched_rule)
 
+        action = deprecation_action_name
         # Last match wins — see the module comment. reverse_each.find returns the
         # most recently declared rule covering this action (catch-all or not).
-        self.class.deprecatable_rules.reverse_each.find do |rule|
-          rule[:actions].empty? || rule[:actions].include?(action)
-        end
+        @deprecatable_matched_rule =
+          action && self.class.deprecatable_rules.reverse_each.find do |rule|
+            rule[:actions].empty? || rule[:actions].include?(action)
+          end
       end
 
       def emit_deprecation_headers(rule)
@@ -238,10 +249,9 @@ module ConcernsOnRails
         return unless deprecation_sunset_reached?(rule)
 
         message = "This endpoint was sunset on #{rule[:sunset_at].httpdate}."
-        return render_error(message: message, status: :gone, code: "endpoint_sunset") if respond_to?(:render_error)
-        return unless respond_to?(:response) && response
+        return unless respond_to?(:render_error) || (respond_to?(:response) && response)
 
-        render json: { success: false, error: { message: message, code: "endpoint_sunset" } }, status: :gone
+        ConcernsOnRails::Support::ErrorEnvelope.render(self, message: message, status: :gone, code: "endpoint_sunset")
       end
 
       # Inclusive: the boundary instant itself counts as sunset.

@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/scalar_param"
 
 module ConcernsOnRails
   module Controllers
@@ -70,13 +71,12 @@ module ConcernsOnRails
         end
       end
 
-      # Scalars (and arrays, which AR turns into `IN (...)`) are safe to pass to
-      # .where; a Hash / ActionController::Parameters is not.
+      # Scalars (and arrays of scalars, which AR turns into `IN (...)`) are safe
+      # to pass to .where; a Hash / ActionController::Parameters is not — and
+      # since 1.22 neither is an array CONTAINING one (`?status[][x]=1` used to
+      # slip through as [Parameters] and 500 with a TypeError).
       def filterable_scalar?(value)
-        return false if value.is_a?(Hash)
-        return false if defined?(ActionController::Parameters) && value.is_a?(ActionController::Parameters)
-
-        true
+        ConcernsOnRails::Support::ScalarParam.where_safe?(value)
       end
     end
   end

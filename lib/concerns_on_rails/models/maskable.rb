@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/masker"
 
 module ConcernsOnRails

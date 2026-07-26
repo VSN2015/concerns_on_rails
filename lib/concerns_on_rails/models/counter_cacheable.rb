@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
   module Models
@@ -66,6 +67,8 @@ module ConcernsOnRails
       end
 
       module ClassMethods
+        include ConcernsOnRails::Support::ColumnGuard
+
         # Declare one counter. Repeatable — each call maintains another column
         # (rules accumulate, reassigned never mutated, so subclasses inherit).
         # `count:` defaults to "<table_name>_count" (e.g. comments → comments_count).
@@ -111,13 +114,18 @@ module ConcernsOnRails
           end
           raise ArgumentError, "#{LABEL}: polymorphic association `#{association}` is not supported" if reflection.polymorphic?
           raise ArgumentError, "#{LABEL}: :if must be callable (respond to #call)" unless condition.nil? || condition.respond_to?(:call)
-          return if [true, false].include?(touch)
+          raise ArgumentError, "#{LABEL}: :touch must be true or false" unless [true, false].include?(touch)
+          return unless touch && ActiveRecord::VERSION::MAJOR < 6
 
-          raise ArgumentError, "#{LABEL}: :touch must be true or false"
+          # `update_counters(..., touch: true)` exists on Rails 6.0+; on 5.x the
+          # option would be read as a counter column literally named `touch` and
+          # produce a SQL error at runtime — fail loudly at macro time instead.
+          raise ArgumentError, "#{LABEL}: `touch: true` requires Rails >= 6.0"
         end
 
         # Validate the column on the PARENT table when its class is already
-        # loaded and connected; defer silently otherwise (load-order tolerant).
+        # loaded and connected; defer silently otherwise (load-order tolerant —
+        # schema reachability is ColumnGuard's shared skip-don't-crash rule).
         def counter_cacheable_ensure_parent_column!(reflection, count_column)
           klass = begin
             reflection.klass
@@ -125,17 +133,8 @@ module ConcernsOnRails
             nil
           end
           return unless klass
-          return unless counter_cacheable_table_exists?(klass)
-          return if klass.column_names.include?(count_column.to_s)
 
-          raise ArgumentError,
-                "#{LABEL}: '#{count_column}' does not exist in the database (table: #{klass.table_name})"
-        end
-
-        def counter_cacheable_table_exists?(klass)
-          klass.table_exists?
-        rescue StandardError
-          false
+          ensure_columns_on!(LABEL, klass, count_column)
         end
 
         def counter_cacheable_recount_rule(rule)
@@ -151,11 +150,19 @@ module ConcernsOnRails
                     unscoped.where.not(fk => nil).group(fk).count
                   end
 
-          parent_class.unscoped.update_all(column => 0)
-          tally.each do |parent_id, n|
-            next if parent_id.nil? || n.to_i.zero?
+          # One transaction so a crash mid-repair can't leave every counter at
+          # the zeroed intermediate state; grouped by tally value so the repair
+          # costs O(distinct counts) statements instead of one UPDATE per parent.
+          parent_class.transaction do
+            parent_class.unscoped.update_all(column => 0)
+            tally.group_by { |_id, n| n.to_i }.each do |n, pairs|
+              next if n.zero?
 
-            parent_class.unscoped.where(parent_class.primary_key => parent_id).update_all(column => n)
+              ids = pairs.map(&:first).compact
+              next if ids.empty?
+
+              parent_class.unscoped.where(parent_class.primary_key => ids).update_all(column => n)
+            end
           end
           tally.count { |_id, n| n.to_i.positive? }
         end

@@ -151,12 +151,13 @@ describe ConcernsOnRails::Controllers::Cacheable do
       expect(c.stale_resource?(resource)).to be(true)
     end
 
-    it "never sends 304 for an unsafe (non-GET/HEAD) request" do
+    it "never sends 304 nor writes validators for an unsafe (non-GET/HEAD) request (1.22)" do
       c = instance(cacheable_class, method: "POST", headers: { "If-None-Match" => etag })
       expect(c.stale_resource?(resource)).to be(true)
       expect(c.response.status).not_to eq(304)
-      # validators are still set
-      expect(c.response.headers["ETag"]).to eq(etag)
+      # A POST response must not advertise an ETag a client could replay
+      # against GET (pre-1.22 validators were written even on unsafe methods).
+      expect(c.response.headers["ETag"]).to be_nil
     end
 
     it "accepts an explicit etag/last_modified pair" do

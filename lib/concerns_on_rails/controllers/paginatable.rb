@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/scalar_param"
 
 module ConcernsOnRails
   module Controllers
@@ -35,34 +36,43 @@ module ConcernsOnRails
       end
 
       # Apply pagination to a relation and set the standard response headers.
-      # Returns the paginated relation. Safe on empty relations.
+      # Returns the paginated relation; the metadata is memoized so a follow-up
+      # `pagination_meta` (no argument) reuses it. Safe on empty relations.
       def paginated(relation)
+        @paginatable_meta = nil
         page = pagination_page
         per_page = pagination_per_page
         offset = (page - 1) * per_page
 
-        counted = relation.except(:order, :limit, :offset).count
-        # `.count` on a grouped relation returns a Hash (group => count); for
-        # offset pagination the meaningful total is the number of groups.
-        total = counted.is_a?(Hash) ? counted.length : counted
+        total = paginatable_total(relation)
         total_pages = per_page.positive? ? (total.to_f / per_page).ceil : 0
 
         records = relation.limit(per_page).offset(offset)
 
-        set_pagination_headers(total: total, page: page, per_page: per_page, total_pages: total_pages)
+        @paginatable_meta = { total: total, page: page, per_page: per_page, total_pages: total_pages }
+        set_pagination_headers(**@paginatable_meta)
         records
       end
 
-      # Pagination metadata for a relation WITHOUT applying limit/offset — handy
-      # for body-based pagination (compose with Respondable's `meta:`).
-      def pagination_meta(relation)
-        page = pagination_page
+      # Pagination metadata WITHOUT applying limit/offset — handy for
+      # body-based pagination (compose with Respondable's `meta:`). Call with
+      # no argument after `paginated` to reuse its memoized meta — the
+      # documented records+meta composition used to run the identical COUNT
+      # twice per request. Pass a relation to compute fresh.
+      def pagination_meta(relation = nil)
+        return @paginatable_meta if relation.nil? && @paginatable_meta
+
+        if relation.nil?
+          raise ArgumentError,
+                "ConcernsOnRails::Controllers::Paginatable: pagination_meta needs a relation " \
+                "(no prior paginated call in this request to reuse)"
+        end
+
+        total = paginatable_total(relation)
         per_page = pagination_per_page
-        counted = relation.except(:order, :limit, :offset).count
-        total = counted.is_a?(Hash) ? counted.length : counted
         {
           total: total,
-          page: page,
+          page: pagination_page,
           per_page: per_page,
           total_pages: per_page.positive? ? (total.to_f / per_page).ceil : 0
         }
@@ -70,13 +80,24 @@ module ConcernsOnRails
 
       private
 
+      # COUNT with the clauses that break or skew it stripped: order/limit/
+      # offset are irrelevant, a custom SELECT list would turn into the invalid
+      # COUNT(a, b), and count(:all) keeps DISTINCT semantics. A grouped
+      # relation counts as a Hash (group => count); the meaningful total is the
+      # number of groups.
+      def paginatable_total(relation)
+        counted = relation.except(:order, :limit, :offset, :select).count(:all)
+        counted.is_a?(Hash) ? counted.length : counted
+      end
+
+      # Both readers route through ScalarParam: `?page[]=1` / `?page[x]=1`
+      # arrive as Array/Parameters, and calling .to_i on those was a 500.
       def pagination_page
-        value = params[:page].to_i
-        [value, 1].max
+        [ConcernsOnRails::Support::ScalarParam.to_i(params[:page], default: 0), 1].max
       end
 
       def pagination_per_page
-        requested = params[:per_page].to_i
+        requested = ConcernsOnRails::Support::ScalarParam.to_i(params[:per_page], default: 0)
         requested = self.class.paginatable_per_page if requested < 1
         cap = self.class.paginatable_max_per_page
         cap.positive? ? [requested, cap].min : requested

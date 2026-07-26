@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
   module Models
@@ -49,28 +50,80 @@ module ConcernsOnRails
           ensure_columns!("ConcernsOnRails::Models::SoftDeletable", soft_delete_field)
         end
 
-        # Soft-delete every matching record, wrapped in a transaction so the batch is atomic.
+        # Soft-delete every matching record. Returns the Integer count of
+        # records transitioned (already-deleted rows are skipped and keep their
+        # original timestamp). A record that fails raises
+        # ActiveRecord::RecordNotSaved and rolls the whole batch back — before
+        # 1.22 the rollback happened silently and the method returned nil. With
+        # `touch: false` and no overridden hooks this is a single UPDATE.
         def soft_delete_all
-          # Roll the whole batch back if any record fails to soft-delete, so the
-          # documented atomicity actually holds (soft_delete! returns falsey on a
-          # validation failure rather than raising).
-          transaction { all.each { |record| record.soft_delete! || raise(ActiveRecord::Rollback) } }
+          if soft_delete_batch_fast_path?(:soft_delete)
+            return all.where(soft_delete_field => nil).update_all(soft_delete_field => Time.zone.now)
+          end
+
+          transaction do
+            all.to_a.count do |record|
+              next false if record.deleted?
+
+              record.soft_delete! ||
+                raise(ActiveRecord::RecordNotSaved.new(
+                        "ConcernsOnRails::Models::SoftDeletable: failed to soft-delete record", record
+                      ))
+              true
+            end
+          end
         end
 
         # Override destroy_all to soft delete. Kept for backwards compatibility, but prefer the
-        # explicit `soft_delete_all` — silently redefining a standard AR method is a known footgun.
+        # explicit `soft_delete_all` — silently redefining a standard AR method is a known footgun
+        # (and unlike AR's destroy_all this returns a count, not the records).
         def destroy_all
           soft_delete_all
         end
 
-        # Provide really_destroy_all to hard delete all records
+        # Hard-delete every record matching the CURRENT relation — including
+        # soft-deleted rows (only the soft-delete column's predicates are
+        # peeled off). Note that `unscope` also drops a caller's own condition
+        # on that column, so `only_deleted.really_destroy_all` widens to the
+        # whole relation — use `soft_deleted.delete_all` to purge trash only.
+        # (Before 1.22 this ignored the relation entirely and hard-deleted the
+        # complete table.)
         def really_destroy_all
-          unscoped.delete_all
+          all.unscope(where: soft_delete_field).delete_all
         end
 
-        # Restore every soft-deleted record, atomically (mirror of soft_delete_all).
+        # Restore every soft-deleted record (mirror of soft_delete_all):
+        # Integer count, RecordNotSaved + rollback on failure, single UPDATE
+        # when the fast path applies.
         def restore_all
-          transaction { soft_deleted.each(&:restore!) }
+          return soft_deleted.update_all(soft_delete_field => nil) if soft_delete_batch_fast_path?(:restore)
+
+          transaction do
+            soft_deleted.to_a.count do |record|
+              record.restore! ||
+                raise(ActiveRecord::RecordNotSaved.new(
+                        "ConcernsOnRails::Models::SoftDeletable: failed to restore record", record
+                      ))
+              true
+            end
+          end
+        end
+
+        private
+
+        # The single-UPDATE fast path is only safe when per-record behavior
+        # cannot differ from update_all: `touch: false` (the per-record path is
+        # update_column — already no validations/callbacks/updated_at) and none
+        # of the gem's hooks or bang methods overridden by the host model.
+        def soft_delete_batch_fast_path?(kind)
+          return false if soft_delete_touch
+
+          methods = if kind == :restore
+                      %i[before_restore after_restore restore!]
+                    else
+                      %i[before_soft_delete after_soft_delete soft_delete!]
+                    end
+          methods.all? { |m| instance_method(m).owner == ConcernsOnRails::Models::SoftDeletable }
         end
       end
 

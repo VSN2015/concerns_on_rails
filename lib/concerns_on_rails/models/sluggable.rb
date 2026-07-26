@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 require "friendly_id"
 
 module ConcernsOnRails
@@ -54,7 +55,11 @@ module ConcernsOnRails
         #   sluggable_by :title, finders: true            # Model.find accepts a slug directly
         def sluggable_by(field, history: false, scope: nil, reserved_words: nil, finders: false)
           self.sluggable_field = field.to_sym
-          ensure_columns!("ConcernsOnRails::Models::Sluggable", [sluggable_field, scope].compact)
+          # Validate the slug column too — a model missing it used to fail at
+          # first save with an opaque friendly_id error instead of this
+          # concern's clear ArgumentError.
+          ensure_columns!("ConcernsOnRails::Models::Sluggable",
+                          [sluggable_field, friendly_id_config.slug_column, scope].compact)
           return unless history || scope || reserved_words || finders
 
           reconfigure_friendly_id(history: history, scope: scope,

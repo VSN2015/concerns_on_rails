@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/error_envelope"
 
 module ConcernsOnRails
   module Controllers
@@ -54,7 +55,11 @@ module ConcernsOnRails
             # a helper_method (which keeps it private on the instance), so the
             # default public-only check would resolve nil and deny everyone.
             actor = respond_to?(via, true) ? send(via) : nil
-            actor.respond_to?(role_method, true) && wanted.include?(actor.send(role_method).to_s)
+            # Array() handles both a scalar role and an array-valued `roles`
+            # method — pre-1.22 an actor with roles = ["admin"] stringified to
+            # '["admin"]' and was always denied.
+            actor.respond_to?(role_method, true) &&
+              Array(actor.send(role_method)).any? { |role| wanted.include?(role.to_s) }
           end
           add_authorization_rule(check: check, only: only, except: except, status: status, message: message)
         end
@@ -87,13 +92,16 @@ module ConcernsOnRails
         nil
       end
 
-      # Public override point for how a denial is rendered.
+      # Public override point for how a denial is rendered. Fails CLOSED: when
+      # there is no response object to render into, raise — returning nil here
+      # (the pre-1.22 behavior) let the action run unauthorized.
       def authorization_denied(status:, message:)
-        return unless respond_to?(:response) && response
+        unless respond_to?(:response) && response
+          raise "ConcernsOnRails::Controllers::Authorizable: denial for '#{authorization_action_name}' " \
+                "could not be rendered (no response object) — refusing to fail open"
+        end
 
-        return render_error(message: message, status: status, code: "forbidden") if respond_to?(:render_error)
-
-        render json: { success: false, error: { message: message, code: "forbidden" } }, status: status
+        ConcernsOnRails::Support::ErrorEnvelope.render(self, message: message, status: status, code: "forbidden")
       end
 
       private

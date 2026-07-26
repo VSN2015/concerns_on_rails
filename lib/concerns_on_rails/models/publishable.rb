@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
   module Models
@@ -51,14 +52,23 @@ module ConcernsOnRails
         # (.unpublished/.scheduled/.draft) unscope the field, so they still work.
         def publishable_by(field = nil, default_scope: false)
           self.publishable_field = field || :published_at
+          @publishable_boolean_column = nil
           ensure_columns!("ConcernsOnRails::Models::Publishable", publishable_field)
           enable_published_default_scope if default_scope
         end
 
         # True when the configured column is a boolean (vs a datetime timestamp);
         # the scopes use this to pick equality vs time-comparison predicates.
+        # Memoized per class once the schema is reachable — a columns_hash
+        # lookup on every scope evaluation adds up on hot query paths.
+        # (publishable_by resets the memo when the field changes.)
         def publishable_boolean_column?
-          columns_hash[publishable_field.to_s]&.type == :boolean
+          cached = @publishable_boolean_column
+          return cached unless cached.nil?
+
+          return false unless schema_reachable?
+
+          @publishable_boolean_column = columns_hash[publishable_field.to_s]&.type == :boolean
         end
 
         private
@@ -81,20 +91,14 @@ module ConcernsOnRails
       def after_unpublish; end
 
       def publish!
-        before_publish
-        result = update(self.class.publishable_field => Time.zone.now)
-        after_publish if result
-        result
+        publishable_write_with_hooks(Time.zone.now, :publish)
       end
 
       # Unpublish the record
       # Example:
       #   record.unpublish!
       def unpublish!
-        before_unpublish
-        result = update(self.class.publishable_field => nil)
-        after_unpublish if result
-        result
+        publishable_write_with_hooks(nil, :unpublish)
       end
 
       # Check if the record is published
@@ -128,10 +132,28 @@ module ConcernsOnRails
       end
 
       # Publish at an explicit time. A future time schedules the record.
+      # Fires the publish hooks (same state change as publish!, so since 1.22
+      # they no longer silently skip).
       # Example:
       #   record.publish_at!(1.day.from_now)
       def publish_at!(time)
-        update(self.class.publishable_field => time)
+        publishable_write_with_hooks(time, :publish)
+      end
+
+      private
+
+      # Shared write path: hooks and the timestamp write in ONE transaction, so
+      # a raising hook rolls the change back (SoftDeletable's pattern). Before
+      # 1.22 a raising after_publish left the record published with the side
+      # effect half-done.
+      def publishable_write_with_hooks(value, kind)
+        result = false
+        transaction do
+          kind == :publish ? before_publish : before_unpublish
+          result = update(self.class.publishable_field => value)
+          (kind == :publish ? after_publish : after_unpublish) if result
+        end
+        result
       end
     end
   end

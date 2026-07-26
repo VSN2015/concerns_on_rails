@@ -167,10 +167,11 @@ describe ConcernsOnRails::Controllers::Authorizable do
   end
 
   describe "#authorization_denied" do
-    it "no-ops cleanly when there is no response object" do
+    it "fails CLOSED when there is no response object (1.22)" do
       c = controller(user: nil) { authorize_by { false } }
       c.response = nil
-      expect { c.enforce_authorization }.not_to raise_error
+      # Pre-1.22 this silently returned nil and the action ran unauthorized.
+      expect { c.enforce_authorization }.to raise_error(/refusing to fail open/)
     end
   end
 end
