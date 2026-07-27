@@ -26,4 +26,6 @@ module ConcernsOnRails
   Storable      = Models::Storable
   CounterCacheable = Models::CounterCacheable
   Encryptable = Models::Encryptable
+  Anonymizable = Models::Anonymizable
+  Duplicable = Models::Duplicable
 end
