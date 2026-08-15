@@ -41,6 +41,8 @@ module ConcernsOnRails
     autoload :Storable,         "concerns_on_rails/models/storable"
     autoload :CounterCacheable, "concerns_on_rails/models/counter_cacheable"
     autoload :Encryptable,      "concerns_on_rails/models/encryptable"
+    autoload :Anonymizable,     "concerns_on_rails/models/anonymizable"
+    autoload :Duplicable,       "concerns_on_rails/models/duplicable"
   end
 
   module Controllers

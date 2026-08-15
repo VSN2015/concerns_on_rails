@@ -14,6 +14,7 @@ module ConcernsOnRails
     Expirable Normalizable Searchable Activatable Tokenizable Stateable
     Addressable Sequenceable Taggable Sanitizable Maskable Monetizable
     Auditable Lockable Aliasable Storable CounterCacheable Encryptable
+    Anonymizable Duplicable
   ].freeze
 
   def self.const_missing(name)

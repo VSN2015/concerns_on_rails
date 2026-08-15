@@ -139,6 +139,25 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   the save transaction covering the reparent × condition-flip matrix;
   `recount_counter_caches!` drift repair (transactional, one UPDATE per
   distinct tally value).
+- **`Anonymizable`** — declarative right-to-erasure ("GDPR-lite").
+  `anonymizable *fields, with:` (presets :nullify/:redact/:hash/:email/
+  :random_hex or callable; repeatable, rules merge; `stamp:` default
+  :anonymized_at with `false` opt-out; `clear_audit_trail:`; `prefix:`/
+  `suffix:` scope affixes). `anonymize!` = hooks + ONE update_columns UPDATE
+  in a transaction (deliberately skips validations/callbacks; values
+  serialize through attribute types so encryptable fields stay ciphertext) +
+  reload. `anonymized?`, `.anonymized`/`.not_anonymized`, batch
+  `anonymize_all!` (count; skips stamped). Clears the Auditable trail when an
+  erased field is tracked.
+- **`Duplicable`** — concern-aware deep copy. `duplicable_by associations:,
+  reset:, suffix:` (optional macro; associations validated at macro time —
+  has_many/has_one deep-copied, HABTM re-linked, belongs_to/:through
+  rejected). `duplicate`/`duplicate!(overrides)` blank identity columns
+  automatically (timestamps, Sluggable slug, Tokenizable/Hashable tokens,
+  Sequenceable numbers, Auditable trail, SoftDeletable stamp, Lockable
+  attempts/locked_at) so sibling concerns regenerate on save; a Duplicable
+  child copies via its OWN rules (recursive graphs); `on_duplicate(copy)`
+  hook.
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 

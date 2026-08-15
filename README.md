@@ -66,6 +66,8 @@ Article.published.without_deleted.find("hello-world")
 | [⚙️ Storable](#-storable) | Typed accessors over one JSON column ("store_attribute-lite") |
 | [🧮 CounterCacheable](#-countercacheable) | Conditional denormalized counters ("counter_culture-lite") |
 | [🔏 Encryptable](#-encryptable) | Transparent field encryption (AES-256-GCM) + blind-index lookups |
+| [🕵️ Anonymizable](#-anonymizable) | GDPR right-to-erasure with per-field strategies |
+| [🧬 Duplicable](#-duplicable) | Concern-aware deep copy ("clone this invoice") |
 
 ### 🎮 Controller concerns
 
@@ -92,7 +94,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## ✨ Why this gem?
 
-- **Twenty-four model concerns + sixteen controller concerns**, all production-ready
+- **Twenty-six model concerns + sixteen controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
@@ -105,7 +107,7 @@ Article.published.without_deleted.find("hello-world")
 Add to your application's `Gemfile`:
 
 ```ruby
-gem "concerns_on_rails", "~> 1.22"
+gem "concerns_on_rails", "~> 1.23"
 ```
 
 Or pull the latest from GitHub:
@@ -1188,6 +1190,66 @@ Patient.where_email("a@b.com")       # chainable Relation (accepts arrays too)
 
 ---
 
+## 🕵️ Anonymizable
+
+Declarative right-to-erasure ("GDPR-lite"): each personal-data field gets an erasure strategy, and `anonymize!` rewrites them all in **one UPDATE** while stamping `anonymized_at`. Completes the sensitive-data suite — Maskable masks *display*, Sanitizable strips *HTML*, Encryptable protects *at rest*; Anonymizable **destroys**.
+
+```ruby
+class User < ApplicationRecord
+  include ConcernsOnRails::Models::Anonymizable
+
+  anonymizable :email, with: :email                 # unique fake address
+  anonymizable :first_name, :last_name, with: :redact
+  anonymizable :ssn, with: :nullify
+  anonymizable :bio, with: ->(value) { value && "removed by user request" }
+end
+
+user.anonymize!                    # hooks + single UPDATE + stamp, in one transaction
+user.anonymized?                   # => true
+User.not_anonymized                # scope (and .anonymized)
+User.where(...).anonymize_all!     # batch; returns the count, skips stamped records
+```
+
+**Strategies** (`with:`): `:nullify`, `:redact` (`"[REDACTED]"`), `:hash` (SHA-256 — deterministic *pseudonymization*, joins keep working), `:email` (random unique `anon-…@anonymized.invalid`, so NOT NULL + unique email columns survive), `:random_hex`, or a callable (`->(value)` / `->(value, record)`). Presets pass `nil` through untouched.
+
+**Options** (repeatable; field rules merge): `stamp:` (default `:anonymized_at`; `false` disables stamping + scopes), `clear_audit_trail:` (default `true` — when an erased field is also `auditable_by`, the trail holding its plaintext history is cleared in the same UPDATE), `prefix:`/`suffix:` (scope names).
+
+**Notes**
+- Deliberately `update_columns`: erasure is never blocked by validations and never runs callbacks that could copy old values elsewhere. Values still serialize through the attribute types, so an `encryptable` field stores a fresh ciphertext envelope — never plaintext.
+- `before_anonymize`/`after_anonymize` hooks run inside the transaction; the record reloads afterwards (erasure is terminal for the instance).
+- `:hash` is pseudonymization — use `:nullify`/`:random_hex` for true erasure. Backups/replicas/logs are out of scope.
+
+---
+
+## 🧬 Duplicable
+
+Concern-aware deep copy — the "clone this invoice / duplicate this template" feature. A bare `dup` copies identity-bearing columns (slug, token, invoice number, audit trail, even `created_at`, which AR preserves on save), so naive copies collide with unique indexes. Duplicable blanks exactly those columns and lets each sibling concern regenerate fresh values on save.
+
+```ruby
+class Invoice < ApplicationRecord
+  include ConcernsOnRails::Models::Duplicable
+
+  has_many :line_items
+  duplicable_by associations: %i[line_items],
+                reset: %i[issued_at],
+                suffix: { title: " (copy)" }
+end
+
+copy = invoice.duplicate                # unsaved deep copy
+copy = invoice.duplicate!(title: "Q3")  # saved (one transaction, autosaved children)
+```
+
+**Auto-reset identity columns** (no configuration): `created_at`/`updated_at`, Sluggable slug, Tokenizable/Hashable tokens, Sequenceable sequence + `into:` columns, Auditable trail, SoftDeletable timestamp, Lockable attempts/locked_at. Business state (Publishable, Stateable, …) is a judgment call — list it in `reset:`.
+
+**Associations** (`associations:` allow-list, declared before the macro, validated at macro time): `has_many`/`has_one` children are deep-copied — a child that also includes Duplicable copies via **its own** rules, so nested graphs stay declarative; `has_and_belongs_to_many` re-links the *same* records; `belongs_to` and `has_many :through` are rejected with an explanation.
+
+**Notes**
+- The macro is optional — bare `include` gives `duplicate`/`duplicate!` with the auto resets.
+- Override `on_duplicate(copy)` for custom tweaks; it receives the unsaved copy last.
+- Reach for [`amoeba`](https://github.com/amoeba-rb/amoeba) when you need per-attribute regex/prepend rules or belongs_to graph copying.
+
+---
+
 # 🎮 Controller Concerns
 
 Pure ActionController + ActiveRecord — **zero extra runtime dependencies** (no Kaminari, Pundit, or Ransack).
@@ -1760,6 +1822,7 @@ Both forms reference the same module, so you can freely mix them.
 | Full-text search with ranking / stemming | [`pg_search`](https://github.com/Casecommons/pg_search) / Elasticsearch |
 | Versioned audit trails with undo/reify, who-dunnit queries, or association tracking | [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) |
 | Field encryption with managed key rotation / Rails-native key infrastructure | [`lockbox`](https://github.com/ankane/lockbox) / Rails 7+ native `encrypts` |
+| Deep clone with per-attribute regex/prepend rules or belongs_to graph copying | [`amoeba`](https://github.com/amoeba-rb/amoeba) |
 
 `Sluggable` wraps [`friendly_id`](https://github.com/norman/friendly_id) and `Sortable` wraps [`acts_as_list`](https://github.com/brendon/acts_as_list), so you get those leaders' engines behind the declarative macro.
 
@@ -1771,7 +1834,7 @@ Both forms reference the same module, so you can freely mix them.
 bundle install                                  # install dev dependencies
 bundle exec rspec                               # run the test suite
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.22.0.gem      # install locally
+gem install ./concerns_on_rails-1.23.0.gem      # install locally
 ```
 
 The test suite uses an in-memory SQLite database and a lightweight `FakeController` harness for controller-concern specs — no Rails routes or boot required.
