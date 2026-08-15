@@ -89,6 +89,7 @@ Article.published.without_deleted.find("hello-world")
 | [🪝 WebhookVerifiable](#-webhookverifiable) | HMAC verification for inbound webhooks |
 | [🌅 Deprecatable](#-deprecatable) | RFC `Deprecation` / `Sunset` headers + 410 |
 | [🗄️ Cacheable](#-cacheable) | HTTP conditional GET (ETag / 304) + `Cache-Control` |
+| [🛂 Permittable](#-permittable) | Typed, validated params contracts + schema-drift guard |
 
 ---
 
@@ -1782,6 +1783,52 @@ end
 - `Last-Modified` is an IMF-fixdate via `Time#httpdate` (not hand-rolled ISO 8601); `If-Modified-Since` is compared at whole-second granularity.
 - When both are sent, `If-None-Match` wins and the date is ignored (RFC 7232 §3.3); a 304 is only sent for safe (GET/HEAD) requests, and still carries the validators and the `Cache-Control` policy.
 - Override `cache_etag_for` / `cache_last_modified_for` to customise validator derivation. For write-side preconditions (`If-Match` → 412), reach for Rails' own helpers.
+
+---
+
+## 🛂 Permittable
+
+Declarative, **typed params contracts** — what strong parameters would be if it also knew types, bounds, defaults, and *why* a request was bad. `params.permit` (and Rails 8's `params.expect`) only answer "which keys may pass"; a Permittable contract additionally **casts** each field, **validates** it, applies **defaults**, and turns every failure into a machine-readable 422. Because the contract is class-level data (not code inside the action), it is introspectable — and can be checked against a model's schema at boot.
+
+```ruby
+class UsersController < ApplicationController
+  include ConcernsOnRails::Controllers::Permittable
+
+  permit_params :create, :update, root: :user, model: User do
+    required :name,  :string,  length: 1..80, normalize: :squish
+    required :email, :string,  format: URI::MailTo::EMAIL_REGEXP, normalize: :email
+    optional :age,   :integer, in: 18..120
+    optional :ssn,   :string,  sensitive: true          # auto-redacted from logs
+    optional :plan,  :string,  in: %w[free pro], default: "free"
+    array    :tag_names, of: :string, length: 0..10
+    optional :address do
+      required :city, :string
+      optional :zip,  :string, format: /\A\d{5}\z/
+    end
+  end
+
+  def create
+    user = User.create!(permitted_params)   # cast, validated, defaulted
+  end
+end
+
+# POST { user: { name: "Jo", email: "JO@x.com ", age: "30" } }
+# ⇒ permitted_params == { "name" => "Jo", "email" => "jo@x.com", "age" => 30, "plan" => "free" }
+# POST { user: { age: "12" } }
+# ⇒ 422 { error: { code: "invalid_parameters",
+#                  details: [{ param: "user.name", code: "missing" },
+#                            { param: "user.age",  code: "inclusion" }] } }
+```
+
+**The schema-drift guard** is the headline: with `model:` (a class, or `true` to infer from the controller name), every non-`virtual:` scalar field is checked against the model's columns **at controller class load** through the same `ColumnGuard` all model concerns use. A column dropped by a migration fails the deploy (production eager-loads controllers) with a teaching error — the missing-column message plus a ready-to-paste migration command plus the `virtual: true` escape hatch. Nested/array fields are implicitly virtual; the check skips gracefully when the schema is unreachable (`db:create`, `assets:precompile`). In CI, one `Rails.application.eager_load!` spec exercises every contract in the app.
+
+**Options** (`permit_params *actions, …`, repeatable; no actions = catch-all; **last matching rule wins**, subclasses inherit copy-on-write): `root:` (key to unwrap, `require(:user)`-style; missing root → **400**; default `false` = top-level params), `model:` (schema-drift guard), `unknown:` (`:ignore` default / `:log` / `:error` — undeclared keys at every nesting level; Rails' `controller`/`action`/`format` keys are exempt at the top level), `enforce:` (`false` = validate lazily on first `permitted_params` call; `true` = validate in a `before_action` so the action body never runs on bad input).
+
+**Field DSL**: `required`/`optional` `name, type` (`:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`) with `in:` (Range/Array), `format:`/`length:`/`normalize:` (`:squish`/`:strip`/`:downcase`/`:upcase`/`:email` or a Proc; string fields only), `default:` (validated against the field's own contract at load time), `validate:` (Proc — falsy fails as `"invalid"`, a returned Symbol becomes the violation code), `virtual:`, `sensitive:` (registers with the gem-wide filter_parameters registry, same pipe as Encryptable). Nested hashes via a block; `array :name, of: :type` (or a block for arrays of hashes) with `length:` as element count and per-index violation paths (`items[1]`).
+
+**Coercion is strict** — deliberately not `ActiveModel::Type` ("abc".to_i == 0 and `Boolean.cast("abc") == true` silently corrupt untrusted input): a value the type can't faithfully represent is an `invalid_type` violation, booleans accept only `true/false/"true"/"false"/"1"/"0"/1/0`, and array/hash type-confusion (`?age[]=1`) is rejected instead of 500ing. `nil` and `""` are both **absent**: absent optional fields are *omitted* from the result (partial updates never nil-out columns), absent required fields violate, `default:` fills absence.
+
+**Failure surface**: violations raise `Permittable::InvalidParameters` (carries `details` + `status`), auto-`rescue_from`d into the shared error envelope (`Respondable#render_error` when included, the identical inline JSON otherwise) and instrumented as `invalid_parameters.concerns_on_rails` for dashboards. Introspect contracts via `permittable_contracts` / `permit_rule_for(action)`. Naming note: legacy InheritedResources controllers also define `permitted_params` — don't mix the two on one controller.
 
 ---
 

@@ -1,5 +1,13 @@
 <!-- CHANGELOG.md -->
 
+## Unreleased
+
+### Added
+- **Controllers::Permittable**: declarative, typed params contracts ("strong parameters with types, validation, and drift detection"). `permit_params *actions, root:, model:, unknown:, enforce:` declares a per-action contract (repeatable; no actions = catch-all; last matching rule wins; inherited copy-on-write) whose block DSL (`required`/`optional`/`array`, nested blocks) types every field (`:string :integer :float :decimal :boolean :date :datetime`) and validates it (`in:`, `format:`, `length:`, `normalize:` presets/Proc, `default:` — itself contract-checked at class load — and custom `validate:` with symbol violation codes). `permitted_params` returns the cast/validated/defaulted hash (lazy; `enforce: true` moves the check to a before_action); violations raise `InvalidParameters`, auto-rescued into the shared ErrorEnvelope as 422 (400 for a missing `root:` key) with machine-readable `details: [{ param: "user.age", code: "inclusion" }]`, and instrument `invalid_parameters.concerns_on_rails`. Coercion is deliberately STRICT (no ActiveModel::Type leniency — `"abc"` is never `0`, `?age[]=1` type confusion is a violation, not a 500); `nil`/`""` are ABSENT (absent optionals are omitted, so partial updates never nil-out columns). The headline: `model:` enables the **schema-drift guard** — every non-`virtual:` scalar field is checked against the model's columns via Support::ColumnGuard at controller class load, so a column dropped by a migration fails the deploy (with the migration-hint error + `virtual: true` escape hatch), not the request. `unknown: :error/:log` polices undeclared keys at every nesting level (Rails' routing keys exempt at top level); `sensitive: true` registers fields with the gem-wide filter_parameters registry (the Encryptable pipe). Zero new dependencies.
+
+### Internal
+- `spec/support/integration_harness.rb`: `dispatch` accepts `params:` (form-encoded request body) so specs can exercise real `ActionController::Parameters` bodies.
+
 ## 1.24.0 (2026-08-15)
 
 A developer-experience wave from the 2026-08-15 usability review: leaner install, lazy loading, teaching errors, and one-initializer store configuration. No behavior changes for configured concerns. 1084 examples, 0 failures.

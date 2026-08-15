@@ -20,8 +20,12 @@ module IntegrationHarness
 
   module_function
 
-  def dispatch(controller_class, action, method: "GET", query: "")
-    env = Rack::MockRequest.env_for("/?#{query}", method: method)
+  # `params:` (a Hash) is form-encoded into the request body — how Permittable
+  # exercises real ActionController::Parameters bodies.
+  def dispatch(controller_class, action, method: "GET", query: "", params: nil)
+    opts = { method: method }
+    opts[:params] = params if params
+    env = Rack::MockRequest.env_for("/?#{query}", **opts)
     status, headers, body = controller_class.action(action).call(env)
     # Rack bodies only guarantee #each (RackBody has no #map).
     chunks = body.enum_for(:each).to_a
