@@ -84,6 +84,24 @@ module ConcernsOnRails
     # FilterParameterRegistry (the Encryptable pipe), so the value is redacted
     # from logs via the Railtie-appended filter_parameters proc.
     #
+    # OUTPUT RESHAPING — the safe replacement for params-mutating
+    # before_actions. Two layers, both operating on the validated COPY (the
+    # request's `params` is never touched):
+    #   * `transform:` (scalar and array fields) — a callable applied AFTER
+    #     cast and validation to reshape that field's output, e.g.
+    #     `transform: ->(v) { v.split(",") }` turns a validated delimited
+    #     String into an Array. Runs only on request-supplied values: absent
+    #     fields stay absent and `default:` values are authored in final shape.
+    #   * `finalize do |p| ... end` (once per contract) — runs after every
+    #     field validated cleanly, receives the result hash, and must return
+    #     the (possibly restructured) Hash: combine parallel fields, build
+    #     value objects, drop scaffolding keys. It executes on a bare runner —
+    #     NOT the controller — so contracts stay pure data + pure functions;
+    #     the only extra vocabulary is `violate!(param, code)`, which records
+    #     one violation and halts the block immediately (the whole contract
+    #     then fails as a normal 422), making finalize double as the
+    #     cross-field validation seam ("ends_at after starts_at").
+    #
     # Naming note: some legacy stacks (InheritedResources) define their own
     # `permitted_params`; don't include both on one controller.
     module Permittable
@@ -273,17 +291,29 @@ module ConcernsOnRails
       # is a programmer error and should fail at class load, not at request
       # time.
       class ContractBuilder
-        SCALAR_OPTS = %i[in format length default normalize validate virtual sensitive].freeze
+        SCALAR_OPTS = %i[in format length default normalize validate virtual sensitive transform].freeze
         NESTED_OPTS = %i[virtual sensitive].freeze
-        ARRAY_OPTS  = %i[of length default validate virtual sensitive required].freeze
+        ARRAY_OPTS  = %i[of length default validate virtual sensitive required transform].freeze
+
+        attr_reader :finalizer
 
         def initialize
           @fields = []
+          @finalizer = nil
         end
 
         def build(&block)
           instance_eval(&block)
           @fields.map(&:freeze).freeze
+        end
+
+        # Post-validation reshaping of the whole contract — see the module
+        # comment. Once per contract, top level only.
+        def finalize(&block)
+          raise ArgumentError, "#{LABEL}: finalize requires a block" unless block
+          raise ArgumentError, "#{LABEL}: finalize may only be declared once per contract" if @finalizer
+
+          @finalizer = block
         end
 
         # `required :name` defaults the type to :string. A block instead of a
@@ -315,6 +345,7 @@ module ConcernsOnRails
           end
           validate_length!(name, field[:length]) if field.key?(:length)
           validate_callable!(name, :validate, field[:validate]) if field.key?(:validate)
+          validate_callable!(name, :transform, field[:transform]) if field.key?(:transform)
           validate_array_default!(field) if field.key?(:default)
           @fields << field
         end
@@ -365,8 +396,12 @@ module ConcernsOnRails
         end
 
         def nested_fields!(name, &block)
-          fields = ContractBuilder.new.build(&block)
+          builder = ContractBuilder.new
+          fields = builder.build(&block)
           raise ArgumentError, "#{LABEL}: nested field :#{name} declares no sub-fields" if fields.empty?
+          if builder.finalizer
+            raise ArgumentError, "#{LABEL}: finalize is only available at the top level of a contract (found inside :#{name})"
+          end
 
           fields
         end
@@ -383,6 +418,7 @@ module ConcernsOnRails
           validate_string_only_opts!(field)
           validate_length!(name, field[:length]) if field.key?(:length)
           validate_callable!(name, :validate, field[:validate]) if field.key?(:validate)
+          validate_callable!(name, :transform, field[:transform]) if field.key?(:transform)
           resolve_normalizer!(field)
           validate_default!(field)
         end
@@ -447,6 +483,23 @@ module ConcernsOnRails
         end
       end
 
+      # The `self` a finalize block runs on. Deliberately bare — no controller
+      # delegation — so a contract cannot grow request-state dependencies; its
+      # whole vocabulary is the hash it receives plus `violate!`.
+      class FinalizeRunner
+        def initialize(violations)
+          @violations = violations
+        end
+
+        # Records ONE violation and halts the finalize block immediately (the
+        # code after a violate! call never runs, so it can assume the checked
+        # invariant). The contract then fails as a normal 422.
+        def violate!(param, code)
+          @violations << { param: param.to_s, code: code.to_s }
+          throw :permittable_finalize_halt
+        end
+      end
+
       module ClassMethods
         include ConcernsOnRails::Support::ColumnGuard
 
@@ -469,7 +522,8 @@ module ConcernsOnRails
           unknown = unknown.to_sym
           raise ArgumentError, "#{LABEL}: :unknown must be one of #{UNKNOWN_MODES.join(', ')}" unless UNKNOWN_MODES.include?(unknown)
 
-          fields = ContractBuilder.new.build(&block)
+          builder = ContractBuilder.new
+          fields = builder.build(&block)
           raise ArgumentError, "#{LABEL}: a contract must declare at least one field" if fields.empty?
 
           model_class = resolve_permit_model(model)
@@ -477,7 +531,8 @@ module ConcernsOnRails
           register_sensitive_params(fields)
 
           rule = { actions: actions.flatten.map(&:to_s).freeze, root: root && root.to_sym,
-                   model: model_class, unknown: unknown, enforce: !!enforce, fields: fields }.freeze
+                   model: model_class, unknown: unknown, enforce: !!enforce, fields: fields,
+                   finalize: builder.finalizer }.freeze
           self.permittable_contracts = permittable_contracts + [rule]
         end
 
@@ -586,6 +641,10 @@ module ConcernsOnRails
           result = permittable_check_hash(rule[:fields], source, path: rule[:root] ? rule[:root].to_s : nil,
                                           unknown: rule[:unknown], top_level: !rule[:root], violations: violations)
         end
+        # finalize only sees a hash every field vouched for — never garbage.
+        if violations.empty? && rule[:finalize]
+          result = permittable_run_finalize(rule[:finalize], result, violations)
+        end
         return result if violations.empty?
 
         raise_invalid_parameters!(violations, status: source ? :unprocessable_entity : :bad_request)
@@ -599,6 +658,21 @@ module ConcernsOnRails
         )
         summary = violations.map { |v| "#{v[:param]} (#{v[:code]})" }.join(", ")
         raise InvalidParameters.new("Invalid parameters: #{summary}", details: violations, status: status)
+      end
+
+      def permittable_run_finalize(finalizer, result, violations)
+        runner = FinalizeRunner.new(violations)
+        finalized = catch(:permittable_finalize_halt) do
+          runner.instance_exec(result, &finalizer)
+        end
+        return result unless violations.empty?
+        unless finalized.is_a?(Hash)
+          raise ArgumentError,
+                "#{LABEL}: finalize must return the params Hash (got #{finalized.class}) — " \
+                "end the block with the hash, e.g. `p` or `p.except(:scaffolding)`"
+        end
+
+        finalized.is_a?(ActiveSupport::HashWithIndifferentAccess) ? finalized : ActiveSupport::HashWithIndifferentAccess.new(finalized)
       end
 
       def permittable_root_hash(rule, violations)
@@ -648,7 +722,12 @@ module ConcernsOnRails
         case field[:kind]
         when :scalar
           status, out = Coercion.check_scalar(field, value)
-          status == :ok ? result[key] = out : violations << { param: full, code: out }
+          if status == :ok
+            out = field[:transform].call(out) if field[:transform]
+            result[key] = out
+          else
+            violations << { param: full, code: out }
+          end
         when :nested
           if value.is_a?(Hash)
             result[key] = permittable_check_hash(field[:fields], ActiveSupport::HashWithIndifferentAccess.new(value),
@@ -666,6 +745,7 @@ module ConcernsOnRails
       end
 
       def permittable_check_array(field, value, path:, unknown:, violations:)
+        before = violations.length
         if field[:length] && !Coercion.length_ok?(field[:length], value.length)
           violations << { param: path, code: "length" }
         end
@@ -676,6 +756,9 @@ module ConcernsOnRails
           status, code = Coercion.check_custom(field[:validate], out)
           violations << { param: path, code: code } unless status == :ok
         end
+        # Transform only a fully-valid array — a partially-nil one (element
+        # violations) would hand user code garbage it never agreed to see.
+        out = field[:transform].call(out) if field[:transform] && violations.length == before
         out
       end
 

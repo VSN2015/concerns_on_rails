@@ -63,9 +63,31 @@ Repeatable; rules are inherited by subclasses copy-on-write. **No positional act
 - A block instead of a type declares a **nested hash** (`optional :address do … end`); violation paths are dotted (`user.address.zip`).
 - `array :name, of: :type` (or a block for arrays of hashes) — `length:` constrains the element **count**, element failures carry the index (`items[1]`), `required: true` opts in.
 
-Per-field options: `in:` (Range — bounds-checked with `cover?` — or Array), `format:` / `length:` / `normalize:` (`:squish`, `:strip`, `:downcase`, `:upcase`, `:email`, or a Proc; string fields only), `default:` (validated against the field's own contract **at class load**), `validate:` (Proc — falsy fails as `"invalid"`, a returned Symbol becomes the violation code, truthy passes), `virtual:` (skip the schema check), `sensitive:` (register with the gem-wide filter_parameters registry — the Encryptable pipe).
+Per-field options: `in:` (Range — bounds-checked with `cover?` — or Array), `format:` / `length:` / `normalize:` (`:squish`, `:strip`, `:downcase`, `:upcase`, `:email`, or a Proc; string fields only), `default:` (validated against the field's own contract **at class load**), `validate:` (Proc — falsy fails as `"invalid"`, a returned Symbol becomes the violation code, truthy passes), `transform:` (see below), `virtual:` (skip the schema check), `sensitive:` (register with the gem-wide filter_parameters registry — the Encryptable pipe).
 
 Every bad declaration (unknown option, unknown type, `required` + `default`, `format:` on an `:integer`, a `default:` violating its own rules, duplicate fields…) raises a teaching `ArgumentError` at class load.
+
+## Output reshaping (`transform:` / `finalize`)
+
+The safe replacement for params-mutating before_actions — both layers operate on the validated **copy**; the request's `params` is never touched.
+
+- **`transform:`** (scalar and array fields) — a callable applied **after** cast and validation, reshaping that field's output: `transform: ->(v) { v.split(",") }` turns a validated delimited String into an Array. It runs only on request-supplied values (absent fields stay absent, `default:` values are authored in final shape) and never sees garbage (a partially-invalid array is not transformed).
+- **`finalize do |p| … end`** (once per contract, top level only) — runs after every field validated cleanly, receives the result hash, and must return the final Hash: combine parallel fields into value objects, drop scaffolding keys. It executes on a bare runner, **not** the controller (a `params` reference inside raises — contracts stay pure); its one extra verb is `violate!(param, code)`, which records a violation and halts the block immediately, making finalize double as the cross-field validation seam.
+
+```ruby
+permit_params :create, root: :lease_addendum_form do
+  required :resident_signatures, :string, transform: ->(v) { v.split("<<delimiter>>") }
+  required :signer_names,        :string, transform: ->(v) { v.split(",") }
+
+  finalize do |p|
+    violate!("lease_addendum_form.signer_names", :length_mismatch) unless p[:signer_names].length == p[:resident_signatures].length
+    p[:signatures] = p[:resident_signatures].zip(p[:signer_names]).map { |image, name| Signature.new(image:, full_name: name) }
+    p.except(:resident_signatures, :signer_names)
+  end
+end
+```
+
+A mismatched pair of client arrays becomes a `422` with `{ param: "lease_addendum_form.signer_names", code: "length_mismatch" }` instead of silently building signatures with `nil` names (or 500ing on a missing field — both latent bugs in the before_action version of this pattern).
 
 ## The schema-drift guard
 

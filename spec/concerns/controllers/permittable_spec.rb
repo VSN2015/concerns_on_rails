@@ -558,6 +558,153 @@ describe ConcernsOnRails::Controllers::Permittable do
     end
   end
 
+  describe "transform:" do
+    it "rejects a non-callable transform on scalar and array fields, and rejects it on nested fields" do
+      expect { permittable_class { permit_params(:create) { required :a, :string, transform: :split } } }
+        .to raise_error(ArgumentError, /:transform for field :a must be callable/)
+      expect { permittable_class { permit_params(:create) { array :a, transform: :split } } }
+        .to raise_error(ArgumentError, /:transform for field :a must be callable/)
+      expect { permittable_class { permit_params(:create) { required(:a, transform: ->(v) { v }) { required :b } } } }
+        .to raise_error(ArgumentError, /unknown option\(s\) :transform for field :a/)
+    end
+
+    it "reshapes a validated scalar (delimited string → array)" do
+      result = permit({ ids: "1,2,3" }) do
+        permit_params(:create) { required :ids, :string, transform: ->(v) { v.split(",") } }
+      end
+      expect(result[:ids]).to eq(%w[1 2 3])
+    end
+
+    it "runs AFTER validation — format sees the pre-transform string" do
+      decl = proc do
+        permit_params(:create) { required :ids, :string, format: /\A[\d,]+\z/, transform: ->(v) { v.split(",") } }
+      end
+      expect(permit({ ids: "1,2" }, &decl)[:ids]).to eq(%w[1 2])
+      expect(violations_for({ ids: "1;2" }, &decl).details).to eq([{ param: "ids", code: "format" }])
+    end
+
+    it "does NOT run on defaults (they are authored in final shape) or absent fields" do
+      decl = proc do
+        permit_params(:create) { optional :ids, :string, default: "authored", transform: ->(v) { v.split(",") } }
+      end
+      expect(permit({}, &decl)[:ids]).to eq("authored")
+      expect(permit({}) { permit_params(:create) { optional :ids, :string, transform: ->(v) { raise "must not run" } } }
+        .key?("ids")).to be(false)
+    end
+
+    it "reshapes a fully-valid array, but is skipped when any element violates" do
+      decl = proc { permit_params(:create) { array :ids, of: :integer, transform: ->(a) { a.sum } } }
+      expect(permit({ ids: %w[1 2 3] }, &decl)[:ids]).to eq(6)
+
+      touchy = proc { permit_params(:create) { array :ids, of: :integer, transform: ->(a) { a.sum } } }
+      e = violations_for({ ids: %w[1 x] }, &touchy)
+      expect(e.details).to eq([{ param: "ids[1]", code: "invalid_type" }])
+    end
+  end
+
+  describe "finalize" do
+    it "requires a block, rejects a second declaration, and rejects nesting" do
+      expect { permittable_class { permit_params(:create) { required :a; finalize } } }
+        .to raise_error(ArgumentError, /finalize requires a block/)
+      expect { permittable_class { permit_params(:create) { required :a; finalize { |p| p }; finalize { |p| p } } } }
+        .to raise_error(ArgumentError, /finalize may only be declared once/)
+      expect { permittable_class { permit_params(:create) { required(:a) { required :b; finalize { |p| p } } } } }
+        .to raise_error(ArgumentError, /finalize is only available at the top level.*inside :a/)
+    end
+
+    it "restructures the validated hash — the zip-parallel-fields case" do
+      signature = Struct.new(:image, :full_name, :debtor_id)
+      decl = proc do
+        permit_params(:create, root: :lease_addendum_form) do
+          optional :resident_signatures, :string, transform: ->(v) { v.split("<<delimiter>>") }
+          optional :signer_names,        :string, transform: ->(v) { v.split(",") }
+          optional :signer_ids,          :string, transform: ->(v) { v.split(",") }
+
+          finalize do |p|
+            next p unless p[:resident_signatures]
+
+            unless p[:signer_names]&.length == p[:resident_signatures].length &&
+                   p[:signer_ids]&.length == p[:resident_signatures].length
+              violate!("lease_addendum_form.signer_names", :length_mismatch)
+            end
+
+            p[:resident_signatures] = p[:resident_signatures]
+              .zip(p[:signer_names], p[:signer_ids])
+              .map { |image, name, id| signature.new(image, name, id) }
+            p.except(:signer_names, :signer_ids)
+          end
+        end
+      end
+
+      result = permit({ lease_addendum_form: { resident_signatures: "img1<<delimiter>>img2",
+                                               signer_names: "An,Binh", signer_ids: "7,9" } }, &decl)
+      expect(result.keys).to eq(["resident_signatures"])
+      expect(result[:resident_signatures].map(&:to_a)).to eq([%w[img1 An 7], %w[img2 Binh 9]])
+
+      e = violations_for({ lease_addendum_form: { resident_signatures: "img1<<delimiter>>img2",
+                                                  signer_names: "An", signer_ids: "7,9" } }, &decl)
+      expect(e.details).to eq([{ param: "lease_addendum_form.signer_names", code: "length_mismatch" }])
+    end
+
+    it "violate! halts the block immediately — code after it never runs" do
+      ran_past = false
+      e = violations_for({ a: "x" }) do
+        permit_params(:create) do
+          required :a, :string
+          finalize do |p|
+            violate!("a", :nope)
+            ran_past = true
+            p
+          end
+        end
+      end
+      expect(e.details).to eq([{ param: "a", code: "nope" }])
+      expect(ran_past).to be(false)
+    end
+
+    it "does not run when field validation already failed" do
+      ran = false
+      e = violations_for({}) do
+        permit_params(:create) do
+          required :a, :string
+          finalize { |p| ran = true; p }
+        end
+      end
+      expect(e.details).to eq([{ param: "a", code: "missing" }])
+      expect(ran).to be(false)
+    end
+
+    it "rewraps a plain Hash return with indifferent access, and rejects a non-Hash return" do
+      result = permit({ a: "x" }) do
+        permit_params(:create) do
+          required :a, :string
+          finalize { |p| { "combined" => p[:a] } }
+        end
+      end
+      expect(result[:combined]).to eq("x")
+
+      klass = permittable_class do
+        permit_params(:create) do
+          required :a, :string
+          finalize { |p| p[:a] }
+        end
+      end
+      expect { controller(klass, params: { a: "x" }).permitted_params }
+        .to raise_error(ArgumentError, /finalize must return the params Hash \(got String\)/)
+    end
+
+    it "runs on a bare runner — controller state is out of reach (purity)" do
+      klass = permittable_class do
+        permit_params(:create) do
+          required :a, :string
+          finalize { |p| params; p }
+        end
+      end
+      expect { controller(klass, params: { a: "x" }).permitted_params }
+        .to raise_error(NameError, /params/)
+    end
+  end
+
   describe "through the real ActionController stack", :integration do
     def build_api_controller(&extra)
       IntegrationHarness.build_controller do
@@ -637,6 +784,39 @@ describe ConcernsOnRails::Controllers::Permittable do
       result = IntegrationHarness.dispatch(controller, :index, query: "page=2&rogue=1")
       expect(result.status).to eq(422)
       expect(JSON.parse(result.body)["error"]["details"]).to eq([{ "param" => "rogue", "code" => "unknown" }])
+    end
+
+    it "transform + finalize replace a params-mutating before_action end to end" do
+      controller = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Permittable
+
+        permit_params :create, root: :lease_addendum_form do
+          required :resident_signatures, :string, transform: ->(v) { v.split("<<delimiter>>") }
+          required :signer_names,        :string, transform: ->(v) { v.split(",") }
+
+          finalize do |p|
+            violate!("lease_addendum_form.signer_names", :length_mismatch) unless p[:signer_names].length == p[:resident_signatures].length
+            p[:signatures] = p[:resident_signatures].zip(p[:signer_names]).map { |image, name| { image: image, full_name: name } }
+            p.except(:resident_signatures, :signer_names)
+          end
+        end
+
+        def create
+          render json: permitted_params
+        end
+      end
+
+      ok = IntegrationHarness.dispatch(controller, :create, method: "POST",
+                                       params: { lease_addendum_form: { resident_signatures: "i1<<delimiter>>i2", signer_names: "An,Binh" } })
+      expect(ok.status).to eq(200)
+      expect(JSON.parse(ok.body)).to eq("signatures" => [{ "image" => "i1", "full_name" => "An" },
+                                                         { "image" => "i2", "full_name" => "Binh" }])
+
+      mismatch = IntegrationHarness.dispatch(controller, :create, method: "POST",
+                                             params: { lease_addendum_form: { resident_signatures: "i1<<delimiter>>i2", signer_names: "An" } })
+      expect(mismatch.status).to eq(422)
+      expect(JSON.parse(mismatch.body)["error"]["details"])
+        .to eq([{ "param" => "lease_addendum_form.signer_names", "code" => "length_mismatch" }])
     end
   end
 end
