@@ -74,7 +74,7 @@ module ConcernsOnRails
           self.auditable_actor = actor
           self.auditable_max_entries = max_entries
           self.auditable_max_value_length = max_value_length
-          ensure_columns!(LABEL, into, *fields)
+          ensure_columns!(LABEL, into, *fields, types: { into => :text })
           auditable_guard_encryptable!(fields)
 
           before_save :auditable_capture_changes

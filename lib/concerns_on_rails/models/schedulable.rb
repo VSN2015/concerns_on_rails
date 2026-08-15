@@ -56,7 +56,7 @@ module ConcernsOnRails
           end
 
           ensure_columns!("ConcernsOnRails::Models::Schedulable",
-                          schedulable_starts_at_field, schedulable_ends_at_field)
+                          schedulable_starts_at_field, schedulable_ends_at_field, types: :datetime)
         end
       end
 

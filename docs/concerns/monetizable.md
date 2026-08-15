@@ -129,7 +129,7 @@ invoice.formatted_total # => "€1.999,99"
 
 ## Notes & gotchas
 
-- **Column must exist at class-load time.** `monetizable` calls `ensure_columns!` immediately when the macro is evaluated. If the migration has not been run, an `ArgumentError` is raised with the message `"'<field>' does not exist in the database (table: <table_name>)"`. This means you cannot call `monetizable` in a model before running the corresponding migration.
+- **Column must exist at class-load time.** `monetizable` calls `ensure_columns!` immediately when the macro is evaluated. If the migration has not been run, an `ArgumentError` is raised with the message `"'<field>' does not exist in the database (table: <table_name>)."` followed by a ready-to-paste `bin/rails generate migration ... <field>:integer` command. This means you cannot call `monetizable` in a model before running the corresponding migration.
 
 - **Columns not ending in `_cents` require `:as`.** If the column name cannot be auto-derived (i.e. it does not end in `_cents`), `monetizable` raises `ArgumentError` with the message `"cannot derive a money method name from '<field>' (it does not end in '_cents'); pass \`as:\` to name it explicitly"`. Always pass `as:` for non-standard column names.
 

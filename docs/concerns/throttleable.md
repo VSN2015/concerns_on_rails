@@ -48,6 +48,15 @@ end
 
 `throttleable_store` is a class-level attribute (not a macro argument). It must be assigned before the first throttled request and must support atomic increment-with-expiry — specifically `store.increment(key, 1, expires_in: seconds)`. `Rails.cache` backed by Memcache or Redis satisfies this contract. A store that returns `nil` from `#increment` for a missing key is handled: the concern falls back to `store.write(key, 1, expires_in: period)` and treats the count as `1`.
 
+The store can also be configured once, gem-wide, in an initializer — the fallback consulted whenever the class attribute is `nil` (a class-level assignment always wins):
+
+```ruby
+# config/initializers/concerns_on_rails.rb
+ConcernsOnRails.setup do |config|
+  config.cache_store = -> { Rails.cache }   # a store, or a Proc resolved per lookup
+end
+```
+
 ## Methods
 
 ### Instance methods
@@ -112,7 +121,7 @@ end
 
 ## Notes & gotchas
 
-- **No default store.** `throttleable_store` is `nil` by default on purpose. If a rule fires before the attribute is set, `enforce_throttles` raises `ArgumentError` with a message containing "no store configured". This prevents silent per-process in-memory counters that reset on every deploy or dyno restart.
+- **No default store.** `throttleable_store` is `nil` by default on purpose. If a rule fires before the attribute (or the gem-wide `ConcernsOnRails.setup { |c| c.cache_store = ... }` fallback) is set, `enforce_throttles` raises `ArgumentError` with a message containing "no store configured". This prevents silent per-process in-memory counters that reset on every deploy or dyno restart.
 
 - **Atomic increment is required for correctness.** Under concurrency, a store whose `#increment` is not atomic will under-count — two simultaneous requests can both read `0`, both write `1`, and both pass through when only one should. `Rails.cache` with a Dalli (Memcache) or Redis backend satisfies the contract; the file store and memory store do not.
 

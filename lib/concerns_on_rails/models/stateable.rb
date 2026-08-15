@@ -90,7 +90,7 @@ module ConcernsOnRails
           self.stateable_transitions = options[:transitions] || {}
           self.stateable_prefix = stateable_affix(options[:prefix])
           self.stateable_suffix = stateable_affix(options[:suffix])
-          ensure_columns!(LABEL, stateable_field)
+          ensure_columns!(LABEL, stateable_field, types: :string)
         end
 
         # `true` => use the field name; a string/symbol => use it literally; else none.

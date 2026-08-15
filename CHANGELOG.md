@@ -1,5 +1,17 @@
 <!-- CHANGELOG.md -->
 
+## Unreleased
+
+A developer-experience wave from the 2026-08-15 usability review: leaner install, lazy loading, teaching errors, and one-initializer store configuration. No behavior changes for configured concerns.
+
+### Changed
+- **Dependencies**: the gem now depends on `actionpack` / `activerecord` / `activesupport` instead of the full `rails` meta-gem (API-only hosts stop pulling Action Cable / Mailbox / Text), and the `acts_as_list` constraint is `>= 0.7.5, < 2` — the old `~> 0.7.5` pin was an unresolvable Bundler conflict for any app already on acts_as_list 1.x. Suite verified against acts_as_list 1.2.6.
+- **Lazy loading**: `require "concerns_on_rails"` no longer eagerly loads all 40 concern/support files — everything is autoloaded on first constant reference, and `friendly_id` / `acts_as_list` load only when Sluggable / Sortable is actually used (a missing gem raises `ConcernsOnRails::MissingDependency`, a `LoadError` subclass whose message names the Gemfile line to add). The pre-1.6 top-level aliases (`ConcernsOnRails::Sluggable`, …) keep working, now resolved lazily via `const_missing`.
+- **Support::ColumnGuard** (all model concerns): the missing-column `ArgumentError` now teaches the fix — it appends a ready-to-paste `bin/rails generate migration ...` command carrying the concern's expected column type (e.g. `AddDeletedAtToArticles deleted_at:datetime`; token/slug columns suggest `string:uniq`, Encryptable blind-index columns `string:index`).
+
+### Added
+- **`ConcernsOnRails.setup`**: gem-wide configuration entry point (`lib/concerns_on_rails/configuration.rb`). First setting: `config.cache_store` — a store or a Proc (e.g. `-> { Rails.cache }`) used as the fallback store by `Controllers::Throttleable` and `Controllers::Idempotentable`, so one initializer line replaces per-controller `self.throttleable_store = ...` / `self.idempotency_store = ...` wiring. A class-level store still wins; with neither configured the concerns raise exactly as before.
+
 ## 1.22.0 (2026-07-26)
 
 A fixes-and-optimizations release driven by a full-library review of all 40 concerns: one data-loss bug, three request-crashing 500s verified through real ActionController dispatch, security headers restored on rescued error responses, a fail-open authorization path closed, and the gem's largest performance defect (unmemoized PBKDF2 per encrypted-value access) eliminated. 1031 examples, 0 failures.

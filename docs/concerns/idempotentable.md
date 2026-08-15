@@ -38,7 +38,7 @@ May be called multiple times to register rules with independent options; the fir
 
 ### `idempotency_store`
 
-A class-level attribute (not a macro argument). There is no in-process default on purpose — the first keyed request raises `ArgumentError` until a store is set. The minimal contract:
+A class-level attribute (not a macro argument). There is no in-process default on purpose — the first keyed request raises `ArgumentError` until a store is set, either on the class or once gem-wide via `ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } }` (the class-level assignment wins). The minimal contract:
 
 | Method | Used for | Required semantics |
 |--------|----------|--------------------|
@@ -134,7 +134,7 @@ end
 
 ## Notes & gotchas
 
-- **No default store.** `idempotency_store` is `nil` by default on purpose; the first keyed request raises `ArgumentError` with "no store configured" rather than silently caching per-process.
+- **No default store.** `idempotency_store` is `nil` by default on purpose; the first keyed request raises `ArgumentError` with "no store configured" rather than silently caching per-process. A gem-wide fallback can be set once via `ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } }`.
 - **Atomic `unless_exist` is required for correctness.** With a store whose `unless_exist:` write is not atomic (file store, plain memory store across processes), two concurrent firsts can both claim and both execute — the behavior degrades to best-effort. `ActiveSupport::Cache::NullStore` silently disables idempotency entirely (claims always "succeed", reads return `nil`).
 - **5xx responses and exceptions are retryable by design.** They release the claim and are never cached, so the client's retry re-executes the action. Only 2xx–4xx responses are replayed.
 - **`rescue_from` responses are never cached.** Rails' rescue layer wraps outside the callback chain, so an exception handled by `ErrorHandleable` still propagates through the around filter (releasing the claim) before the handler renders.

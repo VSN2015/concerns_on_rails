@@ -139,7 +139,7 @@ module ConcernsOnRails
           end
           return unless klass
 
-          ensure_columns_on!(LABEL, klass, count_column)
+          ensure_columns_on!(LABEL, klass, count_column, types: :integer)
         end
 
         def counter_cacheable_recount_rule(rule)

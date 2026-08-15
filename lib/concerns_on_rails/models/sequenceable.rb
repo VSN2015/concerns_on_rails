@@ -62,10 +62,10 @@ module ConcernsOnRails
           reset      = reset.to_sym
           scope_cols = Array(scope).map(&:to_sym)
 
-          ensure_columns!(NAME, field)
-          ensure_columns!(NAME, into) if into
+          ensure_columns!(NAME, field, types: :integer)
+          ensure_columns!(NAME, into, types: :string) if into
           ensure_columns!(NAME, *scope_cols) unless scope_cols.empty?
-          ensure_columns!(NAME, :created_at) unless reset == :never
+          ensure_columns!(NAME, :created_at, types: :datetime) unless reset == :never
           validate_sequenceable_options!(reset, template)
 
           self.sequenceable_config = sequenceable_config.merge(

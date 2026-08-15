@@ -23,7 +23,9 @@ module ConcernsOnRails
     # exact. The store MUST support atomic increment-with-expiry (`Rails.cache`
     # with `#increment`, or Redis); a non-atomic store under-counts under
     # concurrency. There is no in-process default store on purpose — configure
-    # one explicitly or the first throttled request raises ArgumentError.
+    # one explicitly (per controller as above, or once for the whole app via
+    # `ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } }`) or
+    # the first throttled request raises ArgumentError.
     module Throttleable
       extend ActiveSupport::Concern
 
@@ -161,12 +163,14 @@ module ConcernsOnRails
       end
 
       def throttle_store!
-        store = self.class.throttleable_store
+        store = self.class.throttleable_store || ConcernsOnRails.config.resolved_cache_store
         return store if store
 
         raise ArgumentError,
               "ConcernsOnRails::Controllers::Throttleable: no store configured. " \
-              "Set `self.throttleable_store = Rails.cache` (must support atomic #increment)."
+              "Set `self.throttleable_store = Rails.cache` on the controller, or the gem-wide " \
+              "fallback: ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } } " \
+              "(must support atomic #increment)."
       end
 
       def throttle_action_name

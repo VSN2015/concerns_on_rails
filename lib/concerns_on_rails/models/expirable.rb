@@ -21,7 +21,7 @@ module ConcernsOnRails
         #   expirable_by :valid_until
         def expirable_by(field = DEFAULT_FIELD, prefix: nil, suffix: nil)
           self.expirable_field = field.to_sym
-          ensure_columns!("ConcernsOnRails::Models::Expirable", expirable_field)
+          ensure_columns!("ConcernsOnRails::Models::Expirable", expirable_field, types: :datetime)
           define_expirable_scopes(prefix, suffix)
         end
 

@@ -51,4 +51,26 @@ RSpec.describe ConcernsOnRails::Support::ColumnGuard do
     expect(klass.ensure_columns_on!("Spec", klass, :name)).to be(true)
     expect { klass.ensure_columns_on!("Spec", klass, :nope) }.to raise_error(ArgumentError, /does not exist/)
   end
+
+  describe "migration hints (the teaching error)" do
+    it "appends a ready-to-paste generator command with the concern's expected type" do
+      expect { klass.activatable_by(:enabled) }.to raise_error(
+        ArgumentError,
+        %r{Add it with: bin/rails generate migration AddEnabledToColumnGuardRows enabled:boolean}
+      )
+    end
+
+    it "supports per-field types (and generator modifiers) via a types: Hash" do
+      expect do
+        klass.ensure_columns!("Spec", :nope_at, :token, types: { nope_at: :datetime, token: "string:uniq" })
+      end.to raise_error(ArgumentError, /AddNopeAtToColumnGuardRows nope_at:datetime/)
+    end
+
+    it "emits a bare column name when no type is known (generator defaults to string)" do
+      expect { klass.ensure_columns!("Spec", :mystery) }.to raise_error(
+        ArgumentError,
+        %r{Add it with: bin/rails generate migration AddMysteryToColumnGuardRows mystery\z}
+      )
+    end
+  end
 end

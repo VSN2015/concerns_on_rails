@@ -75,7 +75,8 @@ module ConcernsOnRails
           self.lockable_locked_at_field = locked_at
           self.lockable_max_attempts = max_attempts
           self.lockable_unlock_in = unlock_in
-          ensure_columns!(LABEL, attempts, locked_at)
+          ensure_columns!(LABEL, attempts, locked_at,
+                          types: { attempts => :integer, locked_at => :datetime })
           validate_lockable_attempts_column!(attempts)
           define_lockable_scopes(prefix, suffix)
         end

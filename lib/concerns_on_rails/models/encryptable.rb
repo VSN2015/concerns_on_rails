@@ -232,13 +232,13 @@ module ConcernsOnRails
         def encryptable(*fields, type: :string, key: nil, blind_index: nil)
           type = type.to_sym
           encryptable_validate!(fields, type, blind_index)
-          ensure_columns!(LABEL, *fields)
+          ensure_columns!(LABEL, *fields, types: :text)
 
           fields.each do |field|
             field = field.to_sym
             encryptable_guard_auditable!(field)
             bi = encryptable_normalize_blind_index(field, blind_index)
-            ensure_columns!(LABEL, bi[:column]) if bi
+            ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
             attribute field, EncryptedType.new(type: type, key: key)
             encryptable_define_helpers(field)

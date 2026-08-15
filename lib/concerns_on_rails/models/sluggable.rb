@@ -1,6 +1,15 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
-require "friendly_id"
+
+# Loaded here — with the concern, on first use — rather than at gem boot, so
+# apps that never include Sluggable never load friendly_id.
+begin
+  require "friendly_id"
+rescue LoadError
+  raise ConcernsOnRails::MissingDependency,
+        "ConcernsOnRails::Models::Sluggable requires the friendly_id gem. " \
+        'Add `gem "friendly_id", "~> 5.4"` to your Gemfile to use it.'
+end
 
 module ConcernsOnRails
   module Models
@@ -59,7 +68,8 @@ module ConcernsOnRails
           # first save with an opaque friendly_id error instead of this
           # concern's clear ArgumentError.
           ensure_columns!("ConcernsOnRails::Models::Sluggable",
-                          [sluggable_field, friendly_id_config.slug_column, scope].compact)
+                          [sluggable_field, friendly_id_config.slug_column, scope].compact,
+                          types: { friendly_id_config.slug_column.to_sym => "string:uniq" })
           return unless history || scope || reserved_words || finders
 
           reconfigure_friendly_id(history: history, scope: scope,

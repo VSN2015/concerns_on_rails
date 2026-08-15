@@ -50,7 +50,7 @@ module ConcernsOnRails
           self.soft_delete_field = field || :deleted_at
           self.soft_delete_touch = touch
           self.soft_delete_default_scope = default_scope
-          ensure_columns!("ConcernsOnRails::Models::SoftDeletable", soft_delete_field)
+          ensure_columns!("ConcernsOnRails::Models::SoftDeletable", soft_delete_field, types: :datetime)
         end
 
         # Soft-delete every matching record. Returns the Integer count of

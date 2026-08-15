@@ -47,7 +47,7 @@ module ConcernsOnRails
             raise ArgumentError, "ConcernsOnRails::Models::Monetizable: :subunit_to_unit must be a positive integer"
           end
 
-          ensure_columns!("ConcernsOnRails::Models::Monetizable", fields)
+          ensure_columns!("ConcernsOnRails::Models::Monetizable", fields, types: :integer)
           config = { unit: unit, precision: precision, delimiter: delimiter, separator: separator, subunit_to_unit: subunit_to_unit }
           fields.each { |cents_field| define_money_accessors(cents_field.to_sym, as, config) }
         end

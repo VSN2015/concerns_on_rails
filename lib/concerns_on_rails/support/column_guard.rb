@@ -1,3 +1,5 @@
+require "active_support/core_ext/string/inflections"
+
 module ConcernsOnRails
   module Support
     # Shared schema-validation helper mixed into a concern's ClassMethods.
@@ -27,22 +29,39 @@ module ConcernsOnRails
     # The phrase "does not exist" is preserved so existing specs that match
     # /does not exist/ keep passing.
     module ColumnGuard
-      def ensure_columns!(concern, *fields)
-        ensure_columns_on!(concern, self, *fields)
+      # `types:` teaches the error message: a Symbol/String applies to every
+      # listed field, a Hash maps field => type. When present, the raised
+      # ArgumentError appends a ready-to-paste migration command. Generator
+      # column-modifier syntax is welcome ("string:uniq" — tokens/slugs want a
+      # unique index anyway).
+      def ensure_columns!(concern, *fields, types: nil)
+        ensure_columns_on!(concern, self, *fields, types: types)
       end
 
       # Same contract, validated against another class (e.g. CounterCacheable
       # checks the counter column on the *parent* model).
-      def ensure_columns_on!(concern, klass, *fields)
+      def ensure_columns_on!(concern, klass, *fields, types: nil)
         return false unless schema_reachable?(klass)
 
         fields.flatten.compact.each do |field|
           next if klass.column_names.include?(field.to_s)
 
           raise ArgumentError,
-                "#{concern}: '#{field}' does not exist in the database (table: #{klass.table_name})"
+                "#{concern}: '#{field}' does not exist in the database (table: #{klass.table_name})." \
+                "#{column_migration_hint(klass, field, types)}"
         end
         true
+      end
+
+      # " Add it with: bin/rails generate migration AddDeletedAtToArticles
+      # deleted_at:datetime" — every missing-column failure becomes a
+      # copy-paste fix. Without a known type the column name goes out bare
+      # (the generator defaults to string).
+      def column_migration_hint(klass, field, types)
+        type = types.is_a?(Hash) ? types[field.to_sym] : types
+        column = [field, type].compact.join(":")
+        " Add it with: bin/rails generate migration " \
+          "Add#{field.to_s.camelize}To#{klass.table_name.to_s.camelize} #{column}"
       end
 
       # True when the class's table can actually be inspected. Connection

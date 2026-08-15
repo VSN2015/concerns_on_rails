@@ -104,7 +104,7 @@ module ConcernsOnRails
         # named `prefix`/`suffix`. See the module docs.
         def storable_by(column, keys = {}, prefix: nil, suffix: nil, **kw_keys)
           column = column.to_sym
-          ensure_columns!(LABEL, column)
+          ensure_columns!(LABEL, column, types: :text)
 
           prepared = storable_merge_key_specs(keys, kw_keys).map do |key, raw_spec|
             key = key.to_sym

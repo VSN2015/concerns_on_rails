@@ -33,7 +33,7 @@ module ConcernsOnRails
 
         def activatable_by(field = DEFAULT_FIELD, prefix: nil, suffix: nil)
           self.activatable_field = field.to_sym
-          ensure_columns!("ConcernsOnRails::Models::Activatable", activatable_field)
+          ensure_columns!("ConcernsOnRails::Models::Activatable", activatable_field, types: :boolean)
 
           # Affix the scope names so two concerns that each define `.active`
           # (e.g. SoftDeletable / Expirable) can coexist on one model.

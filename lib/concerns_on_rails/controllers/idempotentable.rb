@@ -33,8 +33,10 @@ module ConcernsOnRails
     # The claim is taken atomically via `write(..., unless_exist: true)`
     # (memcached `add` / Redis `SET NX` through Rails.cache); a store without
     # that atomicity is best-effort under concurrency. There is no in-process
-    # default store on purpose — configure one explicitly or the first keyed
-    # request raises ArgumentError. Note that responses rendered by
+    # default store on purpose — configure one explicitly (per controller as
+    # above, or once for the whole app via `ConcernsOnRails.setup { |c|
+    # c.cache_store = -> { Rails.cache } }`) or the first keyed request raises
+    # ArgumentError. Note that responses rendered by
     # `rescue_from` handlers bypass the around filter's success path and are
     # never cached.
     #
@@ -246,12 +248,13 @@ module ConcernsOnRails
       end
 
       def idempotency_store!
-        store = self.class.idempotency_store
+        store = self.class.idempotency_store || ConcernsOnRails.config.resolved_cache_store
         return store if store
 
         raise ArgumentError,
               "ConcernsOnRails::Controllers::Idempotentable: no store configured. " \
-              "Set `self.idempotency_store = Rails.cache` " \
+              "Set `self.idempotency_store = Rails.cache` on the controller, or the gem-wide " \
+              "fallback: ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } } " \
               "(must support #read, #write(expires_in:, unless_exist:) and #delete)."
       end
 

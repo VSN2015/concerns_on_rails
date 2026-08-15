@@ -3,9 +3,84 @@ require "active_support/deprecation"
 require "concerns_on_rails/version"
 
 module ConcernsOnRails
-  module Models; end
-  module Controllers; end
-  module Support; end
+  # Raised (as a LoadError subclass, so a bare `rescue LoadError` still works)
+  # when a concern needs a third-party gem that isn't available. friendly_id
+  # and acts_as_list load lazily with the concern that uses them (Sluggable /
+  # Sortable), so hosts that never touch those concerns never load them.
+  class MissingDependency < LoadError; end
+
+  # Everything below is autoloaded on first constant reference instead of
+  # eagerly required: an app that uses two concerns loads two files (plus
+  # their support helpers), not all forty — and friendly_id / acts_as_list
+  # stay unloaded unless Sluggable / Sortable is actually included.
+  # Each concern file requires the Support helpers it uses, so a direct
+  # `require "concerns_on_rails/models/sluggable"` keeps working too.
+
+  module Models
+    autoload :Sluggable,        "concerns_on_rails/models/sluggable"
+    autoload :Sortable,         "concerns_on_rails/models/sortable"
+    autoload :Publishable,      "concerns_on_rails/models/publishable"
+    autoload :SoftDeletable,    "concerns_on_rails/models/soft_deletable"
+    autoload :Hashable,         "concerns_on_rails/models/hashable"
+    autoload :Schedulable,      "concerns_on_rails/models/schedulable"
+    autoload :Expirable,        "concerns_on_rails/models/expirable"
+    autoload :Normalizable,     "concerns_on_rails/models/normalizable"
+    autoload :Searchable,       "concerns_on_rails/models/searchable"
+    autoload :Activatable,      "concerns_on_rails/models/activatable"
+    autoload :Tokenizable,      "concerns_on_rails/models/tokenizable"
+    autoload :Stateable,        "concerns_on_rails/models/stateable"
+    autoload :Addressable,      "concerns_on_rails/models/addressable"
+    autoload :Sequenceable,     "concerns_on_rails/models/sequenceable"
+    autoload :Taggable,         "concerns_on_rails/models/taggable"
+    autoload :Sanitizable,      "concerns_on_rails/models/sanitizable"
+    autoload :Maskable,         "concerns_on_rails/models/maskable"
+    autoload :Monetizable,      "concerns_on_rails/models/monetizable"
+    autoload :Auditable,        "concerns_on_rails/models/auditable"
+    autoload :Lockable,         "concerns_on_rails/models/lockable"
+    autoload :Aliasable,        "concerns_on_rails/models/aliasable"
+    autoload :Storable,         "concerns_on_rails/models/storable"
+    autoload :CounterCacheable, "concerns_on_rails/models/counter_cacheable"
+    autoload :Encryptable,      "concerns_on_rails/models/encryptable"
+  end
+
+  module Controllers
+    autoload :Paginatable,       "concerns_on_rails/controllers/paginatable"
+    autoload :Filterable,        "concerns_on_rails/controllers/filterable"
+    autoload :Sortable,          "concerns_on_rails/controllers/sortable"
+    autoload :Respondable,       "concerns_on_rails/controllers/respondable"
+    autoload :ErrorHandleable,   "concerns_on_rails/controllers/error_handleable"
+    autoload :Includable,        "concerns_on_rails/controllers/includable"
+    autoload :SecureHeadable,    "concerns_on_rails/controllers/secure_headable"
+    autoload :Localizable,       "concerns_on_rails/controllers/localizable"
+    autoload :Authorizable,      "concerns_on_rails/controllers/authorizable"
+    autoload :Throttleable,      "concerns_on_rails/controllers/throttleable"
+    autoload :Timezoneable,      "concerns_on_rails/controllers/timezoneable"
+    autoload :Idempotentable,    "concerns_on_rails/controllers/idempotentable"
+    autoload :WebhookVerifiable, "concerns_on_rails/controllers/webhook_verifiable"
+    autoload :CursorPaginatable, "concerns_on_rails/controllers/cursor_paginatable"
+    autoload :Deprecatable,      "concerns_on_rails/controllers/deprecatable"
+    autoload :Cacheable,         "concerns_on_rails/controllers/cacheable"
+  end
+
+  module Support
+    autoload :ColumnGuard,             "concerns_on_rails/support/column_guard"
+    autoload :ScalarParam,             "concerns_on_rails/support/scalar_param"
+    autoload :UniqueRetry,             "concerns_on_rails/support/unique_retry"
+    autoload :ErrorEnvelope,           "concerns_on_rails/support/error_envelope"
+    autoload :FilterParameterRegistry, "concerns_on_rails/support/filter_parameter_registry"
+    autoload :RandomValue,             "concerns_on_rails/support/random_value"
+    autoload :AddressData,             "concerns_on_rails/support/address_data"
+    autoload :SequenceCalculator,      "concerns_on_rails/support/sequence_calculator"
+    autoload :HtmlSanitizers,          "concerns_on_rails/support/html_sanitizers"
+    autoload :Masker,                  "concerns_on_rails/support/masker"
+    autoload :Money,                   "concerns_on_rails/support/money"
+    autoload :Encryptor,               "concerns_on_rails/support/encryptor"
+  end
+
+  # Encryption config + error types (Support::Encryptor requires it itself)
+  autoload :Encryption, "concerns_on_rails/encryption"
+  # Gem-wide configuration object behind ConcernsOnRails.setup
+  autoload :Configuration, "concerns_on_rails/configuration"
 
   # Guards the lazy singletons below: the first encrypted attribute read (or
   # deprecation warning) can happen on any request thread, and an unsynchronized
@@ -24,6 +99,20 @@ module ConcernsOnRails
     @deprecator || @config_mutex.synchronize do
       @deprecator ||= ActiveSupport::Deprecation.new("2.0", "concerns_on_rails")
     end
+  end
+
+  # Gem-wide configuration (see Configuration), set from an initializer:
+  #
+  #   ConcernsOnRails.setup do |config|
+  #     config.cache_store = -> { Rails.cache }
+  #   end
+  def self.config
+    @config || @config_mutex.synchronize { @config ||= Configuration.new }
+  end
+
+  def self.setup
+    yield config if block_given?
+    config
   end
 
   # Gem-wide encryption configuration backing Models::Encryptable. Memoized like
@@ -54,68 +143,7 @@ module ConcernsOnRails
   end
 end
 
-# Encryption config + error types (loaded before the support codec that uses them)
-require "concerns_on_rails/encryption"
-
-# Shared internal helpers (must load before the concerns that use them)
-require "concerns_on_rails/support/column_guard"
-require "concerns_on_rails/support/scalar_param"
-require "concerns_on_rails/support/unique_retry"
-require "concerns_on_rails/support/error_envelope"
-require "concerns_on_rails/support/filter_parameter_registry"
-require "concerns_on_rails/support/random_value"
-require "concerns_on_rails/support/address_data"
-require "concerns_on_rails/support/sequence_calculator"
-require "concerns_on_rails/support/html_sanitizers"
-require "concerns_on_rails/support/masker"
-require "concerns_on_rails/support/money"
-require "concerns_on_rails/support/encryptor"
-
-# Model concerns
-require "concerns_on_rails/models/sluggable"
-require "concerns_on_rails/models/sortable"
-require "concerns_on_rails/models/publishable"
-require "concerns_on_rails/models/soft_deletable"
-require "concerns_on_rails/models/hashable"
-require "concerns_on_rails/models/schedulable"
-require "concerns_on_rails/models/expirable"
-require "concerns_on_rails/models/normalizable"
-require "concerns_on_rails/models/searchable"
-require "concerns_on_rails/models/activatable"
-require "concerns_on_rails/models/tokenizable"
-require "concerns_on_rails/models/stateable"
-require "concerns_on_rails/models/addressable"
-require "concerns_on_rails/models/sequenceable"
-require "concerns_on_rails/models/taggable"
-require "concerns_on_rails/models/sanitizable"
-require "concerns_on_rails/models/maskable"
-require "concerns_on_rails/models/monetizable"
-require "concerns_on_rails/models/auditable"
-require "concerns_on_rails/models/lockable"
-require "concerns_on_rails/models/aliasable"
-require "concerns_on_rails/models/storable"
-require "concerns_on_rails/models/counter_cacheable"
-require "concerns_on_rails/models/encryptable"
-
-# Controller concerns
-require "concerns_on_rails/controllers/paginatable"
-require "concerns_on_rails/controllers/filterable"
-require "concerns_on_rails/controllers/sortable"
-require "concerns_on_rails/controllers/respondable"
-require "concerns_on_rails/controllers/error_handleable"
-require "concerns_on_rails/controllers/includable"
-require "concerns_on_rails/controllers/secure_headable"
-require "concerns_on_rails/controllers/localizable"
-require "concerns_on_rails/controllers/authorizable"
-require "concerns_on_rails/controllers/throttleable"
-require "concerns_on_rails/controllers/timezoneable"
-require "concerns_on_rails/controllers/idempotentable"
-require "concerns_on_rails/controllers/webhook_verifiable"
-require "concerns_on_rails/controllers/cursor_paginatable"
-require "concerns_on_rails/controllers/deprecatable"
-require "concerns_on_rails/controllers/cacheable"
-
-# Backwards compatibility (top-level aliases for pre-1.6 module paths)
+# Backwards compatibility (lazy top-level aliases for pre-1.6 module paths)
 require "concerns_on_rails/legacy_aliases"
 
 # Boot-time integration (filter_parameters registration), Rails apps only

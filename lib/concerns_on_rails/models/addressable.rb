@@ -86,7 +86,7 @@ module ConcernsOnRails
           raise ArgumentError, "#{LABEL}: unknown address part(s): #{unknown.join(', ')}" if unknown.any?
 
           overrides = mapping.to_h { |part, column| [part.to_sym, column.to_sym] }
-          ensure_columns!(LABEL, overrides.values)
+          ensure_columns!(LABEL, overrides.values, types: :string)
           DEFAULT_FIELDS.merge(overrides).select { |_part, column| column_names.include?(column.to_s) }
         end
 

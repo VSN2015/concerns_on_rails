@@ -1,6 +1,15 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
-require "acts_as_list"
+
+# Loaded here — with the concern, on first use — rather than at gem boot, so
+# apps that never include Sortable never load acts_as_list.
+begin
+  require "acts_as_list"
+rescue LoadError
+  raise ConcernsOnRails::MissingDependency,
+        "ConcernsOnRails::Models::Sortable requires the acts_as_list gem. " \
+        'Add `gem "acts_as_list"` to your Gemfile to use it.'
+end
 
 module ConcernsOnRails
   module Models
@@ -62,7 +71,7 @@ module ConcernsOnRails
           self.sortable_field = field
           self.sortable_direction = direction
 
-          ensure_columns!("ConcernsOnRails::Models::Sortable", sortable_field)
+          ensure_columns!("ConcernsOnRails::Models::Sortable", sortable_field, types: :integer)
 
           return unless use_acts_as_list
 

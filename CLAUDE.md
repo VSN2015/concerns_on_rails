@@ -32,10 +32,14 @@ the controller concerns.
 
 Model concerns live in `lib/concerns_on_rails/models/<name>.rb`, controller concerns in
 `lib/concerns_on_rails/controllers/<name>.rb`, and shared internal helpers in
-`lib/concerns_on_rails/support/<name>.rb`. `lib/concerns_on_rails.rb` is the loader (note
-the require order: support helpers load before the concerns that use them). Top-level
-aliases for the pre-1.6 module paths (e.g. `ConcernsOnRails::Sluggable`) live in
-`lib/concerns_on_rails/legacy_aliases.rb`.
+`lib/concerns_on_rails/support/<name>.rb`. `lib/concerns_on_rails.rb` is the loader —
+fully autoload-based since the post-1.22 DX wave (each concern file requires the support
+helpers it uses, so direct requires still work). `friendly_id`/`acts_as_list` load lazily
+with Sluggable/Sortable (absent gem → `ConcernsOnRails::MissingDependency`, a LoadError
+subclass). Top-level aliases for the pre-1.6 module paths (e.g. `ConcernsOnRails::Sluggable`)
+resolve lazily via `const_missing` in `lib/concerns_on_rails/legacy_aliases.rb`. Gem-wide
+config lives behind `ConcernsOnRails.setup` (`lib/concerns_on_rails/configuration.rb`);
+its `cache_store` (store or Proc) is the fallback store for Throttleable/Idempotentable.
 
 Most model concerns follow the same pattern: `class_attribute` defaults in `included do`,
 a `class_methods` block with a `<concern>_by` configuration macro, and instance methods.
@@ -183,7 +187,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 ### Support modules (`lib/concerns_on_rails/support/`)
 
 `ColumnGuard` (schema validation; skips — returns false — when the schema is unreachable
-so models stay loadable during `db:create`/`assets:precompile`), `ScalarParam` (untrusted
+so models stay loadable during `db:create`/`assets:precompile`; missing-column errors
+append a `bin/rails generate migration` hint typed via the macro's `types:` argument), `ScalarParam` (untrusted
 query-param coercion shared by the paginators/Filterable), `UniqueRetry` (bounded
 `RecordNotUnique` retry), `ErrorEnvelope` (the shared `render_error`-or-inline error
 renderer used by seven controller concerns), `FilterParameterRegistry` (live
@@ -206,9 +211,10 @@ actions via `Metal.action` + `Rack::MockRequest` (see
 
 ### Runtime dependencies
 
-- `rails >= 5.0, < 9`
-- `acts_as_list ~> 0.7.5`
-- `friendly_id ~> 5.4`
+- `actionpack` / `activerecord` / `activesupport` `>= 5.0, < 9` (component gems, not the
+  full `rails` meta-gem; railties is dev-only for the Railtie spec)
+- `acts_as_list >= 0.7.5, < 2` (lazy-loaded with Sortable)
+- `friendly_id ~> 5.4` (lazy-loaded with Sluggable)
 - Ruby `>= 3.2.0`
 
 ### Release process

@@ -56,7 +56,7 @@ module ConcernsOnRails
           type = type.to_sym
           length = length.to_i
 
-          ensure_columns!("ConcernsOnRails::Models::Tokenizable", field)
+          ensure_columns!("ConcernsOnRails::Models::Tokenizable", field, types: "string:uniq")
           validate_tokenizable_options!(type, length)
 
           # Build a fresh hash so subclasses don't mutate the parent's config.

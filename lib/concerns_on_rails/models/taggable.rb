@@ -53,7 +53,7 @@ module ConcernsOnRails
           self.taggable_field = field.to_sym
           self.taggable_delimiter = delimiter.to_s
           self.taggable_downcase = downcase
-          ensure_columns!(LABEL, taggable_field)
+          ensure_columns!(LABEL, taggable_field, types: :string)
 
           before_validation :taggable_normalize!
         end

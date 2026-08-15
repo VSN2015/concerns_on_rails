@@ -37,7 +37,8 @@ module ConcernsOnRails
           self.hashable_alphabet = alphabet
           self.hashable_unique = unique
 
-          ensure_columns!("ConcernsOnRails::Models::Hashable", hashable_field)
+          ensure_columns!("ConcernsOnRails::Models::Hashable", hashable_field,
+                          types: hashable_unique ? "string:uniq" : :string)
           validate_hashable_options!
           before_create :assign_hashable_value
 

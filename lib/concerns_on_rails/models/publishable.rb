@@ -53,7 +53,7 @@ module ConcernsOnRails
         def publishable_by(field = nil, default_scope: false)
           self.publishable_field = field || :published_at
           @publishable_boolean_column = nil
-          ensure_columns!("ConcernsOnRails::Models::Publishable", publishable_field)
+          ensure_columns!("ConcernsOnRails::Models::Publishable", publishable_field, types: :datetime)
           enable_published_default_scope if default_scope
         end
 

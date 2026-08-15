@@ -94,7 +94,7 @@ Article.published.without_deleted.find("hello-world")
 
 - **Twenty-four model concerns + sixteen controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
-- **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable); controller concerns have zero extra deps
+- **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
 - **Composable** — concerns are independent; mix and match per model
 
@@ -119,6 +119,27 @@ Then run:
 ```sh
 bundle install
 ```
+
+### Optional: one-initializer configuration
+
+Everything works with zero configuration. The store-backed controller concerns
+(`Throttleable`, `Idempotentable`) need a cache store — set it once, gem-wide,
+instead of per controller class:
+
+```ruby
+# config/initializers/concerns_on_rails.rb
+ConcernsOnRails.setup do |config|
+  config.cache_store = -> { Rails.cache }   # fallback for Throttleable / Idempotentable
+end
+
+# Encryptable's key lives in its own config (see the Encryptable section):
+ConcernsOnRails.configure_encryption do |c|
+  c.key = -> { Rails.application.credentials.dig(:encryption, :key) }
+end
+```
+
+A per-class `self.throttleable_store = ...` / `self.idempotency_store = ...`
+still wins over the gem-wide fallback.
 
 ---
 
@@ -1537,7 +1558,7 @@ Fixed-window counter: the key embeds a floored time bucket (`epoch / period`) so
 
 **Notes**
 - The store MUST support **atomic increment-with-expiry** (`Rails.cache` with `#increment`, or Redis) — a non-atomic store under-counts under concurrency.
-- There is **no in-process default store** on purpose: the first throttled request raises `ArgumentError` until you set `throttleable_store`, so you never silently rate-limit per-process.
+- There is **no in-process default store** on purpose: the first throttled request raises `ArgumentError` until you set `throttleable_store` (or the gem-wide fallback `ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } }`), so you never silently rate-limit per-process.
 - When `Respondable` is included, the 429 body delegates to `render_error` (`code: "rate_limited"`).
 - Backports the essentials of Rails 7.2's `rate_limit` (with standardized headers) to Rails 5.0+. For richer rules (fail2ban, allow/deny lists, exponential backoff) reach for [`rack-attack`](https://github.com/rack/rack-attack).
 
@@ -1586,7 +1607,7 @@ Per-key lifecycle: claim atomically (`write unless_exist`, TTL `lock_ttl:`) → 
 
 **Notes**
 - Cache keys are scoped per `controller#action` and the client key is SHA256-hashed, so the same key on different endpoints never collides.
-- There is **no in-process default store** on purpose: the first keyed request raises `ArgumentError` until you set `idempotency_store`.
+- There is **no in-process default store** on purpose: the first keyed request raises `ArgumentError` until you set `idempotency_store` (or the gem-wide fallback `ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } }`).
 - When `Respondable` is included, the 400/409/422 bodies delegate to `render_error`.
 - Declare halting filters (authentication, `Throttleable`) **before** including this concern — a 401/403 rendered by an inner filter would be cached and replayed for the full TTL. Responses rendered by `rescue_from` handlers are never cached.
 - Keys must be ≤255 chars with no control characters (the raw key is echoed in `X-Idempotency-Key`); set `lock_ttl:` above the slowest declared action's worst case.
