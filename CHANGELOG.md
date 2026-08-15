@@ -1,8 +1,8 @@
 <!-- CHANGELOG.md -->
 
-## Unreleased
+## 1.24.0 (2026-08-15)
 
-A developer-experience wave from the 2026-08-15 usability review: leaner install, lazy loading, teaching errors, and one-initializer store configuration. No behavior changes for configured concerns.
+A developer-experience wave from the 2026-08-15 usability review: leaner install, lazy loading, teaching errors, and one-initializer store configuration. No behavior changes for configured concerns. 1084 examples, 0 failures.
 
 ### Changed
 - **Dependencies**: the gem now depends on `actionpack` / `activerecord` / `activesupport` instead of the full `rails` meta-gem (API-only hosts stop pulling Action Cable / Mailbox / Text), and the `acts_as_list` constraint is `>= 0.7.5, < 2` — the old `~> 0.7.5` pin was an unresolvable Bundler conflict for any app already on acts_as_list 1.x. Suite verified against acts_as_list 1.2.6.

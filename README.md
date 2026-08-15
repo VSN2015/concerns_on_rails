@@ -12,7 +12,7 @@ One `include`, one declarative macro — done.
 [![Rails](https://img.shields.io/badge/rails-5.0--8.x-CC0000?logo=rubyonrails&logoColor=white)](https://rubyonrails.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3fb950.svg)](#-license)
 
-🧩 **23 model concerns** &nbsp;·&nbsp; 🎮 **16 controller concerns** &nbsp;·&nbsp; 🪶 **lean deps** &nbsp;·&nbsp; ✅ **schema-validated**
+🧩 **26 model concerns** &nbsp;·&nbsp; 🎮 **16 controller concerns** &nbsp;·&nbsp; 🪶 **lean deps** &nbsp;·&nbsp; ✅ **schema-validated**
 
 </div>
 
@@ -107,7 +107,7 @@ Article.published.without_deleted.find("hello-world")
 Add to your application's `Gemfile`:
 
 ```ruby
-gem "concerns_on_rails", "~> 1.23"
+gem "concerns_on_rails", "~> 1.24"
 ```
 
 Or pull the latest from GitHub:
@@ -1834,7 +1834,7 @@ Both forms reference the same module, so you can freely mix them.
 bundle install                                  # install dev dependencies
 bundle exec rspec                               # run the test suite
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.23.0.gem      # install locally
+gem install ./concerns_on_rails-1.24.0.gem      # install locally
 ```
 
 The test suite uses an in-memory SQLite database and a lightweight `FakeController` harness for controller-concern specs — no Rails routes or boot required.
