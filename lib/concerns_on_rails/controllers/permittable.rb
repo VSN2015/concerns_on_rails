@@ -22,4 +22,4 @@ end
 # share one filter. (Contracts declared through ::Permittable before this
 # bridge loads registered on the gem's default registry — that one stays
 # appended by Permittable::Railtie, so nothing is un-filtered.)
-::Permittable.filter_parameter_registry = ConcernsOnRails.filter_parameter_registry
+Permittable.filter_parameter_registry = ConcernsOnRails.filter_parameter_registry

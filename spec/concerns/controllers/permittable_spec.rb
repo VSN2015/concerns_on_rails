@@ -40,7 +40,7 @@ describe ConcernsOnRails::Controllers::Permittable do
     end
 
     it "rejects an empty contract" do
-      expect { permittable_class { permit_params(:create) {} } }
+      expect { permittable_class { permit_params(:create) {} } } # rubocop:disable Lint/EmptyBlock
         .to raise_error(ArgumentError, /at least one field/)
     end
 
@@ -82,7 +82,14 @@ describe ConcernsOnRails::Controllers::Permittable do
     end
 
     it "rejects a duplicate field in the same contract" do
-      expect { permittable_class { permit_params(:create) { required :a; optional :a } } }
+      expect do
+        permittable_class do
+          permit_params(:create) do
+            required :a
+            optional :a
+          end
+        end
+      end
         .to raise_error(ArgumentError, /:a is declared twice/)
     end
 
@@ -92,7 +99,7 @@ describe ConcernsOnRails::Controllers::Permittable do
     end
 
     it "rejects an empty nested block" do
-      expect { permittable_class { permit_params(:create) { required(:a) {} } } }
+      expect { permittable_class { permit_params(:create) { required(:a) {} } } } # rubocop:disable Lint/EmptyBlock
         .to raise_error(ArgumentError, /nested field :a declares no sub-fields/)
     end
 
@@ -171,8 +178,16 @@ describe ConcernsOnRails::Controllers::Permittable do
     end
 
     it "rejects unparseable dates and datetimes" do
-      expect(violations_for({ day: "not-a-day" }) { permit_params(:create) { required :day, :date } }.details.first[:code]).to eq("invalid_type")
-      expect(violations_for({ at: "not-a-time" }) { permit_params(:create) { required :at, :datetime } }.details.first[:code]).to eq("invalid_type")
+      expect(violations_for({ day: "not-a-day" }) do
+        permit_params(:create) do
+          required :day, :date
+        end
+      end.details.first[:code]).to eq("invalid_type")
+      expect(violations_for({ at: "not-a-time" }) do
+        permit_params(:create) do
+          required :at, :datetime
+        end
+      end.details.first[:code]).to eq("invalid_type")
     end
 
     it "stringifies numbers and booleans for :string (JSON bodies)" do
@@ -216,12 +231,12 @@ describe ConcernsOnRails::Controllers::Permittable do
       squished = permit({ name: "  a   b  " }) { permit_params(:create) { required :name, :string, normalize: :squish } }
       expect(squished[:name]).to eq("a b")
 
-      custom = permit({ sku: "ab-1" }) { permit_params(:create) { required :sku, :string, normalize: ->(v) { v.upcase } } }
+      custom = permit({ sku: "ab-1" }) { permit_params(:create) { required :sku, :string, normalize: :upcase.to_proc } }
       expect(custom[:sku]).to eq("AB-1")
     end
 
     it "runs a custom validate: — falsy fails as 'invalid', a Symbol fails as that code, truthy passes" do
-      falsy = proc { permit_params(:create) { required :n, :integer, validate: ->(v) { v.even? } } }
+      falsy = proc { permit_params(:create) { required :n, :integer, validate: :even?.to_proc } }
       expect(permit({ n: "4" }, &falsy)[:n]).to eq(4)
       expect(violations_for({ n: "3" }, &falsy).details).to eq([{ param: "n", code: "invalid" }])
 
@@ -506,13 +521,16 @@ describe ConcernsOnRails::Controllers::Permittable do
 
     it "raises at class load for a field whose column does not exist, teaching both fixes" do
       m = model
-      expect do
+      error = begin
         permittable_class { permit_params(:create, model: m) { required :nickname, :string } }
-      end.to raise_error(ArgumentError) do |e|
-        expect(e.message).to match(/'nickname' does not exist in the database \(table: permit_users\)/)
-        expect(e.message).to match(%r{bin/rails generate migration AddNicknameToPermitUsers nickname:string})
-        expect(e.message).to match(/declare it with virtual: true/)
+        nil
+      rescue ArgumentError => e
+        e
       end
+      expect(error).to be_an(ArgumentError)
+      expect(error.message).to match(/'nickname' does not exist in the database \(table: permit_users\)/)
+      expect(error.message).to match(%r{bin/rails generate migration AddNicknameToPermitUsers nickname:string})
+      expect(error.message).to match(/declare it with virtual: true/)
     end
 
     it "skips virtual fields and (implicitly) nested/array fields" do
@@ -588,15 +606,15 @@ describe ConcernsOnRails::Controllers::Permittable do
         permit_params(:create) { optional :ids, :string, default: "authored", transform: ->(v) { v.split(",") } }
       end
       expect(permit({}, &decl)[:ids]).to eq("authored")
-      expect(permit({}) { permit_params(:create) { optional :ids, :string, transform: ->(v) { raise "must not run" } } }
+      expect(permit({}) { permit_params(:create) { optional :ids, :string, transform: ->(_v) { raise "must not run" } } }
         .key?("ids")).to be(false)
     end
 
     it "reshapes a fully-valid array, but is skipped when any element violates" do
-      decl = proc { permit_params(:create) { array :ids, of: :integer, transform: ->(a) { a.sum } } }
+      decl = proc { permit_params(:create) { array :ids, of: :integer, transform: :sum.to_proc } }
       expect(permit({ ids: %w[1 2 3] }, &decl)[:ids]).to eq(6)
 
-      touchy = proc { permit_params(:create) { array :ids, of: :integer, transform: ->(a) { a.sum } } }
+      touchy = proc { permit_params(:create) { array :ids, of: :integer, transform: :sum.to_proc } }
       e = violations_for({ ids: %w[1 x] }, &touchy)
       expect(e.details).to eq([{ param: "ids[1]", code: "invalid_type" }])
     end
@@ -604,11 +622,35 @@ describe ConcernsOnRails::Controllers::Permittable do
 
   describe "finalize" do
     it "requires a block, rejects a second declaration, and rejects nesting" do
-      expect { permittable_class { permit_params(:create) { required :a; finalize } } }
+      expect do
+        permittable_class do
+          permit_params(:create) do
+            required :a
+            finalize
+          end
+        end
+      end
         .to raise_error(ArgumentError, /finalize requires a block/)
-      expect { permittable_class { permit_params(:create) { required :a; finalize { |p| p }; finalize { |p| p } } } }
+      expect do
+        permittable_class do
+          permit_params(:create) do
+            required :a
+            finalize { |p| p }
+            finalize { |p| p }
+          end
+        end
+      end
         .to raise_error(ArgumentError, /finalize may only be declared once/)
-      expect { permittable_class { permit_params(:create) { required(:a) { required :b; finalize { |p| p } } } } }
+      expect do
+        permittable_class do
+          permit_params(:create) do
+            required(:a) do
+              required :b
+              finalize { |p| p }
+            end
+          end
+        end
+      end
         .to raise_error(ArgumentError, /finalize is only available at the top level.*inside :a/)
     end
 
@@ -629,8 +671,8 @@ describe ConcernsOnRails::Controllers::Permittable do
             end
 
             p[:resident_signatures] = p[:resident_signatures]
-              .zip(p[:signer_names], p[:signer_ids])
-              .map { |image, name, id| signature.new(image, name, id) }
+                                      .zip(p[:signer_names], p[:signer_ids])
+                                      .map { |image, name, id| signature.new(image, name, id) }
             p.except(:signer_names, :signer_ids)
           end
         end
@@ -667,7 +709,10 @@ describe ConcernsOnRails::Controllers::Permittable do
       e = violations_for({}) do
         permit_params(:create) do
           required :a, :string
-          finalize { |p| ran = true; p }
+          finalize do |p|
+            ran = true
+            p
+          end
         end
       end
       expect(e.details).to eq([{ param: "a", code: "missing" }])
@@ -697,7 +742,10 @@ describe ConcernsOnRails::Controllers::Permittable do
       klass = permittable_class do
         permit_params(:create) do
           required :a, :string
-          finalize { |p| params; p }
+          finalize do |p|
+            params
+            p
+          end
         end
       end
       expect { controller(klass, params: { a: "x" }).permitted_params }
@@ -706,7 +754,7 @@ describe ConcernsOnRails::Controllers::Permittable do
   end
 
   describe "through the real ActionController stack", :integration do
-    def build_api_controller(&extra)
+    let(:api_controller) do
       IntegrationHarness.build_controller do
         include ConcernsOnRails::Controllers::Permittable
 
@@ -719,13 +767,11 @@ describe ConcernsOnRails::Controllers::Permittable do
         def create
           render json: { received: permitted_params }
         end
-
-        class_eval(&extra) if extra
       end
     end
 
     it "casts and defaults real form-encoded ActionController::Parameters" do
-      result = IntegrationHarness.dispatch(build_api_controller, :create,
+      result = IntegrationHarness.dispatch(api_controller, :create,
                                            method: "POST", params: { user: { name: "Jo", age: "30" } })
       expect(result.status).to eq(200)
       body = JSON.parse(result.body)
@@ -733,7 +779,7 @@ describe ConcernsOnRails::Controllers::Permittable do
     end
 
     it "rescues InvalidParameters into the 422 envelope with machine-readable details" do
-      result = IntegrationHarness.dispatch(build_api_controller, :create,
+      result = IntegrationHarness.dispatch(api_controller, :create,
                                            method: "POST", params: { user: { name: "Jo", age: "12" } })
       expect(result.status).to eq(422)
       body = JSON.parse(result.body)
@@ -743,7 +789,7 @@ describe ConcernsOnRails::Controllers::Permittable do
     end
 
     it "renders 400 when the root key is missing" do
-      result = IntegrationHarness.dispatch(build_api_controller, :create,
+      result = IntegrationHarness.dispatch(api_controller, :create,
                                            method: "POST", params: { name: "rootless" })
       expect(result.status).to eq(400)
       expect(JSON.parse(result.body)["error"]["details"]).to eq([{ "param" => "user", "code" => "missing" }])
@@ -806,14 +852,14 @@ describe ConcernsOnRails::Controllers::Permittable do
         end
       end
 
-      ok = IntegrationHarness.dispatch(controller, :create, method: "POST",
-                                       params: { lease_addendum_form: { resident_signatures: "i1<<delimiter>>i2", signer_names: "An,Binh" } })
+      matched = { lease_addendum_form: { resident_signatures: "i1<<delimiter>>i2", signer_names: "An,Binh" } }
+      ok = IntegrationHarness.dispatch(controller, :create, method: "POST", params: matched)
       expect(ok.status).to eq(200)
       expect(JSON.parse(ok.body)).to eq("signatures" => [{ "image" => "i1", "full_name" => "An" },
                                                          { "image" => "i2", "full_name" => "Binh" }])
 
-      mismatch = IntegrationHarness.dispatch(controller, :create, method: "POST",
-                                             params: { lease_addendum_form: { resident_signatures: "i1<<delimiter>>i2", signer_names: "An" } })
+      short = { lease_addendum_form: { resident_signatures: "i1<<delimiter>>i2", signer_names: "An" } }
+      mismatch = IntegrationHarness.dispatch(controller, :create, method: "POST", params: short)
       expect(mismatch.status).to eq(422)
       expect(JSON.parse(mismatch.body)["error"]["details"])
         .to eq([{ "param" => "lease_addendum_form.signer_names", "code" => "length_mismatch" }])
