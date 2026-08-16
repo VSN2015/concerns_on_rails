@@ -443,9 +443,9 @@ describe ConcernsOnRails::Controllers::Permittable do
       expect(ConcernsOnRails.filter_parameter_registry.include?("name")).to be(false)
     end
 
-    it "instruments invalid_parameters.concerns_on_rails with the violation details" do
+    it "instruments invalid_parameters.permittable with the violation details" do
       events = []
-      subscription = ActiveSupport::Notifications.subscribe("invalid_parameters.concerns_on_rails") do |*, payload|
+      subscription = ActiveSupport::Notifications.subscribe("invalid_parameters.permittable") do |*, payload|
         events << payload
       end
       begin

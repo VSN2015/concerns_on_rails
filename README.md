@@ -1830,7 +1830,9 @@ end
 
 **Coercion is strict** — deliberately not `ActiveModel::Type` ("abc".to_i == 0 and `Boolean.cast("abc") == true` silently corrupt untrusted input): a value the type can't faithfully represent is an `invalid_type` violation, booleans accept only `true/false/"true"/"false"/"1"/"0"/1/0`, and array/hash type-confusion (`?age[]=1`) is rejected instead of 500ing. `nil` and `""` are both **absent**: absent optional fields are *omitted* from the result (partial updates never nil-out columns), absent required fields violate, `default:` fills absence.
 
-**Failure surface**: violations raise `Permittable::InvalidParameters` (carries `details` + `status`), auto-`rescue_from`d into the shared error envelope (`Respondable#render_error` when included, the identical inline JSON otherwise) and instrumented as `invalid_parameters.concerns_on_rails` for dashboards. Introspect contracts via `permittable_contracts` / `permit_rule_for(action)`. Naming note: legacy InheritedResources controllers also define `permitted_params` — don't mix the two on one controller.
+**Failure surface**: violations raise `Permittable::InvalidParameters` (carries `details` + `status`), auto-`rescue_from`d into the shared error envelope (`Respondable#render_error` when included, the identical inline JSON otherwise) and instrumented as `invalid_parameters.permittable` for dashboards. Introspect contracts via `permittable_contracts` / `permit_rule_for(action)`. Naming note: legacy InheritedResources controllers also define `permitted_params` — don't mix the two on one controller.
+
+> Permittable ships as the standalone [`permittable` gem](https://github.com/VSN2015/permittable) (a runtime dependency of concerns_on_rails); `ConcernsOnRails::Controllers::Permittable` is an alias for `::Permittable`, with `sensitive:` registrations pooled into this gem's shared filter_parameters registry.
 
 ---
 

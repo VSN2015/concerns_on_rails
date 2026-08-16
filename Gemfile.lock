@@ -1,4 +1,10 @@
 PATH
+  remote: ../permittable
+  specs:
+    permittable (0.1.0)
+      activesupport (>= 5.0, < 9)
+
+PATH
   remote: .
   specs:
     concerns_on_rails (1.24.0)
@@ -7,6 +13,7 @@ PATH
       activesupport (>= 5.0, < 9)
       acts_as_list (>= 0.7.5, < 2)
       friendly_id (~> 5.4)
+      permittable (~> 0.1)
 
 GEM
   remote: https://rubygems.org/
@@ -197,6 +204,7 @@ DEPENDENCIES
   concerns_on_rails!
   faker (~> 3.8)
   friendly_id (~> 5.4)
+  permittable!
   railties (>= 5.0, < 9)
   rake
   rspec (~> 3.12)

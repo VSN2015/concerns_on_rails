@@ -113,5 +113,6 @@ Nested and array fields are implicitly virtual (they don't map one-to-one onto c
 - **Coercion is strict** — deliberately not `ActiveModel::Type` (`"abc".to_i == 0`, `Boolean.cast("abc") == true` silently corrupt untrusted input). `"4.5"` is not an integer; booleans accept only `true/false/"true"/"false"/"1"/"0"/1/0`; unparseable dates are `invalid_type`. Zoneless datetime strings parse as **UTC**, deterministically across host timezones.
 - **Type confusion is a violation, not a 500**: `?age[]=1` or `?age[x]=1` where a scalar is declared yields `invalid_type`.
 - `nil` and `""` are both **absent**: absence of an optional field omits the key, absence of a required field violates (`missing`), `default:` fills absence. Boolean `false` is present.
-- Every violation instruments `invalid_parameters.concerns_on_rails` (controller, action, details) for dashboards.
+- Every violation instruments `invalid_parameters.permittable` (controller, action, details) for dashboards.
+- Permittable ships as the standalone [`permittable` gem](https://github.com/VSN2015/permittable), a runtime dependency of concerns_on_rails; `ConcernsOnRails::Controllers::Permittable` is an alias for `::Permittable`.
 - Naming note: legacy InheritedResources controllers also define `permitted_params` — don't mix the two on one controller.
