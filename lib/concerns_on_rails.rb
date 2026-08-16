@@ -62,6 +62,7 @@ module ConcernsOnRails
     autoload :CursorPaginatable, "concerns_on_rails/controllers/cursor_paginatable"
     autoload :Deprecatable,      "concerns_on_rails/controllers/deprecatable"
     autoload :Cacheable,         "concerns_on_rails/controllers/cacheable"
+    autoload :Permittable,       "concerns_on_rails/controllers/permittable"
   end
 
   module Support
