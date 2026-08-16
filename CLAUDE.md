@@ -203,9 +203,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   prepend_before_action so rescue_from-rendered errors keep it; positive
   freshness never emits on rescued errors.
 - **`Permittable`** — typed, validated params contracts + schema-drift guard.
-  Lives in the STANDALONE `permittable` gem (sibling repo
-  `../permittable`, runtime dependency; Gemfile uses a path source until it's
-  published — publishing it precedes any concerns_on_rails release).
+  Lives in the STANDALONE `permittable` gem (runtime dependency, published on
+  rubygems.org; developed in the sibling repo `../permittable`,
+  github.com/VSN2015/permittable).
   `ConcernsOnRails::Controllers::Permittable` is an alias for `::Permittable`
   (bridge file also pools `sensitive:` registrations into the shared
   filter_parameters registry); this repo's permittable_spec doubles as the
@@ -245,7 +245,7 @@ actions via `Metal.action` + `Rack::MockRequest` (see
   full `rails` meta-gem; railties is dev-only for the Railtie spec)
 - `acts_as_list >= 0.7.5, < 2` (lazy-loaded with Sortable)
 - `friendly_id ~> 5.4` (lazy-loaded with Sluggable)
-- `permittable ~> 0.1` (the extracted Permittable concern; local path source in the Gemfile until published)
+- `permittable ~> 0.1` (the extracted Permittable concern, resolved from rubygems.org)
 - Ruby `>= 3.2.0`
 
 ### Release process

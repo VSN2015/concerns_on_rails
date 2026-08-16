@@ -1,10 +1,4 @@
 PATH
-  remote: ../permittable
-  specs:
-    permittable (0.1.0)
-      activesupport (>= 5.0, < 9)
-
-PATH
   remote: .
   specs:
     concerns_on_rails (1.24.0)
@@ -105,6 +99,8 @@ GEM
     parser (3.3.11.1)
       ast (~> 2.4.1)
       racc
+    permittable (0.1.2)
+      activesupport (>= 5.0, < 9)
     pp (0.6.3)
       prettyprint
     prettyprint (0.2.0)
@@ -204,7 +200,6 @@ DEPENDENCIES
   concerns_on_rails!
   faker (~> 3.8)
   friendly_id (~> 5.4)
-  permittable!
   railties (>= 5.0, < 9)
   rake
   rspec (~> 3.12)
