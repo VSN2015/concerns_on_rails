@@ -46,7 +46,7 @@ Article.published.without_deleted.find("hello-world")
 
 ## 📚 Table of Contents
 
-[Find your concern](#-find-your-concern) &nbsp;·&nbsp; [Why this gem?](#-why-this-gem) &nbsp;·&nbsp; [Installation](#-installation) &nbsp;·&nbsp; [Compatibility](#-compatibility) &nbsp;·&nbsp; [Quick Start](#-quick-start) &nbsp;·&nbsp; [Module paths](#-module-paths--namespacing) &nbsp;·&nbsp; [Development](#-development) &nbsp;·&nbsp; [Contributing](#-contributing) &nbsp;·&nbsp; [License](#-license)
+[Find your concern](#-find-your-concern) &nbsp;·&nbsp; [Why this gem?](#-why-this-gem) &nbsp;·&nbsp; [Installation](#-installation) &nbsp;·&nbsp; [Compatibility](#-compatibility) &nbsp;·&nbsp; [Quick Start](#-quick-start) &nbsp;·&nbsp; [Module paths](#-module-paths--namespacing) &nbsp;·&nbsp; [AI assistants](#-using-this-gem-with-ai-assistants) &nbsp;·&nbsp; [Development](#-development) &nbsp;·&nbsp; [Contributing](#-contributing) &nbsp;·&nbsp; [License](#-license)
 
 Every concern below links to its section in this README **and** to its standalone page on the [docs site](https://vsn2015.github.io/concerns_on_rails) (📖).
 
@@ -1929,6 +1929,25 @@ Both forms reference the same module, so you can freely mix them.
 
 ---
 
+## 🤖 Using this gem with AI assistants
+
+Working with Claude, Cursor, Copilot, or another AI coding agent? The docs are AI-ready — every page
+is plain Markdown, fetchable without JavaScript:
+
+- **[`llms.txt`](https://vsn2015.github.io/concerns_on_rails/llms.txt)** — a machine-readable index of
+  every concern document, following the [llms.txt convention](https://llmstxt.org)
+- **[`llms-full.txt`](https://vsn2015.github.io/concerns_on_rails/llms-full.txt)** — all 43 concern docs
+  concatenated into one ~400 KB plain-text file, for one-shot context loading
+- **Per-concern Markdown** — `https://vsn2015.github.io/concerns_on_rails/concerns/<slug>.md`
+  (e.g. [`concerns/sluggable.md`](https://vsn2015.github.io/concerns_on_rails/concerns/sluggable.md))
+  when your agent only needs one concern's docs
+- This README also ships **inside the packaged gem**, so an agent reading your bundle already has the
+  full reference locally
+
+Point your agent at `llms.txt` for an overview, or paste a single concern's `.md` URL for focused context.
+
+---
+
 ## 🛠️ Development
 
 ```sh
@@ -1963,6 +1982,7 @@ Bug reports and pull requests are welcome at **[github.com/VSN2015/concerns_on_r
 | 📖 Documentation site | [vsn2015.github.io/concerns_on_rails](https://vsn2015.github.io/concerns_on_rails) |
 | 💎 Gem page — live download count, all released versions | [rubygems.org/gems/concerns_on_rails](https://rubygems.org/gems/concerns_on_rails) |
 | 📝 Changelog | [CHANGELOG.md](CHANGELOG.md) |
+| 🤖 AI/LLM docs index (`llms.txt`) | [vsn2015.github.io/concerns_on_rails/llms.txt](https://vsn2015.github.io/concerns_on_rails/llms.txt) |
 | 🐛 Issue tracker | [github.com/VSN2015/concerns_on_rails/issues](https://github.com/VSN2015/concerns_on_rails/issues) |
 | 🛂 Permittable (extracted sibling gem) | [github.com/VSN2015/permittable](https://github.com/VSN2015/permittable) |
 

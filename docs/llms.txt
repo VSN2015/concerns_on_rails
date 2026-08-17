@@ -1,0 +1,61 @@
+# ConcernsOnRails
+
+> Plug-and-play ActiveSupport concerns for Rails models and controllers — one `include`, one declarative macro. 43 concerns covering slugs, soft delete, publishing, encryption, auditing, pagination, rate limiting, webhooks, params contracts, and more.
+
+ConcernsOnRails is a Ruby gem (`gem "concerns_on_rails"`; Ruby >= 3.2, Rails 5.0–8.x). Current version: 1.25.0. Every link below is a standalone plain-Markdown document — fetch it directly, no JavaScript or HTML parsing required.
+
+## Model concerns
+
+- [Sluggable](https://vsn2015.github.io/concerns_on_rails/concerns/sluggable.md): URL-friendly slugs
+- [Sortable](https://vsn2015.github.io/concerns_on_rails/concerns/sortable.md): List ordering via acts_as_list
+- [Publishable](https://vsn2015.github.io/concerns_on_rails/concerns/publishable.md): published_at timestamp publishing
+- [SoftDeletable](https://vsn2015.github.io/concerns_on_rails/concerns/soft-deletable.md): Soft delete with scopes & hooks
+- [Hashable](https://vsn2015.github.io/concerns_on_rails/concerns/hashable.md): Auto-generate tokens / UUIDs / codes
+- [Schedulable](https://vsn2015.github.io/concerns_on_rails/concerns/schedulable.md): starts_at / ends_at time windows
+- [Expirable](https://vsn2015.github.io/concerns_on_rails/concerns/expirable.md): Single-timestamp expiry
+- [Normalizable](https://vsn2015.github.io/concerns_on_rails/concerns/normalizable.md): Attribute normalization (:email, :phone…)
+- [Searchable](https://vsn2015.github.io/concerns_on_rails/concerns/searchable.md): LIKE/ILIKE search across columns
+- [Activatable](https://vsn2015.github.io/concerns_on_rails/concerns/activatable.md): Boolean active/inactive toggle
+- [Tokenizable](https://vsn2015.github.io/concerns_on_rails/concerns/tokenizable.md): Security tokens, timing-safe lookup
+- [Sequenceable](https://vsn2015.github.io/concerns_on_rails/concerns/sequenceable.md): Human-friendly reference numbers
+- [Stateable](https://vsn2015.github.io/concerns_on_rails/concerns/stateable.md): String-backed state machine
+- [Addressable](https://vsn2015.github.io/concerns_on_rails/concerns/addressable.md): Postal address normalization + validation
+- [Taggable](https://vsn2015.github.io/concerns_on_rails/concerns/taggable.md): Lightweight tagging over one column
+- [Sanitizable](https://vsn2015.github.io/concerns_on_rails/concerns/sanitizable.md): Opt-in HTML sanitization (XSS defense)
+- [Maskable](https://vsn2015.github.io/concerns_on_rails/concerns/maskable.md): Non-destructive display masking
+- [Monetizable](https://vsn2015.github.io/concerns_on_rails/concerns/monetizable.md): Integer-cents money columns (BigDecimal)
+- [Auditable](https://vsn2015.github.io/concerns_on_rails/concerns/auditable.md): Single-column change history (paper_trail-lite)
+- [Lockable](https://vsn2015.github.io/concerns_on_rails/concerns/lockable.md): Failed-attempt tracking + account lockout
+- [Aliasable](https://vsn2015.github.io/concerns_on_rails/concerns/aliasable.md): Full read/write/query aliases for associations
+- [Storable](https://vsn2015.github.io/concerns_on_rails/concerns/storable.md): Typed accessors over one JSON settings column
+- [CounterCacheable](https://vsn2015.github.io/concerns_on_rails/concerns/counter-cacheable.md): Conditional denormalized association counters
+- [Encryptable](https://vsn2015.github.io/concerns_on_rails/concerns/encryptable.md): Transparent field-level encryption (AES-256-GCM)
+- [Anonymizable](https://vsn2015.github.io/concerns_on_rails/concerns/anonymizable.md): GDPR right-to-erasure with per-field strategies
+- [Duplicable](https://vsn2015.github.io/concerns_on_rails/concerns/duplicable.md): Concern-aware deep copy with association allow-list
+
+## Controller concerns
+
+- [Paginatable](https://vsn2015.github.io/concerns_on_rails/concerns/paginatable.md): Offset pagination with headers
+- [CursorPaginatable](https://vsn2015.github.io/concerns_on_rails/concerns/cursor-paginatable.md): Cursor (keyset) pagination with headers
+- [Filterable](https://vsn2015.github.io/concerns_on_rails/concerns/filterable.md): Declarative URL-param filters
+- [Sortable (controller)](https://vsn2015.github.io/concerns_on_rails/concerns/sortable-controller.md): URL-param ordering with allow-list
+- [Respondable](https://vsn2015.github.io/concerns_on_rails/concerns/respondable.md): Standardized JSON envelopes
+- [ErrorHandleable](https://vsn2015.github.io/concerns_on_rails/concerns/error-handleable.md): JSON rescue_from handlers
+- [Includable](https://vsn2015.github.io/concerns_on_rails/concerns/includable.md): Association sideloading + sparse fieldsets
+- [SecureHeadable](https://vsn2015.github.io/concerns_on_rails/concerns/secure-headable.md): Security headers + native CSP DSL
+- [Localizable](https://vsn2015.github.io/concerns_on_rails/concerns/localizable.md): Per-request locale from params / header
+- [Authorizable](https://vsn2015.github.io/concerns_on_rails/concerns/authorizable.md): Per-action 403 authorization gate
+- [Throttleable](https://vsn2015.github.io/concerns_on_rails/concerns/throttleable.md): Rate limiting (429 + X-RateLimit-*)
+- [Timezoneable](https://vsn2015.github.io/concerns_on_rails/concerns/timezoneable.md): Per-request Time.zone from params / header
+- [Idempotentable](https://vsn2015.github.io/concerns_on_rails/concerns/idempotentable.md): Idempotency-Key replay for mutating endpoints
+- [WebhookVerifiable](https://vsn2015.github.io/concerns_on_rails/concerns/webhook-verifiable.md): HMAC verification for inbound webhooks
+- [Deprecatable](https://vsn2015.github.io/concerns_on_rails/concerns/deprecatable.md): RFC Deprecation/Sunset headers + 410 enforcement
+- [Cacheable](https://vsn2015.github.io/concerns_on_rails/concerns/cacheable.md): HTTP conditional GET (ETag / 304) + Cache-Control
+- [Permittable](https://vsn2015.github.io/concerns_on_rails/concerns/permittable.md): Typed, validated params contracts + schema-drift guard
+
+## Optional
+
+- [Complete docs in one file](https://vsn2015.github.io/concerns_on_rails/llms-full.txt): every concern document concatenated (~400 KB)
+- [README](https://raw.githubusercontent.com/VSN2015/concerns_on_rails/master/README.md): the full single-file reference, including installation and configuration
+- [CHANGELOG](https://raw.githubusercontent.com/VSN2015/concerns_on_rails/master/CHANGELOG.md): release history
+- [RubyGems](https://rubygems.org/gems/concerns_on_rails): released versions and install stats

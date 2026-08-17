@@ -8,6 +8,7 @@ on:
     branches: [ "master" ]
     paths:
       - "docs/**"
+      - "script/build_llms_docs.rb"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -32,6 +33,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      # Regenerate the AI/LLM artifacts (llms.txt + llms-full.txt) from the
+      # docs manifest + per-concern Markdown, so the published copies never
+      # drift from the site content. Uses the runner's system Ruby — no gems.
+      - name: Build llms.txt + llms-full.txt
+        run: ruby script/build_llms_docs.rb
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
