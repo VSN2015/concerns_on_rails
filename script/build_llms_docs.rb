@@ -21,7 +21,15 @@ REPO_RAW = "https://raw.githubusercontent.com/VSN2015/concerns_on_rails/master"
 manifest = File.read(MANIFEST)
 version  = manifest[/version:\s*"([^"]+)"/, 1] or abort "version not found in #{MANIFEST}"
 
-ENTRY = /\{\s*slug:\s*"(?<slug>[^"]+)",\s*name:\s*"(?<name>[^"]+)",\s*category:\s*"(?<category>[^"]+)",\s*icon:\s*"[^"]*",\s*tagline:\s*"(?<tagline>[^"]+)",\s*include:\s*"(?<include>[^"]+)",\s*src:\s*"(?<src>[^"]+)"/
+ENTRY = /
+  \{\s*slug:\s*"(?<slug>[^"]+)",
+  \s*name:\s*"(?<name>[^"]+)",
+  \s*category:\s*"(?<category>[^"]+)",
+  \s*icon:\s*"[^"]*",
+  \s*tagline:\s*"(?<tagline>[^"]+)",
+  \s*include:\s*"(?<include>[^"]+)",
+  \s*src:\s*"(?<src>[^"]+)"
+/x
 
 concerns = manifest.to_enum(:scan, ENTRY).map { Regexp.last_match.named_captures }
 abort "no concern entries parsed from #{MANIFEST}" if concerns.empty?
@@ -37,7 +45,7 @@ end
 models      = concerns.select { |c| c["category"] == "model" }
 controllers = concerns.select { |c| c["category"] == "controller" }
 
-index_lines = ->(list) {
+index_lines = lambda { |list|
   list.map { |c| "- [#{c['name']}](#{SITE}/concerns/#{c['slug']}.md): #{c['tagline']}" }.join("\n")
 }
 
@@ -64,15 +72,16 @@ llms = <<~TXT
   - [RubyGems](https://rubygems.org/gems/concerns_on_rails): released versions and install stats
 TXT
 
-full = +"# ConcernsOnRails #{version} — complete documentation\n\n"
-full << "> Plug-and-play ActiveSupport concerns for Rails models and controllers. " \
-        "Index: #{SITE}/llms.txt · Source: #{REPO}\n"
+full_parts = ["# ConcernsOnRails #{version} — complete documentation\n\n" \
+              "> Plug-and-play ActiveSupport concerns for Rails models and controllers. " \
+              "Index: #{SITE}/llms.txt · Source: #{REPO}\n"]
 concerns.each do |c|
   body = File.read(File.join(DOCS, "concerns", "#{c['slug']}.md")).strip
-  full << "\n\n---\n\n# #{c['name']} (#{c['category']} concern)\n\n" \
-          "> #{c['tagline']}\n\n" \
-          "`include #{c['include']}` — source: `#{c['src']}`\n\n#{body}\n"
+  full_parts << "\n\n---\n\n# #{c['name']} (#{c['category']} concern)\n\n" \
+                "> #{c['tagline']}\n\n" \
+                "`include #{c['include']}` — source: `#{c['src']}`\n\n#{body}\n"
 end
+full = full_parts.join
 
 File.write(File.join(DOCS, "llms.txt"), llms)
 File.write(File.join(DOCS, "llms-full.txt"), full)
