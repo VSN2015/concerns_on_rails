@@ -6,13 +6,17 @@
 One `include`, one declarative macro — done.
 
 [![Gem Version](https://img.shields.io/gem/v/concerns_on_rails?logo=rubygems&logoColor=white&color=CC342D)](https://rubygems.org/gems/concerns_on_rails)
-[![Downloads](https://img.shields.io/gem/dt/concerns_on_rails?color=1f6feb)](https://rubygems.org/gems/concerns_on_rails)
+[![Total Downloads](https://img.shields.io/gem/dt/concerns_on_rails?color=1f6feb&label=downloads)](https://rubygems.org/gems/concerns_on_rails)
+[![Latest Version Downloads](https://img.shields.io/gem/dtv/concerns_on_rails?color=8250df&label=latest%20version)](https://rubygems.org/gems/concerns_on_rails/versions)
 [![CI](https://github.com/VSN2015/concerns_on_rails/actions/workflows/ci.yml/badge.svg)](https://github.com/VSN2015/concerns_on_rails/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-vsn2015.github.io-6f42c1?logo=readthedocs&logoColor=white)](https://vsn2015.github.io/concerns_on_rails)
 [![Ruby](https://img.shields.io/badge/ruby-%3E%3D%203.2-CC342D?logo=ruby&logoColor=white)](https://www.ruby-lang.org)
 [![Rails](https://img.shields.io/badge/rails-5.0--8.x-CC0000?logo=rubyonrails&logoColor=white)](https://rubyonrails.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3fb950.svg)](#-license)
 
-🧩 **26 model concerns** &nbsp;·&nbsp; 🎮 **16 controller concerns** &nbsp;·&nbsp; 🪶 **lean deps** &nbsp;·&nbsp; ✅ **schema-validated**
+### [📖 **Documentation**](https://vsn2015.github.io/concerns_on_rails) &nbsp;·&nbsp; [💎 **RubyGems**](https://rubygems.org/gems/concerns_on_rails) &nbsp;·&nbsp; [📝 **Changelog**](CHANGELOG.md) &nbsp;·&nbsp; [🐛 **Issues**](https://github.com/VSN2015/concerns_on_rails/issues)
+
+🧩 **26 model concerns** &nbsp;·&nbsp; 🎮 **16 controller concerns** &nbsp;·&nbsp; 🪶 **lean deps** &nbsp;·&nbsp; ✅ **schema-validated** &nbsp;·&nbsp; 🧪 **1,160 specs**
 
 </div>
 
@@ -32,64 +36,108 @@ end
 Article.published.without_deleted.find("hello-world")
 ```
 
+> 📖 **Prefer browsable docs?** Every concern has its own searchable, deep-linkable page
+> (dark mode included) at **[vsn2015.github.io/concerns_on_rails](https://vsn2015.github.io/concerns_on_rails)** —
+> same content as this README, one page per concern. For install stats, every released
+> version, and the live download counter, see the gem page:
+> **[rubygems.org/gems/concerns_on_rails](https://rubygems.org/gems/concerns_on_rails)**.
+
 ---
 
 ## 📚 Table of Contents
 
-[Why this gem?](#-why-this-gem) &nbsp;·&nbsp; [Installation](#-installation) &nbsp;·&nbsp; [Compatibility](#-compatibility) &nbsp;·&nbsp; [Quick Start](#-quick-start) &nbsp;·&nbsp; [Module paths](#-module-paths--namespacing) &nbsp;·&nbsp; [Development](#-development) &nbsp;·&nbsp; [Contributing](#-contributing) &nbsp;·&nbsp; [License](#-license)
+[Find your concern](#-find-your-concern) &nbsp;·&nbsp; [Why this gem?](#-why-this-gem) &nbsp;·&nbsp; [Installation](#-installation) &nbsp;·&nbsp; [Compatibility](#-compatibility) &nbsp;·&nbsp; [Quick Start](#-quick-start) &nbsp;·&nbsp; [Module paths](#-module-paths--namespacing) &nbsp;·&nbsp; [Development](#-development) &nbsp;·&nbsp; [Contributing](#-contributing) &nbsp;·&nbsp; [License](#-license)
+
+Every concern below links to its section in this README **and** to its standalone page on the [docs site](https://vsn2015.github.io/concerns_on_rails) (📖).
 
 ### 🧱 Model concerns
 
-| Concern | What it does |
-|---------|--------------|
-| [📝 Sluggable](#-sluggable) | URL-friendly slugs |
-| [🔢 Sortable](#-sortable) | List ordering via `acts_as_list` |
-| [📤 Publishable](#-publishable) | `published_at` timestamp publishing |
-| [❌ SoftDeletable](#-softdeletable) | Soft delete with scopes &amp; hooks |
-| [🔐 Hashable](#-hashable) | Auto-generate tokens / UUIDs / codes |
-| [🗓️ Schedulable](#-schedulable) | `starts_at` / `ends_at` time windows |
-| [⏳ Expirable](#-expirable) | Single-timestamp expiry |
-| [✨ Normalizable](#-normalizable) | Attribute normalization (`:email`, `:phone`, …) |
-| [🔍 Searchable](#-searchable) | LIKE / ILIKE search across columns |
-| [✅ Activatable](#-activatable) | Boolean active / inactive toggle |
-| [🔑 Tokenizable](#-tokenizable) | Security tokens with timing-safe lookup |
-| [🧾 Sequenceable](#-sequenceable) | Ordered, human-friendly reference numbers |
-| [🔄 Stateable](#-stateable) | Lightweight string-backed state machine |
-| [🏠 Addressable](#-addressable) | Postal address normalization + validation |
-| [🏷️ Taggable](#-taggable) | Lightweight tagging over a single column |
-| [🧼 Sanitizable](#-sanitizable) | Opt-in HTML sanitization (XSS defense) |
-| [🙈 Maskable](#-maskable) | Non-destructive display masking |
-| [💰 Monetizable](#-monetizable) | Integer-cents money columns (BigDecimal) |
-| [📜 Auditable](#-auditable) | Single-column change history ("paper_trail-lite") |
-| [🔐 Lockable](#-lockable) | Failed-attempt tracking + account lockout |
-| [🪞 Aliasable](#-aliasable) | Full read / write / query association aliases |
-| [⚙️ Storable](#-storable) | Typed accessors over one JSON column ("store_attribute-lite") |
-| [🧮 CounterCacheable](#-countercacheable) | Conditional denormalized counters ("counter_culture-lite") |
-| [🔏 Encryptable](#-encryptable) | Transparent field encryption (AES-256-GCM) + blind-index lookups |
-| [🕵️ Anonymizable](#-anonymizable) | GDPR right-to-erasure with per-field strategies |
-| [🧬 Duplicable](#-duplicable) | Concern-aware deep copy ("clone this invoice") |
+| Concern | What it does | Docs |
+|---------|--------------|:----:|
+| [📝 Sluggable](#-sluggable) | URL-friendly slugs | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/sluggable) |
+| [🔢 Sortable](#-sortable) | List ordering via `acts_as_list` | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/sortable) |
+| [📤 Publishable](#-publishable) | `published_at` timestamp publishing | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/publishable) |
+| [❌ SoftDeletable](#-softdeletable) | Soft delete with scopes &amp; hooks | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/soft-deletable) |
+| [🔐 Hashable](#-hashable) | Auto-generate tokens / UUIDs / codes | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/hashable) |
+| [🗓️ Schedulable](#-schedulable) | `starts_at` / `ends_at` time windows | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/schedulable) |
+| [⏳ Expirable](#-expirable) | Single-timestamp expiry | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/expirable) |
+| [✨ Normalizable](#-normalizable) | Attribute normalization (`:email`, `:phone`, …) | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/normalizable) |
+| [🔍 Searchable](#-searchable) | LIKE / ILIKE search across columns | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/searchable) |
+| [✅ Activatable](#-activatable) | Boolean active / inactive toggle | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/activatable) |
+| [🔑 Tokenizable](#-tokenizable) | Security tokens with timing-safe lookup | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/tokenizable) |
+| [🧾 Sequenceable](#-sequenceable) | Ordered, human-friendly reference numbers | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/sequenceable) |
+| [🔄 Stateable](#-stateable) | Lightweight string-backed state machine | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/stateable) |
+| [🏠 Addressable](#-addressable) | Postal address normalization + validation | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/addressable) |
+| [🏷️ Taggable](#-taggable) | Lightweight tagging over a single column | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/taggable) |
+| [🧼 Sanitizable](#-sanitizable) | Opt-in HTML sanitization (XSS defense) | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/sanitizable) |
+| [🙈 Maskable](#-maskable) | Non-destructive display masking | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/maskable) |
+| [💰 Monetizable](#-monetizable) | Integer-cents money columns (BigDecimal) | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/monetizable) |
+| [📜 Auditable](#-auditable) | Single-column change history ("paper_trail-lite") | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/auditable) |
+| [🔐 Lockable](#-lockable) | Failed-attempt tracking + account lockout | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/lockable) |
+| [🪞 Aliasable](#-aliasable) | Full read / write / query association aliases | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/aliasable) |
+| [⚙️ Storable](#-storable) | Typed accessors over one JSON column ("store_attribute-lite") | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/storable) |
+| [🧮 CounterCacheable](#-countercacheable) | Conditional denormalized counters ("counter_culture-lite") | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/counter-cacheable) |
+| [🔏 Encryptable](#-encryptable) | Transparent field encryption (AES-256-GCM) + blind-index lookups | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/encryptable) |
+| [🕵️ Anonymizable](#-anonymizable) | GDPR right-to-erasure with per-field strategies | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/anonymizable) |
+| [🧬 Duplicable](#-duplicable) | Concern-aware deep copy ("clone this invoice") | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/duplicable) |
 
 ### 🎮 Controller concerns
 
-| Concern | What it does |
-|---------|--------------|
-| [📄 Paginatable](#-paginatable) | Offset pagination with headers |
-| [🧭 CursorPaginatable](#-cursorpaginatable) | Cursor (keyset) pagination with headers |
-| [🔎 Filterable](#-filterable) | Declarative URL-param filters |
-| [↕️ Sortable (controller)](#-sortable-controller) | URL-param ordering with allow-list |
-| [📦 Respondable](#-respondable) | Standardized JSON envelopes |
-| [🛟 ErrorHandleable](#-errorhandleable) | JSON `rescue_from` handlers |
-| [🔗 Includable](#-includable) | Association sideloading + sparse fieldsets |
-| [🛡️ SecureHeadable](#-secureheadable) | Security response headers + native CSP DSL |
-| [🌐 Localizable](#-localizable) | Per-request locale from params / `Accept-Language` |
-| [🔒 Authorizable](#-authorizable) | Per-action 403 authorization gate |
-| [🚦 Throttleable](#-throttleable) | Rate limiting (429 + `X-RateLimit-*`) |
-| [🕒 Timezoneable](#-timezoneable) | Per-request `Time.zone` from params / header / cookie |
-| [🔁 Idempotentable](#-idempotentable) | `Idempotency-Key` request replay |
-| [🪝 WebhookVerifiable](#-webhookverifiable) | HMAC verification for inbound webhooks |
-| [🌅 Deprecatable](#-deprecatable) | RFC `Deprecation` / `Sunset` headers + 410 |
-| [🗄️ Cacheable](#-cacheable) | HTTP conditional GET (ETag / 304) + `Cache-Control` |
-| [🛂 Permittable](#-permittable) | Typed, validated params contracts + schema-drift guard |
+| Concern | What it does | Docs |
+|---------|--------------|:----:|
+| [📄 Paginatable](#-paginatable) | Offset pagination with headers | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/paginatable) |
+| [🧭 CursorPaginatable](#-cursorpaginatable) | Cursor (keyset) pagination with headers | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/cursor-paginatable) |
+| [🔎 Filterable](#-filterable) | Declarative URL-param filters | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/filterable) |
+| [↕️ Sortable (controller)](#-sortable-controller) | URL-param ordering with allow-list | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/sortable-controller) |
+| [📦 Respondable](#-respondable) | Standardized JSON envelopes | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/respondable) |
+| [🛟 ErrorHandleable](#-errorhandleable) | JSON `rescue_from` handlers | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/error-handleable) |
+| [🔗 Includable](#-includable) | Association sideloading + sparse fieldsets | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/includable) |
+| [🛡️ SecureHeadable](#-secureheadable) | Security response headers + native CSP DSL | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/secure-headable) |
+| [🌐 Localizable](#-localizable) | Per-request locale from params / `Accept-Language` | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/localizable) |
+| [🔒 Authorizable](#-authorizable) | Per-action 403 authorization gate | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/authorizable) |
+| [🚦 Throttleable](#-throttleable) | Rate limiting (429 + `X-RateLimit-*`) | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/throttleable) |
+| [🕒 Timezoneable](#-timezoneable) | Per-request `Time.zone` from params / header / cookie | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/timezoneable) |
+| [🔁 Idempotentable](#-idempotentable) | `Idempotency-Key` request replay | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/idempotentable) |
+| [🪝 WebhookVerifiable](#-webhookverifiable) | HMAC verification for inbound webhooks | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/webhook-verifiable) |
+| [🌅 Deprecatable](#-deprecatable) | RFC `Deprecation` / `Sunset` headers + 410 | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/deprecatable) |
+| [🗄️ Cacheable](#-cacheable) | HTTP conditional GET (ETag / 304) + `Cache-Control` | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/cacheable) |
+| [🛂 Permittable](#-permittable) | Typed, validated params contracts + schema-drift guard | [📖](https://vsn2015.github.io/concerns_on_rails/#/c/permittable) |
+
+---
+
+## 🧭 Find your concern
+
+Forty-three concerns is a lot of menu. Start from the problem instead:
+
+| "I need to…" | Reach for |
+|--------------|-----------|
+| Give records pretty URLs — `/posts/hello-world`, not `/posts/42` | [📝 Sluggable](#-sluggable) |
+| Let users trash records, then restore them | [❌ SoftDeletable](#-softdeletable) |
+| Schedule a post to go live Friday at 9am | [📤 Publishable](#-publishable) |
+| Support drag-and-drop reordering | [🔢 Sortable](#-sortable) |
+| Issue API keys / invite codes with timing-safe lookup | [🔑 Tokenizable](#-tokenizable) |
+| Number invoices like `INV-2026-00042`, per account, resetting yearly | [🧾 Sequenceable](#-sequenceable) |
+| Add a small state machine without the AASM dependency | [🔄 Stateable](#-stateable) |
+| Encrypt SSNs at rest and still `find_by` them | [🔏 Encryptable](#-encryptable) |
+| Handle a GDPR "delete my data" request in one call | [🕵️ Anonymizable](#-anonymizable) |
+| Know who changed which field, and when | [📜 Auditable](#-auditable) |
+| Lock accounts after 5 failed logins | [🔐 Lockable](#-lockable) |
+| Keep typed, defaulted settings in one JSON column | [⚙️ Storable](#-storable) |
+| Maintain `approved_comments_count` next to `comments_count` | [🧮 CounterCacheable](#-countercacheable) |
+| Ship a "duplicate this invoice" button (line items included) | [🧬 Duplicable](#-duplicable) |
+| Handle money without ever touching a Float | [💰 Monetizable](#-monetizable) |
+| Paginate a JSON index — page numbers or infinite scroll | [📄 Paginatable](#-paginatable) / [🧭 CursorPaginatable](#-cursorpaginatable) |
+| Turn `?status=published&sort=title` into scopes safely | [🔎 Filterable](#-filterable) + [↕️ Sortable](#-sortable-controller) |
+| Render one consistent JSON envelope, errors included | [📦 Respondable](#-respondable) + [🛟 ErrorHandleable](#-errorhandleable) |
+| Rate-limit login attempts per IP | [🚦 Throttleable](#-throttleable) |
+| Make payment retries safe (Stripe-style `Idempotency-Key`) | [🔁 Idempotentable](#-idempotentable) |
+| Verify Stripe / GitHub / Shopify webhook signatures | [🪝 WebhookVerifiable](#-webhookverifiable) |
+| Retire `/api/v1` with proper `Deprecation` / `Sunset` headers | [🌅 Deprecatable](#-deprecatable) |
+| Serve ETags + 304s so clients stop re-downloading JSON | [🗄️ Cacheable](#-cacheable) |
+| Get strong params that also cast, bound-check, and default | [🛂 Permittable](#-permittable) |
+
+Still browsing? The [docs site](https://vsn2015.github.io/concerns_on_rails) has **instant search**
+across all 43 concerns — press <kbd>/</kbd> and type.
 
 ---
 
@@ -98,8 +146,10 @@ Article.published.without_deleted.find("hello-world")
 - **Twenty-six model concerns + sixteen controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
-- **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early
+- **Schema-validated configuration** — every macro checks that the configured column exists and raises `ArgumentError` early — with a ready-to-paste `rails generate migration` hint when it doesn't
 - **Composable** — concerns are independent; mix and match per model
+- **Tested like an app, not a snippet** — **1,160 RSpec examples** run against a real database on every CI build
+- **Documented twice** — everything in this README also lives as a per-concern page on the [docs site](https://vsn2015.github.io/concerns_on_rails), searchable and deep-linkable
 
 ---
 
@@ -1883,9 +1933,12 @@ Both forms reference the same module, so you can freely mix them.
 
 ```sh
 bundle install                                  # install dev dependencies
-bundle exec rspec                               # run the test suite
+bundle exec rspec                               # run the test suite (1,160 examples)
 gem build concerns_on_rails.gemspec             # build the gem
 gem install ./concerns_on_rails-1.25.0.gem      # install locally
+
+# Preview the docs site locally (GitHub Pages serves docs/ as-is):
+cd docs && python3 -m http.server 8000          # → http://localhost:8000
 ```
 
 The test suite uses an in-memory SQLite database and a lightweight `FakeController` harness for controller-concern specs — no Rails routes or boot required.
@@ -1894,7 +1947,24 @@ The test suite uses an in-memory SQLite database and a lightweight `FakeControll
 
 ## 🤝 Contributing
 
-Bug reports and pull requests are welcome at **[github.com/VSN2015/concerns_on_rails](https://github.com/VSN2015/concerns_on_rails)**. ⭐️ stars and 🍴 forks appreciated.
+Bug reports and pull requests are welcome at **[github.com/VSN2015/concerns_on_rails](https://github.com/VSN2015/concerns_on_rails)**.
+
+- 🐛 [Open an issue](https://github.com/VSN2015/concerns_on_rails/issues) — a failing spec is the fastest path to a fix
+- 🔀 Send a PR — run `bundle exec rspec` first; every concern keeps its spec under `spec/concerns/`
+- 📖 Docs count too — each concern's page lives in [`docs/concerns/`](docs/concerns) and redeploys automatically
+- ⭐️ If this gem saved you an afternoon of boilerplate, a star helps other devs find it
+
+---
+
+## 🔗 Links
+
+| Resource | Where |
+|----------|-------|
+| 📖 Documentation site | [vsn2015.github.io/concerns_on_rails](https://vsn2015.github.io/concerns_on_rails) |
+| 💎 Gem page — live download count, all released versions | [rubygems.org/gems/concerns_on_rails](https://rubygems.org/gems/concerns_on_rails) |
+| 📝 Changelog | [CHANGELOG.md](CHANGELOG.md) |
+| 🐛 Issue tracker | [github.com/VSN2015/concerns_on_rails/issues](https://github.com/VSN2015/concerns_on_rails/issues) |
+| 🛂 Permittable (extracted sibling gem) | [github.com/VSN2015/permittable](https://github.com/VSN2015/permittable) |
 
 ---
 
