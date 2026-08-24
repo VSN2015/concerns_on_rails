@@ -13,8 +13,8 @@ gem "friendly_id", "~> 5.4"
 gem "railties", ">= 5.0", "< 9"
 gem "rspec", "~> 3.12"
 gem "simplecov", "~> 0.22"
-gem "sqlite3", "~> 2.9.4"
+gem "sqlite3", "~> 2.9.6"
 
 group :development, :test do
-  gem 'rubocop', '~> 1.87', require: false
+  gem 'rubocop', '~> 1.89', require: false
 end
