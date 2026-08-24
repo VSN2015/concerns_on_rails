@@ -52,7 +52,10 @@ module ConcernsOnRails
       end
 
       # class methods
-      class_methods do
+      # A real module (not `class_methods do`) so the macro and its private
+      # helpers aren't constrained by Metrics/BlockLength (the Stateable
+      # precedent). ActiveSupport::Concern auto-extends ClassMethods.
+      module ClassMethods
         include ConcernsOnRails::Support::ColumnGuard
 
         # Define sluggable field, with optional friendly_id features.
@@ -64,11 +67,11 @@ module ConcernsOnRails
         #   sluggable_by :title, finders: true            # Model.find accepts a slug directly
         def sluggable_by(field, history: false, scope: nil, reserved_words: nil, finders: false)
           self.sluggable_field = field.to_sym
-          # Validate the slug column too — a model missing it used to fail at
-          # first save with an opaque friendly_id error instead of this
-          # concern's clear ArgumentError.
+          # Validate the slug column too (a missing one used to fail at first save
+          # with an opaque friendly_id error); an association scope: is exempt.
+          scope_column = scope && reflect_on_association(scope.to_sym) ? nil : scope
           ensure_columns!("ConcernsOnRails::Models::Sluggable",
-                          [sluggable_field, friendly_id_config.slug_column, scope].compact,
+                          [sluggable_field, friendly_id_config.slug_column, scope_column].compact,
                           types: { friendly_id_config.slug_column.to_sym => "string:uniq" })
           return unless history || scope || reserved_words || finders
 

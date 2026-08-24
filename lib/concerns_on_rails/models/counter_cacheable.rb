@@ -189,27 +189,30 @@ module ConcernsOnRails
       private
 
       def counter_cacheable_run_create
-        self.class.counter_cacheable_rules.each do |rule|
-          next unless counter_cacheable_counted_now?(rule)
-
-          counter_cacheable_adjust(rule, counter_cacheable_fk_value(rule), 1)
-        end
+        counter_cacheable_flush(counter_cacheable_presence_adjustments(1))
       end
 
       def counter_cacheable_run_destroy
-        self.class.counter_cacheable_rules.each do |rule|
-          next unless counter_cacheable_counted_now?(rule)
-
-          counter_cacheable_adjust(rule, counter_cacheable_fk_value(rule), -1)
-        end
+        counter_cacheable_flush(counter_cacheable_presence_adjustments(-1))
       end
 
       def counter_cacheable_run_update
-        self.class.counter_cacheable_rules.each { |rule| counter_cacheable_apply_update(rule) }
+        counter_cacheable_flush(
+          self.class.counter_cacheable_rules.flat_map { |rule| counter_cacheable_update_adjustments(rule) }
+        )
+      end
+
+      # create/destroy share one shape: ±1 on the current parent when counted.
+      def counter_cacheable_presence_adjustments(delta)
+        self.class.counter_cacheable_rules.filter_map do |rule|
+          next unless counter_cacheable_counted_now?(rule)
+
+          counter_cacheable_adjustment(rule, counter_cacheable_fk_value(rule), delta)
+        end
       end
 
       # The create × destroy × (reparent + condition-flip) matrix.
-      def counter_cacheable_apply_update(rule)
+      def counter_cacheable_update_adjustments(rule)
         fk = counter_cacheable_reflection(rule).foreign_key.to_s
         changes = counter_cacheable_changes
         new_fk = self[fk]
@@ -219,31 +222,41 @@ module ConcernsOnRails
         new_counted = counter_cacheable_counted_now?(rule)
 
         if old_fk == new_fk
-          counter_cacheable_apply_same_parent(rule, new_fk, old_counted, new_counted)
+          # Same parent — only a condition flip can change the count.
+          return [] if old_counted == new_counted
+
+          [counter_cacheable_adjustment(rule, new_fk, new_counted ? 1 : -1)]
         else
-          counter_cacheable_apply_reparent(rule, old_fk, new_fk, old_counted, new_counted)
+          # Foreign key changed — settle the old parent and the new one independently.
+          [(counter_cacheable_adjustment(rule, old_fk, -1) if old_counted),
+           (counter_cacheable_adjustment(rule, new_fk, 1) if new_counted)]
         end
       end
 
-      # Same parent — only a condition flip can change the count.
-      def counter_cacheable_apply_same_parent(rule, parent_id, old_counted, new_counted)
-        return if old_counted == new_counted
+      def counter_cacheable_adjustment(rule, parent_id, delta)
+        return nil if parent_id.nil?
 
-        counter_cacheable_adjust(rule, parent_id, new_counted ? 1 : -1)
+        { klass: counter_cacheable_reflection(rule).klass, parent_id: parent_id,
+          column: rule[:count_column], delta: delta, touch: rule[:touch] }
       end
 
-      # Foreign key changed — settle the old parent and the new one independently.
-      def counter_cacheable_apply_reparent(rule, old_fk, new_fk, old_counted, new_counted)
-        counter_cacheable_adjust(rule, old_fk, -1) if old_fk && old_counted
-        counter_cacheable_adjust(rule, new_fk, 1) if new_fk && new_counted
+      # One update_counters per distinct (parent class, parent id): sibling
+      # rules adjusting the same parent (comments_count + approved_comments_count)
+      # ride a single UPDATE instead of one statement each.
+      def counter_cacheable_flush(adjustments)
+        adjustments.compact.group_by { |adj| [adj[:klass], adj[:parent_id]] }.each do |(klass, parent_id), group|
+          counters = counter_cacheable_merged_counters(group)
+          next if counters.empty?
+
+          counters[:touch] = true if group.any? { |adj| adj[:touch] }
+          klass.update_counters(parent_id, counters)
+        end
       end
 
-      def counter_cacheable_adjust(rule, parent_id, delta)
-        return if parent_id.nil?
-
-        counters = { rule[:count_column] => delta }
-        counters[:touch] = true if rule[:touch]
-        counter_cacheable_reflection(rule).klass.update_counters(parent_id, counters)
+      # Sum per column, dropping zero-sum entries (nothing to write).
+      def counter_cacheable_merged_counters(group)
+        group.each_with_object(Hash.new(0)) { |adj, acc| acc[adj[:column]] += adj[:delta] }
+             .reject { |_column, delta| delta.zero? }
       end
 
       def counter_cacheable_fk_value(rule)

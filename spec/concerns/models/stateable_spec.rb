@@ -220,5 +220,42 @@ describe ConcernsOnRails::Stateable do
         end
       end.to raise_error(ArgumentError, /clashes with the same-named state setter/)
     end
+
+    it "raises on unknown options (1.26)" do
+      expect { define_model(:typoed) { stateable_by :status, states: %i[a b], lokc: true } }
+        .to raise_error(ArgumentError, /unknown option\(s\): lokc/)
+    end
+  end
+
+  describe "lock: true (1.26)" do
+    let(:klass) do
+      ActiveRecord::Schema.define do
+        create_table(:locked_orders, force: true) { |t| t.string :status }
+      end
+      Class.new(TestModel) do
+        self.table_name = "locked_orders"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft published], default: :draft, lock: true,
+                              transitions: { publish: { from: :draft, to: :published } }
+      end
+    end
+
+    it "still performs a valid transition" do
+      record = klass.create!
+      expect(record.publish!).to be(true)
+      expect(record.reload.status).to eq("published")
+    end
+
+    it "re-checks the guard against the fresh row, so a stale copy cannot double-fire" do
+      record = klass.create!
+      stale = klass.find(record.id)
+      record.publish!
+
+      # Without the lock, the stale in-memory 'draft' passes the guard and the
+      # event fires twice (hooks and all) — the check-then-write race.
+      expect { stale.publish! }
+        .to raise_error(ConcernsOnRails::Models::Stateable::InvalidTransition)
+    end
   end
 end

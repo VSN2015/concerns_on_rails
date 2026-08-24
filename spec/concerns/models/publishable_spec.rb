@@ -206,6 +206,14 @@ describe ConcernsOnRails::Publishable do
       expect(FlagArticle.draft.map(&:title)).to match_array(%w[off blank])
       expect(FlagArticle.scheduled.to_a).to be_empty
     end
+
+    it "raises from publish_at! — a Time would cast to true and publish NOW (1.26)" do
+      article = FlagArticle.create!(title: "soon")
+
+      expect { article.publish_at!(1.day.from_now) }
+        .to raise_error(ArgumentError, /publish_at! needs a timestamp column/)
+      expect(article.reload.is_published).to be_falsey
+    end
   end
 
   describe "lifecycle callbacks" do

@@ -43,7 +43,12 @@ module ConcernsOnRails
 
           raise ArgumentError, "ConcernsOnRails::Models::Monetizable: :as cannot be combined with multiple fields" if as && fields.size > 1
 
-          unless subunit_to_unit.to_i.positive?
+          # Coerce, don't just validate: a String like "100" passed the old
+          # `.to_i.positive?` check but was stored raw — the writer's
+          # `BigDecimal * "100"` then raised TypeError (swallowed to nil by the
+          # form-garbage rescue) and the reader's division raised outright.
+          subunit_to_unit = subunit_to_unit.to_i
+          unless subunit_to_unit.positive?
             raise ArgumentError, "ConcernsOnRails::Models::Monetizable: :subunit_to_unit must be a positive integer"
           end
 

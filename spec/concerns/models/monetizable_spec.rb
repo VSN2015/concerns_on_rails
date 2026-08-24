@@ -113,6 +113,16 @@ describe ConcernsOnRails::Models::Monetizable do
       expect { product_class { monetizable :price_cents, subunit_to_unit: 0 } }
         .to raise_error(ArgumentError, /:subunit_to_unit must be a positive integer/)
     end
+
+    it "coerces a String :subunit_to_unit (1.26 — the writer silently nil'd, the reader raised)" do
+      klass = product_class { monetizable :price_cents, subunit_to_unit: "100" }
+      product = klass.new
+
+      product.price = 19.99
+      expect(product.price_cents).to eq(1999)
+      expect(product.price).to eq(BigDecimal("19.99"))
+      expect(product.formatted_price).to eq("$19.99")
+    end
   end
 
   describe "Support::Money formatting edge cases" do

@@ -86,24 +86,38 @@ module ConcernsOnRails
         private
 
         def resolve_sortable_config(field_config, field_options)
-          field_config = field_options if field_config.nil? && field_options.any?
+          if field_config.nil? && field_options.any?
+            # `sortable_by position: :desc` — the trailing keywords ARE the config.
+            field_config = field_options
+          elsif field_options.any?
+            # `sortable_by :position, ad_new_at: :top` — a typo'd option used to
+            # ride into **field_options and vanish silently.
+            raise ArgumentError,
+                  "ConcernsOnRails::Models::Sortable: unknown option(s): #{field_options.keys.join(', ')}"
+          end
           # A bare `sortable_by` keeps the documented defaults (:position asc)
           # instead of crashing on nil (pre-1.22 NoMethodError).
           field_config = sortable_field || :position if field_config.nil?
 
           field, direction = parse_sortable_config(field_config)
-          # validate direction and must be :asc or :desc
-          direction = :asc unless %i[asc desc].include?(direction)
+          unless %i[asc desc].include?(direction)
+            # Raise instead of the old silent :asc fallback — a misspelled
+            # direction reordered the whole default scope without a whisper.
+            raise ArgumentError,
+                  "ConcernsOnRails::Models::Sortable: direction must be :asc or :desc, got '#{direction}'"
+          end
           [field, direction]
         end
 
         def parse_sortable_config(config)
           if config.is_a?(Hash)
-            # extract key and value
-            # when we call .first, we get the first key-value pair
-            # Example: { position: :asc }.first => ["position", :asc]
+            if config.size > 1
+              raise ArgumentError,
+                    "ConcernsOnRails::Models::Sortable: pass exactly one field => direction pair, " \
+                    "got #{config.inspect}"
+            end
             key, value = config.first
-            [key.to_sym, value.to_sym]
+            [key.to_sym, value.to_s.to_sym]
           else
             [config.to_sym, :asc]
           end

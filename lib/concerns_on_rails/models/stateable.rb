@@ -29,13 +29,19 @@ module ConcernsOnRails
     #
     # Plus a generic `transition_to!(state)`.
     #
-    # Options for stateable_by: default:, transitions:, prefix:, suffix:
+    # Options for stateable_by: default:, transitions:, prefix:, suffix:, lock:
     # (prefix:/suffix: take `true` to use the field name, or a literal string/symbol).
     #
     # Notes:
     #   * String columns only (store the state name) — not integer-backed like Rails enum.
     #   * A state named like an AR method (`new`, `valid`) or a concern scope
     #     (`active`, `expired`) will clash — use prefix:/suffix: to disambiguate.
+    #   * Guarded transitions check the in-memory state: two processes firing the
+    #     same <event>! concurrently can both pass the guard (check-then-write).
+    #     `lock: true` closes that race — each <event>! takes a row lock
+    #     (SELECT ... FOR UPDATE) and re-checks the guard against the fresh row
+    #     first. Requires a clean record (with_lock reloads; AR refuses to
+    #     reload unsaved changes) and costs a SELECT per transition.
     module Stateable
       extend ActiveSupport::Concern
 
@@ -44,6 +50,9 @@ module ConcernsOnRails
       # Raised when a guarded transition is attempted from a disallowed state.
       class InvalidTransition < StandardError; end
 
+      # Valid stateable_by keyword options (everything besides field/states:).
+      OPTIONS = %i[default transitions prefix suffix lock].freeze
+
       included do
         class_attribute :stateable_field, instance_accessor: false
         class_attribute :stateable_states, instance_accessor: false, default: []
@@ -51,6 +60,7 @@ module ConcernsOnRails
         class_attribute :stateable_transitions, instance_accessor: false, default: {}
         class_attribute :stateable_prefix, instance_accessor: false
         class_attribute :stateable_suffix, instance_accessor: false
+        class_attribute :stateable_lock, instance_accessor: false, default: false
       end
 
       # Move to any declared state by name, bypassing transition guards.
@@ -84,12 +94,16 @@ module ConcernsOnRails
         private
 
         def stateable_configure!(field, states, options)
+          unknown = options.keys - OPTIONS
+          raise ArgumentError, "#{LABEL}: unknown option(s): #{unknown.join(', ')}" if unknown.any?
+
           self.stateable_field = field.to_sym
           self.stateable_states = Array(states).map(&:to_sym)
           self.stateable_default = options[:default]&.to_sym
           self.stateable_transitions = options[:transitions] || {}
           self.stateable_prefix = stateable_affix(options[:prefix])
           self.stateable_suffix = stateable_affix(options[:suffix])
+          self.stateable_lock = options[:lock] ? true : false
           ensure_columns!(LABEL, stateable_field, types: :string)
         end
 
@@ -162,10 +176,21 @@ module ConcernsOnRails
       private
 
       # Instance-level guarded transition body, shared by every `<event>!`.
+      # With `lock: true` the guard is re-checked under a row lock (with_lock
+      # reloads, so the state read is the committed one) — closing the
+      # check-then-write race between two concurrent transitions.
+      def stateable_perform_transition!(field, to, from, event)
+        if self.class.stateable_lock && persisted?
+          with_lock { stateable_execute_transition!(field, to, from, event) }
+        else
+          stateable_execute_transition!(field, to, from, event)
+        end
+      end
+
       # Hooks and the state write share ONE transaction, so a raising
       # after_transition rolls the state change back instead of leaving it
       # committed with the side effect half-done (SoftDeletable's pattern).
-      def stateable_perform_transition!(field, to, from, event)
+      def stateable_execute_transition!(field, to, from, event)
         current = self[field].to_s
         raise InvalidTransition, "#{self.class.name}: cannot #{event} from '#{self[field]}'" unless from.empty? || from.include?(current)
 

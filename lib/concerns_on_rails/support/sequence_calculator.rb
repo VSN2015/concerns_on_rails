@@ -15,10 +15,6 @@ module ConcernsOnRails
         max ? max + 1 : cfg[:start_at]
       end
 
-      def sequence_value_taken?(field, candidate, record, scope_attrs)
-        sequence_relation(field, record, scope_attrs).exists?(field => candidate)
-      end
-
       # Relation of existing rows that share this record's scope (and period, when
       # reset is enabled). Reads from `unscoped` so a model's default_scope never
       # hides rows the counter must account for.

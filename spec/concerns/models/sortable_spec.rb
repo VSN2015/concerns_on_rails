@@ -75,7 +75,7 @@ describe ConcernsOnRails::Sortable do
     end
   end
 
-  context "when given invalid direction" do
+  context "when given invalid or unknown configuration" do
     before do
       ActiveRecord::Schema.define do
         create_table :fallback_direction_tasks, force: true do |t|
@@ -83,20 +83,30 @@ describe ConcernsOnRails::Sortable do
           t.integer :priority
         end
       end
+    end
 
-      class FallbackDirectionTask < TestModel
+    def strict_task_class(&macro_call)
+      Class.new(TestModel) do
+        self.table_name = "fallback_direction_tasks"
         include ConcernsOnRails::Sortable
 
-        sortable_by priority: :invalid_direction
+        class_eval(&macro_call)
       end
     end
 
-    it "defaults to ascending if direction is invalid" do
-      FallbackDirectionTask.create!(name: "Low", priority: 1)
-      FallbackDirectionTask.create!(name: "High", priority: 3)
-      FallbackDirectionTask.create!(name: "Medium", priority: 2)
+    it "raises on an invalid direction (pre-1.26 silently fell back to :asc)" do
+      expect { strict_task_class { sortable_by priority: :invalid_direction } }
+        .to raise_error(ArgumentError, /direction must be :asc or :desc/)
+    end
 
-      expect(FallbackDirectionTask.all.pluck(:name)).to eq(%w[Low Medium High])
+    it "raises on unknown trailing options (pre-1.26 a typo vanished silently)" do
+      expect { strict_task_class { sortable_by :priority, ad_new_at: :top } }
+        .to raise_error(ArgumentError, /unknown option\(s\): ad_new_at/)
+    end
+
+    it "raises when more than one field => direction pair is passed" do
+      expect { strict_task_class { sortable_by priority: :asc, name: :desc } }
+        .to raise_error(ArgumentError, /exactly one field => direction pair/)
     end
   end
 

@@ -24,11 +24,12 @@ module ConcernsOnRails
         # `with_deleted` peels off the default scope so deleted + non-deleted are both returned.
         scope :with_deleted, -> { unscope(where: soft_delete_field) }
         # Records soft-deleted within the last `duration` (e.g. `deleted_within(7.days)`).
-        # Uses an explicit `>=` rather than an endless range (`x..`): AR only
-        # translates an endless range to a `>=` predicate on Rails 6.0+, but this
-        # gem supports Rails >= 5.0.
+        # Arel `gteq` rather than an endless range (`x..`): AR only translates an
+        # endless range to `>=` on Rails 6.0+, but this gem supports Rails >= 5.0.
+        # arel_table also qualifies the column with the table name, so the scope
+        # stays unambiguous inside joins against tables sharing the column.
         scope :deleted_within, lambda { |duration|
-          soft_deleted.where("#{connection.quote_column_name(soft_delete_field.to_s)} >= ?", duration.ago)
+          soft_deleted.where(arel_table[soft_delete_field].gteq(duration.ago))
         }
 
         # Hide soft-deleted rows from `.all` only when enabled (the default). The block is
@@ -64,16 +65,20 @@ module ConcernsOnRails
             return all.where(soft_delete_field => nil).update_all(soft_delete_field => Time.zone.now)
           end
 
+          # find_each streams in PK batches instead of materializing the whole
+          # relation; filtering deleted rows DB-side also skips loading them at
+          # all. Updated rows leave the filtered set, but pagination is strictly
+          # forward by id, so nothing is skipped or revisited.
           transaction do
-            all.to_a.count do |record|
-              next false if record.deleted?
-
+            count = 0
+            all.where(soft_delete_field => nil).find_each do |record|
               record.soft_delete! ||
                 raise(ActiveRecord::RecordNotSaved.new(
                         "ConcernsOnRails::Models::SoftDeletable: failed to soft-delete record", record
                       ))
-              true
+              count += 1
             end
+            count
           end
         end
 
@@ -102,13 +107,15 @@ module ConcernsOnRails
           return soft_deleted.update_all(soft_delete_field => nil) if soft_delete_batch_fast_path?(:restore)
 
           transaction do
-            soft_deleted.to_a.count do |record|
+            count = 0
+            soft_deleted.find_each do |record|
               record.restore! ||
                 raise(ActiveRecord::RecordNotSaved.new(
                         "ConcernsOnRails::Models::SoftDeletable: failed to restore record", record
                       ))
-              true
+              count += 1
             end
+            count
           end
         end
 

@@ -1,5 +1,31 @@
 <!-- CHANGELOG.md -->
 
+## 1.26.0 (2026-08-24)
+
+A fixes-and-performance round from a full audit of the 25 model concerns: one privacy bug (Anonymizable left Encryptable blind-index fingerprints queryable after erasure), four silent-misbehavior fixes, five query-count reductions, and three hardening changes. No new concerns. 1173 examples, 0 failures.
+
+### Fixed
+- **Models::Anonymizable × Encryptable**: `anonymize!` writes via `update_columns`, which skips `before_save` — so Encryptable's blind-index refresh never ran and the `<field>_bidx` column kept the deterministic fingerprint of the ERASED value: `find_by_<field>(old_pii)` still resolved the record after erasure. The erasure payload now rewrites the blind-index column in the same single UPDATE (the fingerprint of the anonymized value; nil when the strategy nullifies), so the erased value stops resolving.
+- **Models::Publishable**: `publish_at!(1.day.from_now)` on a BOOLEAN publishable column now raises `ArgumentError` — the Time used to cast to `true` and silently publish NOW instead of scheduling (a boolean column cannot represent a future publish; use `publish!`/`unpublish!` or a datetime column).
+- **Models::Monetizable**: `subunit_to_unit:` is coerced to Integer at the macro. A String like `"100"` passed the old `.to_i.positive?` validation but was stored raw — the writer's `BigDecimal * "100"` raised TypeError (swallowed to nil by the form-garbage rescue, silently nil-ing every assignment) and the reader's division raised outright.
+- **Models::Taggable**: input containing the delimiter now splits into multiple tags eagerly and identically everywhere — `add_tags("a,b")` adds "a" and "b"; `tag_list=`, `remove_tags`, and `tagged_with?` (AND semantics, mirroring the class-level scope) agree. A tag can never survive with the delimiter inside it (the column format cannot escape it), so pre-1.26 such input silently split on the NEXT normalize pass instead.
+- **Models::Sortable**: `sortable_by` raises `ArgumentError` on unknown trailing options (a typo'd `ad_new_at:` used to vanish into `**field_options`), on a multi-pair Hash (only the first pair was read), and on an invalid direction (previously coerced to `:asc` silently — reordering the whole default scope without a whisper).
+
+### Changed
+- **Models::Stateable**: `stateable_by` validates its options — unknown keys raise (previously ignored silently). New `lock: true` option: guarded `<event>!` transitions take a row lock (`SELECT ... FOR UPDATE`) and re-check the guard against the fresh row, closing the check-then-write race where two concurrent transitions both passed the in-memory guard. Off by default; requires a clean record (`with_lock` reloads) and costs a SELECT per transition.
+- **Models::Sluggable**: `sluggable_by ..., scope:` accepts an association name (`scope: :account`) — friendly_id resolves association scopes itself, but ColumnGuard rejected them as missing columns. Column scopes (`scope: :account_id`) validate exactly as before.
+- **Models::SoftDeletable**: `deleted_within` emits a table-qualified Arel predicate, so the scope stays unambiguous inside joins against tables sharing the column name.
+
+### Performance
+- **Models::CounterCacheable**: counter adjustments are grouped per (parent class, parent id) and flushed as ONE `update_counters` UPDATE — a model with sibling counters on the same parent (`comments_count` + `approved_comments_count`) used to issue one statement per rule per save. A reparent stays at one UPDATE per parent, both counters batched.
+- **Models::Anonymizable**: `anonymize_all!` streams in PK batches (`find_each`) instead of loading the whole relation, filters already-stamped rows DB-side, and skips the per-record `reload` (batch instances are discarded) — two queries saved per record on large erasure jobs.
+- **Models::SoftDeletable**: the `soft_delete_all` / `restore_all` slow paths stream via `find_each` with DB-side filtering instead of `to_a`-loading the relation (memory-bounded; the Integer-count contract, rollback semantics, and the single-UPDATE fast path are unchanged).
+- **Models::Sequenceable**: creates no longer run the `exists?` probe after computing MAX+1 — within one consistent read MAX+1 cannot be taken, so the probe re-verified a tautology on EVERY create (and could not close the concurrent-insert race anyway; the scoped unique index does, per the module docs). One query saved per create.
+- **Models::Taggable**: `all_tags` dedupes DB-side (`where.not(nil).distinct.pluck`), so identical tag strings ship over the wire once instead of once per row.
+
+### Internal
+- Regression specs for every fix — the Anonymizable blind-index pair doubles as the previously-missing Encryptable-composition coverage; CounterCacheable gained SQL statement-count specs; Sequenceable gained a no-probe query-count spec. Sluggable's `class_methods do` converted to a real `ClassMethods` module (the Stateable precedent).
+
 ## 1.25.0 (2026-08-16)
 
 One new controller concern — Permittable, typed/validated params contracts with a boot-time schema-drift guard — developed here and shipped as the standalone [`permittable` gem](https://rubygems.org/gems/permittable) (new runtime dependency; `ConcernsOnRails::Controllers::Permittable` is an alias). 1160 examples, 0 failures.

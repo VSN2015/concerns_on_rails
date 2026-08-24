@@ -151,6 +151,39 @@ describe ConcernsOnRails::Sluggable do
       expect(a.slug).to eq("hello")
       expect(b.slug).to eq("hello")
     end
+
+    it "accepts an association name as the scope (1.26 — no missing-column error)" do
+      ActiveRecord::Schema.define do
+        create_table :slug_accounts, force: true do |t|
+          t.string :name
+        end
+        create_table :assoc_scoped_pages, force: true do |t|
+          t.string :title
+          t.string :slug
+          t.integer :slug_account_id
+        end
+      end
+
+      class SlugAccount < TestModel; end
+
+      # ColumnGuard used to reject this: `scope: :slug_account` is an
+      # association, not a column, and friendly_id resolves it itself.
+      class AssocScopedPage < TestModel
+        include ConcernsOnRails::Sluggable
+
+        belongs_to :slug_account, optional: true
+        sluggable_by :title, scope: :slug_account
+      end
+
+      one = SlugAccount.create!(name: "one")
+      two = SlugAccount.create!(name: "two")
+      a = AssocScopedPage.create!(title: "Hello", slug_account: one)
+      b = AssocScopedPage.create!(title: "Hello", slug_account: two)
+      expect(a.slug).to eq("hello")
+      expect(b.slug).to eq("hello")
+    ensure
+      %i[AssocScopedPage SlugAccount].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
   end
 
   describe "slug history (1.9)" do

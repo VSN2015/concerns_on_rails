@@ -158,7 +158,7 @@ across all 43 concerns — press <kbd>/</kbd> and type.
 Add to your application's `Gemfile`:
 
 ```ruby
-gem "concerns_on_rails", "~> 1.25"
+gem "concerns_on_rails", "~> 1.26"
 ```
 
 Or pull the latest from GitHub:
@@ -1952,9 +1952,9 @@ Point your agent at `llms.txt` for an overview, or paste a single concern's `.md
 
 ```sh
 bundle install                                  # install dev dependencies
-bundle exec rspec                               # run the test suite (1,160 examples)
+bundle exec rspec                               # run the test suite (1,173 examples)
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.25.0.gem      # install locally
+gem install ./concerns_on_rails-1.26.0.gem      # install locally
 
 # Preview the docs site locally (GitHub Pages serves docs/ as-is):
 cd docs && python3 -m http.server 8000          # → http://localhost:8000

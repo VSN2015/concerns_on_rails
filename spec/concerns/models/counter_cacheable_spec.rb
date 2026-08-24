@@ -268,4 +268,38 @@ describe ConcernsOnRails::Models::CounterCacheable do
       end.to raise_error(ArgumentError, /unknown option/)
     end
   end
+
+  describe "statement batching (1.26)" do
+    def capture_post_updates
+      updates = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*args|
+        sql = args.last[:sql].to_s
+        updates << sql if sql.start_with?("UPDATE") && sql.include?("posts")
+      end
+      yield
+      updates
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscriber)
+    end
+
+    it "adjusts sibling counters on the same parent in ONE UPDATE" do
+      updates = capture_post_updates { Comment.create!(post: post, approved: true) }
+
+      post.reload
+      expect(post.comments_count).to eq(1)
+      expect(post.approved_comments_count).to eq(1)
+      expect(updates.length).to eq(1)
+    end
+
+    it "keeps a reparent as one UPDATE per parent" do
+      comment = Comment.create!(post: post, approved: true)
+
+      updates = capture_post_updates { comment.update!(post: other) }
+
+      expect(post.reload.comments_count).to eq(0)
+      expect(other.reload.comments_count).to eq(1)
+      expect(other.reload.approved_comments_count).to eq(1)
+      expect(updates.length).to eq(2) # old parent −, new parent + (both counters batched)
+    end
+  end
 end

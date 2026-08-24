@@ -133,10 +133,19 @@ module ConcernsOnRails
 
       # Publish at an explicit time. A future time schedules the record.
       # Fires the publish hooks (same state change as publish!, so since 1.22
-      # they no longer silently skip).
+      # they no longer silently skip). Raises on a boolean publishable column:
+      # the Time would cast to `true` and silently publish NOW instead of
+      # scheduling — a boolean column cannot represent a future publish.
       # Example:
       #   record.publish_at!(1.day.from_now)
       def publish_at!(time)
+        if self.class.publishable_boolean_column?
+          raise ArgumentError,
+                "ConcernsOnRails::Models::Publishable: publish_at! needs a timestamp column, but " \
+                "'#{self.class.publishable_field}' is a boolean — a Time casts to true and would " \
+                "publish immediately. Use publish!/unpublish!, or a datetime column to schedule."
+        end
+
         publishable_write_with_hooks(time, :publish)
       end
 

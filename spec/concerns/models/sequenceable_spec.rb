@@ -184,18 +184,23 @@ describe ConcernsOnRails::Sequenceable do
     end
   end
 
-  describe "uniqueness guard" do
-    it "increments past an already-taken candidate value" do
+  describe "query efficiency" do
+    it "assigns MAX+1 with a single SELECT — no exists? probe per create (1.26)" do
       Invoice.create! # sequence 1
-      allow(Invoice).to receive(:sequence_base_value).and_return(1)
 
-      expect(Invoice.create!.sequence).to eq(2)
-    end
+      selects = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*args|
+        sql = args.last[:sql].to_s
+        selects << sql if sql.start_with?("SELECT") && sql.include?("invoices")
+      end
+      invoice = Invoice.create!
+      ActiveSupport::Notifications.unsubscribe(subscriber)
 
-    it "raises after MAX_GENERATION_ATTEMPTS consecutive collisions" do
-      allow(Invoice).to receive(:sequence_value_taken?).and_return(true)
-
-      expect { Invoice.create! }.to raise_error(/could not find a free value/)
+      expect(invoice.sequence).to eq(2)
+      # The pre-1.26 taken?-probe emitted `SELECT 1 AS one` on every create,
+      # re-verifying that MAX+1 is free — a tautology within one consistent read.
+      expect(selects.grep(/SELECT 1/i)).to be_empty
+      expect(selects.grep(/MAX/i).length).to eq(1)
     end
   end
 

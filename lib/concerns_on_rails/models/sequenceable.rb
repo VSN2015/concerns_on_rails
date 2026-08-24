@@ -33,7 +33,6 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       RESET_PERIODS = %i[never year month day].freeze
-      MAX_GENERATION_ATTEMPTS = 10
       NAME = "ConcernsOnRails::Models::Sequenceable".freeze
 
       included do
@@ -108,26 +107,17 @@ module ConcernsOnRails
       end
 
       # Assigns the sequence (and, when configured, the formatted string) only when
-      # the integer column is blank, so callers can pass an explicit value. The
-      # increment-until-free loop is a best-effort guard against pre-taken values;
-      # a scoped unique index is the real concurrency guarantee.
+      # the integer column is blank, so callers can pass an explicit value.
+      # MAX+1 (or start_at on an empty scope) cannot already be taken within the
+      # same consistent read — the pre-1.26 exists? probe re-verified that
+      # tautology with an extra query on EVERY create, and could not close the
+      # concurrent-insert race anyway. Concurrency is the scoped unique index's
+      # job (pair with Support::UniqueRetry around the create).
       def assign_sequenceable_value(field)
         cfg = self.class.sequenceable_config.fetch(field)
         sequenceable_pin_created_at(cfg)
 
-        if self[field].blank?
-          candidate = self.class.send(:sequence_base_value, field, self, {})
-          attempts = 0
-          while self.class.send(:sequence_value_taken?, field, candidate, self, {})
-            attempts += 1
-            if attempts >= MAX_GENERATION_ATTEMPTS
-              raise "#{NAME}: could not find a free value for '#{field}' after " \
-                    "#{MAX_GENERATION_ATTEMPTS} attempts — add a scoped unique index"
-            end
-            candidate += 1
-          end
-          self[field] = candidate
-        end
+        self[field] = self.class.send(:sequence_base_value, field, self, {}) if self[field].blank?
 
         return unless cfg[:into] && self[cfg[:into]].blank?
 

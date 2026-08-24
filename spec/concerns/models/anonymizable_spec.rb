@@ -11,6 +11,7 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
         t.string :ssn
         t.text :audit_log
         t.text :secret
+        t.string :email_bidx
         t.datetime :anonymized_at
         t.datetime :when_wiped
         t.timestamps null: true
@@ -309,6 +310,47 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
 
       fresh = klass.find(record.id)
       expect(fresh.secret).to eq("[REDACTED]")
+    end
+
+    context "with a blind index" do
+      let(:klass) do
+        model_class do
+          include ConcernsOnRails::Models::Encryptable
+
+          encryptable :email, key: "anonymizable-spec-passphrase", blind_index: true
+          anonymizable :email, with: :email
+        end
+      end
+
+      it "rewrites the fingerprint in the same UPDATE, so the erased value stops resolving (1.26)" do
+        record = klass.create!(email: "jane@real.example")
+        expect(klass.find_by_email("jane@real.example")).to eq(record)
+
+        old_fingerprint = record.email_bidx
+        record.anonymize!
+
+        # update_columns skips before_save, so without the explicit payload
+        # entry the OLD value's fingerprint stayed queryable after erasure.
+        expect(record.email_bidx).not_to eq(old_fingerprint)
+        expect(record.email_bidx).to eq(klass.email_fingerprint(record.email))
+        expect(klass.find_by_email("jane@real.example")).to be_nil
+        expect(klass.find_by_email(record.email)).to eq(record)
+      end
+
+      it "nils the fingerprint when the strategy nullifies" do
+        nullify_klass = model_class do
+          include ConcernsOnRails::Models::Encryptable
+
+          encryptable :email, key: "anonymizable-spec-passphrase", blind_index: true
+          anonymizable :email, with: :nullify
+        end
+
+        record = nullify_klass.create!(email: "gone@real.example")
+        record.anonymize!
+
+        expect(record.email).to be_nil
+        expect(record.email_bidx).to be_nil
+      end
     end
   end
 end

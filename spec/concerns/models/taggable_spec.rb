@@ -98,6 +98,30 @@ describe ConcernsOnRails::Taggable do
     end
   end
 
+  describe "tags containing the delimiter" do
+    # A tag can never survive with the delimiter inside it (the column format
+    # cannot escape it) — pre-1.26 such input silently split on the NEXT
+    # normalize pass; now it splits eagerly and identically everywhere.
+    it "splits eagerly in add_tags / tag_list= / remove_tags" do
+      a = TagArticle.new
+      a.add_tags("a,b")
+      expect(a.tag_list).to eq(%w[a b])
+
+      a.tag_list = ["c,d", "e"]
+      expect(a.tag_list).to eq(%w[c d e])
+
+      a.remove_tags("c,d")
+      expect(a.tag_list).to eq(%w[e])
+    end
+
+    it "answers tagged_with? with AND semantics (mirrors the class-level scope)" do
+      a = TagArticle.new(tag_list: %w[c d e])
+      expect(a.tagged_with?("c,d")).to be(true)
+      expect(a.tagged_with?("c,x")).to be(false)
+      expect(a.tagged_with?("")).to be(false)
+    end
+  end
+
   describe ".tagged_with" do
     let!(:a1) { TagArticle.create!(title: "a1", tag_list: "ruby, rails") }
     let!(:a2) { TagArticle.create!(title: "a2", tag_list: "ruby, go") }

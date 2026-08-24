@@ -27,7 +27,10 @@ module ConcernsOnRails
     #
     # Notes:
     #   * Matching is boundary-safe ("rail" does not match "rails").
-    #   * A tag must not contain the delimiter (default ",").
+    #   * A tag cannot contain the delimiter (default ",") — input containing
+    #     it is split into multiple tags on the spot (`add_tags("a,b")` adds
+    #     "a" and "b"), everywhere, so what you read back always matches what
+    #     a save would have produced.
     #   * Reach for acts-as-taggable-on when you need tag contexts, ownership,
     #     tag counts/clouds, or polymorphic tags shared across models.
     module Taggable
@@ -70,8 +73,14 @@ module ConcernsOnRails
         end
 
         # All distinct tags currently stored across the table, sorted.
+        # distinct + NULL filter dedupe DB-side, so identical tag strings ship
+        # over the wire once instead of once per row.
         def all_tags
-          pluck(taggable_field).flat_map { |raw| taggable_split(raw) }.uniq.sort
+          where.not(taggable_field => nil)
+               .distinct
+               .pluck(taggable_field)
+               .flat_map { |raw| taggable_split(raw) }
+               .uniq.sort
         end
 
         # Split a raw stored column value into a normalized tag array.
@@ -87,8 +96,16 @@ module ConcernsOnRails
 
         private
 
+        # Splits each entry on the delimiter before cleaning: a tag can never
+        # contain the delimiter (the column format has no way to escape it),
+        # so "a,b" was ALWAYS going to read back as two tags after the next
+        # normalize pass — splitting here makes that immediate and uniform
+        # instead of a silent later surprise.
         def taggable_clean_all(names)
-          names.flatten.map { |t| taggable_clean(t) }.reject(&:blank?).uniq
+          names.flatten
+               .flat_map { |t| t.to_s.split(taggable_delimiter) }
+               .map { |t| taggable_clean(t) }
+               .reject(&:blank?).uniq
         end
 
         # Boundary-safe match for one tag against the delimiter-joined column.
@@ -126,20 +143,23 @@ module ConcernsOnRails
       end
 
       def add_tags(*names)
-        self.tag_list = tag_list + names.flatten.map { |t| self.class.taggable_clean(t) }
+        self.tag_list = tag_list + names.flatten
         tag_list
       end
       alias add_tag add_tags
 
       def remove_tags(*names)
-        drop = names.flatten.map { |t| self.class.taggable_clean(t) }
+        drop = taggable_coerce(names.flatten)
         self.tag_list = tag_list.reject { |t| drop.include?(t) }
         tag_list
       end
       alias remove_tag remove_tags
 
+      # AND semantics for delimiter-containing input, mirroring the class-level
+      # tagged_with default: tagged_with?("a,b") is true when BOTH tags are set.
       def tagged_with?(tag)
-        tag_list.include?(self.class.taggable_clean(tag))
+        parts = self.class.taggable_split(tag.to_s)
+        parts.any? && (parts - tag_list).empty?
       end
       alias has_tag? tagged_with?
 
@@ -156,9 +176,12 @@ module ConcernsOnRails
         self[field] = tags.empty? ? nil : tags.join(self.class.taggable_delimiter)
       end
 
+      # Funnel every input shape through taggable_split so Strings and Arrays
+      # (and Array items that themselves contain the delimiter) normalize
+      # identically.
       def taggable_coerce(value)
-        items = value.is_a?(Array) ? value : value.to_s.split(self.class.taggable_delimiter)
-        items.map { |t| self.class.taggable_clean(t) }.reject(&:blank?).uniq
+        raw = value.is_a?(Array) ? value.join(self.class.taggable_delimiter) : value.to_s
+        self.class.taggable_split(raw)
       end
     end
   end
