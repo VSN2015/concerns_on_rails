@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/affix"
 
 module ConcernsOnRails
   module Models
@@ -59,6 +60,8 @@ module ConcernsOnRails
         class_attribute :lockable_locked_at_field, instance_accessor: false, default: DEFAULT_LOCKED_AT_FIELD
         class_attribute :lockable_max_attempts, instance_accessor: false, default: DEFAULT_MAX_ATTEMPTS
         class_attribute :lockable_unlock_in, instance_accessor: false, default: nil
+        class_attribute :lockable_scope_names, instance_accessor: false,
+                                               default: { locked: :locked, unlocked: :unlocked }.freeze
       end
 
       module ClassMethods
@@ -109,7 +112,14 @@ module ConcernsOnRails
         # configuration and compute the cutoff in Ruby at call time, so the
         # predicate stays portable (no adapter-specific SQL date math).
         def define_lockable_scopes(prefix, suffix)
-          scope lockable_scope_name(:locked, prefix, suffix), lambda {
+          prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: lockable_locked_at_field)
+          suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: lockable_locked_at_field)
+          self.lockable_scope_names = {
+            locked: ConcernsOnRails::Support::Affix.name(:locked, prefix: prefix, suffix: suffix),
+            unlocked: ConcernsOnRails::Support::Affix.name(:unlocked, prefix: prefix, suffix: suffix)
+          }.freeze
+
+          scope lockable_scope_names[:locked], lambda {
             field = lockable_locked_at_field
             if lockable_unlock_in
               where(arel_table[field].gt(Time.zone.now - lockable_unlock_in))
@@ -117,7 +127,7 @@ module ConcernsOnRails
               where.not(field => nil)
             end
           }
-          scope lockable_scope_name(:unlocked, prefix, suffix), lambda {
+          scope lockable_scope_names[:unlocked], lambda {
             field = lockable_locked_at_field
             if lockable_unlock_in
               column = arel_table[field]
@@ -126,10 +136,6 @@ module ConcernsOnRails
               where(field => nil)
             end
           }
-        end
-
-        def lockable_scope_name(base, prefix, suffix)
-          [prefix, base, suffix].compact.join("_").to_sym
         end
 
         def positive_integer_or_nil?(value)

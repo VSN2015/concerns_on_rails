@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/affix"
 
 module ConcernsOnRails
   module Models
@@ -107,15 +108,12 @@ module ConcernsOnRails
           ensure_columns!(LABEL, stateable_field, types: :string)
         end
 
-        # `true` => use the field name; a string/symbol => use it literally; else none.
         def stateable_affix(option)
-          return nil unless option
-
-          option == true ? stateable_field.to_s : option.to_s
+          ConcernsOnRails::Support::Affix.normalize(option, default: stateable_field)
         end
 
         def stateable_method_name(base)
-          [stateable_prefix, base, stateable_suffix].compact.join("_")
+          ConcernsOnRails::Support::Affix.name(base, prefix: stateable_prefix, suffix: stateable_suffix).to_s
         end
 
         def stateable_validate!

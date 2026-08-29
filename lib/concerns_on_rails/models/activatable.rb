@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/affix"
 
 module ConcernsOnRails
   module Models
@@ -26,6 +27,8 @@ module ConcernsOnRails
 
       included do
         class_attribute :activatable_field, instance_accessor: false, default: DEFAULT_FIELD
+        class_attribute :activatable_scope_names, instance_accessor: false,
+                                                  default: { active: :active, inactive: :inactive }.freeze
       end
 
       class_methods do
@@ -35,16 +38,17 @@ module ConcernsOnRails
           self.activatable_field = field.to_sym
           ensure_columns!("ConcernsOnRails::Models::Activatable", activatable_field, types: :boolean)
 
+          prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: activatable_field)
+          suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: activatable_field)
+          self.activatable_scope_names = {
+            active: ConcernsOnRails::Support::Affix.name(:active, prefix: prefix, suffix: suffix),
+            inactive: ConcernsOnRails::Support::Affix.name(:inactive, prefix: prefix, suffix: suffix)
+          }.freeze
+
           # Affix the scope names so two concerns that each define `.active`
           # (e.g. SoftDeletable / Expirable) can coexist on one model.
-          scope activatable_scope_name(:active, prefix, suffix),   -> { where(activatable_field => true) }
-          scope activatable_scope_name(:inactive, prefix, suffix), -> { where(activatable_field => [false, nil]) }
-        end
-
-        private
-
-        def activatable_scope_name(base, prefix, suffix)
-          [prefix, base, suffix].compact.join("_").to_sym
+          scope activatable_scope_names[:active],   -> { where(activatable_field => true) }
+          scope activatable_scope_names[:inactive], -> { where(activatable_field => [false, nil]) }
         end
       end
 

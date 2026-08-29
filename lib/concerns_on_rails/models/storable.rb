@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/affix"
 require "active_support/core_ext/object/deep_dup"
 require "active_model/type"
 require "bigdecimal"
@@ -169,7 +170,7 @@ module ConcernsOnRails
           end
 
           { type: type, default: raw_spec[:default], in: inclusion,
-            accessor: [prefix, key, suffix].compact.join("_").to_sym }
+            accessor: ConcernsOnRails::Support::Affix.name(key, prefix: prefix, suffix: suffix) }
         end
 
         # Guard collisions against a working copy of the owners map (so two keys
