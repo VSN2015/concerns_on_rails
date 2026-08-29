@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/batch_ops"
 
 module ConcernsOnRails
   module Models
@@ -82,6 +83,36 @@ module ConcernsOnRails
                           types: { attempts => :integer, locked_at => :datetime })
           validate_lockable_attempts_column!(attempts)
           define_lockable_scopes(prefix, suffix)
+        end
+
+        # Unlock every row whose lock window has fully elapsed, clearing
+        # locked_at and zeroing the attempts counter exactly as
+        # unlock_access! does. Returns the Integer count.
+        #
+        # Nothing expires when unlock_in is nil (manual unlock only), so that
+        # case returns 0 without touching the database. The boundary instant
+        # counts as expired, matching lock_expired? and the scopes.
+        def unlock_expired
+          unlock_in = lockable_unlock_in
+          return 0 unless unlock_in
+
+          locked_field = lockable_locked_at_field
+          attempts_field = lockable_attempts_field
+          # `lteq` on a NULL locked_at is NULL, so never-locked rows are
+          # excluded without an extra predicate.
+          expired = all.where(arel_table[locked_field].lteq(Time.zone.now - unlock_in))
+
+          if ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Lockable,
+                                                           :before_unlock, :after_unlock, :unlock_access!)
+            return expired.update_all(locked_field => nil, attempts_field => 0)
+          end
+
+          ConcernsOnRails::Support::BatchOps.run(
+            expired,
+            label: LABEL,
+            message: "failed to unlock record",
+            &:unlock_access!
+          )
         end
 
         private

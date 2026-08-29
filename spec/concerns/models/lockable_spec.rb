@@ -665,4 +665,76 @@ describe ConcernsOnRails::Lockable do
       expect(klass.unscoped.find(user.id).failed_attempts).to eq(1)
     end
   end
+
+  describe "#unlock_expired" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :batch_accounts, force: true do |t|
+          t.integer :failed_attempts, default: 0
+          t.datetime :locked_at
+        end
+      end
+    end
+
+    def lockable_class(**options)
+      Class.new(TestModel) do
+        self.table_name = "batch_accounts"
+        include ConcernsOnRails::Lockable
+
+        lockable_by(attempts: :failed_attempts, locked_at: :locked_at, **options)
+      end
+    end
+
+    it "unlocks only the rows whose window has elapsed, and returns the count" do
+      klass = lockable_class(unlock_in: 15.minutes)
+      stale = klass.create!(failed_attempts: 5, locked_at: 1.hour.ago)
+      fresh = klass.create!(failed_attempts: 5, locked_at: 1.minute.ago)
+      never = klass.create!(failed_attempts: 2, locked_at: nil)
+
+      expect(klass.unlock_expired).to eq(1)
+
+      expect(stale.reload.locked_at).to be_nil
+      expect(stale.failed_attempts).to eq(0)
+      expect(fresh.reload.locked_at).not_to be_nil
+      expect(fresh.failed_attempts).to eq(5)
+      expect(never.reload.failed_attempts).to eq(2)
+    end
+
+    it "returns 0 when unlock_in is nil" do
+      klass = lockable_class(unlock_in: nil)
+      klass.create!(failed_attempts: 5, locked_at: 1.year.ago)
+
+      expect(klass.unlock_expired).to eq(0)
+      expect(klass.first.locked_at).not_to be_nil
+    end
+
+    it "is idempotent" do
+      klass = lockable_class(unlock_in: 15.minutes)
+      klass.create!(failed_attempts: 5, locked_at: 1.hour.ago)
+      klass.unlock_expired
+
+      expect(klass.unlock_expired).to eq(0)
+    end
+
+    it "fires the unlock hooks once per record when they are overridden" do
+      klass = Class.new(TestModel) do
+        self.table_name = "batch_accounts"
+        include ConcernsOnRails::Lockable
+
+        lockable_by attempts: :failed_attempts, locked_at: :locked_at, unlock_in: 15.minutes
+
+        cattr_accessor :unlocked_ids
+        self.unlocked_ids = []
+
+        def after_unlock
+          self.class.unlocked_ids << id
+        end
+      end
+      stub_const("HookedAccount", klass)
+      a = HookedAccount.create!(failed_attempts: 5, locked_at: 1.hour.ago)
+
+      expect(HookedAccount.unlock_expired).to eq(1)
+      expect(HookedAccount.unlocked_ids).to eq([a.id])
+    end
+  end
 end
