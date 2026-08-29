@@ -2070,9 +2070,9 @@ Point your agent at `llms.txt` for an overview, or paste a single concern's `.md
 
 ```sh
 bundle install                                  # install dev dependencies
-bundle exec rspec                               # run the test suite (1,173 examples)
+bundle exec rspec                               # run the test suite (1,245 examples)
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.26.0.gem      # install locally
+gem install ./concerns_on_rails-1.27.0.gem      # install locally
 
 # Preview the docs site locally (GitHub Pages serves docs/ as-is):
 cd docs && python3 -m http.server 8000          # → http://localhost:8000

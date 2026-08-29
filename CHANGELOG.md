@@ -2,8 +2,10 @@
 
 ## 1.27.0 (2026-08-29)
 
-Scope-name collisions finally have an escape hatch on every concern that
-generates scopes, and the 1.22 batch-operation contract reaches five more
+Scope-name collisions finally have an escape hatch on the eight concerns whose
+generated scope names can collide (Activatable, Expirable, Lockable, Stateable
+and Anonymizable already had it; Publishable, SoftDeletable and Schedulable
+join them here), and the 1.22 batch-operation contract reaches five more
 concerns. No new columns, migrations or dependencies. 1245 examples, 0
 failures.
 
@@ -39,19 +41,30 @@ none of the concern's hooks/bang methods; see the per-concern docs for the
 exact method list). `unlock_expired` is exempt from the validators check
 because `unlock_access!` writes via `update_columns`, which always skips
 validations, so its two paths are already equivalent. On a model with
-`validates`, every one of these verbs instead streams the relation
-record-by-record inside a transaction, calling the same guarded bang/update
-method a single record would use; a record that fails to save raises
+`validates`, five of these verbs (`publish_all`, `unpublish_all`, `expire_all`,
+`activate_all`, `deactivate_all`) instead stream the relation record-by-record
+inside a transaction, calling the same guarded bang/update method a single
+record would use; a record that fails to save raises
 `ActiveRecord::RecordNotSaved` and rolls the **entire batch** back — nothing
-partially commits. `transition_all` always takes the per-record path,
-regardless of validators, for the same reason. One residual, deliberate
-divergence survives on the fast path: like every `*_all` method in Rails,
-the single-UPDATE path does not fire host-defined `before_save`/`after_save`
-callbacks (only the concern's own `before_*`/`after_*` lifecycle hooks are
-checked when deciding whether the fast path applies at all). If your model
-relies on `before_save`/`after_save` for side effects, either add a
-validation (forcing the slow, per-record path) or call the bang method in a
-loop.
+partially commits.
+
+`transition_all` also always takes the per-record path, regardless of
+validators — for the same underlying reason (validations must run) — but its
+failure mode is different, not the same: the per-record path calls the
+guarded `<event>!`, which calls `update!`, and `update!` raises
+`ActiveRecord::RecordInvalid` **directly** on a validation failure. That
+exception propagates straight out of the batch loop, never reaching the
+`RecordNotSaved` branch the other five verbs use. Code that rescues
+`RecordNotSaved` around a `transition_all` call will not catch a failed row —
+rescue `RecordInvalid` there instead.
+
+One residual, deliberate divergence survives on the fast path: like every
+`*_all` method in Rails, the single-UPDATE path does not fire host-defined
+`before_save`/`after_save` callbacks (only the concern's own
+`before_*`/`after_*` lifecycle hooks are checked when deciding whether the
+fast path applies at all). If your model relies on `before_save`/`after_save`
+for side effects, either add a validation (forcing the slow, per-record path)
+or call the bang method in a loop.
 
 ### Internal
 - New `Support::Affix` (affixed-name computation, `prefix: true` normalization,
