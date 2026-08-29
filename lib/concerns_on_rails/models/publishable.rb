@@ -134,13 +134,6 @@ module ConcernsOnRails
             end
           }
         end
-        # Scopes the disable above to just this method instead of running to
-        # EOF (which silently exempted every method below it). RuboCop flags
-        # the enable itself as redundant only because nothing below currently
-        # trips PerceivedComplexity — that's the point, not a reason to drop it.
-        # rubocop:disable Lint/RedundantCopEnableDirective
-        # rubocop:enable Metrics/PerceivedComplexity
-        # rubocop:enable Lint/RedundantCopEnableDirective
 
         # Routed through a helper so the `default_scope:` keyword doesn't shadow
         # the `default_scope` macro inside `publishable_by`.
@@ -151,8 +144,15 @@ module ConcernsOnRails
 
         # The single-UPDATE fast path is only safe when per-record behavior
         # cannot differ from update_all: none of the concern's hooks or bang
-        # methods overridden by the host model.
+        # methods overridden by the host model, AND no validators — update_all
+        # skips validations entirely, so a model with any validates would
+        # silently write invalid records instead of honoring the batch
+        # contract (RecordNotSaved + rollback on a record that can't save).
+        # Save callbacks are deliberately NOT gated on: update_all skipping
+        # callbacks is documented Rails behavior shared by every *_all method.
         def publishable_batch_fast_path?(kind)
+          return false unless validators.empty?
+
           methods = if kind == :publish
                       %i[before_publish after_publish publish!]
                     else

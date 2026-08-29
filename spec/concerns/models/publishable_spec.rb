@@ -336,6 +336,7 @@ describe ConcernsOnRails::Publishable do
       ActiveRecord::Schema.define do
         create_table :batch_articles, force: true do |t|
           t.datetime :published_at
+          t.string :title
         end
       end
 
@@ -435,6 +436,23 @@ describe ConcernsOnRails::Publishable do
 
       expect { FailingArticle.publish_all }.to raise_error(ActiveRecord::RecordNotSaved)
       expect(FailingArticle.where(published_at: nil).count).to eq(1)
+    end
+
+    it "cannot take the fast path when the model has validations — an invalid record rolls the whole batch back" do
+      stub_const("ValidatedArticle", Class.new(TestModel) do
+        self.table_name = "batch_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+        validates :title, presence: true
+      end)
+      valid = ValidatedArticle.create!(title: "ok", published_at: nil)
+      invalid = ValidatedArticle.create!(title: "temporary", published_at: nil)
+      invalid.update_column(:title, nil)
+
+      expect { ValidatedArticle.publish_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(valid.reload.published_at).to be_nil
+      expect(invalid.reload.published_at).to be_nil
     end
   end
 end
