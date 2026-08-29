@@ -368,8 +368,10 @@ Post.published.unpublish_all # unpublishes every currently-published post; retur
 Both respect the current relation, return an Integer count, and run in a transaction — a
 record that fails to save raises `ActiveRecord::RecordNotSaved` and rolls the whole batch
 back. With no overridden `before_publish`/`after_publish`/`before_unpublish`/`after_unpublish`/
-`publish!`/`unpublish!` and no validations on the model — neither `validates`/`validates_with`
-nor a custom `validate :method` — both collapse to a single `UPDATE`, which bumps `updated_at`
+`publish!`/`unpublish!` and no validations on the model — neither `validates`/`validates_with`,
+a custom `validate :method`, nor an association's autosave validation (a bare `has_many`
+registers one, so most models with associations take the streaming path) — both collapse to a
+single `UPDATE`, which bumps `updated_at`
 exactly as the per-record path does; otherwise they stream per record through
 `publish!`/`unpublish!` so validations still run.
 
@@ -637,7 +639,9 @@ ApiToken.expiring_within(1.day).expire_all   # => 12
 
 `expire_all(time = Time.zone.now)` expires every currently-active record in the relation and
 returns the Integer count, in a transaction. With `expire!` unoverridden and no validations on
-the model — neither `validates`/`validates_with` nor a custom `validate :method` — it collapses
+the model — neither `validates`/`validates_with`, a custom `validate :method`, nor an
+association's autosave validation (a bare `has_many` registers one, so most models with
+associations take the streaming path) — it collapses
 to a single `UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise it
 streams per record through `expire!` so validations still run, and a record that fails to save
 raises `ActiveRecord::RecordNotSaved` and rolls the whole batch back.
@@ -758,7 +762,9 @@ Subscription.active.deactivate_all     # => 3
 
 Both target the relation, return an Integer count, and run in a transaction. With
 `activate!`/`deactivate!` unoverridden and no validations on the model — neither
-`validates`/`validates_with` nor a custom `validate :method` — they collapse to a single
+`validates`/`validates_with`, a custom `validate :method`, nor an association's autosave
+validation (a bare `has_many` registers one, so most models with associations take the
+streaming path) — they collapse to a single
 `UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise they stream
 per record so validations still run, and a record that fails to save raises
 `ActiveRecord::RecordNotSaved` and rolls the whole batch back. `toggle_active!`'s row lock has

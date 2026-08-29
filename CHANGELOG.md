@@ -47,6 +47,12 @@ exact method list). "No validations" means neither `validates` /
 `validates_with` **nor** a custom `validate :method` / `validate do … end` —
 the latter registers only a validate callback and leaves `validators` empty,
 so it is detected through `_validate_callbacks` rather than `validators`.
+It also means **no association carrying the default autosave validation**: a
+bare `has_many`/`has_one` registers a `validate_associated_records_*` callback,
+so in practice most models with associations take the streaming per-record
+path. That is deliberate — the gate errs toward the path that honours the
+rollback contract — but it means the single-`UPDATE` optimisation applies to
+simple models, not to every model that merely omits `validates`.
 `unlock_expired` is exempt from the validations check because
 `unlock_access!` writes via `update_columns`, which always skips validations,
 so its two paths are already equivalent. On a model that declares any
