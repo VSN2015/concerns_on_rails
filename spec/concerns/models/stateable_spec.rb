@@ -352,5 +352,20 @@ describe ConcernsOnRails::Stateable do
       expect(AffixedOrder.transition_all(:submit)).to eq(1)
       expect(AffixedOrder.where(status: "submitted").count).to eq(1)
     end
+
+    it "is idempotent when :from is omitted (any state -> target)" do
+      stub_const("ArchivableOrder", Class.new(TestModel) do
+        self.table_name = "batch_orders"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft submitted approved archived],
+                              transitions: { archive: { to: :archived } }
+      end)
+      ArchivableOrder.create!(status: "draft")
+      ArchivableOrder.create!(status: "submitted")
+
+      expect(ArchivableOrder.transition_all(:archive)).to eq(2)
+      expect(ArchivableOrder.transition_all(:archive)).to eq(0)
+    end
   end
 end

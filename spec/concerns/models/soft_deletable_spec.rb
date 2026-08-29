@@ -474,6 +474,7 @@ describe ConcernsOnRails::SoftDeletable do
       Class.new(TestModel) do
         self.table_name = "affixed_docs"
         include ConcernsOnRails::SoftDeletable
+
         soft_deletable_by :deleted_at, **options
       end
     end

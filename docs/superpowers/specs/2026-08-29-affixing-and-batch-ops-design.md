@@ -202,9 +202,9 @@ than six. Its existing specs guard the move. Autoloaded alongside `Support::Affi
 
 | Concern | Verb(s) | Target rows | Fast path | Notes |
 |---|---|---|---|---|
-| Publishable | `publish_all`, `unpublish_all` | not currently published / currently published | when `before/after_publish`, `before/after_unpublish`, `publish!`, `unpublish!` are unoverridden | branches boolean vs timestamp column, like every other Publishable scope |
-| Expirable | `expire_all` | currently active | when `expire!` is unoverridden | Expirable defines no hooks, so only an overridden bang method forces the slow path |
-| Activatable | `activate_all`, `deactivate_all` | inactive / active | when the bang method is unoverridden | Activatable defines no hooks; `toggle_active!`'s row lock has no batch analogue |
+| Publishable | `publish_all`, `unpublish_all` | not currently published / currently published | when `before/after_publish`, `before/after_unpublish`, `publish!`, `unpublish!` are unoverridden **and the model declares no validators** | branches boolean vs timestamp column, like every other Publishable scope. The per-record path calls `update`, which runs validations, while `update_all` does not — so a model with `validates` must take the slow path even with every hook unoverridden |
+| Expirable | `expire_all` | currently active | when `expire!` is unoverridden **and the model declares no validators** | Expirable defines no hooks, so an overridden bang method or the presence of validators forces the slow path; same `update` vs `update_all` gap as Publishable |
+| Activatable | `activate_all`, `deactivate_all` | inactive / active | when the bang method is unoverridden **and the model declares no validators** | Activatable defines no hooks; `toggle_active!`'s row lock has no batch analogue; same `update` vs `update_all` gap as Publishable |
 | Lockable | `unlock_expired` | locked rows whose `locked_at + unlock_in` has passed | when `before/after_unlock` and `unlock_access!` are unoverridden | must also reset failed attempts, mirroring `unlock_access!`; matches nothing when `unlock_in` is nil |
 | Stateable | `transition_all(event)` | rows in a state the event can leave, minus rows already in the target state | **never** | the per-record path uses `update!`, which runs validations, while every fast path uses `update_all`, which does not — collapsing would silently skip them. Guard membership is still filtered DB-side; records failing `may_<event>?` are **skipped, not errors** |
 

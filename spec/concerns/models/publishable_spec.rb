@@ -252,6 +252,7 @@ describe ConcernsOnRails::Publishable do
       klass = Class.new(TestModel) do
         self.table_name = "affixed_articles"
         include ConcernsOnRails::Publishable
+
         publishable_by
       end
 
@@ -272,6 +273,7 @@ describe ConcernsOnRails::Publishable do
       klass = Class.new(TestModel) do
         self.table_name = "affixed_articles"
         include ConcernsOnRails::Publishable
+
         publishable_by :published_at, prefix: :article
       end
 
@@ -285,6 +287,7 @@ describe ConcernsOnRails::Publishable do
       klass = Class.new(TestModel) do
         self.table_name = "affixed_articles"
         include ConcernsOnRails::Publishable
+
         publishable_by :published_at, prefix: true
       end
 
@@ -295,6 +298,7 @@ describe ConcernsOnRails::Publishable do
       klass = Class.new(TestModel) do
         self.table_name = "affixed_articles"
         include ConcernsOnRails::Publishable
+
         publishable_by :published_at, suffix: :posts
       end
       live = klass.create!(published_at: 1.day.ago)
@@ -308,6 +312,7 @@ describe ConcernsOnRails::Publishable do
       klass = Class.new(TestModel) do
         self.table_name = "affixed_articles"
         include ConcernsOnRails::Publishable
+
         publishable_by :published_at, prefix: :article, default_scope: true
       end
       live = klass.create!(published_at: 1.day.ago)
@@ -321,6 +326,7 @@ describe ConcernsOnRails::Publishable do
       parent = Class.new(TestModel) do
         self.table_name = "affixed_articles"
         include ConcernsOnRails::Publishable
+
         publishable_by
       end
       stub_const("AffixedParentArticle", parent)

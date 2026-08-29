@@ -237,6 +237,7 @@ describe ConcernsOnRails::Schedulable do
       Class.new(TestModel) do
         self.table_name = "affixed_events"
         include ConcernsOnRails::Schedulable
+
         schedulable_by(**options)
       end
     end

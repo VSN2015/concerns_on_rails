@@ -358,6 +358,49 @@ publishable_by :published_at, default_scope: true
 # Article.unscoped reaches everything
 ```
 
+**Bulk operations**
+
+```ruby
+Post.draft.publish_all       # publishes every not-currently-published post; returns the count
+Post.published.unpublish_all # unpublishes every currently-published post; returns the count
+```
+
+Both respect the current relation, return an Integer count, and run in a transaction — a
+record that fails to save raises `ActiveRecord::RecordNotSaved` and rolls the whole batch
+back. With no overridden `before_publish`/`after_publish`/`before_unpublish`/`after_unpublish`/
+`publish!`/`unpublish!` and no `validates` on the model, both collapse to a single `UPDATE`;
+otherwise they stream per record through `publish!`/`unpublish!` so validations still run.
+`publish_all` targets every not-currently-published row — **including scheduled ones**,
+whose future `published_at` it overwrites — so chain `.draft` (`Post.draft.publish_all`) to
+exclude them.
+
+**Scope-name collisions**
+
+```ruby
+publishable_by :published_at, prefix: :article   # => Article.article_published / .article_draft
+publishable_by :published_at, suffix: :posts     # => Article.published_posts / .draft_posts
+publishable_by :published_at, prefix: true       # => Article.published_at_published / ...
+```
+
+`prefix:`/`suffix:` rename every scope `publishable_by` generates, so a model can include
+Publishable alongside another concern that would otherwise generate a same-named scope
+(SoftDeletable and Activatable also define `.active`, for instance) without one clobbering
+the other. With no affix passed, scope names, the optional default scope, and the emitted
+SQL are all unchanged.
+
+`prefix:`/`suffix:` mean three different things across the gem, depending on the concern:
+- **Scope-name affix** (renames generated scopes) — Activatable, Expirable, Lockable,
+  Stateable, Anonymizable, Publishable, SoftDeletable, Schedulable.
+- **Accessor-name affix** (renames generated reader/writer methods) — Storable.
+- **A literal string prepended to the generated value itself** — Sequenceable's `prefix:`
+  (e.g. `"INV-"`), unrelated to scope/method naming.
+
+Passing `true` for a scope- or accessor-name affix means "use the configured field name"
+(`publishable_by :published_at, prefix: true` → `published_at_published`/`published_at_draft`).
+
+Unrelated to all three: Searchable's `match: :prefix` is a LIKE-match mode (`term%`), not a
+naming affix.
+
 **Notes**
 - "Published" means `published_at` is set **and** in the past — so future-dated posts stay unpublished until their time arrives.
 - No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`).
@@ -411,6 +454,21 @@ batch back. With `touch: false` and no overridden hooks, `soft_delete_all` / `re
 collapse to a single `UPDATE`. Note that `really_destroy_all` peels the soft-delete
 predicate off the relation, so `only_deleted.really_destroy_all` widens to the whole
 relation — purge trash with `User.soft_deleted.delete_all` instead.
+
+**Scope-name collisions**
+
+```ruby
+soft_deletable_by :deleted_at, prefix: :account   # => .account_active / .account_soft_deleted / ...
+soft_deletable_by :deleted_at, suffix: :records    # => .active_records / .soft_deleted_records / ...
+soft_deletable_by :deleted_at, prefix: true        # => .deleted_at_active / ...
+```
+
+`prefix:`/`suffix:` rename every scope `soft_deletable_by` generates (`active`,
+`without_deleted`, `soft_deleted`, `only_deleted`, `with_deleted`, `deleted_within`), so a
+model can combine SoftDeletable with another concern that also defines `.active` (Activatable,
+Expirable) without a collision. `prefix: true` uses the configured field name. With no affix
+passed, scope names, the default scope, and the emitted SQL are unchanged. See the
+Publishable section above for how `prefix:`/`suffix:` differ across the gem.
 
 **Lifecycle hooks** — override these methods on the model:
 
@@ -512,6 +570,18 @@ promo.reschedule!(starts_at: 1.day.from_now,
                   ends_at:   2.days.from_now)
 ```
 
+**Scope-name collisions**
+
+```ruby
+schedulable_by prefix: :promo    # => .promo_current / .promo_upcoming / .promo_expired / .promo_active_at
+schedulable_by suffix: :window   # => .current_window / .upcoming_window / .expired_window / .active_at_window
+schedulable_by prefix: true      # => .starts_at_current / ... (the configured starts_at/ends_at field)
+```
+
+`prefix:`/`suffix:` rename every scope `schedulable_by` generates (`active_at`, `current`,
+`upcoming`, `expired`). With no affix passed, scope names and the emitted SQL are unchanged.
+See the Publishable section above for how `prefix:`/`suffix:` differ across the gem.
+
 **Notes**
 - Boundary semantics: **inclusive start, exclusive end** — active at exactly `starts_at`, not at exactly `ends_at`.
 - A `nil` end means "never expires"; a `nil` start means "not yet started".
@@ -551,6 +621,18 @@ token.extend_expiry!(by: 1.day)     # pushes expiry forward
 `extend_expiry!` is smart about the base:
 - If `expires_at` is `nil` or in the past → new value is `now + by`
 - If `expires_at` is still in the future → `by` is added to the existing value
+
+**Bulk operations**
+
+```ruby
+ApiToken.expiring_within(1.day).expire_all   # => 12
+```
+
+`expire_all(time = Time.zone.now)` expires every currently-active record in the relation and
+returns the Integer count, in a transaction. With `expire!` unoverridden and no `validates` on
+the model it collapses to a single `UPDATE`; otherwise it streams per record through `expire!`
+so validations still run, and a record that fails to save raises `ActiveRecord::RecordNotSaved`
+and rolls the whole batch back.
 
 **Custom field name**
 
@@ -658,6 +740,19 @@ sub.toggle_active!     # flips back to true
 Subscription.active     # WHERE active = TRUE
 Subscription.inactive   # WHERE active = FALSE OR active IS NULL
 ```
+
+**Bulk operations**
+
+```ruby
+Subscription.inactive.activate_all     # => 12
+Subscription.active.deactivate_all     # => 3
+```
+
+Both target the relation, return an Integer count, and run in a transaction. With
+`activate!`/`deactivate!` unoverridden and no `validates` on the model they collapse to a
+single `UPDATE`; otherwise they stream per record so validations still run, and a record that
+fails to save raises `ActiveRecord::RecordNotSaved` and rolls the whole batch back.
+`toggle_active!`'s row lock has no batch analogue.
 
 **Notes**
 - `NULL` is treated as inactive (same convention as most apps' "unset = off").
@@ -804,6 +899,18 @@ article.may_publish?           # => true  (guard check without raising)
 
 article.transition_to!(:archived)  # generic move to any declared state
 ```
+
+**Bulk operations**
+
+```ruby
+Article.draft.transition_all(:publish)   # => 12 — runs :publish across every eligible row
+```
+
+Returns the Integer count of records transitioned, running in a transaction; records the
+guard rejects are skipped (not errors). Unlike every other batch verb in this gem,
+`transition_all` has **no single-UPDATE fast path** — it always streams per record through
+the guarded `<event>!` method, because that path runs validations via `update!` while a bulk
+`update_all` would silently skip them.
 
 **Prefix / suffix** — avoid clashes when the state names overlap with other concerns or scopes:
 
@@ -1094,9 +1201,20 @@ user.reset_failed_attempts!     # call on successful login
 user.lock_access!               # manual lock     (hooks: before/after_lock)
 user.unlock_access!             # manual unlock   (hooks: before/after_unlock)
 User.locked / User.unlocked     # expiry-aware scopes
+
+User.unlock_expired              # => 3 — unlocks every row whose unlock_in window has elapsed
 ```
 
 **Options**: `attempts:` (`:failed_attempts`, must be an integer column), `locked_at:` (`:locked_at`, datetime column), `max_attempts:` (`5`; `nil` = count but never auto-lock), `unlock_in:` (`nil` = locked until manual unlock; a duration makes the lock lapse by itself), `prefix:` / `suffix:` (affix the scope names).
+
+**Bulk operations**
+
+`unlock_expired` clears `locked_at` and zeroes the attempts counter on every row whose
+`locked_at + unlock_in` has passed, exactly as `unlock_access!` does — returns the Integer
+count, runs in a transaction. Returns `0` without querying when `unlock_in` is `nil` (manual
+unlock only). Because `unlock_access!` persists via `update_columns` (which already skips
+validations), the single-`UPDATE` fast path and the per-record path are equivalent here —
+unlike Publishable/Expirable/Activatable, this one has no validators gate.
 
 **Notes**
 - The increment is SQL-side (`COALESCE(attempts, 0) + 1` via `update_counters`), so concurrent failures never lose updates and a NULL counter needs no column default; a locked account stops counting.

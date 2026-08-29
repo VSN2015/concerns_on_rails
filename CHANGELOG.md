@@ -1,5 +1,72 @@
 <!-- CHANGELOG.md -->
 
+## 1.27.0 (2026-08-29)
+
+Scope-name collisions finally have an escape hatch on every concern that
+generates scopes, and the 1.22 batch-operation contract reaches five more
+concerns. No new columns, migrations or dependencies. 1245 examples, 0
+failures.
+
+### Added
+- **Models::Publishable / SoftDeletable / Schedulable**: `prefix:`/`suffix:` on
+  `publishable_by` / `soft_deletable_by` / `schedulable_by` rename the generated
+  scopes, so a model can include SoftDeletable (`.active`) alongside Activatable
+  or Expirable (also `.active`) without one silently clobbering the other. With
+  no affix passed the scope names, default scopes and emitted SQL are unchanged.
+  `prefix: true` (use the configured field name), previously honoured only by
+  Stateable, now works on every affixing concern.
+- **Models::Publishable**: `publish_all` / `unpublish_all`. `publish_all` targets
+  every not-currently-published row — *including scheduled ones*, whose future
+  timestamp it overwrites; chain the draft scope (`Post.draft.publish_all`) to
+  narrow it. Both respect the relation, return an Integer count, and run in a
+  transaction.
+- **Models::Expirable**: `expire_all(time = Time.zone.now)`.
+- **Models::Activatable**: `activate_all` / `deactivate_all`.
+- **Models::Lockable**: `unlock_expired` — clears `locked_at` and zeroes the
+  attempts counter on every row whose `unlock_in` window has elapsed, mirroring
+  `unlock_access!`. Returns 0 without querying when `unlock_in` is nil.
+- **Models::Stateable**: `transition_all(event)` — runs one declared transition
+  across the relation, skipping (not failing) records the guard rejects.
+  Deliberately has no single-UPDATE fast path: the per-record path runs
+  validations through `update!` and a bulk UPDATE would skip them.
+
+### Notes
+Validation semantics of the new batch verbs (`publish_all`, `unpublish_all`,
+`expire_all`, `activate_all`, `deactivate_all`, `unlock_expired`): each
+collapses to a **single `UPDATE`** — one SQL statement for the whole batch —
+only when the host model declares **no validations** (and has overridden
+none of the concern's hooks/bang methods; see the per-concern docs for the
+exact method list). `unlock_expired` is exempt from the validators check
+because `unlock_access!` writes via `update_columns`, which always skips
+validations, so its two paths are already equivalent. On a model with
+`validates`, every one of these verbs instead streams the relation
+record-by-record inside a transaction, calling the same guarded bang/update
+method a single record would use; a record that fails to save raises
+`ActiveRecord::RecordNotSaved` and rolls the **entire batch** back — nothing
+partially commits. `transition_all` always takes the per-record path,
+regardless of validators, for the same reason. One residual, deliberate
+divergence survives on the fast path: like every `*_all` method in Rails,
+the single-UPDATE path does not fire host-defined `before_save`/`after_save`
+callbacks (only the concern's own `before_*`/`after_*` lifecycle hooks are
+checked when deciding whether the fast path applies at all). If your model
+relies on `before_save`/`after_save` for side effects, either add a
+validation (forcing the slow, per-record path) or call the bang method in a
+loop.
+
+### Internal
+- New `Support::Affix` (affixed-name computation, `prefix: true` normalization,
+  and the guarded scope capture/retirement used by the three newly affixable
+  concerns) replaces six duplicated implementations across Activatable,
+  Expirable, Lockable, Anonymizable, Stateable and Storable.
+- New `Support::BatchOps` (hook-ownership fast-path predicate + the
+  transactional `find_each` runner); SoftDeletable's `soft_delete_all` /
+  `restore_all` now route through it, so the contract has one definition.
+- Retiring a default-named scope is guarded three ways — the name must have been
+  recorded by the concern, be owned by the class's own singleton, and still be
+  the exact method captured — so a model's own override survives and a parent's
+  scopes are never removed from a subclass (that case raises with a pointer to
+  the parent).
+
 ## 1.26.0 (2026-08-24)
 
 A fixes-and-performance round from a full audit of the 25 model concerns: one privacy bug (Anonymizable left Encryptable blind-index fingerprints queryable after erasure), four silent-misbehavior fixes, five query-count reductions, and three hardening changes. No new concerns. 1173 examples, 0 failures.
