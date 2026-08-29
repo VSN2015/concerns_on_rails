@@ -459,4 +459,75 @@ describe ConcernsOnRails::SoftDeletable do
       expect(rec.reload.deleted_at).to be_nil
     end
   end
+
+  describe "scope affixing" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :affixed_docs, force: true do |t|
+          t.string :name
+          t.datetime :deleted_at
+        end
+      end
+    end
+
+    def affixed_class(**options)
+      Class.new(TestModel) do
+        self.table_name = "affixed_docs"
+        include ConcernsOnRails::SoftDeletable
+        soft_deletable_by :deleted_at, **options
+      end
+    end
+
+    it "keeps the default names with no affix" do
+      klass = affixed_class
+      expect(klass).to respond_to(:without_deleted)
+      expect(klass).to respond_to(:only_deleted)
+    end
+
+    it "defines affixed names and removes the defaults" do
+      klass = affixed_class(prefix: :doc)
+
+      expect(klass).to respond_to(:doc_without_deleted)
+      expect(klass).to respond_to(:doc_soft_deleted)
+      expect(klass).not_to respond_to(:without_deleted)
+      expect(klass).not_to respond_to(:active)
+    end
+
+    it "keeps the default_scope filtering deleted rows under an affix" do
+      klass = affixed_class(prefix: :doc)
+      live = klass.create!(name: "live")
+      gone = klass.create!(name: "gone")
+      gone.soft_delete!
+
+      expect(klass.all.pluck(:id)).to eq([live.id])
+      expect(klass.doc_with_deleted.count).to eq(2)
+      expect(klass.doc_soft_deleted.pluck(:id)).to eq([gone.id])
+    end
+
+    it "keeps only_deleted delegating to soft_deleted under an affix" do
+      klass = affixed_class(prefix: :doc)
+      gone = klass.create!(name: "gone")
+      gone.soft_delete!
+
+      expect(klass.doc_only_deleted.pluck(:id)).to eq([gone.id])
+    end
+
+    it "keeps deleted_within working under an affix" do
+      klass = affixed_class(prefix: :doc)
+      gone = klass.create!(name: "gone")
+      gone.soft_delete!
+
+      expect(klass.doc_deleted_within(1.day).pluck(:id)).to eq([gone.id])
+      expect(klass.doc_deleted_within(0.seconds).count).to eq(0)
+    end
+
+    it "honours default_scope: false under an affix" do
+      klass = affixed_class(prefix: :doc, default_scope: false)
+      klass.create!(name: "live")
+      klass.create!(name: "gone").soft_delete!
+
+      expect(klass.all.count).to eq(2)
+      expect(klass.doc_without_deleted.count).to eq(1)
+    end
+  end
 end
