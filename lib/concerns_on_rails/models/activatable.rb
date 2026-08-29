@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/batch_ops"
 
 module ConcernsOnRails
   module Models
@@ -31,7 +32,7 @@ module ConcernsOnRails
                                                   default: { active: :active, inactive: :inactive }.freeze
       end
 
-      class_methods do
+      class_methods do # rubocop:disable Metrics/BlockLength
         include ConcernsOnRails::Support::ColumnGuard
 
         def activatable_by(field = DEFAULT_FIELD, prefix: nil, suffix: nil)
@@ -49,6 +50,50 @@ module ConcernsOnRails
           # (e.g. SoftDeletable / Expirable) can coexist on one model.
           scope activatable_scope_names[:active],   -> { where(activatable_field => true) }
           scope activatable_scope_names[:inactive], -> { where(activatable_field => [false, nil]) }
+        end
+
+        # Activate every inactive record in the relation; returns the count.
+        def activate_all
+          inactive = all.public_send(activatable_scope_names.fetch(:inactive))
+          return inactive.update_all(activatable_field => true) if activatable_batch_fast_path?(:activate!)
+
+          ConcernsOnRails::Support::BatchOps.run(
+            inactive,
+            label: "ConcernsOnRails::Models::Activatable",
+            message: "failed to activate record",
+            &:activate!
+          )
+        end
+
+        # Deactivate every active record in the relation; returns the count.
+        def deactivate_all
+          active = all.public_send(activatable_scope_names.fetch(:active))
+          return active.update_all(activatable_field => false) if activatable_batch_fast_path?(:deactivate!)
+
+          ConcernsOnRails::Support::BatchOps.run(
+            active,
+            label: "ConcernsOnRails::Models::Activatable",
+            message: "failed to deactivate record",
+            &:deactivate!
+          )
+        end
+
+        private
+
+        # The single-UPDATE fast path is only safe when per-record behavior
+        # cannot differ from update_all: the given bang method not overridden
+        # by the host model, AND no validators — update_all skips validations
+        # entirely, so a model with any validates would silently write
+        # invalid records instead of honoring the batch contract
+        # (RecordNotSaved + rollback on a record that can't save). Activatable
+        # defines no lifecycle hooks, so the bang method is the only method
+        # that needs gating; save callbacks are deliberately NOT gated on —
+        # update_all skipping callbacks is documented Rails behavior shared
+        # by every *_all method.
+        def activatable_batch_fast_path?(method)
+          return false unless validators.empty?
+
+          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Activatable, method)
         end
       end
 

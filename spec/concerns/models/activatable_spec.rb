@@ -153,4 +153,72 @@ describe ConcernsOnRails::Activatable do
       expect(klass.respond_to?(:active)).to be(false)
     end
   end
+
+  describe "batch operations" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :batch_flags, force: true do |t|
+          t.boolean :active
+          t.string :title
+        end
+      end
+
+      stub_const("BatchFlag", Class.new(TestModel) do
+        self.table_name = "batch_flags"
+        include ConcernsOnRails::Activatable
+
+        activatable_by
+      end)
+    end
+
+    it "activates every inactive record and returns the count" do
+      BatchFlag.create!(active: false)
+      BatchFlag.create!(active: nil)
+      BatchFlag.create!(active: true)
+
+      expect(BatchFlag.activate_all).to eq(2)
+      expect(BatchFlag.active.count).to eq(3)
+    end
+
+    it "deactivates every active record" do
+      BatchFlag.create!(active: true)
+      BatchFlag.create!(active: false)
+
+      expect(BatchFlag.deactivate_all).to eq(1)
+      expect(BatchFlag.inactive.count).to eq(2)
+    end
+
+    it "is idempotent" do
+      BatchFlag.create!(active: false)
+      BatchFlag.activate_all
+
+      expect(BatchFlag.activate_all).to eq(0)
+    end
+
+    it "respects the relation" do
+      keep = BatchFlag.create!(active: false)
+      BatchFlag.create!(active: false)
+
+      expect(BatchFlag.where.not(id: keep.id).activate_all).to eq(1)
+      expect(keep.reload.active).to be false
+    end
+
+    it "cannot take the fast path when the model has validations — an invalid record rolls the whole batch back" do
+      stub_const("ValidatedFlag", Class.new(TestModel) do
+        self.table_name = "batch_flags"
+        include ConcernsOnRails::Activatable
+
+        activatable_by
+
+        validates :title, presence: true
+      end)
+      valid = ValidatedFlag.create!(title: "ok", active: false)
+      invalid = ValidatedFlag.create!(title: "temporary", active: false)
+      invalid.update_column(:title, nil)
+
+      expect { ValidatedFlag.activate_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(valid.reload.active).to be false
+      expect(invalid.reload.active).to be false
+    end
+  end
 end

@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/batch_ops"
 
 module ConcernsOnRails
   module Models
@@ -29,7 +30,36 @@ module ConcernsOnRails
           define_expirable_scopes(prefix, suffix)
         end
 
+        # Expire every currently-active record in the relation. Returns the
+        # Integer count. Expirable defines no lifecycle hooks, so this is a
+        # single UPDATE unless the model overrode `expire!`.
+        def expire_all(time = Time.zone.now)
+          active = all.public_send(expirable_scope_names.fetch(:active))
+          return active.update_all(expirable_field => time) if expirable_batch_fast_path?
+
+          ConcernsOnRails::Support::BatchOps.run(
+            active,
+            label: "ConcernsOnRails::Models::Expirable",
+            message: "failed to expire record"
+          ) { |record| record.expire!(time) }
+        end
+
         private
+
+        # The single-UPDATE fast path is only safe when per-record behavior
+        # cannot differ from update_all: `expire!` not overridden by the host
+        # model, AND no validators — update_all skips validations entirely,
+        # so a model with any validates would silently write invalid records
+        # instead of honoring the batch contract (RecordNotSaved + rollback
+        # on a record that can't save). Expirable defines no lifecycle hooks,
+        # so `expire!` is the only method that needs gating; save callbacks
+        # are deliberately NOT gated on — update_all skipping callbacks is
+        # documented Rails behavior shared by every *_all method.
+        def expirable_batch_fast_path?
+          return false unless validators.empty?
+
+          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Expirable, :expire!)
+        end
 
         # Scopes live here (not in `included do`) so their names can be affixed —
         # letting Expirable's `.active`/`.expired` coexist with the same-named
