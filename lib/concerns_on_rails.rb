@@ -79,6 +79,7 @@ module ConcernsOnRails
     autoload :Money,                   "concerns_on_rails/support/money"
     autoload :Encryptor,               "concerns_on_rails/support/encryptor"
     autoload :Affix,                   "concerns_on_rails/support/affix"
+    autoload :BatchOps,                "concerns_on_rails/support/batch_ops"
   end
 
   # Encryption config + error types (Support::Encryptor requires it itself)

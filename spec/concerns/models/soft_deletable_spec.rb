@@ -529,5 +529,14 @@ describe ConcernsOnRails::SoftDeletable do
       expect(klass.all.count).to eq(2)
       expect(klass.doc_without_deleted.count).to eq(1)
     end
+
+    it "restores records via restore_all under an affix" do
+      klass = affixed_class(prefix: :doc)
+      gone = klass.create!(name: "gone")
+      gone.soft_delete!
+
+      expect(klass.restore_all).to eq(1)
+      expect(gone.reload).not_to be_deleted
+    end
   end
 end

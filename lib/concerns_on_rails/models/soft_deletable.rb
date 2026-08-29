@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/batch_ops"
 
 module ConcernsOnRails
   module Models
@@ -63,25 +64,15 @@ module ConcernsOnRails
         # 1.22 the rollback happened silently and the method returned nil. With
         # `touch: false` and no overridden hooks this is a single UPDATE.
         def soft_delete_all
-          if soft_delete_batch_fast_path?(:soft_delete)
-            return all.where(soft_delete_field => nil).update_all(soft_delete_field => Time.zone.now)
-          end
+          pending = all.where(soft_delete_field => nil)
+          return pending.update_all(soft_delete_field => Time.zone.now) if soft_delete_batch_fast_path?(:soft_delete)
 
-          # find_each streams in PK batches instead of materializing the whole
-          # relation; filtering deleted rows DB-side also skips loading them at
-          # all. Updated rows leave the filtered set, but pagination is strictly
-          # forward by id, so nothing is skipped or revisited.
-          transaction do
-            count = 0
-            all.where(soft_delete_field => nil).find_each do |record|
-              record.soft_delete! ||
-                raise(ActiveRecord::RecordNotSaved.new(
-                        "ConcernsOnRails::Models::SoftDeletable: failed to soft-delete record", record
-                      ))
-              count += 1
-            end
-            count
-          end
+          ConcernsOnRails::Support::BatchOps.run(
+            pending,
+            label: "ConcernsOnRails::Models::SoftDeletable",
+            message: "failed to soft-delete record",
+            &:soft_delete!
+          )
         end
 
         # Override destroy_all to soft delete. Kept for backwards compatibility, but prefer the
@@ -109,17 +100,12 @@ module ConcernsOnRails
           deleted = all.public_send(soft_delete_scope_names.fetch(:soft_deleted))
           return deleted.update_all(soft_delete_field => nil) if soft_delete_batch_fast_path?(:restore)
 
-          transaction do
-            count = 0
-            deleted.find_each do |record|
-              record.restore! ||
-                raise(ActiveRecord::RecordNotSaved.new(
-                        "ConcernsOnRails::Models::SoftDeletable: failed to restore record", record
-                      ))
-              count += 1
-            end
-            count
-          end
+          ConcernsOnRails::Support::BatchOps.run(
+            deleted,
+            label: "ConcernsOnRails::Models::SoftDeletable",
+            message: "failed to restore record",
+            &:restore!
+          )
         end
 
         private
@@ -170,7 +156,7 @@ module ConcernsOnRails
                     else
                       %i[before_soft_delete after_soft_delete soft_delete!]
                     end
-          methods.all? { |m| instance_method(m).owner == ConcernsOnRails::Models::SoftDeletable }
+          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::SoftDeletable, *methods)
         end
       end
 
