@@ -238,4 +238,96 @@ describe ConcernsOnRails::Publishable do
       expect(article.log).to eq(%i[before_publish after_publish before_unpublish after_unpublish])
     end
   end
+
+  describe "scope affixing" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :affixed_articles, force: true do |t|
+          t.datetime :published_at
+        end
+      end
+    end
+
+    it "keeps the default scope names when no affix is given" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+        publishable_by
+      end
+
+      expect(klass).to respond_to(:published)
+      expect(klass).to respond_to(:draft)
+    end
+
+    it "keeps the default scope names when the macro is never called" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+      end
+
+      expect(klass).to respond_to(:published)
+    end
+
+    it "defines affixed names and removes the defaults" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+        publishable_by :published_at, prefix: :article
+      end
+
+      expect(klass).to respond_to(:article_published)
+      expect(klass).to respond_to(:article_draft)
+      expect(klass).not_to respond_to(:published)
+      expect(klass).not_to respond_to(:draft)
+    end
+
+    it "accepts prefix: true, meaning the field name" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+        publishable_by :published_at, prefix: true
+      end
+
+      expect(klass).to respond_to(:published_at_published)
+    end
+
+    it "returns the right rows through the affixed scopes" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+        publishable_by :published_at, suffix: :posts
+      end
+      live = klass.create!(published_at: 1.day.ago)
+      klass.create!(published_at: nil)
+
+      expect(klass.published_posts.pluck(:id)).to eq([live.id])
+      expect(klass.draft_posts.count).to eq(1)
+    end
+
+    it "keeps default_scope: true working under an affix" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+        publishable_by :published_at, prefix: :article, default_scope: true
+      end
+      live = klass.create!(published_at: 1.day.ago)
+      klass.create!(published_at: nil)
+
+      expect(klass.all.pluck(:id)).to eq([live.id])
+      expect(klass.article_draft.count).to eq(1)
+    end
+
+    it "raises when affixing on a subclass whose parent owns the scopes" do
+      parent = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+        publishable_by
+      end
+      stub_const("AffixedParentArticle", parent)
+
+      expect do
+        Class.new(parent) { publishable_by :published_at, prefix: :child }
+      end.to raise_error(ArgumentError, /AffixedParentArticle/)
+    end
+  end
 end

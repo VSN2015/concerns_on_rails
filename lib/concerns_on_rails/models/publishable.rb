@@ -1,59 +1,42 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/affix"
 
 module ConcernsOnRails
   module Models
     module Publishable
       extend ActiveSupport::Concern
 
-      included do # rubocop:disable Metrics/BlockLength
+      SCOPE_BASES = %i[published unpublished scheduled draft].freeze
+
+      included do
         class_attribute :publishable_field, instance_accessor: false, default: :published_at
+        class_attribute :publishable_scope_names, instance_accessor: false,
+                                                  default: SCOPE_BASES.to_h { |b| [b, b] }.freeze
+        class_attribute :publishable_captured_scopes, instance_accessor: false, default: {}.freeze
 
-        # All scopes branch on the column type: a boolean publishable column (which
-        # the macro and instance methods also accept) needs equality predicates,
-        # not the timestamp `<= now` / `> now` comparisons that produce nonsensical
-        # SQL against a boolean.
-        scope :published, lambda {
-          if publishable_boolean_column?
-            where(publishable_field => true)
-          else
-            where(arel_table[publishable_field].lteq(Time.zone.now))
-          end
-        }
-        scope :unpublished, lambda {
-          if publishable_boolean_column?
-            unscope(where: publishable_field).where(publishable_field => [nil, false])
-          else
-            column = arel_table[publishable_field]
-            unscope(where: publishable_field).where(column.eq(nil).or(column.gt(Time.zone.now)))
-          end
-        }
-        # Set, but the publish time is still in the future (timestamp columns only).
-        scope :scheduled, lambda {
-          next none if publishable_boolean_column?
-
-          unscope(where: publishable_field).where(arel_table[publishable_field].gt(Time.zone.now))
-        }
-        # Never published — a true draft.
-        scope :draft, lambda {
-          if publishable_boolean_column?
-            unscope(where: publishable_field).where(publishable_field => [nil, false])
-          else
-            unscope(where: publishable_field).where(publishable_field => nil)
-          end
-        }
+        define_publishable_scopes(nil, nil)
+        self.publishable_captured_scopes =
+          ConcernsOnRails::Support::Affix.capture(self, SCOPE_BASES).freeze
       end
 
-      class_methods do
+      class_methods do # rubocop:disable Metrics/BlockLength
         include ConcernsOnRails::Support::ColumnGuard
 
         # Pass `default_scope: true` to hide unpublished records by default
         # (`.all` then returns only published). The negative scopes
         # (.unpublished/.scheduled/.draft) unscope the field, so they still work.
-        def publishable_by(field = nil, default_scope: false)
+        def publishable_by(field = nil, default_scope: false, prefix: nil, suffix: nil)
           self.publishable_field = field || :published_at
           @publishable_boolean_column = nil
           ensure_columns!("ConcernsOnRails::Models::Publishable", publishable_field, types: :datetime)
+
+          if prefix || suffix
+            define_publishable_scopes(prefix, suffix)
+            ConcernsOnRails::Support::Affix.retire!(self, publishable_captured_scopes,
+                                                    label: "ConcernsOnRails::Models::Publishable")
+          end
+
           enable_published_default_scope if default_scope
         end
 
@@ -73,10 +56,58 @@ module ConcernsOnRails
 
         private
 
+        # Scopes are built here rather than inline in `included do` so their
+        # names can be affixed. `included do` calls this with no affix, so a
+        # model that only includes the concern keeps the default names; an
+        # affixed macro call rebuilds them under new names and retires the
+        # originals.
+        #
+        # All scopes branch on the column type: a boolean publishable column
+        # needs equality predicates, not the timestamp `<= now` / `> now`
+        # comparisons that produce nonsensical SQL against a boolean.
+        def define_publishable_scopes(prefix, suffix) # rubocop:disable Metrics/PerceivedComplexity
+          prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: publishable_field)
+          suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: publishable_field)
+          self.publishable_scope_names = SCOPE_BASES.to_h do |base|
+            [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
+          end.freeze
+
+          scope publishable_scope_names[:published], lambda {
+            if publishable_boolean_column?
+              where(publishable_field => true)
+            else
+              where(arel_table[publishable_field].lteq(Time.zone.now))
+            end
+          }
+          scope publishable_scope_names[:unpublished], lambda {
+            if publishable_boolean_column?
+              unscope(where: publishable_field).where(publishable_field => [nil, false])
+            else
+              column = arel_table[publishable_field]
+              unscope(where: publishable_field).where(column.eq(nil).or(column.gt(Time.zone.now)))
+            end
+          }
+          # Set, but the publish time is still in the future (timestamp columns only).
+          scope publishable_scope_names[:scheduled], lambda {
+            next none if publishable_boolean_column?
+
+            unscope(where: publishable_field).where(arel_table[publishable_field].gt(Time.zone.now))
+          }
+          # Never published — a true draft.
+          scope publishable_scope_names[:draft], lambda {
+            if publishable_boolean_column?
+              unscope(where: publishable_field).where(publishable_field => [nil, false])
+            else
+              unscope(where: publishable_field).where(publishable_field => nil)
+            end
+          }
+        end
+
         # Routed through a helper so the `default_scope:` keyword doesn't shadow
         # the `default_scope` macro inside `publishable_by`.
         def enable_published_default_scope
-          default_scope { published }
+          published_scope = publishable_scope_names.fetch(:published)
+          default_scope { public_send(published_scope) }
         end
       end
 
