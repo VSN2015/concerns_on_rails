@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/batch_ops"
 
 module ConcernsOnRails
   module Models
@@ -54,6 +55,37 @@ module ConcernsOnRails
           @publishable_boolean_column = columns_hash[publishable_field.to_s]&.type == :boolean
         end
 
+        # Publish every not-currently-published record in the relation.
+        # Returns the Integer count. NOTE this includes *scheduled* rows,
+        # whose future timestamp is overwritten with now — chain the draft
+        # scope (`Post.draft.publish_all`) when that isn't what you want.
+        def publish_all
+          pending = all.public_send(publishable_scope_names.fetch(:unpublished))
+          value = publishable_boolean_column? || Time.zone.now
+          return pending.update_all(publishable_field => value) if publishable_batch_fast_path?(:publish)
+
+          ConcernsOnRails::Support::BatchOps.run(
+            pending,
+            label: "ConcernsOnRails::Models::Publishable",
+            message: "failed to publish record",
+            &:publish!
+          )
+        end
+
+        # Unpublish every published record in the relation. Writes nil on both
+        # column types, exactly as `unpublish!` does.
+        def unpublish_all
+          live = all.public_send(publishable_scope_names.fetch(:published))
+          return live.update_all(publishable_field => nil) if publishable_batch_fast_path?(:unpublish)
+
+          ConcernsOnRails::Support::BatchOps.run(
+            live,
+            label: "ConcernsOnRails::Models::Publishable",
+            message: "failed to unpublish record",
+            &:unpublish!
+          )
+        end
+
         private
 
         # Scopes are built here rather than inline in `included do` so their
@@ -102,12 +134,31 @@ module ConcernsOnRails
             end
           }
         end
+        # Scopes the disable above to just this method instead of running to
+        # EOF (which silently exempted every method below it). RuboCop flags
+        # the enable itself as redundant only because nothing below currently
+        # trips PerceivedComplexity — that's the point, not a reason to drop it.
+        # rubocop:disable Lint/RedundantCopEnableDirective
+        # rubocop:enable Metrics/PerceivedComplexity
+        # rubocop:enable Lint/RedundantCopEnableDirective
 
         # Routed through a helper so the `default_scope:` keyword doesn't shadow
         # the `default_scope` macro inside `publishable_by`.
         def enable_published_default_scope
           published_scope = publishable_scope_names.fetch(:published)
           default_scope { public_send(published_scope) }
+        end
+
+        # The single-UPDATE fast path is only safe when per-record behavior
+        # cannot differ from update_all: none of the concern's hooks or bang
+        # methods overridden by the host model.
+        def publishable_batch_fast_path?(kind)
+          methods = if kind == :publish
+                      %i[before_publish after_publish publish!]
+                    else
+                      %i[before_unpublish after_unpublish unpublish!]
+                    end
+          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Publishable, *methods)
         end
       end
 

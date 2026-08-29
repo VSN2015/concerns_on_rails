@@ -330,4 +330,111 @@ describe ConcernsOnRails::Publishable do
       end.to raise_error(ArgumentError, /AffixedParentArticle/)
     end
   end
+
+  describe "batch operations" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :batch_articles, force: true do |t|
+          t.datetime :published_at
+        end
+      end
+
+      stub_const("BatchArticle", Class.new(TestModel) do
+        self.table_name = "batch_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+      end)
+    end
+
+    def capture_sql
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*args|
+        statements << args.last[:sql].to_s
+      end
+      yield
+      statements
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscriber)
+    end
+
+    it "publishes every unpublished record and returns the count" do
+      BatchArticle.create!(published_at: nil)
+      BatchArticle.create!(published_at: nil)
+      already = BatchArticle.create!(published_at: 2.days.ago)
+
+      expect(BatchArticle.publish_all).to eq(2)
+      expect(BatchArticle.where(published_at: nil).count).to eq(0)
+      expect(already.reload.published_at).to be_within(1.second).of(2.days.ago)
+    end
+
+    it "is idempotent — a second call transitions nothing" do
+      BatchArticle.create!(published_at: nil)
+      BatchArticle.publish_all
+
+      expect(BatchArticle.publish_all).to eq(0)
+    end
+
+    it "respects the relation" do
+      keep = BatchArticle.create!(published_at: nil)
+      BatchArticle.create!(published_at: nil)
+
+      expect(BatchArticle.where.not(id: keep.id).publish_all).to eq(1)
+      expect(keep.reload.published_at).to be_nil
+    end
+
+    it "issues exactly one UPDATE on the fast path" do
+      2.times { BatchArticle.create!(published_at: nil) }
+
+      statements = capture_sql { BatchArticle.publish_all }
+
+      expect(statements.grep(/^UPDATE/).length).to eq(1)
+    end
+
+    it "unpublishes every published record" do
+      BatchArticle.create!(published_at: 1.day.ago)
+      BatchArticle.create!(published_at: nil)
+
+      expect(BatchArticle.unpublish_all).to eq(1)
+      expect(BatchArticle.where.not(published_at: nil).count).to eq(0)
+    end
+
+    it "runs the hooks once per record when they are overridden" do
+      stub_const("HookedArticle", Class.new(TestModel) do
+        self.table_name = "batch_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+
+        cattr_accessor :published_ids
+        self.published_ids = []
+
+        def after_publish
+          self.class.published_ids << id
+        end
+      end)
+      a = HookedArticle.create!(published_at: nil)
+      b = HookedArticle.create!(published_at: nil)
+
+      expect(HookedArticle.publish_all).to eq(2)
+      expect(HookedArticle.published_ids).to match_array([a.id, b.id])
+    end
+
+    it "rolls the whole batch back when a record fails" do
+      stub_const("FailingArticle", Class.new(TestModel) do
+        self.table_name = "batch_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+
+        def publish!
+          false
+        end
+      end)
+      FailingArticle.create!(published_at: nil)
+
+      expect { FailingArticle.publish_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(FailingArticle.where(published_at: nil).count).to eq(1)
+    end
+  end
 end
