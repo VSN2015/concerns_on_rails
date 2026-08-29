@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/batch_ops"
 
 module ConcernsOnRails
   module Models
@@ -90,6 +91,37 @@ module ConcernsOnRails
           stateable_define_states
           stateable_define_transitions
           stateable_apply_default
+        end
+
+        # Run one declared transition across the relation. Returns the Integer
+        # count of records transitioned; records whose current state the
+        # event's guard rejects are skipped, not errors.
+        #
+        # There is deliberately NO single-UPDATE fast path here: the
+        # per-record path goes through `update!`, which runs validations,
+        # while every fast path in this gem uses `update_all`, which does not.
+        # Collapsing would silently skip validations that `<event>!` runs.
+        # Guard membership is still filtered DB-side, so the scan is cheap.
+        def transition_all(event)
+          name = event.to_sym
+          config = stateable_transitions[name] || stateable_transitions[event.to_s]
+          raise ArgumentError, "#{LABEL}: unknown transition '#{event}'" unless config
+
+          from = Array(config[:from]).map(&:to_s)
+          to = config.fetch(:to).to_s
+          field = stateable_field
+          method_base = stateable_method_name(name)
+
+          eligible = from.empty? ? all : all.where(field => from)
+          eligible = eligible.where.not(field => to)
+
+          ConcernsOnRails::Support::BatchOps.run(
+            eligible,
+            label: LABEL,
+            message: "failed to transition record"
+          ) do |record|
+            record.public_send(:"may_#{method_base}?") ? record.public_send(:"#{method_base}!") : :skip
+          end
         end
 
         private
