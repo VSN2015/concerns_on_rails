@@ -102,8 +102,11 @@ module ConcernsOnRails
           # excluded without an extra predicate.
           expired = all.where(arel_table[locked_field].lteq(Time.zone.now - unlock_in))
 
-          if ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Lockable,
-                                                           :before_unlock, :after_unlock, :unlock_access!)
+          # Ownership-only check (no validations gate, and no updated_at on the
+          # bulk write): `unlock_access!` writes via update_columns, which
+          # already skips validations and timestamps, so the two paths agree.
+          if ConcernsOnRails::Support::BatchOps.unoverridden?(self, ConcernsOnRails::Models::Lockable,
+                                                              :before_unlock, :after_unlock, :unlock_access!)
             return expired.update_all(locked_field => nil, attempts_field => 0)
           end
 

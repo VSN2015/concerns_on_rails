@@ -220,5 +220,30 @@ describe ConcernsOnRails::Activatable do
       expect(valid.reload.active).to be false
       expect(invalid.reload.active).to be false
     end
+
+    # Regression: `validate :method` leaves `validators` EMPTY (only `validates`
+    # / `validates_with` populate it), so the old `validators.empty?` gate took
+    # the fast path and activated invalid rows.
+    it "cannot take the fast path when the model has a custom validate method" do
+      stub_const("CallbackValidatedFlag", Class.new(TestModel) do
+        self.table_name = "batch_flags"
+        include ConcernsOnRails::Activatable
+
+        activatable_by
+        validate :title_must_be_present
+
+        def title_must_be_present
+          errors.add(:title, "can't be blank") if title.blank?
+        end
+      end)
+      valid = CallbackValidatedFlag.create!(title: "ok", active: false)
+      invalid = CallbackValidatedFlag.create!(title: "temporary", active: false)
+      invalid.update_column(:title, nil)
+
+      expect(CallbackValidatedFlag.validators).to be_empty
+      expect { CallbackValidatedFlag.activate_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(valid.reload.active).to be false
+      expect(invalid.reload.active).to be false
+    end
   end
 end

@@ -6,6 +6,11 @@ describe ConcernsOnRails::Support::BatchOps do
       create_table :batch_items, force: true do |t|
         t.string :state
       end
+
+      create_table :stamped_items, force: true do |t|
+        t.string :state
+        t.timestamps
+      end
     end
 
     stub_const("BatchItem", Class.new(TestModel) do
@@ -21,12 +26,12 @@ describe ConcernsOnRails::Support::BatchOps do
     end
   end
 
-  describe ".fast_path?" do
+  describe ".unoverridden?" do
     it "is true when no listed method is overridden" do
       owner = Module.new { def touched; end }
       klass = Class.new { include(owner) }
 
-      expect(described_class.fast_path?(klass, owner, :touched)).to be true
+      expect(described_class.unoverridden?(klass, owner, :touched)).to be true
     end
 
     it "is false when the host overrode a listed method" do
@@ -37,7 +42,75 @@ describe ConcernsOnRails::Support::BatchOps do
         def touched; end
       end
 
+      expect(described_class.unoverridden?(klass, owner, :touched)).to be false
+    end
+  end
+
+  describe ".fast_path?" do
+    let(:owner) { Module.new { def touched; end } }
+
+    def model_including(owner, &body)
+      Class.new(TestModel) do
+        self.table_name = "batch_items"
+        include(owner)
+
+        class_eval(&body) if body
+      end
+    end
+
+    it "is true for a bare model with nothing overridden and no validations" do
+      expect(described_class.fast_path?(model_including(owner), owner, :touched)).to be true
+    end
+
+    it "is false when the host overrode a listed method" do
+      klass = model_including(owner) { def touched; end }
+
       expect(described_class.fast_path?(klass, owner, :touched)).to be false
+    end
+
+    it "is false when the model declares validates" do
+      klass = model_including(owner) { validates :state, presence: true }
+
+      expect(described_class.fast_path?(klass, owner, :touched)).to be false
+    end
+
+    # Regression: `validate :method` populates only _validate_callbacks, so a
+    # `validators.empty?` gate waved it through and update_all wrote invalid rows.
+    it "is false when the model declares a custom validate method" do
+      klass = model_including(owner) do
+        validate :state_present
+
+        def state_present; end
+      end
+
+      expect(klass.validators).to be_empty
+      expect(described_class.fast_path?(klass, owner, :touched)).to be false
+    end
+  end
+
+  describe ".with_timestamps" do
+    it "adds updated_at when the model has the column" do
+      klass = Class.new(TestModel) { self.table_name = "stamped_items" }
+
+      payload = described_class.with_timestamps(klass, state: "done")
+
+      expect(payload[:state]).to eq("done")
+      expect(payload["updated_at"]).to be_within(5.seconds).of(Time.zone.now)
+    end
+
+    it "leaves the payload alone when the model has no timestamp column" do
+      klass = Class.new(TestModel) { self.table_name = "batch_items" }
+
+      expect(described_class.with_timestamps(klass, state: "done")).to eq(state: "done")
+    end
+
+    it "leaves the payload alone when record_timestamps is off" do
+      klass = Class.new(TestModel) do
+        self.table_name = "stamped_items"
+        self.record_timestamps = false
+      end
+
+      expect(described_class.with_timestamps(klass, state: "done")).to eq(state: "done")
     end
   end
 

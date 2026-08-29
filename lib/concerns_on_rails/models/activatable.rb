@@ -55,7 +55,11 @@ module ConcernsOnRails
         # Activate every inactive record in the relation; returns the count.
         def activate_all
           inactive = all.public_send(activatable_scope_names.fetch(:inactive))
-          return inactive.update_all(activatable_field => true) if activatable_batch_fast_path?(:activate!)
+          if activatable_batch_fast_path?(:activate!)
+            return inactive.update_all(
+              ConcernsOnRails::Support::BatchOps.with_timestamps(self, activatable_field => true)
+            )
+          end
 
           ConcernsOnRails::Support::BatchOps.run(
             inactive,
@@ -68,7 +72,11 @@ module ConcernsOnRails
         # Deactivate every active record in the relation; returns the count.
         def deactivate_all
           active = all.public_send(activatable_scope_names.fetch(:active))
-          return active.update_all(activatable_field => false) if activatable_batch_fast_path?(:deactivate!)
+          if activatable_batch_fast_path?(:deactivate!)
+            return active.update_all(
+              ConcernsOnRails::Support::BatchOps.with_timestamps(self, activatable_field => false)
+            )
+          end
 
           ConcernsOnRails::Support::BatchOps.run(
             active,
@@ -80,19 +88,11 @@ module ConcernsOnRails
 
         private
 
-        # The single-UPDATE fast path is only safe when per-record behavior
-        # cannot differ from update_all: the given bang method not overridden
-        # by the host model, AND no validators — update_all skips validations
-        # entirely, so a model with any validates would silently write
-        # invalid records instead of honoring the batch contract
-        # (RecordNotSaved + rollback on a record that can't save). Activatable
-        # defines no lifecycle hooks, so the bang method is the only method
-        # that needs gating; save callbacks are deliberately NOT gated on —
-        # update_all skipping callbacks is documented Rails behavior shared
-        # by every *_all method.
+        # Whether the single-UPDATE fast path is safe — the whole decision
+        # (bang method unoverridden AND the model declares no validations,
+        # plus why) lives in Support::BatchOps.fast_path?. Activatable defines
+        # no lifecycle hooks, so the bang method is the only one to check.
         def activatable_batch_fast_path?(method)
-          return false unless validators.empty?
-
           ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Activatable, method)
         end
       end

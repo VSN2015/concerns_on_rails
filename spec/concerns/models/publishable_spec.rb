@@ -343,6 +343,7 @@ describe ConcernsOnRails::Publishable do
         create_table :batch_articles, force: true do |t|
           t.datetime :published_at
           t.string :title
+          t.timestamps
         end
       end
 
@@ -388,6 +389,31 @@ describe ConcernsOnRails::Publishable do
 
       expect(BatchArticle.where.not(id: keep.id).publish_all).to eq(1)
       expect(keep.reload.published_at).to be_nil
+    end
+
+    # Regression: publish_all used to target the `unpublished` SCOPE, whose body
+    # opens with `unscope(where: published_at)` — that stripped the caller's own
+    # predicate on the publish column back off, so `.draft` was silently
+    # discarded and scheduled rows were published, destroying their future
+    # timestamp. The existing "respects the relation" example constrains on :id,
+    # which the unscope leaves alone, so it never caught this.
+    it "composes with a caller constraint on the publish column, leaving scheduled rows alone" do
+      BatchArticle.create!(published_at: nil)
+      scheduled = BatchArticle.create!(published_at: 5.days.from_now)
+
+      expect(BatchArticle.draft.publish_all).to eq(1)
+      expect(scheduled.reload.published_at).to be_within(1.second).of(5.days.from_now)
+    end
+
+    # Regression: update_all does not touch updated_at but the per-record
+    # `update` does, so the two paths used to disagree depending on whether the
+    # model happened to declare a validator.
+    it "bumps updated_at on the fast path, exactly as the per-record path does" do
+      article = BatchArticle.create!(published_at: nil)
+      BatchArticle.where(id: article.id).update_all(updated_at: 3.days.ago)
+
+      expect(BatchArticle.publish_all).to eq(1)
+      expect(article.reload.updated_at).to be_within(5.seconds).of(Time.zone.now)
     end
 
     it "issues exactly one UPDATE on the fast path" do
@@ -457,6 +483,31 @@ describe ConcernsOnRails::Publishable do
       invalid.update_column(:title, nil)
 
       expect { ValidatedArticle.publish_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(valid.reload.published_at).to be_nil
+      expect(invalid.reload.published_at).to be_nil
+    end
+
+    # Regression: `validate :method` leaves `validators` EMPTY (only `validates`
+    # / `validates_with` populate it), so the old `validators.empty?` gate took
+    # the fast path and published invalid rows.
+    it "cannot take the fast path when the model has a custom validate method" do
+      stub_const("CallbackValidatedArticle", Class.new(TestModel) do
+        self.table_name = "batch_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+        validate :title_must_be_present
+
+        def title_must_be_present
+          errors.add(:title, "can't be blank") if title.blank?
+        end
+      end)
+      valid = CallbackValidatedArticle.create!(title: "ok", published_at: nil)
+      invalid = CallbackValidatedArticle.create!(title: "temporary", published_at: nil)
+      invalid.update_column(:title, nil)
+
+      expect(CallbackValidatedArticle.validators).to be_empty
+      expect { CallbackValidatedArticle.publish_all }.to raise_error(ActiveRecord::RecordNotSaved)
       expect(valid.reload.published_at).to be_nil
       expect(invalid.reload.published_at).to be_nil
     end

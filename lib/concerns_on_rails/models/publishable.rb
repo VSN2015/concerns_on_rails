@@ -59,10 +59,27 @@ module ConcernsOnRails
         # Returns the Integer count. NOTE this includes *scheduled* rows,
         # whose future timestamp is overwritten with now — chain the draft
         # scope (`Post.draft.publish_all`) when that isn't what you want.
+        #
+        # The target predicate is built INLINE against `all` rather than
+        # routed through the `unpublished` scope, whose body opens with
+        # `unscope(where: publishable_field)` — that would strip the caller's
+        # own constraint on the publish column right back off, so
+        # `Post.draft.publish_all` used to silently publish scheduled rows
+        # too and destroy their future timestamps.
+        #
+        # The composing consequence: on a model configured with
+        # `publishable_by ..., default_scope: true`, `all` is already limited
+        # to published rows, so a bare `Post.publish_all` targets nothing.
+        # Chain `.draft` or `.unpublished` first — both unscope the field
+        # themselves, so the chain resolves to the rows you mean.
         def publish_all
-          pending = all.public_send(publishable_scope_names.fetch(:unpublished))
-          value = publishable_boolean_column? || Time.zone.now
-          return pending.update_all(publishable_field => value) if publishable_batch_fast_path?(:publish)
+          pending = publishable_pending_relation
+          if publishable_batch_fast_path?(:publish)
+            value = publishable_boolean_column? || Time.zone.now
+            return pending.update_all(
+              ConcernsOnRails::Support::BatchOps.with_timestamps(self, publishable_field => value)
+            )
+          end
 
           ConcernsOnRails::Support::BatchOps.run(
             pending,
@@ -73,10 +90,16 @@ module ConcernsOnRails
         end
 
         # Unpublish every published record in the relation. Writes nil on both
-        # column types, exactly as `unpublish!` does.
+        # column types, exactly as `unpublish!` does. The `published` scope
+        # does NOT unscope the field, so a caller's own constraint on the
+        # publish column composes here as it should.
         def unpublish_all
           live = all.public_send(publishable_scope_names.fetch(:published))
-          return live.update_all(publishable_field => nil) if publishable_batch_fast_path?(:unpublish)
+          if publishable_batch_fast_path?(:unpublish)
+            return live.update_all(
+              ConcernsOnRails::Support::BatchOps.with_timestamps(self, publishable_field => nil)
+            )
+          end
 
           ConcernsOnRails::Support::BatchOps.run(
             live,
@@ -142,17 +165,21 @@ module ConcernsOnRails
           default_scope { public_send(published_scope) }
         end
 
-        # The single-UPDATE fast path is only safe when per-record behavior
-        # cannot differ from update_all: none of the concern's hooks or bang
-        # methods overridden by the host model, AND no validators — update_all
-        # skips validations entirely, so a model with any validates would
-        # silently write invalid records instead of honoring the batch
-        # contract (RecordNotSaved + rollback on a record that can't save).
-        # Save callbacks are deliberately NOT gated on: update_all skipping
-        # callbacks is documented Rails behavior shared by every *_all method.
-        def publishable_batch_fast_path?(kind)
-          return false unless validators.empty?
+        # "Not currently published", built against the CURRENT relation: the
+        # same predicate the `unpublished` scope body applies, minus the
+        # `unscope` that would peel the caller's own constraint on the column
+        # back off (see publish_all).
+        def publishable_pending_relation
+          return all.where(publishable_field => [nil, false]) if publishable_boolean_column?
 
+          column = arel_table[publishable_field]
+          all.where(column.eq(nil).or(column.gt(Time.zone.now)))
+        end
+
+        # Whether the single-UPDATE fast path is safe — hooks/bang methods
+        # unoverridden AND the model declares no validations. The whole
+        # decision, including why, lives in Support::BatchOps.fast_path?.
+        def publishable_batch_fast_path?(kind)
           methods = if kind == :publish
                       %i[before_publish after_publish publish!]
                     else

@@ -368,11 +368,18 @@ Post.published.unpublish_all # unpublishes every currently-published post; retur
 Both respect the current relation, return an Integer count, and run in a transaction — a
 record that fails to save raises `ActiveRecord::RecordNotSaved` and rolls the whole batch
 back. With no overridden `before_publish`/`after_publish`/`before_unpublish`/`after_unpublish`/
-`publish!`/`unpublish!` and no `validates` on the model, both collapse to a single `UPDATE`;
-otherwise they stream per record through `publish!`/`unpublish!` so validations still run.
-`publish_all` targets every not-currently-published row — **including scheduled ones**,
-whose future `published_at` it overwrites — so chain `.draft` (`Post.draft.publish_all`) to
-exclude them.
+`publish!`/`unpublish!` and no validations on the model — neither `validates`/`validates_with`
+nor a custom `validate :method` — both collapse to a single `UPDATE`, which bumps `updated_at`
+exactly as the per-record path does; otherwise they stream per record through
+`publish!`/`unpublish!` so validations still run.
+
+`publish_all` targets every not-currently-published row — **including scheduled ones**, whose
+future `published_at` it overwrites — so chain `.draft` (`Post.draft.publish_all`) to exclude
+them. Its predicate composes with your own constraint on the publish column, so that chain
+really does leave scheduled rows alone. The flip side of composing: with `default_scope: true`
+the relation is already narrowed to published rows, so a bare `Post.publish_all` matches
+nothing — chain `.draft` or `.unpublished` first (both unscope the column themselves, so the
+chain resolves to the rows you mean).
 
 **Scope-name collisions**
 
@@ -629,10 +636,11 @@ ApiToken.expiring_within(1.day).expire_all   # => 12
 ```
 
 `expire_all(time = Time.zone.now)` expires every currently-active record in the relation and
-returns the Integer count, in a transaction. With `expire!` unoverridden and no `validates` on
-the model it collapses to a single `UPDATE`; otherwise it streams per record through `expire!`
-so validations still run, and a record that fails to save raises `ActiveRecord::RecordNotSaved`
-and rolls the whole batch back.
+returns the Integer count, in a transaction. With `expire!` unoverridden and no validations on
+the model — neither `validates`/`validates_with` nor a custom `validate :method` — it collapses
+to a single `UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise it
+streams per record through `expire!` so validations still run, and a record that fails to save
+raises `ActiveRecord::RecordNotSaved` and rolls the whole batch back.
 
 **Custom field name**
 
@@ -749,10 +757,12 @@ Subscription.active.deactivate_all     # => 3
 ```
 
 Both target the relation, return an Integer count, and run in a transaction. With
-`activate!`/`deactivate!` unoverridden and no `validates` on the model they collapse to a
-single `UPDATE`; otherwise they stream per record so validations still run, and a record that
-fails to save raises `ActiveRecord::RecordNotSaved` and rolls the whole batch back.
-`toggle_active!`'s row lock has no batch analogue.
+`activate!`/`deactivate!` unoverridden and no validations on the model — neither
+`validates`/`validates_with` nor a custom `validate :method` — they collapse to a single
+`UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise they stream
+per record so validations still run, and a record that fails to save raises
+`ActiveRecord::RecordNotSaved` and rolls the whole batch back. `toggle_active!`'s row lock has
+no batch analogue.
 
 **Notes**
 - `NULL` is treated as inactive (same convention as most apps' "unset = off").

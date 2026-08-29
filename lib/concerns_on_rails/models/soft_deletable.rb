@@ -148,6 +148,9 @@ module ConcernsOnRails
         # cannot differ from update_all: `touch: false` (the per-record path is
         # update_column — already no validations/callbacks/updated_at) and none
         # of the gem's hooks or bang methods overridden by the host model.
+        # Exempt from BatchOps.fast_path?'s validations gate for that first
+        # reason: under `touch: false` both paths skip validations already, so
+        # only the ownership half (`unoverridden?`) applies.
         def soft_delete_batch_fast_path?(kind)
           return false if soft_delete_touch
 
@@ -156,7 +159,7 @@ module ConcernsOnRails
                     else
                       %i[before_soft_delete after_soft_delete soft_delete!]
                     end
-          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::SoftDeletable, *methods)
+          ConcernsOnRails::Support::BatchOps.unoverridden?(self, ConcernsOnRails::Models::SoftDeletable, *methods)
         end
       end
 

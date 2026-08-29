@@ -299,5 +299,30 @@ describe ConcernsOnRails::Expirable do
       expect(valid.reload.expires_at).to be_nil
       expect(invalid.reload.expires_at).to be_nil
     end
+
+    # Regression: `validate :method` leaves `validators` EMPTY (only `validates`
+    # / `validates_with` populate it), so the old `validators.empty?` gate took
+    # the fast path and expired invalid rows.
+    it "cannot take the fast path when the model has a custom validate method" do
+      stub_const("CallbackValidatedToken", Class.new(TestModel) do
+        self.table_name = "batch_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by
+        validate :title_must_be_present
+
+        def title_must_be_present
+          errors.add(:title, "can't be blank") if title.blank?
+        end
+      end)
+      valid = CallbackValidatedToken.create!(title: "ok", expires_at: nil)
+      invalid = CallbackValidatedToken.create!(title: "temporary", expires_at: nil)
+      invalid.update_column(:title, nil)
+
+      expect(CallbackValidatedToken.validators).to be_empty
+      expect { CallbackValidatedToken.expire_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(valid.reload.expires_at).to be_nil
+      expect(invalid.reload.expires_at).to be_nil
+    end
   end
 end

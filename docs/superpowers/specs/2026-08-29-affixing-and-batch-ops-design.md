@@ -189,22 +189,48 @@ Every batch verb, matching `soft_delete_all` / `restore_all` / `anonymize_all!`:
 `soft_delete_batch_fast_path?` generalizes to:
 
 ```ruby
-ConcernsOnRails::Support::BatchOps.fast_path?(klass, owner, *methods)
+ConcernsOnRails::Support::BatchOps.unoverridden?(klass, owner, *methods)
 # true when every named instance method is still owned by `owner`
 # (i.e. the host model overrode none of the concern's hooks or bang methods)
+
+ConcernsOnRails::Support::BatchOps.fast_path?(klass, owner, *methods)
+# the WHOLE decision: unoverridden? AND the host model declares no validations
+
+ConcernsOnRails::Support::BatchOps.with_timestamps(klass, attributes)
+# the bulk-write payload, plus updated_at/updated_on when the model has them
+# and record_timestamps is on
 ```
 
-SoftDeletable is refactored onto it — keeping its extra `return false if
-soft_delete_touch` guard at the call site — so the rule has one definition rather
-than six. Its existing specs guard the move. Autoloaded alongside `Support::Affix`.
+The validations half cannot be `klass.validators.empty?`: `validators` is
+populated only by `validates` / `validates_with`, while a custom
+`validate :method` (or `validate do … end`) registers only a `_validate_callbacks`
+entry and leaves `validators` empty — so that gate took the fast path, and wrote
+invalid rows, through one of the most common declaration forms. `validations?`
+therefore also diffs `_validate_callbacks` filters against
+`ActiveRecord::Base`'s own (Rails ships one there, so a raw count doesn't work).
+Hoisting the whole decision into `fast_path?` keeps it in one place instead of
+three near-copies.
+
+`with_timestamps` exists because `update_all` never touches `updated_at` while
+the per-record `update` does: without it a batch verb would bump `updated_at` or
+not depending on whether the model happens to declare a validator, silently
+staling cache keys and `updated_since` sync jobs. It is what Rails' own
+`touch_all` / `update_counters(touch:)` do.
+
+SoftDeletable and Lockable call `unoverridden?` rather than `fast_path?` — both
+are exempt from the validations half (and from `with_timestamps`) because their
+per-record paths write via `update_column(s)`, which already skips validations
+and timestamps, so their two paths are equivalent as they stand. SoftDeletable
+keeps its extra `return false if soft_delete_touch` guard at the call site. Its
+existing specs guard the move. Autoloaded alongside `Support::Affix`.
 
 ### Verbs
 
 | Concern | Verb(s) | Target rows | Fast path | Notes |
 |---|---|---|---|---|
-| Publishable | `publish_all`, `unpublish_all` | not currently published / currently published | when `before/after_publish`, `before/after_unpublish`, `publish!`, `unpublish!` are unoverridden **and the model declares no validators** | branches boolean vs timestamp column, like every other Publishable scope. The per-record path calls `update`, which runs validations, while `update_all` does not — so a model with `validates` must take the slow path even with every hook unoverridden |
-| Expirable | `expire_all` | currently active | when `expire!` is unoverridden **and the model declares no validators** | Expirable defines no hooks, so an overridden bang method or the presence of validators forces the slow path; same `update` vs `update_all` gap as Publishable |
-| Activatable | `activate_all`, `deactivate_all` | inactive / active | when the bang method is unoverridden **and the model declares no validators** | Activatable defines no hooks; `toggle_active!`'s row lock has no batch analogue; same `update` vs `update_all` gap as Publishable |
+| Publishable | `publish_all`, `unpublish_all` | not currently published / currently published | when `before/after_publish`, `before/after_unpublish`, `publish!`, `unpublish!` are unoverridden **and the model declares no validations** (`validates`/`validates_with` or a custom `validate`) | branches boolean vs timestamp column, like every other Publishable scope. The per-record path calls `update`, which runs validations, while `update_all` does not — so a model with any validation must take the slow path even with every hook unoverridden |
+| Expirable | `expire_all` | currently active | when `expire!` is unoverridden **and the model declares no validations** | Expirable defines no hooks, so an overridden bang method or any declared validation forces the slow path; same `update` vs `update_all` gap as Publishable |
+| Activatable | `activate_all`, `deactivate_all` | inactive / active | when the bang method is unoverridden **and the model declares no validations** | Activatable defines no hooks; `toggle_active!`'s row lock has no batch analogue; same `update` vs `update_all` gap as Publishable |
 | Lockable | `unlock_expired` | locked rows whose `locked_at + unlock_in` has passed | when `before/after_unlock` and `unlock_access!` are unoverridden | must also reset failed attempts, mirroring `unlock_access!`; matches nothing when `unlock_in` is nil |
 | Stateable | `transition_all(event)` | rows in a state the event can leave, minus rows already in the target state | **never** | the per-record path uses `update!`, which runs validations, while every fast path uses `update_all`, which does not — collapsing would silently skip them. Guard membership is still filtered DB-side; records failing `may_<event>?` are **skipped, not errors** |
 
@@ -215,6 +241,26 @@ than six. Its existing specs guard the move. Autoloaded alongside `Support::Affi
 verbs respect the relation, the narrow case is expressible without a special
 case: `Post.draft.publish_all`. Documented in the Publishable section of the
 README; not special-cased in code.
+
+For that mitigation to actually work, `publish_all` builds its "not currently
+published" predicate INLINE against `all` instead of calling the `unpublished`
+scope: that scope's body opens with `unscope(where: publishable_field)`, which
+strips the *caller's own* predicate on the publish column right back off — so
+`Post.draft.publish_all` silently discarded `.draft`, published scheduled rows
+and overwrote their future timestamps unrecoverably. Rejected alternatives: an
+`include_scheduled:` keyword (public surface routing around a bug) and merely
+documenting the sharp edge (the relation-respecting contract exists so that
+chaining works).
+
+Accepted consequence: on a model configured with `default_scope: true`, `all`
+is already narrowed to published rows, so a bare `Post.publish_all` targets
+nothing. Such callers chain `.draft` or `.unpublished` first — both unscope the
+field themselves, so the chain resolves correctly. Documented on the method, in
+the README and in the CHANGELOG.
+
+`unpublish_all` needs no equivalent change: it targets the `published` scope,
+whose body does not unscope, so a caller's constraint on the publish column
+already composes.
 
 ### No bangs on the new verbs
 
