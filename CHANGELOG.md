@@ -1,5 +1,112 @@
 <!-- CHANGELOG.md -->
 
+## 1.27.0 (2026-08-29)
+
+Scope-name collisions finally have an escape hatch on the eight concerns whose
+generated scope names can collide (Activatable, Expirable, Lockable, Stateable
+and Anonymizable already had it; Publishable, SoftDeletable and Schedulable
+join them here), and the 1.22 batch-operation contract reaches five more
+concerns. No new columns, migrations or dependencies. 1257 examples, 0
+failures.
+
+### Added
+- **Models::Publishable / SoftDeletable / Schedulable**: `prefix:`/`suffix:` on
+  `publishable_by` / `soft_deletable_by` / `schedulable_by` rename the generated
+  scopes, so a model can include SoftDeletable (`.active`) alongside Activatable
+  or Expirable (also `.active`) without one silently clobbering the other. With
+  no affix passed the scope names, default scopes and emitted SQL are unchanged.
+  `prefix: true` (use the configured field name), previously honoured only by
+  Stateable, now works on every affixing concern.
+- **Models::Publishable**: `publish_all` / `unpublish_all`. `publish_all` targets
+  every not-currently-published row — *including scheduled ones*, whose future
+  timestamp it overwrites; chain the draft scope (`Post.draft.publish_all`) to
+  narrow it, which composes because the predicate is built against the current
+  relation rather than routed through the field-unscoping `unpublished` scope.
+  The flip side: on a model with `default_scope: true` the relation is already
+  narrowed to published rows, so a bare `Post.publish_all` matches nothing —
+  chain `.draft` or `.unpublished` (both unscope the column themselves). Both
+  verbs respect the relation, return an Integer count, and run in a
+  transaction.
+- **Models::Expirable**: `expire_all(time = Time.zone.now)`.
+- **Models::Activatable**: `activate_all` / `deactivate_all`.
+- **Models::Lockable**: `unlock_expired` — clears `locked_at` and zeroes the
+  attempts counter on every row whose `unlock_in` window has elapsed, mirroring
+  `unlock_access!`. Returns 0 without querying when `unlock_in` is nil.
+- **Models::Stateable**: `transition_all(event)` — runs one declared transition
+  across the relation, skipping (not failing) records the guard rejects.
+  Deliberately has no single-UPDATE fast path: the per-record path runs
+  validations through `update!` and a bulk UPDATE would skip them.
+
+### Notes
+Validation semantics of the new batch verbs (`publish_all`, `unpublish_all`,
+`expire_all`, `activate_all`, `deactivate_all`, `unlock_expired`): each
+collapses to a **single `UPDATE`** — one SQL statement for the whole batch —
+only when the host model declares **no validations** (and has overridden
+none of the concern's hooks/bang methods; see the per-concern docs for the
+exact method list). "No validations" means neither `validates` /
+`validates_with` **nor** a custom `validate :method` / `validate do … end` —
+the latter registers only a validate callback and leaves `validators` empty,
+so it is detected through `_validate_callbacks` rather than `validators`.
+It also means **no association carrying the default autosave validation**: a
+bare `has_many`/`has_one` registers a `validate_associated_records_*` callback,
+so in practice most models with associations take the streaming per-record
+path. That is deliberate — the gate errs toward the path that honours the
+rollback contract — but it means the single-`UPDATE` optimisation applies to
+simple models, not to every model that merely omits `validates`.
+`unlock_expired` is exempt from the validations check because
+`unlock_access!` writes via `update_columns`, which always skips validations,
+so its two paths are already equivalent. On a model that declares any
+validation, five of these verbs (`publish_all`, `unpublish_all`, `expire_all`,
+`activate_all`, `deactivate_all`) instead stream the relation record-by-record
+inside a transaction, calling the same guarded bang/update method a single
+record would use; a record that fails to save raises
+`ActiveRecord::RecordNotSaved` and rolls the **entire batch** back — nothing
+partially commits.
+
+The single-`UPDATE` path writes `updated_at` (`updated_on` too, when present)
+alongside the concern's own column whenever the model has that column and
+`record_timestamps` is on, so the fast and slow paths agree — the same thing
+Rails' `touch_all` and `update_counters(touch:)` do. `unlock_expired` is
+exempt here as well: it mirrors `unlock_access!`, which writes via
+`update_columns` and deliberately does not touch timestamps.
+
+`transition_all` also always takes the per-record path, regardless of
+validators — for the same underlying reason (validations must run) — but its
+failure mode is different, not the same: the per-record path calls the
+guarded `<event>!`, which calls `update!`, and `update!` raises
+`ActiveRecord::RecordInvalid` **directly** on a validation failure. That
+exception propagates straight out of the batch loop, never reaching the
+`RecordNotSaved` branch the other five verbs use. Code that rescues
+`RecordNotSaved` around a `transition_all` call will not catch a failed row —
+rescue `RecordInvalid` there instead.
+
+One residual, deliberate divergence survives on the fast path: like every
+`*_all` method in Rails, the single-UPDATE path does not fire host-defined
+`before_save`/`after_save` callbacks (only the concern's own
+`before_*`/`after_*` lifecycle hooks are checked when deciding whether the
+fast path applies at all). If your model relies on `before_save`/`after_save`
+for side effects, either add a validation (forcing the slow, per-record path)
+or call the bang method in a loop.
+
+### Internal
+- New `Support::Affix` (affixed-name computation, `prefix: true` normalization,
+  and the guarded scope capture/retirement used by the three newly affixable
+  concerns) replaces six duplicated implementations across Activatable,
+  Expirable, Lockable, Anonymizable, Stateable and Storable.
+- New `Support::BatchOps`: the whole fast-path safety decision
+  (`fast_path?` = hooks/bang methods unoverridden AND no declared validations,
+  detected through both `validators` and `_validate_callbacks`), the
+  ownership-only half (`unoverridden?`, for the two concerns whose per-record
+  path writes via `update_column(s)` and so needs no validations gate), the
+  `updated_at`/`updated_on` bulk-write payload helper (`with_timestamps`), and
+  the transactional `find_each` runner. SoftDeletable's `soft_delete_all` /
+  `restore_all` now route through it, so the contract has one definition.
+- Retiring a default-named scope is guarded three ways — the name must have been
+  recorded by the concern, be owned by the class's own singleton, and still be
+  the exact method captured — so a model's own override survives and a parent's
+  scopes are never removed from a subclass (that case raises with a pointer to
+  the parent).
+
 ## 1.26.0 (2026-08-24)
 
 A fixes-and-performance round from a full audit of the 25 model concerns: one privacy bug (Anonymizable left Encryptable blind-index fingerprints queryable after erasure), four silent-misbehavior fixes, five query-count reductions, and three hardening changes. No new concerns. 1173 examples, 0 failures.

@@ -57,12 +57,16 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   field/direction. `sortable_by :position` / `position: :desc`; `scope:`, `add_new_at:`,
   `use_acts_as_list: false`.
 - **`Publishable`** — timestamp (default `published_at`) **or** boolean column; scopes
-  `.published/.unpublished/.scheduled/.draft` branch on the column type. `default_scope: true`
-  hides unpublished. Lifecycle hooks: `before/after_publish`, `before/after_unpublish`.
+  `.published/.unpublished/.scheduled/.draft` (affixable via `prefix:`/`suffix:`) branch on
+  the column type. `default_scope: true` hides unpublished. Lifecycle hooks:
+  `before/after_publish`, `before/after_unpublish`. Batch `publish_all`/`unpublish_all`
+  (atomic; single-UPDATE fast path when the hooks/bang methods are unoverridden AND the
+  model has no validators — `update` in the per-record path runs them, `update_all` doesn't).
 - **`SoftDeletable`** — timestamp (default `deleted_at`) + `default_scope` hiding deleted
-  rows (opt out with `default_scope: false`). `soft_delete!`/`restore!`, batch
-  `soft_delete_all`/`restore_all` (atomic), `really_destroy_all`/`really_delete!` for hard
-  deletes. Hooks: `before/after_soft_delete`, `before/after_restore`.
+  rows (opt out with `default_scope: false`); scopes affixable via `prefix:`/`suffix:`.
+  `soft_delete!`/`restore!`, batch `soft_delete_all`/`restore_all` (atomic, routed through
+  `Support::BatchOps`), `really_destroy_all`/`really_delete!` for hard deletes. Hooks:
+  `before/after_soft_delete`, `before/after_restore`.
 - **`Hashable`** — one random identifier column. `type:` `:hex`/`:uuid`/`:integer`/`:custom`,
   `length:`, `alphabet:`, `unique:` (retry on collision).
 - **`Tokenizable`** — multiple security-token columns. `type:` `:urlsafe`/`:hex`/
@@ -70,14 +74,17 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Sequenceable`** — ordered reference numbers (invoice/order numbers). `into:`, `prefix:`,
   `padding:`, `scope:`, `reset:` (`:year`/`:month`/`:day`), `template:`.
 - **`Schedulable`** — start/end window (`starts_at`/`ends_at`); `current`/`upcoming`/`expired`
-  scopes + predicates.
+  scopes (affixable via `prefix:`/`suffix:`) + predicates.
 - **`Expirable`** — single expiry column (default `expires_at`); `active`/`expired`/
-  `expiring_within` scopes (affixable via `prefix:`/`suffix:`).
+  `expiring_within` scopes (affixable via `prefix:`/`suffix:`). Batch `expire_all` (single-
+  UPDATE fast path when `expire!` is unoverridden AND the model has no validators).
 - **`Activatable`** — boolean active flag (default `active`); `active`/`inactive` scopes
-  (affixable via `prefix:`/`suffix:`), `activate!`/`deactivate!`/`toggle_active!`.
+  (affixable via `prefix:`/`suffix:`), `activate!`/`deactivate!`/`toggle_active!`. Batch
+  `activate_all`/`deactivate_all` (same validators-gated fast path as Publishable/Expirable).
 - **`Stateable`** — lightweight string-backed state machine: states, `default:`,
   `transitions:`, `prefix:`/`suffix:`; guarded `<event>!` + `may_<event>?`,
-  `before/after_transition` hooks.
+  `before/after_transition` hooks. Batch `transition_all(event)` — deliberately NO fast path,
+  since the per-record path runs validations via `update!` and `update_all` would skip them.
 - **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all`,
   `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only).
 - **`Normalizable`** — `before_validation` normalization. Presets (`:email`, `:phone`,
@@ -98,7 +105,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `lockable_by attempts:, locked_at:, max_attempts:, unlock_in:, prefix:/suffix:`;
   `register_failed_attempt!` (atomic SQL increment), `access_locked?` (lazy expiry),
   `lock_access!`/`unlock_access!` (update_columns + before/after hooks),
-  `reset_failed_attempts!`; expiry-aware `.locked`/`.unlocked` scopes.
+  `reset_failed_attempts!`; expiry-aware `.locked`/`.unlocked` scopes. Batch
+  `unlock_expired` (mirrors `unlock_access!`; no validators gate needed since
+  `update_columns` already skips them; returns 0 without a query when `unlock_in` is nil).
 - **`Aliasable`** — full association aliasing: `alias_association :new, :old`
   (alias_method argument order, repeatable, declared after the source). Read/write/
   build_/create_/ids delegators + a renamed reflection copy so joins/includes/
@@ -224,7 +233,17 @@ query-param coercion shared by the paginators/Filterable), `UniqueRetry` (bounde
 renderer used by seven controller concerns), `FilterParameterRegistry` (live
 filter_parameters registry consulted by the proc `ConcernsOnRails::Railtie` appends at
 boot), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,
-`SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`.
+`SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `Affix` (affixed
+scope/accessor-name computation + `prefix: true` normalization, shared by Activatable,
+Expirable, Lockable, Anonymizable, Stateable, Storable, Publishable, SoftDeletable and
+Schedulable; the latter three additionally use its guarded scope capture/retirement — a
+captured default-named scope is only retired when it's still recorded, still owned by the
+class's own singleton, and still the exact method captured, so an overridden scope survives
+and a subclass never rips a scope out from under its parent), `BatchOps` (the hook-ownership
+fast-path predicate — every named instance method still owned by the concern, i.e.
+unoverridden — plus the transactional `find_each` batch runner shared by every `*_all` verb:
+Integer count, DB-side filtering for idempotency, rollback via `ActiveRecord::RecordNotSaved`
+on a failed record).
 `lib/concerns_on_rails/railtie.rb` loads only when `Rails::Railtie` is defined.
 
 ### Test structure

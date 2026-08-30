@@ -238,4 +238,278 @@ describe ConcernsOnRails::Publishable do
       expect(article.log).to eq(%i[before_publish after_publish before_unpublish after_unpublish])
     end
   end
+
+  describe "scope affixing" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :affixed_articles, force: true do |t|
+          t.datetime :published_at
+        end
+      end
+    end
+
+    it "keeps the default scope names when no affix is given" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+      end
+
+      expect(klass).to respond_to(:published)
+      expect(klass).to respond_to(:draft)
+    end
+
+    it "keeps the default scope names when the macro is never called" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+      end
+
+      expect(klass).to respond_to(:published)
+    end
+
+    it "defines affixed names and removes the defaults" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by :published_at, prefix: :article
+      end
+
+      expect(klass).to respond_to(:article_published)
+      expect(klass).to respond_to(:article_draft)
+      expect(klass).not_to respond_to(:published)
+      expect(klass).not_to respond_to(:draft)
+    end
+
+    it "accepts prefix: true, meaning the field name" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by :published_at, prefix: true
+      end
+
+      expect(klass).to respond_to(:published_at_published)
+    end
+
+    it "returns the right rows through the affixed scopes" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by :published_at, suffix: :posts
+      end
+      live = klass.create!(published_at: 1.day.ago)
+      klass.create!(published_at: nil)
+
+      expect(klass.published_posts.pluck(:id)).to eq([live.id])
+      expect(klass.draft_posts.count).to eq(1)
+    end
+
+    it "keeps default_scope: true working under an affix" do
+      klass = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by :published_at, prefix: :article, default_scope: true
+      end
+      live = klass.create!(published_at: 1.day.ago)
+      klass.create!(published_at: nil)
+
+      expect(klass.all.pluck(:id)).to eq([live.id])
+      expect(klass.article_draft.count).to eq(1)
+    end
+
+    it "raises when affixing on a subclass whose parent owns the scopes" do
+      parent = Class.new(TestModel) do
+        self.table_name = "affixed_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+      end
+      stub_const("AffixedParentArticle", parent)
+
+      expect do
+        Class.new(parent) { publishable_by :published_at, prefix: :child }
+      end.to raise_error(ArgumentError, /AffixedParentArticle/)
+    end
+  end
+
+  describe "batch operations" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :batch_articles, force: true do |t|
+          t.datetime :published_at
+          t.string :title
+          t.timestamps
+        end
+      end
+
+      stub_const("BatchArticle", Class.new(TestModel) do
+        self.table_name = "batch_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+      end)
+    end
+
+    def capture_sql
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*args|
+        statements << args.last[:sql].to_s
+      end
+      yield
+      statements
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscriber)
+    end
+
+    it "publishes every unpublished record and returns the count" do
+      BatchArticle.create!(published_at: nil)
+      BatchArticle.create!(published_at: nil)
+      already = BatchArticle.create!(published_at: 2.days.ago)
+
+      expect(BatchArticle.publish_all).to eq(2)
+      expect(BatchArticle.where(published_at: nil).count).to eq(0)
+      expect(already.reload.published_at).to be_within(1.second).of(2.days.ago)
+    end
+
+    it "is idempotent — a second call transitions nothing" do
+      BatchArticle.create!(published_at: nil)
+      BatchArticle.publish_all
+
+      expect(BatchArticle.publish_all).to eq(0)
+    end
+
+    it "respects the relation" do
+      keep = BatchArticle.create!(published_at: nil)
+      BatchArticle.create!(published_at: nil)
+
+      expect(BatchArticle.where.not(id: keep.id).publish_all).to eq(1)
+      expect(keep.reload.published_at).to be_nil
+    end
+
+    # Regression: publish_all used to target the `unpublished` SCOPE, whose body
+    # opens with `unscope(where: published_at)` — that stripped the caller's own
+    # predicate on the publish column back off, so `.draft` was silently
+    # discarded and scheduled rows were published, destroying their future
+    # timestamp. The existing "respects the relation" example constrains on :id,
+    # which the unscope leaves alone, so it never caught this.
+    it "composes with a caller constraint on the publish column, leaving scheduled rows alone" do
+      BatchArticle.create!(published_at: nil)
+      scheduled = BatchArticle.create!(published_at: 5.days.from_now)
+
+      expect(BatchArticle.draft.publish_all).to eq(1)
+      expect(scheduled.reload.published_at).to be_within(1.second).of(5.days.from_now)
+    end
+
+    # Regression: update_all does not touch updated_at but the per-record
+    # `update` does, so the two paths used to disagree depending on whether the
+    # model happened to declare a validator.
+    it "bumps updated_at on the fast path, exactly as the per-record path does" do
+      article = BatchArticle.create!(published_at: nil)
+      BatchArticle.where(id: article.id).update_all(updated_at: 3.days.ago)
+
+      expect(BatchArticle.publish_all).to eq(1)
+      expect(article.reload.updated_at).to be_within(5.seconds).of(Time.zone.now)
+    end
+
+    it "issues exactly one UPDATE on the fast path" do
+      2.times { BatchArticle.create!(published_at: nil) }
+
+      statements = capture_sql { BatchArticle.publish_all }
+
+      expect(statements.grep(/^UPDATE/).length).to eq(1)
+    end
+
+    it "unpublishes every published record" do
+      BatchArticle.create!(published_at: 1.day.ago)
+      BatchArticle.create!(published_at: nil)
+
+      expect(BatchArticle.unpublish_all).to eq(1)
+      expect(BatchArticle.where.not(published_at: nil).count).to eq(0)
+    end
+
+    it "runs the hooks once per record when they are overridden" do
+      stub_const("HookedArticle", Class.new(TestModel) do
+        self.table_name = "batch_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+
+        cattr_accessor :published_ids
+        self.published_ids = []
+
+        def after_publish
+          self.class.published_ids << id
+        end
+      end)
+      a = HookedArticle.create!(published_at: nil)
+      b = HookedArticle.create!(published_at: nil)
+
+      expect(HookedArticle.publish_all).to eq(2)
+      expect(HookedArticle.published_ids).to match_array([a.id, b.id])
+    end
+
+    it "rolls the whole batch back when a record fails" do
+      stub_const("FailingArticle", Class.new(TestModel) do
+        self.table_name = "batch_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+
+        def publish!
+          false
+        end
+      end)
+      FailingArticle.create!(published_at: nil)
+
+      expect { FailingArticle.publish_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(FailingArticle.where(published_at: nil).count).to eq(1)
+    end
+
+    it "cannot take the fast path when the model has validations — an invalid record rolls the whole batch back" do
+      stub_const("ValidatedArticle", Class.new(TestModel) do
+        self.table_name = "batch_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+        validates :title, presence: true
+      end)
+      valid = ValidatedArticle.create!(title: "ok", published_at: nil)
+      invalid = ValidatedArticle.create!(title: "temporary", published_at: nil)
+      invalid.update_column(:title, nil)
+
+      expect { ValidatedArticle.publish_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(valid.reload.published_at).to be_nil
+      expect(invalid.reload.published_at).to be_nil
+    end
+
+    # Regression: `validate :method` leaves `validators` EMPTY (only `validates`
+    # / `validates_with` populate it), so the old `validators.empty?` gate took
+    # the fast path and published invalid rows.
+    it "cannot take the fast path when the model has a custom validate method" do
+      stub_const("CallbackValidatedArticle", Class.new(TestModel) do
+        self.table_name = "batch_articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+        validate :title_must_be_present
+
+        def title_must_be_present
+          errors.add(:title, "can't be blank") if title.blank?
+        end
+      end)
+      valid = CallbackValidatedArticle.create!(title: "ok", published_at: nil)
+      invalid = CallbackValidatedArticle.create!(title: "temporary", published_at: nil)
+      invalid.update_column(:title, nil)
+
+      expect(CallbackValidatedArticle.validators).to be_empty
+      expect { CallbackValidatedArticle.publish_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(valid.reload.published_at).to be_nil
+      expect(invalid.reload.published_at).to be_nil
+    end
+  end
 end

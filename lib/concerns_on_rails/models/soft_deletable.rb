@@ -1,10 +1,14 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/batch_ops"
 
 module ConcernsOnRails
   module Models
     module SoftDeletable
       extend ActiveSupport::Concern
+
+      SCOPE_BASES = %i[active without_deleted soft_deleted only_deleted with_deleted deleted_within].freeze
 
       included do
         # declare class attributes and set default values
@@ -15,26 +19,20 @@ module ConcernsOnRails
         # A default_scope is sticky and breaks unscoped joins / uniqueness validations /
         # eager-loading, so new models are encouraged to disable it and chain `.without_deleted`.
         class_attribute :soft_delete_default_scope, instance_accessor: false, default: true
+        class_attribute :soft_delete_scope_names, instance_accessor: false,
+                                                  default: SCOPE_BASES.to_h { |b| [b, b] }.freeze
+        class_attribute :soft_delete_captured_scopes, instance_accessor: false, default: {}.freeze
 
-        # scopes
-        scope :active, -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
-        scope :without_deleted, -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
-        scope :soft_deleted, -> { unscope(where: soft_delete_field).where.not(soft_delete_field => nil) }
-        scope :only_deleted, -> { soft_deleted }
-        # `with_deleted` peels off the default scope so deleted + non-deleted are both returned.
-        scope :with_deleted, -> { unscope(where: soft_delete_field) }
-        # Records soft-deleted within the last `duration` (e.g. `deleted_within(7.days)`).
-        # Arel `gteq` rather than an endless range (`x..`): AR only translates an
-        # endless range to `>=` on Rails 6.0+, but this gem supports Rails >= 5.0.
-        # arel_table also qualifies the column with the table name, so the scope
-        # stays unambiguous inside joins against tables sharing the column.
-        scope :deleted_within, lambda { |duration|
-          soft_deleted.where(arel_table[soft_delete_field].gteq(duration.ago))
-        }
+        define_soft_delete_scopes(nil, nil)
+        self.soft_delete_captured_scopes =
+          ConcernsOnRails::Support::Affix.capture(self, SCOPE_BASES).freeze
 
         # Hide soft-deleted rows from `.all` only when enabled (the default). The block is
-        # evaluated lazily, so toggling `soft_delete_default_scope` via the macro takes effect.
-        default_scope { soft_delete_default_scope ? without_deleted : all }
+        # evaluated lazily, so toggling `soft_delete_default_scope` via the macro takes effect —
+        # and it resolves the scope through the names map, so an affixed model still filters.
+        default_scope do
+          soft_delete_default_scope ? public_send(soft_delete_scope_names.fetch(:without_deleted)) : all
+        end
       end
 
       # A real module (not `class_methods do`) so the batch helpers and their
@@ -47,11 +45,16 @@ module ConcernsOnRails
         # Example:
         #   soft_deletable_by :deleted_at, touch: false
         #   soft_deletable_by :deleted_at, default_scope: false  # don't hide deleted rows from .all
-        def soft_deletable_by(field = nil, touch: true, default_scope: true)
+        def soft_deletable_by(field = nil, touch: true, default_scope: true, prefix: nil, suffix: nil)
           self.soft_delete_field = field || :deleted_at
           self.soft_delete_touch = touch
           self.soft_delete_default_scope = default_scope
           ensure_columns!("ConcernsOnRails::Models::SoftDeletable", soft_delete_field, types: :datetime)
+          return unless prefix || suffix
+
+          define_soft_delete_scopes(prefix, suffix)
+          ConcernsOnRails::Support::Affix.retire!(self, soft_delete_captured_scopes,
+                                                  label: "ConcernsOnRails::Models::SoftDeletable")
         end
 
         # Soft-delete every matching record. Returns the Integer count of
@@ -61,25 +64,15 @@ module ConcernsOnRails
         # 1.22 the rollback happened silently and the method returned nil. With
         # `touch: false` and no overridden hooks this is a single UPDATE.
         def soft_delete_all
-          if soft_delete_batch_fast_path?(:soft_delete)
-            return all.where(soft_delete_field => nil).update_all(soft_delete_field => Time.zone.now)
-          end
+          pending = all.where(soft_delete_field => nil)
+          return pending.update_all(soft_delete_field => Time.zone.now) if soft_delete_batch_fast_path?(:soft_delete)
 
-          # find_each streams in PK batches instead of materializing the whole
-          # relation; filtering deleted rows DB-side also skips loading them at
-          # all. Updated rows leave the filtered set, but pagination is strictly
-          # forward by id, so nothing is skipped or revisited.
-          transaction do
-            count = 0
-            all.where(soft_delete_field => nil).find_each do |record|
-              record.soft_delete! ||
-                raise(ActiveRecord::RecordNotSaved.new(
-                        "ConcernsOnRails::Models::SoftDeletable: failed to soft-delete record", record
-                      ))
-              count += 1
-            end
-            count
-          end
+          ConcernsOnRails::Support::BatchOps.run(
+            pending,
+            label: "ConcernsOnRails::Models::SoftDeletable",
+            message: "failed to soft-delete record",
+            &:soft_delete!
+          )
         end
 
         # Override destroy_all to soft delete. Kept for backwards compatibility, but prefer the
@@ -104,27 +97,60 @@ module ConcernsOnRails
         # Integer count, RecordNotSaved + rollback on failure, single UPDATE
         # when the fast path applies.
         def restore_all
-          return soft_deleted.update_all(soft_delete_field => nil) if soft_delete_batch_fast_path?(:restore)
+          deleted = all.public_send(soft_delete_scope_names.fetch(:soft_deleted))
+          return deleted.update_all(soft_delete_field => nil) if soft_delete_batch_fast_path?(:restore)
 
-          transaction do
-            count = 0
-            soft_deleted.find_each do |record|
-              record.restore! ||
-                raise(ActiveRecord::RecordNotSaved.new(
-                        "ConcernsOnRails::Models::SoftDeletable: failed to restore record", record
-                      ))
-              count += 1
-            end
-            count
-          end
+          ConcernsOnRails::Support::BatchOps.run(
+            deleted,
+            label: "ConcernsOnRails::Models::SoftDeletable",
+            message: "failed to restore record",
+            &:restore!
+          )
         end
 
         private
+
+        # Built here rather than inline in `included do` so the names can be
+        # affixed. Every scope that references another scope resolves it
+        # through soft_delete_scope_names — a hard-coded symbol would break
+        # the moment a model affixes.
+        def define_soft_delete_scopes(prefix, suffix)
+          prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: soft_delete_field)
+          suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: soft_delete_field)
+          self.soft_delete_scope_names = SCOPE_BASES.to_h do |base|
+            [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
+          end.freeze
+
+          soft_deleted_name = soft_delete_scope_names.fetch(:soft_deleted)
+
+          scope soft_delete_scope_names[:active],
+                -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
+          scope soft_delete_scope_names[:without_deleted],
+                -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
+          scope soft_delete_scope_names[:soft_deleted],
+                -> { unscope(where: soft_delete_field).where.not(soft_delete_field => nil) }
+          scope soft_delete_scope_names[:only_deleted],
+                -> { public_send(soft_deleted_name) }
+          # `with_deleted` peels off the default scope so deleted + non-deleted are both returned.
+          scope soft_delete_scope_names[:with_deleted],
+                -> { unscope(where: soft_delete_field) }
+          # Records soft-deleted within the last `duration` (e.g. `deleted_within(7.days)`).
+          # Arel `gteq` rather than an endless range (`x..`): AR only translates an
+          # endless range to `>=` on Rails 6.0+, but this gem supports Rails >= 5.0.
+          # arel_table also qualifies the column with the table name, so the scope
+          # stays unambiguous inside joins against tables sharing the column.
+          scope soft_delete_scope_names[:deleted_within], lambda { |duration|
+            public_send(soft_deleted_name).where(arel_table[soft_delete_field].gteq(duration.ago))
+          }
+        end
 
         # The single-UPDATE fast path is only safe when per-record behavior
         # cannot differ from update_all: `touch: false` (the per-record path is
         # update_column — already no validations/callbacks/updated_at) and none
         # of the gem's hooks or bang methods overridden by the host model.
+        # Exempt from BatchOps.fast_path?'s validations gate for that first
+        # reason: under `touch: false` both paths skip validations already, so
+        # only the ownership half (`unoverridden?`) applies.
         def soft_delete_batch_fast_path?(kind)
           return false if soft_delete_touch
 
@@ -133,7 +159,7 @@ module ConcernsOnRails
                     else
                       %i[before_soft_delete after_soft_delete soft_delete!]
                     end
-          methods.all? { |m| instance_method(m).owner == ConcernsOnRails::Models::SoftDeletable }
+          ConcernsOnRails::Support::BatchOps.unoverridden?(self, ConcernsOnRails::Models::SoftDeletable, *methods)
         end
       end
 

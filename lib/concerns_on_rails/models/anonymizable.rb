@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/affix"
 require "digest"
 require "securerandom"
 
@@ -152,9 +153,12 @@ module ConcernsOnRails
           return if anonymizable_scopes_defined || anonymizable_stamp.nil?
 
           self.anonymizable_scopes_defined = true
-          affixed = ->(base) { [prefix, base, suffix].compact.join("_") }
-          scope affixed.call("anonymized"), -> { where.not(anonymizable_stamp => nil) }
-          scope affixed.call("not_anonymized"), -> { where(anonymizable_stamp => nil) }
+          prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: anonymizable_stamp)
+          suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: anonymizable_stamp)
+          scope ConcernsOnRails::Support::Affix.name(:anonymized, prefix: prefix, suffix: suffix),
+                -> { where.not(anonymizable_stamp => nil) }
+          scope ConcernsOnRails::Support::Affix.name(:not_anonymized, prefix: prefix, suffix: suffix),
+                -> { where(anonymizable_stamp => nil) }
         end
       end
 

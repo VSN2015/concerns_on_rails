@@ -222,4 +222,56 @@ describe ConcernsOnRails::Schedulable do
     expect(ReconfigPromo.schedulable_starts_at_field).to eq(:starts_on)
     expect(ReconfigPromo.schedulable_ends_at_field).to eq(:ends_on)
   end
+
+  describe "scope affixing" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :affixed_events, force: true do |t|
+          t.datetime :starts_at
+          t.datetime :ends_at
+        end
+      end
+    end
+
+    def affixed_class(**options)
+      Class.new(TestModel) do
+        self.table_name = "affixed_events"
+        include ConcernsOnRails::Schedulable
+
+        schedulable_by(**options)
+      end
+    end
+
+    it "keeps the default names with no affix" do
+      klass = affixed_class
+      expect(klass).to respond_to(:current)
+      expect(klass).to respond_to(:expired)
+    end
+
+    it "defines affixed names and removes the defaults" do
+      klass = affixed_class(prefix: :event)
+
+      expect(klass).to respond_to(:event_current)
+      expect(klass).to respond_to(:event_active_at)
+      expect(klass).not_to respond_to(:current)
+      expect(klass).not_to respond_to(:expired)
+    end
+
+    it "keeps current delegating to active_at under an affix" do
+      klass = affixed_class(prefix: :event)
+      live = klass.create!(starts_at: 1.day.ago, ends_at: 1.day.from_now)
+      klass.create!(starts_at: 1.day.from_now, ends_at: 2.days.from_now)
+
+      expect(klass.event_current.pluck(:id)).to eq([live.id])
+    end
+
+    it "keeps upcoming and expired correct under an affix" do
+      klass = affixed_class(suffix: :window)
+      soon = klass.create!(starts_at: 1.day.from_now, ends_at: 2.days.from_now)
+      over = klass.create!(starts_at: 3.days.ago, ends_at: 1.day.ago)
+
+      expect(klass.upcoming_window.pluck(:id)).to eq([soon.id])
+      expect(klass.expired_window.pluck(:id)).to eq([over.id])
+    end
+  end
 end

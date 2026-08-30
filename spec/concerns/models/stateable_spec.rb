@@ -258,4 +258,114 @@ describe ConcernsOnRails::Stateable do
         .to raise_error(ConcernsOnRails::Models::Stateable::InvalidTransition)
     end
   end
+
+  describe "#transition_all" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :batch_orders, force: true do |t|
+          t.string :status
+        end
+      end
+
+      stub_const("BatchOrder", Class.new(TestModel) do
+        self.table_name = "batch_orders"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status,
+                     states: %i[draft submitted approved],
+                     default: :draft,
+                     transitions: {
+                       submit: { from: :draft, to: :submitted },
+                       approve: { from: :submitted, to: :approved }
+                     }
+      end)
+    end
+
+    it "transitions every eligible record and returns the count" do
+      BatchOrder.create!(status: "draft")
+      BatchOrder.create!(status: "draft")
+      other = BatchOrder.create!(status: "submitted")
+
+      expect(BatchOrder.transition_all(:submit)).to eq(2)
+      expect(BatchOrder.where(status: "submitted").count).to eq(3)
+      expect(other.reload.status).to eq("submitted")
+    end
+
+    it "skips records the guard rejects rather than raising" do
+      BatchOrder.create!(status: "draft")
+      BatchOrder.create!(status: "approved")
+
+      expect(BatchOrder.transition_all(:submit)).to eq(1)
+    end
+
+    it "is idempotent" do
+      BatchOrder.create!(status: "draft")
+      BatchOrder.transition_all(:submit)
+
+      expect(BatchOrder.transition_all(:submit)).to eq(0)
+    end
+
+    it "respects the relation" do
+      keep = BatchOrder.create!(status: "draft")
+      BatchOrder.create!(status: "draft")
+
+      expect(BatchOrder.where.not(id: keep.id).transition_all(:submit)).to eq(1)
+      expect(keep.reload.status).to eq("draft")
+    end
+
+    it "fires the transition hooks once per record" do
+      stub_const("HookedOrder", Class.new(TestModel) do
+        self.table_name = "batch_orders"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft submitted],
+                              transitions: { submit: { from: :draft, to: :submitted } }
+
+        cattr_accessor :events
+        self.events = []
+
+        def after_transition(event, from, to)
+          self.class.events << [event, from, to]
+        end
+      end)
+      HookedOrder.create!(status: "draft")
+
+      expect(HookedOrder.transition_all(:submit)).to eq(1)
+      expect(HookedOrder.events).to eq([[:submit, "draft", "submitted"]])
+    end
+
+    it "raises on an unknown event" do
+      expect { BatchOrder.transition_all(:nope) }
+        .to raise_error(ArgumentError, /unknown transition 'nope'/)
+    end
+
+    it "honours affixed event names" do
+      stub_const("AffixedOrder", Class.new(TestModel) do
+        self.table_name = "batch_orders"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft submitted], prefix: :order,
+                              transitions: { submit: { from: :draft, to: :submitted } }
+      end)
+      AffixedOrder.create!(status: "draft")
+
+      expect(AffixedOrder.transition_all(:submit)).to eq(1)
+      expect(AffixedOrder.where(status: "submitted").count).to eq(1)
+    end
+
+    it "is idempotent when :from is omitted (any state -> target)" do
+      stub_const("ArchivableOrder", Class.new(TestModel) do
+        self.table_name = "batch_orders"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft submitted approved archived],
+                              transitions: { archive: { to: :archived } }
+      end)
+      ArchivableOrder.create!(status: "draft")
+      ArchivableOrder.create!(status: "submitted")
+
+      expect(ArchivableOrder.transition_all(:archive)).to eq(2)
+      expect(ArchivableOrder.transition_all(:archive)).to eq(0)
+    end
+  end
 end

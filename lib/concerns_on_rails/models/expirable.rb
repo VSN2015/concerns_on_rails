@@ -1,5 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/batch_ops"
 
 module ConcernsOnRails
   module Models
@@ -10,9 +12,12 @@ module ConcernsOnRails
 
       included do
         class_attribute :expirable_field, instance_accessor: false, default: DEFAULT_FIELD
+        class_attribute :expirable_scope_names, instance_accessor: false,
+                                                default: { active: :active, expired: :expired,
+                                                           expiring_within: :expiring_within }.freeze
       end
 
-      class_methods do
+      class_methods do # rubocop:disable Metrics/BlockLength
         include ConcernsOnRails::Support::ColumnGuard
 
         # Configure the expiry column.
@@ -25,28 +30,57 @@ module ConcernsOnRails
           define_expirable_scopes(prefix, suffix)
         end
 
+        # Expire every currently-active record in the relation. Returns the
+        # Integer count. Expirable defines no lifecycle hooks, so this is a
+        # single UPDATE unless the model overrode `expire!` or declares
+        # validations (see Support::BatchOps.fast_path?).
+        def expire_all(time = Time.zone.now)
+          active = all.public_send(expirable_scope_names.fetch(:active))
+          if expirable_batch_fast_path?
+            return active.update_all(
+              ConcernsOnRails::Support::BatchOps.with_timestamps(self, expirable_field => time)
+            )
+          end
+
+          ConcernsOnRails::Support::BatchOps.run(
+            active,
+            label: "ConcernsOnRails::Models::Expirable",
+            message: "failed to expire record"
+          ) { |record| record.expire!(time) }
+        end
+
         private
+
+        # Whether the single-UPDATE fast path is safe — the whole decision
+        # (bang method unoverridden AND the model declares no validations,
+        # plus why) lives in Support::BatchOps.fast_path?. Expirable defines
+        # no lifecycle hooks, so `expire!` is the only method to check.
+        def expirable_batch_fast_path?
+          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Expirable, :expire!)
+        end
 
         # Scopes live here (not in `included do`) so their names can be affixed —
         # letting Expirable's `.active`/`.expired` coexist with the same-named
         # scopes from SoftDeletable / Activatable on a single model.
         def define_expirable_scopes(prefix, suffix)
-          scope expirable_scope_name(:active, prefix, suffix), lambda {
+          prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: expirable_field)
+          suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: expirable_field)
+          self.expirable_scope_names = %i[active expired expiring_within].to_h do |base|
+            [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
+          end.freeze
+
+          scope expirable_scope_names[:active], lambda {
             column = arel_table[expirable_field]
             where(column.eq(nil).or(column.gt(Time.zone.now)))
           }
-          scope expirable_scope_name(:expired, prefix, suffix), lambda {
+          scope expirable_scope_names[:expired], lambda {
             where(arel_table[expirable_field].lteq(Time.zone.now))
           }
-          scope expirable_scope_name(:expiring_within, prefix, suffix), lambda { |duration|
+          scope expirable_scope_names[:expiring_within], lambda { |duration|
             column = arel_table[expirable_field]
             now = Time.zone.now
             where(column.gt(now)).where(column.lteq(now + duration))
           }
-        end
-
-        def expirable_scope_name(base, prefix, suffix)
-          [prefix, base, suffix].compact.join("_").to_sym
         end
       end
 

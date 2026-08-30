@@ -217,4 +217,112 @@ describe ConcernsOnRails::Expirable do
       expect(klass.respond_to?(:active)).to be(false)
     end
   end
+
+  describe "batch operations" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :batch_tokens, force: true do |t|
+          t.datetime :expires_at
+          t.string :title
+        end
+      end
+
+      stub_const("BatchToken", Class.new(TestModel) do
+        self.table_name = "batch_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by
+      end)
+    end
+
+    it "expires every active record and returns the count" do
+      BatchToken.create!(expires_at: 1.day.from_now)
+      BatchToken.create!(expires_at: nil)
+      done = BatchToken.create!(expires_at: 1.day.ago)
+
+      expect(BatchToken.expire_all).to eq(2)
+      expect(BatchToken.expired.count).to eq(3)
+      expect(done.reload.expires_at).to be_within(1.second).of(1.day.ago)
+    end
+
+    it "is idempotent" do
+      BatchToken.create!(expires_at: 1.day.from_now)
+      BatchToken.expire_all
+
+      expect(BatchToken.expire_all).to eq(0)
+    end
+
+    it "accepts an explicit time" do
+      BatchToken.create!(expires_at: nil)
+      at = 2.days.ago
+
+      BatchToken.expire_all(at)
+
+      expect(BatchToken.first.expires_at).to be_within(1.second).of(at)
+    end
+
+    it "uses the per-record path when expire! is overridden" do
+      stub_const("CountingToken", Class.new(TestModel) do
+        self.table_name = "batch_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by
+
+        cattr_accessor :calls
+        self.calls = 0
+
+        def expire!(time = Time.zone.now)
+          self.class.calls += 1
+          super
+        end
+      end)
+      2.times { CountingToken.create!(expires_at: nil) }
+
+      expect(CountingToken.expire_all).to eq(2)
+      expect(CountingToken.calls).to eq(2)
+    end
+
+    it "cannot take the fast path when the model has validations — an invalid record rolls the whole batch back" do
+      stub_const("ValidatedToken", Class.new(TestModel) do
+        self.table_name = "batch_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by
+
+        validates :title, presence: true
+      end)
+      valid = ValidatedToken.create!(title: "ok", expires_at: nil)
+      invalid = ValidatedToken.create!(title: "temporary", expires_at: nil)
+      invalid.update_column(:title, nil)
+
+      expect { ValidatedToken.expire_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(valid.reload.expires_at).to be_nil
+      expect(invalid.reload.expires_at).to be_nil
+    end
+
+    # Regression: `validate :method` leaves `validators` EMPTY (only `validates`
+    # / `validates_with` populate it), so the old `validators.empty?` gate took
+    # the fast path and expired invalid rows.
+    it "cannot take the fast path when the model has a custom validate method" do
+      stub_const("CallbackValidatedToken", Class.new(TestModel) do
+        self.table_name = "batch_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by
+        validate :title_must_be_present
+
+        def title_must_be_present
+          errors.add(:title, "can't be blank") if title.blank?
+        end
+      end)
+      valid = CallbackValidatedToken.create!(title: "ok", expires_at: nil)
+      invalid = CallbackValidatedToken.create!(title: "temporary", expires_at: nil)
+      invalid.update_column(:title, nil)
+
+      expect(CallbackValidatedToken.validators).to be_empty
+      expect { CallbackValidatedToken.expire_all }.to raise_error(ActiveRecord::RecordNotSaved)
+      expect(valid.reload.expires_at).to be_nil
+      expect(invalid.reload.expires_at).to be_nil
+    end
+  end
 end
