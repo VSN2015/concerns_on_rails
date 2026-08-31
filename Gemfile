@@ -12,7 +12,7 @@ gem "friendly_id", "~> 5.4"
 # exercises ConcernsOnRails::Railtie directly.
 gem "railties", ">= 5.0", "< 9"
 gem "rspec", "~> 3.12"
-gem "simplecov", "~> 0.22"
+gem "simplecov", "~> 1.1"
 gem "sqlite3", "~> 2.9.6"
 
 group :development, :test do
