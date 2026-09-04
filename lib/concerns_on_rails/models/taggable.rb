@@ -24,6 +24,7 @@ module ConcernsOnRails
     #   Article.tagged_with("ruby", "rails")          # records carrying BOTH tags
     #   Article.tagged_with("ruby", "go", any: true)  # records carrying ANY tag
     #   Article.all_tags                               # sorted unique tags in use
+    #   Article.published.tag_counts(limit: 20)        # { "ruby" => 12, "rails" => 7, ... } for a tag cloud
     #
     # Notes:
     #   * Matching is boundary-safe ("rail" does not match "rails").
@@ -32,7 +33,7 @@ module ConcernsOnRails
     #     "a" and "b"), everywhere, so what you read back always matches what
     #     a save would have produced.
     #   * Reach for acts-as-taggable-on when you need tag contexts, ownership,
-    #     tag counts/clouds, or polymorphic tags shared across models.
+    #     or polymorphic tags shared across models.
     module Taggable
       extend ActiveSupport::Concern
 
@@ -81,6 +82,22 @@ module ConcernsOnRails
                .pluck(taggable_field)
                .flat_map { |raw| taggable_split(raw) }
                .uniq.sort
+        end
+
+        # Tag => number of records carrying it, ordered by count desc then tag
+        # asc (a Hash keeps insertion order, so `.first(n)` / `.keys` are the
+        # cloud). Relation-aware: `Article.published.tag_counts`. One GROUP BY
+        # query on the raw column — identical tag strings ship once with their
+        # row count and are split in Ruby, so the cost scales with DISTINCT tag
+        # strings, not rows. `limit:` keeps the top N.
+        def tag_counts(limit: nil)
+          counts = Hash.new(0)
+          all.where.not(taggable_field => nil).unscope(:order).group(taggable_field).count.each do |raw, rows|
+            taggable_split(raw).each { |tag| counts[tag] += rows }
+          end
+          ordered = counts.sort_by { |tag, count| [-count, tag] }
+          ordered = ordered.first(limit.to_i) if limit
+          ordered.to_h
         end
 
         # Split a raw stored column value into a normalized tag array.

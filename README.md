@@ -1048,6 +1048,7 @@ article.save!
 Article.tagged_with("ruby", "rails")          # records carrying BOTH tags
 Article.tagged_with("ruby", "go", any: true)  # records carrying ANY tag
 Article.all_tags                               # => sorted unique tags in use
+Article.published.tag_counts(limit: 20)        # => { "ruby" => 12, "rails" => 7, ... } — a tag cloud, relation-aware
 ```
 
 **Options**
@@ -1060,7 +1061,8 @@ Article.all_tags                               # => sorted unique tags in use
 **Notes**
 - Matching is **boundary-safe** — searching `rail` does not match `rails`. An explicit SQL `ESCAPE` clause makes tags containing `_` / `%` match literally on every adapter.
 - Tags are normalized in `before_validation`, so a direct `record.tags = "a, b"` assignment is cleaned too. An empty list stores `NULL`.
-- Reach for [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) when you need tag contexts, ownership, counts/clouds, or polymorphic tags shared across models.
+- `tag_counts` runs one `GROUP BY` on the raw column — identical tag strings ship once with their row count and are split in Ruby — so it scales with distinct tag strings, not rows; ordered by count desc then name, `limit:` keeps the top N.
+- Reach for [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) when you need tag contexts, ownership, or polymorphic tags shared across models.
 
 ---
 

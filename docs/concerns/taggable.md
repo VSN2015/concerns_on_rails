@@ -97,6 +97,18 @@ Splits a raw stored column value on the configured delimiter and returns a norma
 
 Normalizes a single tag: strips surrounding whitespace and optionally lowercases it. Used internally by all normalization paths.
 
+#### `.tag_counts(limit: nil) → Hash{String => Integer}`
+
+Tag → number of records carrying it, ordered by count descending then tag name — the shape a tag cloud needs. Relation-aware, so it composes with scopes and `tagged_with`:
+
+```ruby
+Article.tag_counts                     # => { "ruby" => 3, "go" => 2, "api" => 1, "rails" => 1 }
+Article.published.tag_counts(limit: 20)
+Article.tagged_with("go").tag_counts   # counts among records that carry "go"
+```
+
+One `GROUP BY` query on the raw column: identical tag strings come back once with their row count and are split in Ruby, so the cost scales with the number of *distinct tag strings*, not rows. A record counts once per tag even if the stored string repeats it. Returns `{}` when nothing is tagged.
+
 ### Instance methods
 
 #### `#tag_list → Array<String>`
@@ -201,6 +213,6 @@ Post.tagged_with("rails")        # => [p]
 - **`before_validation` normalization covers direct assignment.** If you assign the raw column directly (`record.tags = "a, b"`), the `before_validation` hook strips, splits, and de-duplicates the value before saving. You do not have to go through `tag_list=` for normalization to apply.
 - **Boundary-safe SQL matching.** The `tagged_with` scope builds four OR-ed clauses per tag against the delimiter-joined column: an exact match (`column = ?`) plus three `LIKE` patterns that pin the tag to a delimiter boundary — `tag<delim>%` (tag first), `%<delim>tag` (tag last), and `%<delim>tag<delim>%` (tag in the middle). Each `LIKE` carries an explicit `ESCAPE '\\'` clause, so tags containing `_` or `%` are escaped and will not behave as SQL wildcards, and a search for `"rail"` will not match `"rails"`.
 - **`tagged_with` with no arguments returns `all`.** An empty tag array short-circuits to `all`, so the result is safely chainable without a conditional guard.
-- **No external gem dependencies.** Unlike `acts-as-taggable-on`, this concern requires no additional gems. The trade-off is that it has no support for tag counts, contexts, ownership, or polymorphic tags shared across multiple model types. Reach for `acts-as-taggable-on` when those features are needed.
+- **No external gem dependencies.** Unlike `acts-as-taggable-on`, this concern requires no additional gems. The trade-off is that it has no support for tag contexts, ownership, or polymorphic tags shared across multiple model types (`tag_counts` covers clouds). Reach for `acts-as-taggable-on` when those features are needed.
 - **Delimiter must not appear inside a tag value.** Tags containing the configured delimiter character produce incorrect split behavior. Choose a delimiter that cannot appear in your tag vocabulary, or sanitize tag input before assigning.
-- **`all_tags` is a full-table scan.** It `pluck`s every row's tag column and aggregates in Ruby. Add a database-level index on the column only if needed for `tagged_with` queries; `all_tags` cannot use it efficiently at scale.
+- **`all_tags` and `tag_counts` read every distinct tag string.** `all_tags` plucks the distinct column values, `tag_counts` groups them with a row count; both then split in Ruby. Cheap while the set of distinct tag strings is small, a candidate for caching on very large tables. Add a database-level index on the column only if needed for `tagged_with` queries; neither aggregate can use it.
