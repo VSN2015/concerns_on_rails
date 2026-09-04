@@ -27,6 +27,12 @@ module ConcernsOnRails
     #   product.audited_changes_since(1.day.ago)
     #   product.clear_audit_trail!                 # wipe the column (skips callbacks)
     #
+    # Actor resolution ("by"): a model's `actor:` (a callable instance_exec'd
+    # on the record, or a Symbol naming a record method) wins; otherwise the
+    # gem-wide fallback `ConcernsOnRails.setup { |c| c.audit_actor = -> {
+    # Current.user&.id } }` applies to every audited model at once; `actor:
+    # false` opts one model out of that fallback.
+    #
     # Notes:
     #   * One entry per changed field per save; creates record `"from" => nil`.
     #     "by" is omitted entirely when no actor is configured (or it returns nil).
@@ -103,7 +109,14 @@ module ConcernsOnRails
           unless positive_integer_or_nil?(max_value_length)
             raise ArgumentError, "#{LABEL}: max_value_length must be a positive Integer or nil"
           end
-          raise ArgumentError, "#{LABEL}: actor must be callable (respond to #call)" unless actor.nil? || actor.respond_to?(:call)
+          return if auditable_valid_actor?(actor)
+
+          raise ArgumentError,
+                "#{LABEL}: actor must be callable (respond to #call), a Symbol naming a record method, nil or false"
+        end
+
+        def auditable_valid_actor?(actor)
+          actor.nil? || actor == false || actor.is_a?(Symbol) || actor.respond_to?(:call)
         end
 
         def positive_integer_or_nil?(value)
@@ -199,11 +212,18 @@ module ConcernsOnRails
         end
       end
 
+      # Model-level actor: first (false = explicitly none), then the gem-wide
+      # fallback, resolved per save so an initializer that runs later still
+      # applies. Symbols call the record's method; callables are instance_exec'd.
       def auditable_resolve_actor
         actor = self.class.auditable_actor
-        return nil unless actor
+        return nil if actor == false
 
-        auditable_json_value(instance_exec(&actor))
+        actor = ConcernsOnRails.config.audit_actor if actor.nil?
+        return nil if actor.nil?
+
+        value = actor.is_a?(Symbol) ? send(actor) : instance_exec(&actor)
+        auditable_json_value(value)
       end
 
       # from/to pipeline: JSON coercion, then opt-in truncation.
