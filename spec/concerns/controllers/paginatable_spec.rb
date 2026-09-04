@@ -1,4 +1,5 @@
 require "spec_helper"
+require "support/integration_harness"
 
 describe ConcernsOnRails::Controllers::Paginatable do
   before do
@@ -222,6 +223,89 @@ describe ConcernsOnRails::Controllers::Paginatable do
       records = controller.paginated(Widget.all)
       expect(records).to be_a(ActiveRecord::Relation)
       expect(records.to_sql).to match(/LIMIT/i)
+    end
+  end
+
+  describe "RFC 8288 Link header (through the real ActionController stack)" do
+    def link_controller(&extra)
+      IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        class_eval(&extra) if extra
+
+        define_method(:index) { render json: paginated(Widget.order(:id)).map(&:id) }
+      end
+    end
+
+    def links(result)
+      header = result.header("Link")
+      return {} unless header
+
+      header.split(", ").to_h { |entry| entry.match(/\A<(.+)>; rel="(.+)"\z/).captures.reverse }
+    end
+
+    it "emits first/prev/next/last relative to the current page, preserving the other query params" do
+      result = IntegrationHarness.dispatch(link_controller, :index, query: "page=2&per_page=10&q=abc")
+      expect(links(result)).to eq(
+        "first" => "http://example.org/?page=1&per_page=10&q=abc",
+        "prev" => "http://example.org/?page=1&per_page=10&q=abc",
+        "next" => "http://example.org/?page=3&per_page=10&q=abc",
+        "last" => "http://example.org/?page=5&per_page=10&q=abc"
+      )
+    end
+
+    it "omits prev on the first page and next on the last page" do
+      first = IntegrationHarness.dispatch(link_controller, :index, query: "per_page=10")
+      expect(links(first).keys).to match_array(%w[first next last])
+      expect(links(first)["next"]).to eq("http://example.org/?per_page=10&page=2")
+
+      last = IntegrationHarness.dispatch(link_controller, :index, query: "page=5&per_page=10")
+      expect(links(last).keys).to match_array(%w[first prev last])
+    end
+
+    it "points prev at the last page when the requested page is past the end" do
+      result = IntegrationHarness.dispatch(link_controller, :index, query: "page=99&per_page=10")
+      expect(links(result)).to include("prev" => "http://example.org/?page=5&per_page=10", "last" => "http://example.org/?page=5&per_page=10")
+      expect(links(result)).not_to have_key("next")
+    end
+
+    it "emits no Link header for an empty collection" do
+      Widget.delete_all
+      result = IntegrationHarness.dispatch(link_controller, :index, query: "per_page=10")
+      expect(result.header("Link")).to be_nil
+      expect(result.header("X-Total-Count")).to eq("0")
+    end
+
+    it "can be switched off with paginate_by link_header: false" do
+      klass = link_controller { paginate_by link_header: false }
+      result = IntegrationHarness.dispatch(klass, :index, query: "page=2&per_page=10")
+      expect(result.header("Link")).to be_nil
+      expect(result.header("X-Page")).to eq("2")
+    end
+
+    it "appends to a Link header something else already set (Deprecatable, CDN hints)" do
+      klass = link_controller do
+        before_action { response.set_header("Link", '<https://docs.example.com/v2>; rel="deprecation"') }
+      end
+      result = IntegrationHarness.dispatch(klass, :index, query: "page=2&per_page=10")
+      expect(result.header("Link")).to start_with('<https://docs.example.com/v2>; rel="deprecation", <http://example.org/?page=1')
+    end
+
+    it "works for in-memory collections too" do
+      klass = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        define_method(:index) { render json: paginated((1..30).to_a) }
+      end
+      result = IntegrationHarness.dispatch(klass, :index, query: "page=1&per_page=10")
+      expect(links(result)["last"]).to eq("http://example.org/?page=1&per_page=10".sub("page=1", "page=3"))
+    end
+
+    it "is skipped silently when the controller has no request (bare harness)" do
+      controller = controller_class.new(params: { page: 2, per_page: 10 })
+      controller.paginated(Widget.all)
+      expect(controller.response.headers).not_to have_key("Link")
+      expect(controller.response.headers["X-Page"]).to eq("2")
     end
   end
 end

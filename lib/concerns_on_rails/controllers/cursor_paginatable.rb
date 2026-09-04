@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
 require "concerns_on_rails/support/scalar_param"
 require "json"
+require "concerns_on_rails/support/link_header"
 require "time" # Time#iso8601(fraction_digits) lives in the stdlib time library
 
 module ConcernsOnRails
@@ -141,6 +142,7 @@ module ConcernsOnRails
         class_attribute :cursor_paginatable_max_per_page, default: DEFAULT_MAX_PER_PAGE
         class_attribute :cursor_paginatable_bidirectional, default: false
         class_attribute :cursor_paginatable_predicate, default: :auto
+        class_attribute :cursor_paginatable_link_header, default: true
 
         # Real controllers (anything with ActiveSupport::Rescuable) get the 400
         # handlers automatically; bare objects let the errors propagate.
@@ -161,7 +163,7 @@ module ConcernsOnRails
         # max_per_page: 0 (or negative) disables the per_page cap.
         def cursor_paginate_by(order: nil, order_presets: nil, default_preset: nil, order_param: :order,
                                per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE,
-                               bidirectional: false, predicate: :auto)
+                               bidirectional: false, predicate: :auto, link_header: true)
           self.cursor_paginatable_order = order && CursorPaginatable.normalize_order!(order)
           self.cursor_paginatable_order_presets = order_presets && CursorPaginatable.normalize_presets!(order_presets)
           self.cursor_paginatable_default_preset =
@@ -171,6 +173,7 @@ module ConcernsOnRails
           self.cursor_paginatable_max_per_page = max_per_page.to_i
           self.cursor_paginatable_bidirectional = bidirectional ? true : false
           self.cursor_paginatable_predicate = CursorPaginatable.validate_predicate!(predicate)
+          self.cursor_paginatable_link_header = link_header ? true : false
         end
       end
 
@@ -506,10 +509,30 @@ module ConcernsOnRails
         response.set_header("X-Count", meta[:count].to_s)
         response.set_header("X-Has-More", meta[:has_more].to_s)
         response.set_header("X-Next-Cursor", meta[:next_cursor]) if meta[:next_cursor]
+        apply_cursor_pagination_links(meta)
         return unless meta.key?(:has_prev)
 
         response.set_header("X-Has-Prev", meta[:has_prev].to_s)
         response.set_header("X-Prev-Cursor", meta[:prev_cursor]) if meta[:prev_cursor]
+      end
+
+      # RFC 8288 Link: rel="next" carries the X-Next-Cursor token, rel="prev"
+      # the X-Prev-Cursor one (bidirectional mode), rel="first" is the current
+      # URL with the cursor dropped — emitted once a cursor is in play. Other
+      # query params (per_page, the order preset) are preserved. Skipped when
+      # disabled or without a real request.
+      def apply_cursor_pagination_links(meta)
+        return unless self.class.cursor_paginatable_link_header
+        return unless ConcernsOnRails::Support::LinkHeader.available?(self)
+
+        cursor_url = ->(token) { ConcernsOnRails::Support::LinkHeader.url_for(request, cursor: token) }
+        raw_cursor = params[:cursor]
+        ConcernsOnRails::Support::LinkHeader.append(
+          response,
+          first: ConcernsOnRails::Support::ScalarParam.scalar?(raw_cursor) && !raw_cursor.to_s.empty? ? cursor_url.call(nil) : nil,
+          prev: meta[:prev_cursor] && cursor_url.call(meta[:prev_cursor]),
+          next: meta[:next_cursor] && cursor_url.call(meta[:next_cursor])
+        )
       end
     end
   end

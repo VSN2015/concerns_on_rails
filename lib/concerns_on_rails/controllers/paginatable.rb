@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/scalar_param"
+require "concerns_on_rails/support/link_header"
 
 module ConcernsOnRails
   module Controllers
@@ -23,6 +24,12 @@ module ConcernsOnRails
     #   def search
     #     render json: paginated(ExternalCatalog.search(params[:q]))
     #   end
+    #
+    # Every paginated response also carries an RFC 8288 `Link` header with
+    # first/prev/next/last URLs rebuilt from the current request (other query
+    # params preserved) — the GitHub convention, so clients can follow links
+    # instead of computing page numbers. `paginate_by link_header: false` turns
+    # it off.
     module Paginatable
       extend ActiveSupport::Concern
 
@@ -33,15 +40,18 @@ module ConcernsOnRails
       included do
         class_attribute :paginatable_per_page, default: DEFAULT_PER_PAGE
         class_attribute :paginatable_max_per_page, default: DEFAULT_MAX_PER_PAGE
+        class_attribute :paginatable_link_header, default: true
       end
 
       class_methods do
-        # Configure the default page size and the hard cap on per_page.
+        # Configure the default page size, the hard cap on per_page, and whether
+        # the RFC 8288 Link header is emitted.
         # Example:
-        #   paginate_by per_page: 50, max_per_page: 500
-        def paginate_by(per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE)
+        #   paginate_by per_page: 50, max_per_page: 500, link_header: false
+        def paginate_by(per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE, link_header: true)
           self.paginatable_per_page = per_page.to_i
           self.paginatable_max_per_page = max_per_page.to_i
+          self.paginatable_link_header = link_header ? true : false
         end
       end
 
@@ -70,6 +80,7 @@ module ConcernsOnRails
 
         @paginatable_meta = { total: total, page: page, per_page: per_page, total_pages: total_pages }
         set_pagination_headers(**@paginatable_meta)
+        set_pagination_links(page: page, total_pages: total_pages)
         records
       end
 
@@ -147,6 +158,30 @@ module ConcernsOnRails
         response.set_header("X-Page", page.to_s)
         response.set_header("X-Per-Page", per_page.to_s)
         response.set_header("X-Total-Pages", total_pages.to_s)
+      end
+
+      # Link: <…?page=1>; rel="first", <…?page=1>; rel="prev", <…?page=3>;
+      # rel="next", <…?page=5>; rel="last". prev/next only when such a page
+      # exists; past the end, prev points at the last page. Nothing is emitted
+      # for an empty collection, when disabled, or without a real request.
+      def set_pagination_links(page:, total_pages:)
+        return unless pagination_links_applicable?(total_pages)
+
+        page_url = ->(number) { ConcernsOnRails::Support::LinkHeader.url_for(request, page: number) }
+        ConcernsOnRails::Support::LinkHeader.append(
+          response,
+          first: page_url.call(1),
+          prev: page > 1 ? page_url.call([page - 1, total_pages].min) : nil,
+          next: page < total_pages ? page_url.call(page + 1) : nil,
+          last: page_url.call(total_pages)
+        )
+      end
+
+      def pagination_links_applicable?(total_pages)
+        return false unless self.class.paginatable_link_header && total_pages.positive?
+        return false unless respond_to?(:response) && response
+
+        ConcernsOnRails::Support::LinkHeader.available?(self)
       end
     end
   end

@@ -1,4 +1,5 @@
 require "spec_helper"
+require "support/integration_harness"
 require "active_support/rescuable"
 
 # NOTE: FakeController cannot simulate performed?/double-render; the concern's
@@ -725,6 +726,64 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       from_relation = make_controller.cursor_paginated(Item.all)
 
       expect(from_class.map(&:id)).to eq(from_relation.map(&:id))
+    end
+  end
+  describe "RFC 8288 Link header (through the real ActionController stack)" do
+    def cursor_link_controller(**macro)
+      IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by(order: { created_at: :asc }, per_page: 20, **macro)
+
+        define_method(:index) { render json: cursor_paginated(Item.all).map(&:id) }
+      end
+    end
+
+    def links(result)
+      header = result.header("Link")
+      return {} unless header
+
+      header.split(", ").to_h { |entry| entry.match(/\A<(.+)>; rel="(.+)"\z/).captures.reverse }
+    end
+
+    it "emits next (with the X-Next-Cursor token) on the first page, and no first/prev" do
+      result = IntegrationHarness.dispatch(cursor_link_controller, :index, query: "per_page=20")
+      token = result.header("X-Next-Cursor")
+      expect(token).to be_present
+      expect(links(result)).to eq("next" => "http://example.org/?per_page=20&cursor=#{token}")
+    end
+
+    it "emits first (cursor dropped) once a cursor is in play, and no next on the last page" do
+      first = IntegrationHarness.dispatch(cursor_link_controller, :index, query: "per_page=20")
+      second = IntegrationHarness.dispatch(cursor_link_controller, :index, query: "per_page=20&cursor=#{first.header('X-Next-Cursor')}")
+      expect(links(second).keys).to match_array(%w[first next])
+      expect(links(second)["first"]).to eq("http://example.org/?per_page=20")
+
+      third = IntegrationHarness.dispatch(cursor_link_controller, :index, query: "per_page=20&cursor=#{second.header('X-Next-Cursor')}")
+      expect(third.header("X-Has-More")).to eq("false")
+      expect(links(third).keys).to eq(%w[first])
+    end
+
+    it "adds prev in bidirectional mode, preserving the order preset param" do
+      klass = cursor_link_controller(bidirectional: true, order: nil, order_presets: { oldest: { created_at: :asc } })
+      first = IntegrationHarness.dispatch(klass, :index, query: "order=oldest&per_page=20")
+      second = IntegrationHarness.dispatch(klass, :index, query: "order=oldest&per_page=20&cursor=#{first.header('X-Next-Cursor')}")
+      expect(links(second).keys).to match_array(%w[first prev next])
+      expect(links(second)["prev"]).to eq("http://example.org/?order=oldest&per_page=20&cursor=#{second.header('X-Prev-Cursor')}")
+    end
+
+    it "can be switched off with cursor_paginate_by link_header: false" do
+      result = IntegrationHarness.dispatch(cursor_link_controller(link_header: false), :index, query: "per_page=20")
+      expect(result.header("Link")).to be_nil
+      expect(result.header("X-Next-Cursor")).to be_present
+    end
+
+    it "is skipped silently when the controller has no request (bare harness)" do
+      c = make_controller(per_page: 5)
+      c.class.cursor_paginate_by(order: { created_at: :asc })
+      c.cursor_paginated(Item.all)
+      expect(c.response.headers).not_to have_key("Link")
+      expect(c.response.headers["X-Has-More"]).to eq("true")
     end
   end
 end

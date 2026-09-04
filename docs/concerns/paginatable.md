@@ -34,6 +34,7 @@ end
 |---|---|---|---|
 | `per_page` | Integer | `25` | Default number of records per page when the caller supplies no `?per_page=` param, or supplies a value less than 1. Coerced with `.to_i`. |
 | `max_per_page` | Integer | `200` | Hard upper bound on `per_page`. Any caller-supplied value above this cap is silently reduced to this value. When set to `0` or a negative integer the cap is disabled and any requested `per_page` is honored. Coerced with `.to_i`. |
+| `link_header` | Boolean | `true` | Emit the RFC 8288 `Link` header (`first`/`prev`/`next`/`last`) on every paginated response. Set `false` to send only the `X-*` headers. |
 
 **URL params read from `params`**
 
@@ -67,6 +68,7 @@ The four `X-*` headers set on `response`:
 | `X-Page` | The resolved current page number (always >= 1). |
 | `X-Per-Page` | The resolved per-page value after applying defaults and the cap. |
 | `X-Total-Pages` | `ceil(total / per_page)`. Returns `"0"` when the relation is empty. |
+| `Link` | RFC 8288 web links: `<…?page=1>; rel="first", <…?page=1>; rel="prev", <…?page=3>; rel="next", <…?page=5>; rel="last"`. URLs are the current request's base URL + path with `page` replaced and every other query param preserved. `prev`/`next` appear only when such a page exists (past the end, `prev` points at the last page). Not emitted for an empty collection, when `link_header: false`, or when the controller has no request. Appended to an existing `Link` header, never replacing it. |
 
 ## Examples
 
@@ -139,6 +141,8 @@ end
 
 ## Notes & gotchas
 
+- **`Link` header is on by default.** Every non-empty paginated response carries `first`/`prev`/`next`/`last` links built from `request.base_url + request.path` and the current query string — behind a proxy, make sure `X-Forwarded-Host`/`-Proto` reach Rails (`config.action_dispatch.trusted_proxies`) or the links will name the internal host. `paginate_by link_header: false` disables it; the `X-*` headers are unaffected.
+- **`Link` is appended, not set.** If Deprecatable (or a CDN hint) already put a `Link` header on the response, the pagination links are appended after it with a comma.
 - **No database columns required.** This is a pure controller concern with no model-layer dependency.
 - **In-memory collections are sliced in Ruby.** The whole collection is already in memory by definition, so `paginated(array)` costs one `to_a` plus an `Array#[]` — there is no lazy path. If the data lives in a table, pass the relation so the database does the work.
 - **Relation detection is duck-typed.** Anything answering `limit` and `offset` takes the SQL path; that includes association proxies and model classes, and keeps a `has_many` collection paginating in the database rather than loading it.
