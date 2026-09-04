@@ -487,6 +487,27 @@ Expirable) without a collision. `prefix: true` uses the configured field name. W
 passed, scope names, the default scope, and the emitted SQL are unchanged. See the
 Publishable section above for how `prefix:`/`suffix:` differ across the gem.
 
+**Cascading to dependents**
+
+```ruby
+class Post < ApplicationRecord
+  include ConcernsOnRails::SoftDeletable
+  has_many :comments
+  has_one  :cover
+  soft_deletable_by :deleted_at, cascade: %i[comments cover]   # Comment and Cover include SoftDeletable too
+end
+
+post.soft_delete!        # comments + cover soft-deleted in the same transaction, with the post's exact timestamp
+post.restore!            # brings back the comments/cover the cascade deleted — NOT a comment someone trashed last week
+post.soft_delete!(at: 1.day.ago)   # new at: keyword — backdate, or hand a timestamp down a cascade
+```
+
+Dependents go through their own `soft_delete!` / `restore!` (hooks and nested cascades run; a raising
+dependent rolls the whole thing back). Restore matches on the parent's timestamp, so independently
+deleted dependents keep their own. `cascade:` accepts `has_many` / `has_one` (no `belongs_to`, HABTM or
+`:through`) whose models include SoftDeletable; with a cascade configured `soft_delete_all` / `restore_all`
+take the per-record path (a bulk `UPDATE` cannot follow associations).
+
 **Lifecycle hooks** — override these methods on the model:
 
 ```ruby

@@ -710,4 +710,194 @@ describe ConcernsOnRails::SoftDeletable do
       end
     end
   end
+
+  describe "cascade: (soft-deleting and restoring dependents)" do
+    before(:all) do
+      ActiveRecord::Schema.define do
+        create_table :casc_posts, force: true do |t|
+          t.string :title
+          t.datetime :deleted_at, precision: 6
+          t.timestamps null: false
+        end
+        create_table :casc_comments, force: true do |t|
+          t.integer :casc_post_id
+          t.string :body
+          t.datetime :deleted_at, precision: 6
+          t.timestamps null: false
+        end
+        create_table :casc_likes, force: true do |t|
+          t.integer :casc_comment_id
+          t.datetime :deleted_at, precision: 6
+        end
+        create_table :casc_covers, force: true do |t|
+          t.integer :casc_post_id
+          t.datetime :deleted_at, precision: 6
+        end
+        create_table :casc_tags, force: true do |t|
+          t.integer :casc_post_id
+          t.string :name
+        end
+      end
+    end
+
+    before do
+      stub_const("CascLike", Class.new(ActiveRecord::Base) do
+        self.table_name = "casc_likes"
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, touch: false
+        belongs_to :casc_comment
+      end)
+      stub_const("CascComment", Class.new(ActiveRecord::Base) do
+        self.table_name = "casc_comments"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :casc_likes, dependent: :destroy
+        soft_deletable_by :deleted_at, cascade: :casc_likes
+        belongs_to :casc_post
+
+        attr_accessor :log
+
+        def before_soft_delete
+          (@log ||= []) << :before_soft_delete
+        end
+
+        def after_soft_delete
+          (@log ||= []) << :after_soft_delete
+        end
+      end)
+      stub_const("CascCover", Class.new(ActiveRecord::Base) do
+        self.table_name = "casc_covers"
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at
+        belongs_to :casc_post
+      end)
+      stub_const("CascTag", Class.new(ActiveRecord::Base) do
+        self.table_name = "casc_tags"
+        belongs_to :casc_post
+      end)
+      stub_const("CascPost", Class.new(ActiveRecord::Base) do
+        self.table_name = "casc_posts"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :casc_comments
+        has_one :casc_cover
+        has_many :casc_tags
+        soft_deletable_by :deleted_at, cascade: %i[casc_comments casc_cover]
+      end)
+      %w[casc_posts casc_comments casc_likes casc_covers casc_tags].each do |table|
+        ActiveRecord::Base.connection.execute("DELETE FROM #{table}")
+      end
+    end
+
+    let!(:post) { CascPost.create!(title: "p") }
+    let!(:comment) { CascComment.create!(casc_post: post, body: "c1") }
+    let!(:like) { CascLike.create!(casc_comment: comment) }
+    let!(:cover) { CascCover.create!(casc_post: post) }
+
+    def deleted_at(klass, record)
+      klass.unscoped.find(record.id).deleted_at
+    end
+
+    it "soft-deletes has_many and has_one dependents with the parent's exact timestamp, recursively" do
+      post.soft_delete!(at: Time.utc(2026, 6, 1, 12, 0, 0.5r)) # travel_to truncates usec; at: carries it
+      stamp = deleted_at(CascPost, post)
+      expect(stamp).to eq(Time.utc(2026, 6, 1, 12, 0, 0.5r))
+      expect(deleted_at(CascComment, comment)).to eq(stamp)
+      expect(deleted_at(CascCover, cover)).to eq(stamp)
+      expect(deleted_at(CascLike, like)).to eq(stamp) # through the comment's own cascade
+    end
+
+    it "runs the dependents' own hooks" do
+      post.soft_delete!
+      reloaded = CascComment.unscoped.find(comment.id)
+      expect(reloaded.deleted_at).to be_present
+      # hooks fire on the instances the cascade loaded; assert through a probe
+      probe = CascComment.unscoped.find(comment.id)
+      probe.restore!
+      probe.soft_delete!
+      expect(probe.log).to eq(%i[before_soft_delete after_soft_delete])
+    end
+
+    it "restore! restores the cascaded dependents but not one that was deleted independently earlier" do
+      earlier = CascComment.create!(casc_post: post, body: "old")
+      travel_to(Time.utc(2026, 5, 1)) { earlier.soft_delete! }
+      travel_to(Time.utc(2026, 6, 1)) { post.soft_delete! }
+
+      post.restore!
+      expect(deleted_at(CascPost, post)).to be_nil
+      expect(deleted_at(CascComment, comment)).to be_nil
+      expect(deleted_at(CascCover, cover)).to be_nil
+      expect(deleted_at(CascLike, like)).to be_nil
+      expect(deleted_at(CascComment, earlier)).to eq(Time.utc(2026, 5, 1))
+    end
+
+    it "leaves already-deleted dependents' own timestamps alone when the parent is deleted" do
+      earlier = CascComment.create!(casc_post: post, body: "old")
+      travel_to(Time.utc(2026, 5, 1)) { earlier.soft_delete! }
+      travel_to(Time.utc(2026, 6, 1)) { post.soft_delete! }
+      expect(deleted_at(CascComment, earlier)).to eq(Time.utc(2026, 5, 1))
+    end
+
+    it "soft_delete!(at:) backdates, standalone and through the cascade" do
+      post.soft_delete!(at: Time.utc(2020, 1, 1))
+      expect(deleted_at(CascPost, post)).to eq(Time.utc(2020, 1, 1))
+      expect(deleted_at(CascComment, comment)).to eq(Time.utc(2020, 1, 1))
+    end
+
+    it "shares the parent's transaction — a failing dependent rolls everything back" do
+      failing = Class.new(CascComment) do
+        def after_soft_delete
+          raise "child boom"
+        end
+      end
+      stub_const("CascComment", failing)
+      CascPost.has_many :casc_comments, class_name: "CascComment"
+      expect { post.soft_delete! }.to raise_error("child boom")
+      expect(deleted_at(CascPost, post)).to be_nil
+      expect(deleted_at(CascCover, cover)).to be_nil
+    end
+
+    it "disables the single-UPDATE fast paths so soft_delete_all / restore_all cascade too" do
+      other = CascPost.create!(title: "q")
+      other_comment = CascComment.create!(casc_post: other, body: "c2")
+      expect(CascPost.soft_delete_all).to eq(2)
+      expect(deleted_at(CascComment, comment)).to be_present
+      expect(deleted_at(CascComment, other_comment)).to be_present
+      expect(CascPost.restore_all).to eq(2)
+      expect(deleted_at(CascComment, other_comment)).to be_nil
+    end
+
+    it "exposes the configured cascade" do
+      expect(CascPost.soft_delete_cascade).to eq(%i[casc_comments casc_cover])
+      expect(CascCover.soft_delete_cascade).to eq([])
+    end
+
+    it "rejects an unknown association, a belongs_to, a :through, and a non-SoftDeletable target at class load" do
+      # A NAMED class: from inside an anonymous class body Rails cannot resolve
+      # association targets (compute_type needs `name`), so the target check
+      # would be deferred to cascade time instead of firing at class load.
+      build = lambda do |cascade|
+        klass = Class.new(ActiveRecord::Base)
+        stub_const("CascValidation", klass)
+        klass.class_eval do
+          self.table_name = "casc_posts"
+          include ConcernsOnRails::SoftDeletable
+
+          has_many :casc_comments
+          has_many :casc_tags
+          has_many :casc_likes, through: :casc_comments
+          belongs_to :owner, class_name: "CascPost", optional: true
+          soft_deletable_by :deleted_at, cascade: cascade
+        end
+      end
+      expect { build.call(:nope) }.to raise_error(ArgumentError, /cascade: 'nope' is not an association/)
+      expect { build.call(:owner) }.to raise_error(ArgumentError, /cascade: 'owner' must be a has_many or has_one/)
+      expect { build.call(:casc_likes) }.to raise_error(ArgumentError, /cascade: 'casc_likes'.*through/)
+      expect do
+        build.call(:casc_tags)
+      end.to raise_error(ArgumentError, /cascade: 'casc_tags' targets CascTag, which does not include SoftDeletable/)
+    end
+  end
 end
