@@ -1512,12 +1512,30 @@ class ArticlesController < ApplicationController
   filter_by :status, :category                                       # ?status=draft → .where(status: 'draft')
   filter_by :published, scope: :published                            # ?published=1 → Article.published
   filter_by :q, with: ->(rel, v) { rel.where("title ILIKE ?", "%#{v}%") }
+  filter_by :price, :created_at, operators: true                     # ?price_gte=10&created_at_lt=2026-01-01
+  filter_by :min_stock, type: :integer, with: ->(rel, v) { rel.where(rel.model.arel_table[:stock].gteq(v)) }
 
   def index
     render json: filtered(Article.all)
   end
 end
 ```
+
+**Operators** (opt-in per filter, direct-where mode only — `operators: true` or a subset like `%i[gte lte]`),
+accepted as a suffix `?price_gte=10` or in bracket form `?price[gte]=10&price[lte]=50`:
+
+| Operator | Param                              | SQL                                   |
+|----------|------------------------------------|---------------------------------------|
+| `not`    | `?status_not=draft`                | `status != 'draft'`                   |
+| `gt` `gte` `lt` `lte` | `?price_gte=10`       | `price >= 10` (cast through the column type) |
+| `in` `not_in` | `?status_in=a,b` or `?status_in[]=a` | `status IN ('a','b')`         |
+| `null`   | `?deleted_at_null=true`            | `deleted_at IS NULL` (`false` → `IS NOT NULL`) |
+| `contains` `starts_with` | `?title_contains=rails` | `title LIKE '%rails%'` (wildcards escaped; ILIKE on PostgreSQL) |
+
+Comparison values are cast the way ActiveRecord casts them (the column's own type), or through `type:`
+(any ActiveModel type name); `type:` also pre-casts the value handed to a `with:` lambda. Blank values
+are skipped and unknown operators / non-scalar values ignored — nothing raises at request time. For
+strict, validated contracts reach for `Permittable`.
 
 **Modes**
 
@@ -1529,7 +1547,7 @@ end
 
 **Notes**
 - Blank params are skipped — unset filters don't narrow the relation.
-- Passing both `:scope` and `:with` raises `ArgumentError`.
+- Passing both `:scope` and `:with` raises `ArgumentError`; so do `operators:` on a `scope:`/`with:` filter, an unknown operator name, or an unknown `type:` — all at class load.
 - Scope mode pairs naturally with `Publishable.published`, `SoftDeletable.active`, `Expirable.active`, etc.
 
 ---
