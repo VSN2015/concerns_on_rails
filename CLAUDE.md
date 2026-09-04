@@ -226,8 +226,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 ### Support modules (`lib/concerns_on_rails/support/`)
 
 `ColumnGuard` (schema validation; skips — returns false — when the schema is unreachable
-so models stay loadable during `db:create`/`assets:precompile`; missing-column errors
-append a `bin/rails generate migration` hint typed via the macro's `types:` argument), `ScalarParam` (untrusted
+so models stay loadable during `db:create`/`assets:precompile`; one call reports EVERY
+missing column in a single error, whose `bin/rails generate migration` hint — typed via the
+macro's `types:` argument — adds them all: `Add<Field>To<Table>` for one column,
+`Add<Concern>ColumnsTo<Table>` for several), `ScalarParam` (untrusted
 query-param coercion shared by the paginators/Filterable), `UniqueRetry` (bounded
 `RecordNotUnique` retry), `ErrorEnvelope` (the shared `render_error`-or-inline error
 renderer used by seven controller concerns), `FilterParameterRegistry` (live

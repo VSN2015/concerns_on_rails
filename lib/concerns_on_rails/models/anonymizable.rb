@@ -96,7 +96,7 @@ module ConcernsOnRails
           anonymizable_apply_options(stamp, clear_audit_trail)
 
           ensure_columns!(LABEL, fields)
-          ensure_columns!(LABEL, anonymizable_stamp) if anonymizable_stamp
+          ensure_columns!(LABEL, anonymizable_stamp, types: :datetime) if anonymizable_stamp
           self.anonymizable_rules = anonymizable_rules.merge(fields.to_h { |f| [f.to_sym, strategy] })
 
           anonymizable_define_scopes(prefix, suffix)

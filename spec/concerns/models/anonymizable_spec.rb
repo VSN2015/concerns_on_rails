@@ -240,6 +240,18 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
     it "raises on a missing column" do
       expect { model_class { anonymizable :nope, with: :redact } }.to raise_error(ArgumentError, /does not exist/)
     end
+
+    it "reports every missing field at once with one combined migration command" do
+      expect { model_class { anonymizable :nope, :nada, with: :redact } }.to raise_error(
+        ArgumentError, /\x27nope\x27 and \x27nada\x27 do not exist.*AddAnonymizableColumnsToAnonUsers nope nada\z/
+      )
+    end
+
+    it "types the stamp column in the migration hint" do
+      expect { model_class { anonymizable :name, with: :redact, stamp: :erased_at } }.to raise_error(
+        ArgumentError, /AddErasedAtToAnonUsers erased_at:datetime\z/
+      )
+    end
   end
 
   describe "Auditable interaction" do

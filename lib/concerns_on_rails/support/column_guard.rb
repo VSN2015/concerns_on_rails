@@ -39,29 +39,52 @@ module ConcernsOnRails
       end
 
       # Same contract, validated against another class (e.g. CounterCacheable
-      # checks the counter column on the *parent* model).
+      # checks the counter column on the *parent* model). Every missing column
+      # is reported in ONE error — a fresh model with five absent columns is one
+      # migration away, not five boot failures.
       def ensure_columns_on!(concern, klass, *fields, types: nil)
         return false unless schema_reachable?(klass)
 
-        fields.flatten.compact.each do |field|
-          next if klass.column_names.include?(field.to_s)
+        missing = fields.flatten.compact.map(&:to_sym).uniq.reject { |field| klass.column_names.include?(field.to_s) }
+        return true if missing.empty?
 
-          raise ArgumentError,
-                "#{concern}: '#{field}' does not exist in the database (table: #{klass.table_name})." \
-                "#{column_migration_hint(klass, field, types)}"
-        end
-        true
+        raise ArgumentError, missing_columns_message(concern, klass, missing, types)
+      end
+
+      # "Concern: 'a' does not exist in the database (table: t). Add it with: …"
+      # for one column; "'a', 'b' and 'c' do not exist … Add them with: …" for
+      # several. The singular wording is unchanged from earlier releases.
+      def missing_columns_message(concern, klass, missing, types)
+        quoted = missing.map { |field| "'#{field}'" }
+        subject = if quoted.size == 1
+                    "#{quoted.first} does not exist"
+                  else
+                    "#{quoted[0..-2].join(', ')} and #{quoted.last} do not exist"
+                  end
+        "#{concern}: #{subject} in the database (table: #{klass.table_name})." \
+          "#{column_migration_hint(klass, missing, types, concern: concern)}"
       end
 
       # " Add it with: bin/rails generate migration AddDeletedAtToArticles
       # deleted_at:datetime" — every missing-column failure becomes a
-      # copy-paste fix. Without a known type the column name goes out bare
-      # (the generator defaults to string).
-      def column_migration_hint(klass, field, types)
-        type = types.is_a?(Hash) ? types[field.to_sym] : types
-        column = [field, type].compact.join(":")
-        " Add it with: bin/rails generate migration " \
-          "Add#{field.to_s.camelize}To#{klass.table_name.to_s.camelize} #{column}"
+      # copy-paste fix. Several columns get ONE command, named after the
+      # concern (AddAddressableColumnsToUsers street:string city:string) since
+      # AddStreetAndCityAndZipAndCountryTo… stops being readable. Without a
+      # known type the column name goes out bare (the generator defaults to
+      # string). Accepts a single field or a list.
+      def column_migration_hint(klass, fields, types, concern: nil)
+        fields = Array(fields)
+        columns = fields.map do |field|
+          type = types.is_a?(Hash) ? types[field.to_sym] : types
+          [field, type].compact.join(":")
+        end
+        table = klass.table_name.to_s.camelize
+        if fields.size == 1
+          " Add it with: bin/rails generate migration Add#{fields.first.to_s.camelize}To#{table} #{columns.first}"
+        else
+          " Add them with: bin/rails generate migration " \
+            "Add#{concern.to_s.demodulize}ColumnsTo#{table} #{columns.join(' ')}"
+        end
       end
 
       # True when the class's table can actually be inspected. Connection
