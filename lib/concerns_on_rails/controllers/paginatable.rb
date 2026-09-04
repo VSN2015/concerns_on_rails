@@ -14,9 +14,19 @@ module ConcernsOnRails
     #       render json: paginated(Article.all)
     #     end
     #   end
+    #
+    # `paginated` also takes an in-memory collection — an Array, Set, Range or
+    # any other non-Hash Enumerable — so results assembled outside the
+    # database (an external API, a loaded association, a hand-built list of
+    # Structs) get the same slicing, headers and `pagination_meta`:
+    #
+    #   def search
+    #     render json: paginated(ExternalCatalog.search(params[:q]))
+    #   end
     module Paginatable
       extend ActiveSupport::Concern
 
+      LABEL = "ConcernsOnRails::Controllers::Paginatable".freeze
       DEFAULT_PER_PAGE = 25
       DEFAULT_MAX_PER_PAGE = 200
 
@@ -35,40 +45,49 @@ module ConcernsOnRails
         end
       end
 
-      # Apply pagination to a relation and set the standard response headers.
-      # Returns the paginated relation; the metadata is memoized so a follow-up
-      # `pagination_meta` (no argument) reuses it. Safe on empty relations.
-      def paginated(relation)
+      # Apply pagination to a relation or an in-memory collection and set the
+      # standard response headers. A relation comes back as a relation with
+      # LIMIT/OFFSET applied (still lazy); an Enumerable comes back as the
+      # current page's Array slice (`[]` past the last page). The metadata is
+      # memoized so a follow-up `pagination_meta` (no argument) reuses it.
+      # Safe on empty collections.
+      def paginated(collection)
         @paginatable_meta = nil
+        source = paginatable_source(collection)
         page = pagination_page
         per_page = pagination_per_page
         offset = (page - 1) * per_page
 
-        total = paginatable_total(relation)
+        total = paginatable_total(source)
         total_pages = per_page.positive? ? (total.to_f / per_page).ceil : 0
 
-        records = relation.limit(per_page).offset(offset)
+        records =
+          if source.is_a?(Array)
+            source[offset, per_page] || []
+          else
+            source.limit(per_page).offset(offset)
+          end
 
         @paginatable_meta = { total: total, page: page, per_page: per_page, total_pages: total_pages }
         set_pagination_headers(**@paginatable_meta)
         records
       end
 
-      # Pagination metadata WITHOUT applying limit/offset — handy for
-      # body-based pagination (compose with Respondable's `meta:`). Call with
-      # no argument after `paginated` to reuse its memoized meta — the
+      # Pagination metadata WITHOUT applying limit/offset (or slicing) — handy
+      # for body-based pagination (compose with Respondable's `meta:`). Call
+      # with no argument after `paginated` to reuse its memoized meta — the
       # documented records+meta composition used to run the identical COUNT
-      # twice per request. Pass a relation to compute fresh.
-      def pagination_meta(relation = nil)
-        return @paginatable_meta if relation.nil? && @paginatable_meta
+      # twice per request. Pass a relation or collection to compute fresh.
+      def pagination_meta(collection = nil)
+        return @paginatable_meta if collection.nil? && @paginatable_meta
 
-        if relation.nil?
+        if collection.nil?
           raise ArgumentError,
-                "ConcernsOnRails::Controllers::Paginatable: pagination_meta needs a relation " \
+                "#{LABEL}: pagination_meta needs a relation or collection " \
                 "(no prior paginated call in this request to reuse)"
         end
 
-        total = paginatable_total(relation)
+        total = paginatable_total(paginatable_source(collection))
         per_page = pagination_per_page
         {
           total: total,
@@ -80,13 +99,31 @@ module ConcernsOnRails
 
       private
 
-      # COUNT with the clauses that break or skew it stripped: order/limit/
-      # offset are irrelevant, a custom SELECT list would turn into the invalid
-      # COUNT(a, b), and count(:all) keeps DISTINCT semantics. A grouped
-      # relation counts as a Hash (group => count); the meaningful total is the
-      # number of groups.
-      def paginatable_total(relation)
-        counted = relation.except(:order, :limit, :offset, :select).count(:all)
+      # Relations — anything answering `limit` and `offset`: an
+      # ActiveRecord::Relation, an association CollectionProxy, a model class —
+      # pass through untouched so they keep paginating in SQL. Any other
+      # non-Hash Enumerable is materialized ONCE into an Array, so an
+      # Enumerator is not consumed twice (once to count, once to slice). A Hash
+      # is rejected rather than silently paginated as [key, value] pairs.
+      def paginatable_source(collection)
+        return collection if collection.respond_to?(:limit) && collection.respond_to?(:offset)
+        return collection.to_a if collection.is_a?(Enumerable) && !collection.is_a?(Hash)
+
+        hint = collection.is_a?(Hash) ? " — call .to_a to paginate a Hash as [key, value] pairs" : ""
+        raise ArgumentError,
+              "#{LABEL}: expected an ActiveRecord relation or an Enumerable (Array, Set, Range, ...), " \
+              "got #{collection.class}#{hint}"
+      end
+
+      # Arrays already know their size. Relations COUNT with the clauses that
+      # break or skew it stripped: order/limit/offset are irrelevant, a custom
+      # SELECT list would turn into the invalid COUNT(a, b), and count(:all)
+      # keeps DISTINCT semantics. A grouped relation counts as a Hash
+      # (group => count); the meaningful total is the number of groups.
+      def paginatable_total(source)
+        return source.size if source.is_a?(Array)
+
+        counted = source.except(:order, :limit, :offset, :select).count(:all)
         counted.is_a?(Hash) ? counted.length : counted
       end
 

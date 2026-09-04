@@ -1455,6 +1455,21 @@ class ArticlesController < ApplicationController
 end
 ```
 
+**Arrays and other Enumerables work too.** Results that never touched the database — an
+external API response, a loaded association, a hand-built list of Structs — get the same
+slicing, headers and `pagination_meta`. Relations still paginate in SQL (`LIMIT`/`OFFSET`);
+an in-memory collection is sliced in Ruby and comes back as an `Array`:
+
+```ruby
+def search
+  render json: paginated(ExternalCatalog.search(params[:q]))   # Array in, current page out
+end
+```
+
+Anything answering `limit`/`offset` is treated as a relation; any other non-`Hash` `Enumerable`
+(`Array`, `Set`, `Range`, `Enumerator` — consumed once) is materialized and sliced. A `Hash`,
+`nil` or a non-collection raises `ArgumentError` (call `.to_a` to paginate a Hash's pairs).
+
 **URL params**
 
 | Param        | Default | Notes                              |
