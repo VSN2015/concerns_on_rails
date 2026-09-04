@@ -40,6 +40,7 @@ The `localizable` class macro accepts the following keyword options:
 | `default:` | `Symbol` / `nil` | `nil` | Locale to use when neither the param nor the header produces a match. Coerced to a symbol. When `nil` and no match is found, falls back to `I18n.default_locale`. |
 | `param:` | `Symbol` / `nil` | `:locale` | Name of the query/route parameter to inspect first. Coerced to a symbol. Pass `nil` to disable param-based resolution entirely. |
 | `header:` | `Boolean` | `true` | When `true`, parses the `Accept-Language` request header as a fallback after param resolution fails. Set to `false` to skip header inspection. |
+| `response_headers:` | `Boolean` | `true` | Emit `Content-Language: <resolved locale>` on every response (BCP 47 form, `pt_BR` → `pt-BR`) and, when `header:` is `true`, append `Accept-Language` to the `Vary` header (de-duplicated, never clobbering an existing `Vary`). Written before the action runs. Set `false` to emit neither. |
 
 Calling `localizable` with no arguments is valid; all options take their defaults.
 
@@ -49,14 +50,14 @@ Calling `localizable` with no arguments is valid; all options take their default
 
 | Signature | Visibility | Description |
 |---|---|---|
-| `switch_locale(&block)` | public | `around_action` callback. Calls `I18n.with_locale(resolved_locale, &block)`, running the action block under the chosen locale and restoring the previous locale afterwards. Subclasses may override this method. |
+| `switch_locale(&block)` | public | `around_action` callback. Writes the response headers (`Content-Language`, and `Vary: Accept-Language` when the header is a source), then calls `I18n.with_locale(resolved_locale, &block)`, running the action block under the chosen locale and restoring the previous locale afterwards. Subclasses may override this method. |
 | `resolved_locale` | public | Returns the `Symbol` locale chosen for the current request using the resolution order described below. Never returns a value absent from `I18n.available_locales`. |
 
 ### Class methods
 
 | Signature | Description |
 |---|---|
-| `localizable(available:, default:, param:, header:)` | Configuration macro. Stores options in the inheritable `localizable_options` class attribute. Safe to call in subcontrollers to narrow or change the options for that subtree. |
+| `localizable(available:, default:, param:, header:, response_headers:)` | Configuration macro. Stores options in the inheritable `localizable_options` class attribute. Safe to call in subcontrollers to narrow or change the options for that subtree. |
 
 ## Examples
 
@@ -103,6 +104,7 @@ end
 
 ## Notes & gotchas
 
+- **`Content-Language` and `Vary` are on by default.** A localized JSON body is a different representation per locale; without `Vary: Accept-Language` a shared cache (CDN, `Rack::Cache`) would serve one client's French to another's English. The headers are written before the action, so they ride a rescued error too. If you localize only via a URL param, pass `header: false` and `Vary` is skipped (the URL already differs); `response_headers: false` disables both.
 **Resolution order.** The concern resolves locale in this priority sequence: `params[param]` → first matching language in `Accept-Language` → `default:` option → `I18n.default_locale`. Each step is attempted only if the previous one produced no match within the allow-list.
 
 **Final validation against `I18n.available_locales`.** Even if a locale passes the `available:` allow-list, `resolved_locale` performs a final check against `I18n.available_locales` before returning. If the two lists fall out of sync (e.g. the `available:` option is set to `[:en, :fr]` but I18n is later reconfigured to only `[:en]`), the resolved `:fr` candidate is discarded and `I18n.default_locale` is returned instead. This means locale resolution is always safe to hand to `I18n.with_locale` without risk of `I18n::InvalidLocale`.

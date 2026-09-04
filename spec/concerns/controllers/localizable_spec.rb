@@ -91,4 +91,71 @@ describe ConcernsOnRails::Controllers::Localizable do
       expect(I18n.locale).to eq(:en) # restored
     end
   end
+  describe "response headers (Content-Language / Vary)" do
+    it "sets Content-Language to the resolved locale while switching" do
+      c = controller(params: { locale: "fr" }) { localizable available: %i[en fr de], default: :en }
+      c.switch_locale { nil }
+      expect(c.response.headers["Content-Language"]).to eq("fr")
+    end
+
+    it "appends Vary: Accept-Language when the header is a locale source, merging with an existing Vary" do
+      c = controller(accept_language: "de") { localizable available: %i[en fr de], default: :en }
+      c.response.set_header("Vary", "Accept")
+      c.switch_locale { nil }
+      expect(c.response.headers["Vary"]).to eq("Accept, Accept-Language")
+      expect(c.response.headers["Content-Language"]).to eq("de")
+
+      again = controller(accept_language: "de") { localizable available: %i[en fr de], default: :en }
+      again.response.set_header("Vary", "Accept-Language")
+      again.switch_locale { nil }
+      expect(again.response.headers["Vary"]).to eq("Accept-Language") # de-duplicated
+    end
+
+    it "does not add Vary when header: false (the locale cannot depend on Accept-Language)" do
+      c = controller(params: { locale: "fr" }) { localizable available: %i[en fr de], default: :en, header: false }
+      c.switch_locale { nil }
+      expect(c.response.headers["Content-Language"]).to eq("fr")
+      expect(c.response.headers).not_to have_key("Vary")
+    end
+
+    it "can be switched off with response_headers: false" do
+      c = controller(accept_language: "fr") { localizable available: %i[en fr de], default: :en, response_headers: false }
+      c.switch_locale { nil }
+      expect(c.response.headers).not_to have_key("Content-Language")
+      expect(c.response.headers).not_to have_key("Vary")
+    end
+
+    it "emits a BCP 47 tag (underscore locales become dashed)" do
+      saved = I18n.available_locales
+      I18n.available_locales = %i[en pt_BR]
+      c = controller(params: { locale: "pt_BR" }) { localizable available: %i[en pt_BR], default: :en }
+      c.switch_locale { nil }
+      expect(c.response.headers["Content-Language"]).to eq("pt-BR")
+    ensure
+      I18n.available_locales = saved
+    end
+
+    it "writes the headers before the action, so a raising action (rescue_from path) still carries them" do
+      c = controller(accept_language: "de") { localizable available: %i[en fr de], default: :en }
+      expect { c.switch_locale { raise "boom" } }.to raise_error("boom")
+      expect(c.response.headers["Content-Language"]).to eq("de")
+      expect(c.response.headers["Vary"]).to eq("Accept-Language")
+    end
+
+    it "is a no-op on a controller without a response object" do
+      klass = Class.new do
+        def self.around_action(*); end
+        # no ActiveSupport here — stub what the included block needs
+        def self.class_attribute(*, **); end
+
+        def self.localizable_options
+          {}
+        end
+        include ConcernsOnRails::Controllers::Localizable
+      end
+      bare = klass.new
+      allow(bare).to receive(:resolved_locale).and_return(:en)
+      expect(bare.switch_locale { I18n.locale }).to eq(:en)
+    end
+  end
 end
