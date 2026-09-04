@@ -928,6 +928,25 @@ guard rejects are skipped (not errors). Unlike every other batch verb in this ge
 the guarded `<event>!` method, because that path runs validations via `update!` while a bulk
 `update_all` would silently skip them.
 
+**Timestamps and per-event hooks**
+
+```ruby
+stateable_by :status, states: %i[draft review published archived], default: :draft,
+             timestamps: true,                  # or %i[published archived] — stamps <state>_at
+             transitions: { publish: { from: %i[draft review], to: :published }, archive: { to: :archived } }
+
+article.publish!          # status = "published" AND published_at = Time.current, in ONE update!
+article.archived!         # direct setters and transition_to! stamp too; the default state on create does not
+
+def before_publish  = check_embargo!          # per-event hooks, fired inside the generic pair and the
+def after_publish   = notify_subscribers      # same transaction: before_transition → before_publish →
+                                              # write → after_publish → after_transition
+```
+
+`timestamps:` requires the `<state>_at` columns (checked at class load, one typed migration hint); per-event
+hooks follow the affixed event name (`before_status_publish` with `prefix: true`) and, like the generic hooks,
+fire only for guarded `<event>!` transitions. `Model.stateable_timestamps` lists the stamped states.
+
 **Prefix / suffix** — avoid clashes when the state names overlap with other concerns or scopes:
 
 ```ruby
