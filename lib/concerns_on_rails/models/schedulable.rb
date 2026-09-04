@@ -9,7 +9,7 @@ module ConcernsOnRails
 
       DEFAULT_STARTS_AT_FIELD = :starts_at
       DEFAULT_ENDS_AT_FIELD = :ends_at
-      SCOPE_BASES = %i[active_at current upcoming expired].freeze
+      SCOPE_BASES = %i[active_at current upcoming expired overlapping].freeze
 
       included do
         class_attribute :schedulable_starts_at_field, instance_accessor: false, default: DEFAULT_STARTS_AT_FIELD
@@ -49,7 +49,49 @@ module ConcernsOnRails
                                                   label: "ConcernsOnRails::Models::Schedulable")
         end
 
+        # The relation behind the `overlapping` scope. Public (like
+        # schedulable_window) because scope lambdas resolve methods through the
+        # relation, which cannot reach private class methods.
+        def schedulable_overlapping(from, to = nil)
+          from, to, inclusive_end = schedulable_window(from, to)
+          relation = all
+          relation = schedulable_started_before(relation, to, inclusive_end) if schedulable_starts_at_field
+          relation = schedulable_ending_after(relation, from) if schedulable_ends_at_field && from
+          relation
+        end
+
+        # Normalizes an overlapping/overlaps? window into [from, to,
+        # inclusive_end]: two Times, or one Range (`..` → inclusive end).
+        def schedulable_window(from, to)
+          inclusive_end = false
+          if from.is_a?(Range)
+            raise ArgumentError, "ConcernsOnRails::Models::Schedulable: pass a Range or from/to, not both" unless to.nil?
+
+            inclusive_end = !from.exclude_end?
+            to = from.end
+            from = from.begin
+          end
+          raise ArgumentError, "ConcernsOnRails::Models::Schedulable: from must not be after to" if from && to && from > to
+
+          [from, to, inclusive_end]
+        end
+
         private
+
+        # Started (NULL never overlaps, matching active_at) and, with a `to`,
+        # started before it — or on it for an inclusive Range end.
+        def schedulable_started_before(relation, to, inclusive_end)
+          column = arel_table[schedulable_starts_at_field]
+          return relation.where.not(schedulable_starts_at_field => nil) if to.nil?
+
+          relation.where(inclusive_end ? column.lteq(to) : column.lt(to))
+        end
+
+        # Open-ended, or ending strictly after `from`.
+        def schedulable_ending_after(relation, from)
+          column = arel_table[schedulable_ends_at_field]
+          relation.where(column.eq(nil).or(column.gt(from)))
+        end
 
         # Built here rather than inline in `included do` so the names can be
         # affixed. `current` resolves `active_at` through the names map — a
@@ -88,6 +130,14 @@ module ConcernsOnRails
 
             where(arel_table[field].lteq(Time.zone.now))
           }
+
+          # Records whose window intersects [from, to) — bookings that clash,
+          # events on a calendar page. Same boundary rules as active_at
+          # (inclusive start, exclusive end): a window that merely touches the
+          # query window does not overlap. Either side may be nil (unbounded);
+          # a Range works too, and `from..to` makes the end inclusive.
+          # Unstarted records (nil starts_at) never overlap, matching active_at.
+          scope schedulable_scope_names[:overlapping], ->(from, to = nil) { schedulable_overlapping(from, to) }
         end
       end # rubocop:enable Metrics/BlockLength
 
@@ -98,6 +148,13 @@ module ConcernsOnRails
 
       def current?
         active_at?(Time.zone.now)
+      end
+
+      # Does this record's window intersect [from, to)? Mirrors the
+      # `overlapping` scope — boundaries, nil sides and Ranges included.
+      def overlaps?(from, to = nil)
+        from, to, inclusive_end = self.class.schedulable_window(from, to)
+        schedulable_starts_before?(to, inclusive_end) && schedulable_ends_after?(from)
       end
 
       def upcoming?
@@ -169,6 +226,30 @@ module ConcernsOnRails
         value.nil? || value > time
       end
       private :schedulable_not_ended_at?
+
+      # Started (nil = never, matching active_at) and, when `to` is given,
+      # started before it (or on it, for an inclusive Range end).
+      def schedulable_starts_before?(to, inclusive_end)
+        field = self.class.schedulable_starts_at_field
+        return true unless field
+
+        value = self[field]
+        return false if value.nil?
+        return true if to.nil?
+
+        inclusive_end ? value <= to : value < to
+      end
+      private :schedulable_starts_before?
+
+      # Still running at `from` (open-ended or ending strictly after it).
+      def schedulable_ends_after?(from)
+        field = self.class.schedulable_ends_at_field
+        return true unless field && from
+
+        value = self[field]
+        value.nil? || value > from
+      end
+      private :schedulable_ends_after?
     end
   end
 end
