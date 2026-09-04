@@ -34,6 +34,7 @@ end
 |--------|------|----------|-------|
 | `failed_attempts` (or your `attempts:` column) | `integer` | Yes | A `default: 0` is nice but **not required** — the increment NULL-coalesces. Must be an integer column (validated at class-load time). |
 | `locked_at` (or your `locked_at:` column) | `datetime` | Yes | `NULL` = not locked. |
+| `unlock_token` (your `unlock_token:` column) | `string` (unique index recommended) | With `unlock_token:` | Holds the self-service unlock token while the account is locked; `NULL` otherwise. |
 
 ```ruby
 class AddLockableToUsers < ActiveRecord::Migration[7.1]
@@ -56,6 +57,7 @@ Both columns must exist (and `attempts:` must be an integer column) or the macro
 | `locked_at:` | `Symbol` | `:locked_at` | Datetime lock column. Must differ from `attempts:`. |
 | `max_attempts:` | positive `Integer` or `nil` | `5` | The failure count that triggers the lock (reached **exactly**: the 5th failure locks). `nil` = count failures but never auto-lock. |
 | `unlock_in:` | positive duration or `nil` | `nil` | `nil` = locked until `unlock_access!`. With a duration (e.g. `15.minutes`) the lock lapses by itself; the expiry instant counts as unlocked. |
+| `unlock_token:` | `Symbol` or `nil` | `nil` | A string column. When set, `lock_access!` (including the lock tripped by `register_failed_attempt!`) mints a 43-character URL-safe token into it in the same write, and every unlock path — `unlock_access!`, `unlock_by_token`, `unlock_expired`, the quiet stale-lock reset on a failed attempt — clears it. Must differ from `attempts:`/`locked_at:`; the column is checked at class load. |
 | `prefix:` / `suffix:` | `Symbol`/`String` | `nil` | Affix the `.locked` / `.unlocked` scope names to avoid collisions. |
 
 ## Methods
@@ -77,6 +79,7 @@ Both columns must exist (and `attempts:` must be an integer column) or the macro
 | `lock_expired? → Boolean` | Was locked and the `unlock_in` window has fully elapsed. Always `false` when `unlock_in` is `nil`. |
 | `lock_expires_at → Time \| nil` | `locked_at + unlock_in`; `nil` when not locked or manual-unlock-only. |
 | `attempts_remaining → Integer \| nil` | Failures left before auto-lock (never negative); `nil` when `max_attempts: nil`. |
+| `User.unlock_by_token(token) → record \| nil` | _(class method, needs `unlock_token:`)_ Finds the row holding `token` (constant-time compare on the fetched value), runs `unlock_access!` — hooks fire, counter zeroed, token cleared — and returns the record. `nil` for a blank, unknown or already-used token; works even after the lock lapsed on its own (clears the stale lock). Raises `ArgumentError` when `unlock_token:` is not configured. |
 
 ### Scopes
 
@@ -131,6 +134,7 @@ user.unlock_access!               # support-desk manual unlock (also resets the 
 
 ## Notes & gotchas
 
+- **Unlock tokens are single-use and live exactly as long as the lock.** The token is minted with the lock and cleared by every unlock path, so a mailed link works once; `after_lock` is where you send it. A lock that lapses on its own keeps its token until the next write, so a late click still cleans the row. Use a unique index on the column (the `string:uniq` hint) — `unlock_by_token` does an indexed equality lookup before its constant-time compare.
 - **Don't reveal lock state to unauthenticated callers** unless that is an accepted trade-off — a "locked" response confirms the account exists. Many apps return the same generic 401 either way and only surface lock state in account-recovery flows.
 - **`update_columns` semantics.** Locking/unlocking bypasses validations and AR callbacks on purpose (an otherwise-invalid record must still be lockable). That also skips `updated_at`, and a coexisting `Auditable` will not record the change.
 - **Lazy expiry.** Readers and scopes never write. A lapsed lock's column is cleared by the next `unlock_access!` or `register_failed_attempt!` (quietly there — no unlock hooks fire from a failed login, so "account unlocked" notifications can't be triggered by an attacker's guess).

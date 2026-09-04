@@ -1199,7 +1199,7 @@ One entry is recorded **per changed field per save** (creates record `"from" => 
 
 ## 🔐 Lockable
 
-Failed-attempt tracking + **account lockout** ("Devise lockable-lite") for apps rolling their own authentication (Rails 8 auth generator / `has_secure_password`) — which ships **no brute-force protection** out of the box. Two columns on the model's own table; no tokens, no mailers.
+Failed-attempt tracking + **account lockout** ("Devise lockable-lite") for apps rolling their own authentication (Rails 8 auth generator / `has_secure_password`) — which ships **no brute-force protection** out of the box. Two columns on the model's own table (plus an optional unlock-token column for self-service unlock links); no mailers.
 
 ```ruby
 class User < ApplicationRecord
@@ -1219,9 +1219,14 @@ user.unlock_access!             # manual unlock   (hooks: before/after_unlock)
 User.locked / User.unlocked     # expiry-aware scopes
 
 User.unlock_expired              # => 3 — unlocks every row whose unlock_in window has elapsed
+
+# Self-service unlock (Devise's :email strategy, minus the mailer) — needs a string column:
+#   lockable_by max_attempts: 5, unlock_token: :unlock_token
+user.lock_access!; user.unlock_token   # minted in the same write as the lock — mail it as a link
+User.unlock_by_token(params[:token])   # constant-time lookup; unlocks once (hooks fire), returns the user or nil
 ```
 
-**Options**: `attempts:` (`:failed_attempts`, must be an integer column), `locked_at:` (`:locked_at`, datetime column), `max_attempts:` (`5`; `nil` = count but never auto-lock), `unlock_in:` (`nil` = locked until manual unlock; a duration makes the lock lapse by itself), `prefix:` / `suffix:` (affix the scope names).
+**Options**: `attempts:` (`:failed_attempts`, must be an integer column), `locked_at:` (`:locked_at`, datetime column), `max_attempts:` (`5`; `nil` = count but never auto-lock), `unlock_in:` (`nil` = locked until manual unlock; a duration makes the lock lapse by itself), `unlock_token:` (`nil`; a string column that receives a 43-char URL-safe token on lock and is cleared by every unlock path), `prefix:` / `suffix:` (affix the scope names).
 
 **Bulk operations**
 
