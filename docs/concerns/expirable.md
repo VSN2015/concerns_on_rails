@@ -87,7 +87,10 @@ ApiToken.expiring_within(1.hour)   # expires_at in (now, now + 1.hour]
 |---|---|
 | `expired?` | Returns `true` when the expiry column is set and its value is less than or equal to `Time.zone.now`. Returns `false` when the column is `nil`. |
 | `active?` | Inverse of `expired?`. Returns `true` when not expired (including records with no expiry set). |
-| `expire!(time = Time.zone.now)` | Persists an expiry timestamp via `update`. Defaults to the current time, making the record immediately expired. Accepts any `Time`-compatible value. |
+| `expire!(time = Time.zone.now)` | Persists an expiry timestamp via `update`. Defaults to the current time, making the record immediately expired. Accepts any `Time`-compatible value. Runs `before_expire`, the write, then `after_expire` (only when the write succeeded) inside one transaction; returns the `update` result. |
+| `expire_in!(duration)` | Sets an absolute lifetime from now — `expire!(Time.zone.now + duration)` — whatever the current expiry. Fires the hooks like `expire!`. |
+| `clear_expiry!` | Sets the expiry column to `nil` so the record never expires. No hooks (nothing expired). |
+| `before_expire` / `after_expire` | Lifecycle hooks, no-ops by default. Fired by `expire!` / `expire_in!` / `expire_all`; not by `extend_expiry!` or `clear_expiry!`. Overriding either moves `expire_all` to the per-record path. |
 | `extend_expiry!(by:)` | Pushes the expiry forward by a duration. The base for the calculation is smart: if the record is never-expiring or already expired, `now` is used as the base; if the record has a future expiry, the existing value is used as the base. |
 | `time_until_expiry` | Returns an `ActiveSupport::Duration` representing seconds until expiry, `nil` if there is no expiry set, or `0.seconds` if the record is already expired. |
 
@@ -155,6 +158,7 @@ old_invite.active?     # => true
 
 ## Notes & gotchas
 
+- **Hooks share the write's transaction.** A raising `after_expire` rolls the expiry back; a write that fails validation returns `false` and skips `after_expire`. `expire_all` detects an overridden hook (like an overridden `expire!`) and streams per record so the hooks run for every row — declare hooks knowing the bulk verb pays a query per record.
 - **Boundary is exclusive for the expiring record.** A record whose `expires_at` equals `Time.zone.now` exactly is considered expired (`expired?` returns `true`, `active?` returns `false`). The same boundary applies to the `.expired` scope (`<= now`) and `.active` scope (`> now`).
 - **`nil` means never-expires, not immediately-expired.** `expired?` returns `false` and `active?` returns `true` when the column is `nil`. The `.active` scope includes `NULL` rows; the `.expired` scope excludes them.
 - **`expirable_by` must be called before the model is used.** The macro writes the `expirable_field` class attribute and validates the column. If you skip the call, the three scopes are still defined (they were added by `included do`) but they will read from the default `expirable_field` value of `:expires_at`, which may not match your actual column.

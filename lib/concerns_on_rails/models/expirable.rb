@@ -31,9 +31,10 @@ module ConcernsOnRails
         end
 
         # Expire every currently-active record in the relation. Returns the
-        # Integer count. Expirable defines no lifecycle hooks, so this is a
-        # single UPDATE unless the model overrode `expire!` or declares
-        # validations (see Support::BatchOps.fast_path?).
+        # Integer count. A single UPDATE unless the model overrode `expire!`
+        # or a lifecycle hook (before_expire / after_expire), or declares
+        # validations (see Support::BatchOps.fast_path?) — then it streams
+        # per record so the hooks run.
         def expire_all(time = Time.zone.now)
           active = all.public_send(expirable_scope_names.fetch(:active))
           if expirable_batch_fast_path?
@@ -52,11 +53,11 @@ module ConcernsOnRails
         private
 
         # Whether the single-UPDATE fast path is safe — the whole decision
-        # (bang method unoverridden AND the model declares no validations,
-        # plus why) lives in Support::BatchOps.fast_path?. Expirable defines
-        # no lifecycle hooks, so `expire!` is the only method to check.
+        # (bang method and hooks unoverridden AND the model declares no
+        # validations, plus why) lives in Support::BatchOps.fast_path?.
         def expirable_batch_fast_path?
-          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Expirable, :expire!)
+          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Expirable,
+                                                        :expire!, :before_expire, :after_expire)
         end
 
         # Scopes live here (not in `included do`) so their names can be affixed —
@@ -96,8 +97,36 @@ module ConcernsOnRails
         value <= Time.zone.now
       end
 
+      # Lifecycle hooks — override in the model. Fired by `expire!` (and so by
+      # `expire_in!` and `expire_all`), not by `extend_expiry!` (a renewal) or
+      # `clear_expiry!`. Overriding either one moves `expire_all` to the
+      # per-record path.
+      def before_expire; end
+      def after_expire; end
+
+      # Write the expiry (default: now, i.e. expire immediately). The hooks and
+      # the write share one transaction, so a raising after_expire rolls the
+      # expiry back (SoftDeletable's pattern); a failed write (validation)
+      # returns false and skips after_expire.
       def expire!(time = Time.zone.now)
-        update(self.class.expirable_field => time)
+        result = false
+        transaction do
+          before_expire
+          result = update(self.class.expirable_field => time)
+          after_expire if result
+        end
+        result
+      end
+
+      # Set an absolute lifetime from now — `token.expire_in!(15.minutes)` —
+      # whatever the current expiry. Sugar for `expire!(now + duration)`.
+      def expire_in!(duration)
+        expire!(Time.zone.now + duration)
+      end
+
+      # Make the record never expire (nil expiry). No hooks: nothing expired.
+      def clear_expiry!
+        update(self.class.expirable_field => nil)
       end
 
       # Push expiry forward by `by:`. If the record has no expiry yet, or has
