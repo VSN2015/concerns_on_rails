@@ -456,13 +456,21 @@ User.soft_delete_all      # soft-deletes all matching records; returns the count
 User.destroy_all          # alias of soft_delete_all (kept for backwards compatibility; returns a count, not records)
 User.really_destroy_all   # hard-deletes the records matching the CURRENT relation (soft-deleted included)
 User.restore_all          # restores the matching soft-deleted records; returns the count
+
+User.deleted_within(1.hour).restore_all        # undo a bulk delete — only the last hour's trash
+User.deleted_within(30.days).really_destroy_all # purge recent trash; older rows untouched
+User.only_deleted.really_destroy_all           # empty the trash can, nothing else
 ```
 
 A record that fails to transition raises `ActiveRecord::RecordNotSaved` and rolls the whole
 batch back. With `touch: false` and no overridden hooks, `soft_delete_all` / `restore_all`
-collapse to a single `UPDATE`. Note that `really_destroy_all` peels the soft-delete
-predicate off the relation, so `only_deleted.really_destroy_all` widens to the whole
-relation — purge trash with `User.soft_deleted.delete_all` instead.
+collapse to a single `UPDATE`. Both `restore_all` and `really_destroy_all` peel off **only the
+default scope's own** `deleted_at IS NULL`: a predicate *you* put on the column — `deleted_within`,
+`where(deleted_at: range)`, `only_deleted` — survives, as does any other default scope the model
+declares. (Previously they unscoped the column outright, so `deleted_within(1.hour).restore_all`
+restored the whole trash can and `only_deleted.really_destroy_all` widened to the whole relation.)
+The *scopes* still unscope the column, so chain them first: `soft_deleted.where(...)`, not
+`where(...).soft_deleted`.
 
 **Scope-name collisions**
 

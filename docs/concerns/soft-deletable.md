@@ -100,10 +100,20 @@ Article.deleted_within(30.days)    # => deleted in the last 30 days
 | `soft_deletable_by(field = nil, touch: true, default_scope: true)` | Configuration macro. Sets the soft-delete column (defaulting to `:deleted_at` when `field` is `nil`) and options; validates the column exists. |
 | `soft_delete_all` | Soft-deletes every record in the current scope and returns the Integer count. A failing record raises `ActiveRecord::RecordNotSaved` and rolls the whole batch back. With `touch: false` and no overridden hooks it collapses to a single `UPDATE`. Preferred over `destroy_all`. |
 | `destroy_all` | Overrides ActiveRecord's `destroy_all` to call `soft_delete_all` instead of issuing `DELETE`. Kept for backwards compatibility — note it returns a count, not the records. |
-| `really_destroy_all` | Hard-deletes the records matching the **current relation** (soft-deleted included — only the soft-delete column's predicates are peeled off). Bypasses callbacks via `delete_all`. |
-| `restore_all` | Restores every matching soft-deleted record and returns the Integer count (mirror of `soft_delete_all`: `RecordNotSaved` + rollback on failure, single-`UPDATE` fast path). |
+| `really_destroy_all` | Hard-deletes the records matching the **current relation**, soft-deleted included — only the default scope's own `deleted_at IS NULL` is peeled off, so `only_deleted.really_destroy_all` purges the trash and nothing else and `deleted_within(30.days).really_destroy_all` purges recent trash. Bypasses callbacks via `delete_all`. |
+| `restore_all` | Restores every soft-deleted record **in the current relation** and returns the Integer count (mirror of `soft_delete_all`: `RecordNotSaved` + rollback on failure, single-`UPDATE` fast path). A caller predicate on the column composes: `deleted_within(1.hour).restore_all` undoes only the last hour's deletions. |
 
 ## Examples
+
+**Undo a bulk delete without emptying the whole trash can:**
+
+```ruby
+User.deleted_within(1.hour).restore_all          # => 42 — only rows soft-deleted in the last hour
+User.where(deleted_at: from..to).restore_all     # any predicate on the column composes the same way
+User.only_deleted.really_destroy_all             # purge everything in the trash, nothing live
+```
+
+`restore_all` and `really_destroy_all` peel off only the default scope's own `deleted_at IS NULL`; predicates *you* add on the column survive, and so does any other `default_scope` the model declares (a tenant scope, say). The *scopes* themselves still `unscope` the column, so put them first in a chain — `soft_deleted.where(...)` rather than `where(...).soft_deleted`.
 
 **Basic soft-delete and restore cycle:**
 
