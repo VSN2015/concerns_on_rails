@@ -79,6 +79,7 @@ module ConcernsOnRails
       PINNED_DIGEST_SCHEMES = %i[github shopify stripe].freeze
       SUPPORTED_DIGESTS = { sha256: "SHA256", sha1: "SHA1", sha512: "SHA512" }.freeze
       STRIPE_DEFAULT_TOLERANCE = 300 # seconds; Stripe's recommended window
+      DEFAULT_REPLAY_TTL = 86_400 # 24 hours
       # Stripe sends at most two v1 values (during secret rolls); the cap is
       # cheap hygiene against a header stuffed with thousands of candidates.
       MAX_STRIPE_SIGNATURES = 16
@@ -93,16 +94,28 @@ module ConcernsOnRails
         # Declare signature verification for the given actions (none =
         # catch-all). Each call appends a rule; the FIRST rule matching the
         # current action wins, so declare specific rules before a catch-all.
-        def verify_webhook(*actions, secret:, scheme: :hex, header: nil, tolerance: nil, digest: :sha256)
+        #
+        # `replay:` adds replay protection for schemes that carry no timestamp
+        # (GitHub, Shopify, plain hex/base64 — Stripe's `tolerance:` only bounds
+        # the window): after a signature verifies, a digest of the signature
+        # header is written to the store with `unless_exist:`; a second delivery
+        # with the same signature within `replay_ttl:` (default 24 hours) is
+        # rejected with 409 `webhook_replayed`. `replay: true` uses the gem-wide
+        # `ConcernsOnRails.config.cache_store`; pass a store object (anything with
+        # `#write(key, value, expires_in:, unless_exist:)`) to override.
+        def verify_webhook(*actions, secret:, scheme: :hex, header: nil, tolerance: nil, digest: :sha256,
+                           replay: nil, replay_ttl: nil)
           actions = actions.flatten.map(&:to_s)
           scheme = scheme.to_sym
           digest = digest.to_sym
           validate_verify_webhook!(secret: secret, scheme: scheme, header: header, tolerance: tolerance, digest: digest)
+          validate_webhook_replay!(replay, replay_ttl)
 
           rule = { actions: actions, secret: secret, scheme: scheme,
                    header: (header || SCHEMES[scheme][:header]).to_s,
                    tolerance: scheme == :stripe ? (tolerance || STRIPE_DEFAULT_TOLERANCE).to_i : nil,
-                   digest: digest }
+                   digest: digest,
+                   replay: replay, replay_ttl: replay ? (replay_ttl || DEFAULT_REPLAY_TTL).to_i : nil }
           self.webhook_rules = webhook_rules + [rule]
         end
 
@@ -117,6 +130,23 @@ module ConcernsOnRails
           validate_webhook_header!(scheme, header)
           validate_webhook_tolerance!(scheme, tolerance)
           validate_webhook_digest!(scheme, digest)
+        end
+
+        def validate_webhook_replay!(replay, replay_ttl)
+          raise ArgumentError, "#{LABEL}: :replay_ttl requires :replay" if replay_ttl && replay.nil?
+          return if replay.nil?
+
+          unless replay == true || replay.respond_to?(:write)
+            raise ArgumentError, "#{LABEL}: :replay must be true or a store responding to #write"
+          end
+
+          validate_webhook_replay_ttl!(replay_ttl)
+        end
+
+        def validate_webhook_replay_ttl!(replay_ttl)
+          return if replay_ttl.nil? || replay_ttl.to_i.positive?
+
+          raise ArgumentError, "#{LABEL}: :replay_ttl must be a positive duration"
         end
 
         def validate_webhook_header!(scheme, header)
@@ -194,10 +224,14 @@ module ConcernsOnRails
       end
 
       def webhook_render_outcome(rule, outcome)
+        outcome = :replayed if outcome == :ok && webhook_replayed?(rule)
         case outcome
         when :ok
           @webhook_verified = true
           nil
+        when :replayed
+          webhook_verification_failed(message: "This webhook delivery was already received.",
+                                      status: :conflict, code: "webhook_replayed")
         when :malformed
           webhook_verification_failed(message: "#{rule[:header]} header could not be parsed.",
                                       status: :bad_request, code: "webhook_signature_malformed")
@@ -208,6 +242,37 @@ module ConcernsOnRails
           webhook_verification_failed(message: "#{rule[:header]} signature does not match the request body.",
                                       status: :unauthorized, code: "webhook_signature_invalid")
         end
+      end
+
+      # Replay check, run ONLY after the signature verified so forged traffic
+      # never consumes a slot. The key is a SHA256 of the signature header
+      # (for a valid signature that identifies the body, and for Stripe the
+      # attempt's timestamp too), scoped per controller#action; the atomic
+      # unless_exist write is what makes two concurrent replays lose exactly
+      # one of them (memcached add / Redis SET NX through Rails.cache).
+      def webhook_replayed?(rule)
+        return false unless rule[:replay]
+
+        store = webhook_replay_store!(rule)
+        digest = Digest::SHA256.hexdigest(read_webhook_header(rule).to_s)
+        key = "webhook_replay:#{webhook_replay_scope}:#{digest}"
+        !store.write(key, 1, expires_in: rule[:replay_ttl], unless_exist: true)
+      end
+
+      def webhook_replay_store!(rule)
+        store = rule[:replay] == true ? ConcernsOnRails.config.resolved_cache_store : rule[:replay]
+        return store if store
+
+        raise ArgumentError,
+              "#{LABEL}: no store configured for replay: true. Pass replay: <store>, or the gem-wide fallback: " \
+              "ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } } " \
+              "(must support #write(key, value, expires_in:, unless_exist:))."
+      end
+
+      def webhook_replay_scope
+        controller = respond_to?(:controller_path) ? controller_path : self.class.name || "anonymous"
+        action = respond_to?(:action_name) ? action_name.to_s : ""
+        "#{controller}##{action}"
       end
 
       def webhook_verification_outcome(rule, value, secrets)
