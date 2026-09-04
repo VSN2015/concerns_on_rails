@@ -25,7 +25,11 @@ module ConcernsOnRails
     #                   5xx responses and raised exceptions release the claim so
     #                   the client can retry.
     #   * done       -> the cached status/body/content type is replayed with
-    #                   `X-Idempotency-Replayed: true`.
+    #                   `X-Idempotency-Replayed: true`, along with the
+    #                   allow-listed response headers captured from the original
+    #                   (`headers:`, default Location / Content-Location / ETag /
+    #                   Last-Modified / Link — so a replayed 201 still says where
+    #                   the resource lives; `headers: []` disables capture).
     #   * in flight  -> 409 with code "idempotency_conflict" and `Retry-After`.
     #   * same key, different request payload -> 422 "idempotency_key_reuse"
     #     (override `idempotency_fingerprint` to customize payload matching).
@@ -54,6 +58,11 @@ module ConcernsOnRails
 
       DEFAULT_HEADER = "Idempotency-Key".freeze
       MAX_KEY_LENGTH = 255
+      # Response headers captured with the cached response and set again on
+      # replay. Deliberately an allow-list: Set-Cookie, Date, request ids and
+      # rate-limit headers describe the ORIGINAL exchange and must not be
+      # replayed.
+      DEFAULT_REPLAY_HEADERS = %w[Location Content-Location ETag Last-Modified Link].freeze
       IGNORED_FINGERPRINT_KEYS = %w[controller action format].freeze
 
       included do
@@ -65,26 +74,38 @@ module ConcernsOnRails
       module ClassMethods
         # Declare idempotent actions. `ttl:` is the cached-response lifetime,
         # `lock_ttl:` the in-flight claim lifetime (kept short so a crashed
-        # worker cannot wedge a key), `header:` the request header to read, and
-        # `required:` whether a missing key is a 400. Each call appends a rule;
-        # the first rule listing the current action wins.
-        def idempotent_actions(*actions, ttl: 86_400, lock_ttl: 60, header: DEFAULT_HEADER, required: false)
+        # worker cannot wedge a key), `header:` the request header to read,
+        # `required:` whether a missing key is a 400, and `headers:` the
+        # response headers captured and replayed with the cached response
+        # (default DEFAULT_REPLAY_HEADERS; `[]` to capture none). Each call
+        # appends a rule; the first rule listing the current action wins.
+        def idempotent_actions(*actions, ttl: 86_400, lock_ttl: 60, header: DEFAULT_HEADER, required: false,
+                               headers: DEFAULT_REPLAY_HEADERS)
           actions = actions.flatten.map(&:to_s)
-          validate_idempotent!(actions, ttl: ttl, lock_ttl: lock_ttl, header: header, required: required)
+          validate_idempotent!(actions, ttl: ttl, lock_ttl: lock_ttl, header: header, required: required, headers: headers)
 
-          rule = { actions: actions, ttl: ttl.to_i, lock_ttl: lock_ttl.to_i, header: header.to_s, required: required }
+          rule = { actions: actions, ttl: ttl.to_i, lock_ttl: lock_ttl.to_i, header: header.to_s, required: required,
+                   headers: headers.map(&:to_s) }
           self.idempotency_rules = idempotency_rules + [rule]
         end
 
         private
 
-        def validate_idempotent!(actions, ttl:, lock_ttl:, header:, required:)
+        def validate_idempotent!(actions, ttl:, lock_ttl:, header:, required:, headers:)
           prefix = "ConcernsOnRails::Controllers::Idempotentable"
           raise ArgumentError, "#{prefix}: pass at least one action" if actions.empty?
           raise ArgumentError, "#{prefix}: :ttl must be a positive duration" unless ttl.to_i.positive?
           raise ArgumentError, "#{prefix}: :lock_ttl must be a positive duration" unless lock_ttl.to_i.positive?
           raise ArgumentError, "#{prefix}: :header must be a non-blank String" if header.to_s.strip.empty?
           raise ArgumentError, "#{prefix}: :required must be true or false" unless [true, false].include?(required)
+
+          validate_idempotent_headers!(prefix, headers)
+        end
+
+        def validate_idempotent_headers!(prefix, headers)
+          return if headers.is_a?(Array) && headers.all? { |name| !name.to_s.strip.empty? }
+
+          raise ArgumentError, "#{prefix}: :headers must be an Array of non-blank header names"
         end
       end
 
@@ -124,11 +145,14 @@ module ConcernsOnRails
         Digest::SHA256.hexdigest(JSON.generate(idempotency_deep_sort(filtered)))
       end
 
-      # Public override point for how a cached response is replayed.
+      # Public override point for how a cached response is replayed. Captured
+      # headers (`record["headers"]`, absent on records written before the
+      # feature) are set before the body renders.
       def replay_idempotent_response(record)
         return unless respond_to?(:response) && response
 
         emit_idempotency_replayed_header(true)
+        (record["headers"] || {}).each { |name, value| response.set_header(name, value) }
         options = { body: record["body"], status: record["status"] }
         options[:content_type] = record["content_type"] if record["content_type"]
         render(options)
@@ -195,7 +219,20 @@ module ConcernsOnRails
 
         record = { "state" => "done", "status" => status, "body" => idempotency_response_body,
                    "content_type" => idempotency_response_content_type, "fingerprint" => fingerprint }
+        headers = idempotency_response_headers(rule)
+        record["headers"] = headers unless headers.empty?
         store.write(cache_key, record, expires_in: rule[:ttl])
+      end
+
+      # The rule's allow-listed headers that the action actually set, as a
+      # plain name => value Hash (store-serializable).
+      def idempotency_response_headers(rule)
+        return {} unless respond_to?(:response) && response.respond_to?(:headers)
+
+        rule[:headers].each_with_object({}) do |name, captured|
+          value = response.headers[name]
+          captured[name] = value.to_s unless value.nil?
+        end
       end
 
       def idempotency_resolve_existing(store, cache_key, rule, fingerprint)
