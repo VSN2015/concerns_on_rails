@@ -1704,6 +1704,9 @@ class ApplicationController < ActionController::Base
   # Preset headers, plus any custom "Header-Name" => "value" pairs:
   secure_headers :nosniff, :sameorigin_frame, :no_referrer_leak, :disable_legacy_xss
   secure_headers "Permissions-Policy" => "geolocation=()"
+  # ...or the break-nothing baseline in one line, then relax what you must (later wins):
+  secure_headers :recommended
+  secure_headers :sameorigin_frame
 
   # Delegates to Rails' native CSP DSL — roll out report-only FIRST:
   content_security_policy_for(report_only: true) do |policy|
@@ -1724,6 +1727,13 @@ end
 | `:no_referrer_leak`   | `Referrer-Policy: strict-origin-when-cross-origin`     |
 | `:no_cross_domain`    | `X-Permitted-Cross-Domain-Policies: none`              |
 | `:disable_legacy_xss` | `X-XSS-Protection: 0` (the only correct modern value)  |
+| `:hsts`               | `Strict-Transport-Security: max-age=31536000; includeSubDomains` (no `preload` — opt in via a custom pair) |
+| `:same_origin_opener` / `:same_origin_opener_allow_popups` | `Cross-Origin-Opener-Policy: same-origin` / `same-origin-allow-popups` |
+| `:require_corp_embedder` | `Cross-Origin-Embedder-Policy: require-corp`        |
+| `:same_origin_resource` | `Cross-Origin-Resource-Policy: same-origin`          |
+| `:no_sensitive_permissions` | `Permissions-Policy` denying camera, microphone, geolocation, payment, usb and motion sensors |
+
+**Bundles** (expand to presets in place, so a later preset or custom pair still wins): `:recommended` = nosniff, deny_frame, no_referrer_leak, no_cross_domain, disable_legacy_xss, same_origin_opener_allow_popups, no_sensitive_permissions — deliberately *without* COEP/CORP (they block cross-origin embeds of your resources and CDN assets lacking CORP headers) and HSTS (belongs with `force_ssl`), so it breaks nothing; `:cross_origin_isolation` = same_origin_opener + require_corp_embedder + same_origin_resource (what SharedArrayBuffer / high-resolution timers require).
 
 **Notes**
 - Headers are applied in an `after_action`, so they reinforce Rails' middleware defaults; later `secure_headers` declarations win on a colliding name.

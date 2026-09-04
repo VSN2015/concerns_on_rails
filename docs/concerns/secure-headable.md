@@ -46,6 +46,19 @@ Registers one or more header preset symbols and/or arbitrary custom headers. Can
 | `:no_referrer_leak` | `Referrer-Policy` | `strict-origin-when-cross-origin` |
 | `:no_cross_domain` | `X-Permitted-Cross-Domain-Policies` | `none` |
 | `:disable_legacy_xss` | `X-XSS-Protection` | `0` |
+| `:hsts` | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` — one year, no `preload` (the preload list is a months-long commitment; add it as a custom pair). For API-only apps behind a TLS-terminating proxy; with `force_ssl` / `config.ssl_options` Rails sets this itself. |
+| `:same_origin_opener` | `Cross-Origin-Opener-Policy` | `same-origin` — severs `window.opener`; breaks OAuth/payment popups that rely on it |
+| `:same_origin_opener_allow_popups` | `Cross-Origin-Opener-Policy` | `same-origin-allow-popups` — the popup-friendly variant used by `:recommended` |
+| `:require_corp_embedder` | `Cross-Origin-Embedder-Policy` | `require-corp` — every cross-origin subresource must opt in via CORS/CORP |
+| `:same_origin_resource` | `Cross-Origin-Resource-Policy` | `same-origin` — other origins cannot embed your responses via `<img>`/`<script>` (CORS fetches are unaffected) |
+| `:no_sensitive_permissions` | `Permissions-Policy` | `accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()` |
+
+**Bundles** — a bundle name expands to its presets *in declaration position*, so `secure_headers :recommended, :sameorigin_frame` (or a later `secure_headers` call) relaxes a bundled header.
+
+| Bundle | Presets | Why this set |
+|---|---|---|
+| `:recommended` | `nosniff`, `deny_frame`, `no_referrer_leak`, `no_cross_domain`, `disable_legacy_xss`, `same_origin_opener_allow_popups`, `no_sensitive_permissions` | The baseline that breaks nothing: no COEP/CORP (they block cross-origin embeds of your resources and CDN assets without CORP headers) and no HSTS (belongs with `force_ssl`). Relax `deny_frame` → `:sameorigin_frame` if the app frames itself. |
+| `:cross_origin_isolation` | `same_origin_opener`, `require_corp_embedder`, `same_origin_resource` | What `SharedArrayBuffer` and high-resolution timers require — expect to add CORS/CORP headers to every cross-origin asset first. |
 
 **Custom headers** (`**custom`): any `"Header-Name" => "value"` keyword pairs. Keys are coerced to strings via `to_s`.
 
@@ -124,6 +137,7 @@ end
 
 ## Notes & gotchas
 
+- **`:recommended` is conservative on purpose.** It picks `same-origin-allow-popups` over `same-origin` for COOP and leaves COEP/CORP out because those three are the headers that break real apps (popup logins, CDN images, embedded widgets). Opt into `:cross_origin_isolation` deliberately, after your cross-origin assets carry CORP/CORS headers.
 - **`after_action`, not `before_action`:** Headers are written after the response is rendered. This means they can reinforce or override headers that Rails middleware or the render process set earlier. It also means the `response` object is available and populated when `apply_secure_headers` runs.
 - **Later declarations win:** Each call to `secure_headers` merges into the accumulated class attribute hash. If `:sameorigin_frame` is declared first and `:deny_frame` is declared second (even in a separate call), `X-Frame-Options` resolves to `DENY`. This applies across inheritance: a subcontroller that calls `secure_headers :deny_frame` will override the parent's `:sameorigin_frame` for that header only, leaving all other inherited headers intact.
 - **`:disable_legacy_xss` emits `"0"`, never `"1; mode=block"`:** The legacy XSS auditor was itself exploitable (information disclosure, bypass) and has been removed from Chrome, Firefox, and Edge. `"0"` explicitly disables any remaining auditor. This concern will never emit a non-zero value for this header.
