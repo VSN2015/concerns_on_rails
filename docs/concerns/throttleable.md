@@ -44,6 +44,8 @@ end
 | `by:` | callable (`Proc`, `lambda`) | `-> { request.remote_ip }` | Discriminator evaluated with `instance_exec` on the controller instance, so `request`, `params`, and helpers such as `current_user` are all in scope. Must respond to `#call`; a plain string or symbol raises `ArgumentError`. |
 | `only:` | `Symbol` or `Array<Symbol>` | `nil` (all actions) | Restricts the rule to the listed action names. Mutually exclusive with `except:`; passing both raises `ArgumentError`. |
 | `except:` | `Symbol` or `Array<Symbol>` | `nil` (no exclusions) | Skips the rule for the listed action names. Mutually exclusive with `only:`. |
+| `if:` | `Symbol` or callable | `nil` (always applies) | Per-request skip condition. A Symbol names a controller method; a callable is `instance_exec`'d on the controller (so `request`, `params`, `current_user` are in scope). The rule applies only when it returns truthy — no counter increment, no headers otherwise. Anything else raises `ArgumentError`. |
+| `unless:` | `Symbol` or callable | `nil` (always applies) | Inverse of `if:` — the rule is skipped when it returns truthy. May be combined with `if:`; both must pass. |
 | `name:` | `Symbol` or `String` | `"rule0"`, `"rule1"`, … | Embedded in the cache key to disambiguate counters when multiple rules share the same discriminator value. Defaults to `"rule#{index}"` based on declaration order. |
 
 `throttleable_store` is a class-level attribute (not a macro argument). It must be assigned before the first throttled request and must support atomic increment-with-expiry — specifically `store.increment(key, 1, expires_in: seconds)`. `Rails.cache` backed by Memcache or Redis satisfies this contract. A store that returns `nil` from `#increment` for a missing key is handled: the concern falls back to `store.write(key, 1, expires_in: period)` and treats the count as `1`.
@@ -63,16 +65,46 @@ end
 
 | Signature | Description |
 |-----------|-------------|
-| `enforce_throttles` | `before_action` entry point. Iterates every applicable rule, increments its counter, sets rate-limit headers, and renders a 429 response if the limit is exceeded. Public so subclasses can call or override it. |
+| `enforce_throttles` | `before_action` entry point. Iterates every applicable rule (action scope **and** `if:`/`unless:`), increments its counter, and renders a 429 if a limit is exceeded — emitting that rule's headers and `on_rate_limited`. When every rule passes, the `X-RateLimit-*` headers describe the **tightest** rule (fewest remaining). Public so subclasses can call or override it. |
+| `on_rate_limited(rule, result)` | Public override point + instrumentation seam, run once per throttled request before the body is rendered. Default: `ActiveSupport::Notifications.instrument("rate_limited.concerns_on_rails", controller:, action:, rule:, discriminator:, count:, limit:, period:, reset_at:, retry_after:)`. Override to alert or block; call `super` to keep the event. |
 | `throttled_response(rule, result)` | Renders the 429 body. Public override point. By default renders `{ success: false, error: { message: "...", code: "rate_limited" } }` with `status: :too_many_requests`. If `Respondable` is also included the call is delegated to `render_error`. Override this method to customize the body format. |
 
 ### Class methods
 
 | Signature | Description |
 |-----------|-------------|
-| `throttle_by(limit:, period:, by: nil, only: nil, except: nil, name: nil)` | Declares a rate-limit rule and appends it to `throttleable_rules`. Raises `ArgumentError` immediately if any argument is invalid. |
+| `throttle_by(limit:, period:, by: nil, only: nil, except: nil, if: nil, unless: nil, name: nil)` | Declares a rate-limit rule and appends it to `throttleable_rules`. Raises `ArgumentError` immediately if any argument is invalid. |
 
 ## Examples
+
+**Skip conditions and alerting on throttled clients**
+
+```ruby
+class Api::BaseController < ApplicationController
+  include ConcernsOnRails::Controllers::Throttleable
+  self.throttleable_store = Rails.cache
+
+  throttle_by limit: 60,  period: 1.minute, unless: :staff?                      # staff are never throttled
+  throttle_by limit: 5,   period: 1.minute, only: :create,
+              by: -> { current_user&.id || request.remote_ip },
+              if: -> { Flipper.enabled?(:strict_create_limits) }                 # feature-flagged rule
+
+  private
+
+  def staff?
+    current_user&.staff?
+  end
+end
+
+# config/initializers/throttling.rb
+ActiveSupport::Notifications.subscribe("rate_limited.concerns_on_rails") do |event|
+  p = event.payload
+  Rails.logger.warn("rate limited #{p[:discriminator]} on #{p[:controller]}##{p[:action]} (#{p[:rule]}: #{p[:count]}/#{p[:limit]})")
+end
+```
+
+A request that trips the 5-per-minute `create` rule while the 60-per-minute rule still has room gets `X-RateLimit-Limit: 5`, `X-RateLimit-Remaining: 0` and `Retry-After`; a request that passes both gets the headers of whichever rule has fewer requests left.
+
 
 **Global IP-based limit on an API base controller:**
 
@@ -131,7 +163,10 @@ end
 
 - **Action name matching is string-based.** `only: :create` is stored as `["create"]` and compared against `action_name.to_s`. Symbols and strings in the array are both accepted at declaration time.
 
-- **First-exceeding rule wins.** Rules are evaluated in declaration order. The first rule whose counter exceeds its limit renders the 429 body and returns immediately — subsequent rules are not evaluated for that request.
+- **First-exceeding rule wins.** Rules are evaluated in declaration order. The first rule whose counter exceeds its limit emits its headers, runs `on_rate_limited`, renders the 429 body and returns immediately — subsequent rules are not evaluated (or incremented) for that request.
+- **Headers describe the tightest passing rule.** When several rules apply and all pass, the `X-RateLimit-*` headers come from the rule with the fewest requests remaining (`limit - count`), not from the last one declared — the client sees the budget that will run out first.
+- **`if:`/`unless:` are evaluated per request, before the counter.** A skipped rule increments nothing and emits nothing, exactly like one skipped by `only:`/`except:`. Conditions run on the controller instance (`send` for a Symbol, `instance_exec` for a callable), so a raising condition propagates like any before_action error.
+- **Instrumentation fires only on a 429.** `rate_limited.concerns_on_rails` is emitted once per throttled request from `enforce_throttles`, independently of `throttled_response` — overriding the body keeps the event; override `on_rate_limited` (with or without `super`) to change or drop it.
 
 - **`X-RateLimit-Remaining` floors at zero.** Once a counter surpasses the limit the header reads `"0"`, never a negative value. `Retry-After` is only set on responses that exceed the limit.
 
