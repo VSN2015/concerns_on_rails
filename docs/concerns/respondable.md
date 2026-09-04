@@ -46,7 +46,16 @@ No generator, initializer, or configuration macro is required. Including the mod
 
 ## Configuration
 
-`Respondable` exposes no configuration macro. All behavior is controlled per-call through the keyword arguments documented in the Methods section below.
+### `respondable_by(error_format: :envelope, problem_type_base: nil)`
+
+Optional. Without it `render_error` emits the classic envelope below.
+
+| Option | Values | Default | Description |
+|---|---|---|---|
+| `error_format:` | `:envelope`, `:problem_details` | `:envelope` | `:problem_details` makes `render_error` emit an RFC 9457 document with `Content-Type: application/problem+json`: `type`, `title` (the HTTP reason phrase), `status` (integer), `detail` (the message), `instance` (the request path when a request is available), plus `code` and `errors` as extension members when given. Anything else raises `ArgumentError`. |
+| `problem_type_base:` | String URI | `nil` | Prefix joined with `code` (one slash) to form `type`, e.g. `https://api.example.com/problems/record_invalid`. Without a base, or without a code, `type` is `about:blank`. |
+
+Every concern in this gem that renders an error delegates to `render_error` when Respondable is included, so this one declaration changes the shape of every 4xx they produce. `render_success` is unaffected.
 
 ## Methods
 
@@ -78,7 +87,7 @@ Renders a JSON error envelope and halts the action. Returns the result of `rende
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `message` | String | _(required)_ | Human-readable description of the failure. Placed under `error.message`. |
+| `message` | String | _(required)_ | Human-readable description of the failure. Placed under `error.message` (`detail` in problem-details format). |
 | `status` | Symbol or Integer | `:unprocessable_entity` | HTTP status code. Any value accepted by Rails is valid (e.g. `:not_found`, `:forbidden`, `422`). |
 | `code` | String or nil | `nil` | Machine-readable error code (e.g. `"not_found"`, `"PERMISSION_DENIED"`). Included under `error.code` only when non-nil. |
 | `errors` | Array or nil | `nil` | Detailed error list — typically `record.errors.full_messages`. Included under `error.details` only when non-nil. |

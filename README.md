@@ -1597,6 +1597,20 @@ end
 { "success": false, "error": { "message": "...", "code": "...", "details": [...] } }
 ```
 
+**RFC 9457 problem details** — switch the error format once and every 4xx the gem's concerns render
+through `render_error` (ErrorHandleable, Throttleable, Idempotentable, CursorPaginatable, Deprecatable,
+WebhookVerifiable, Authorizable) becomes an `application/problem+json` document; `render_success` is untouched:
+
+```ruby
+respondable_by error_format: :problem_details, problem_type_base: "https://api.example.com/problems"
+# 422 application/problem+json
+# { "type": "https://api.example.com/problems/record_invalid", "title": "Unprocessable Content", "status": 422,
+#   "detail": "Validation failed", "instance": "/api/articles", "code": "record_invalid", "errors": ["Name can't be blank"] }
+```
+
+`type` is `problem_type_base/<code>` (or `about:blank` without a base or code), `title` the status reason phrase,
+`instance` the request path; `code` and `errors` ride along as extension members.
+
 **API**
 
 | Method            | Signature                                                                                  |
