@@ -50,12 +50,27 @@ Declares the policy emitted via `after_action`. Repeatable; rules are inherited 
 | `stale_while_revalidate:` | `nil` | Append `stale-while-revalidate=<seconds>` |
 | `vary:` | `nil` | `String` or `Array` of header names, **appended** (de-duplicated) to any existing `Vary` |
 
+### `etag_with(*sources, vary: nil, &block)`
+
+Declares request context that shapes the representation and therefore belongs in the ETag — the analogue of Rails' class-level `etag { }`. Repeatable; entries accumulate and are folded into every validator `stale_resource?` / `set_cache_validators` writes (`W/"md5(base-etag | value | value …)"`), so two representations of one resource never share an ETag and a client never gets a 304 for a body it has not seen.
+
+| Source | Value folded in | Default `Vary` |
+|---|---|---|
+| `:locale` | `I18n.locale` | `Accept-Language` |
+| `:format` | `request.format` | `Accept` |
+| `:query` | `request.query_string` | — |
+| any other `Symbol` | the controller method of that name (`send`) | — |
+| a block | `instance_exec`'d on the controller | — |
+
+`vary:` (String/Array) replaces the implied header(s) for that call; `vary: false` suppresses them. The `Vary` header is written whenever validators are written and merged (de-duplicated) with the `http_cache_actions` policy. `nil` values are dropped, so an absent context leaves the ETag unchanged. A Symbol that is neither a preset nor a controller method raises `ArgumentError` at request time; an empty call or a non-Symbol source raises at class load. `cacheable_etag_extras` exposes the declared entries.
+
 All option errors raise `ArgumentError` at declaration time (bad `:visibility`, non-positive durations, blank `:vary`, non-boolean flags).
 
 ## Methods
 
-- `stale_resource?(resource = nil, etag: nil, last_modified: nil)` — sets the validators; for a safe (GET/HEAD) request whose precondition matches, sends `304 Not Modified` and returns **false**; otherwise returns **true** (render the body). Mirrors Rails' `stale?` under a non-clashing name.
-- `set_cache_validators(resource = nil, etag:, last_modified:)` — sets `ETag`/`Last-Modified` without short-circuiting; returns the computed `{ etag:, last_modified: }`.
+- `stale_resource?(resource = nil, etag: nil, last_modified: nil, extras: nil)` — sets the validators (with the `etag_with` context and any per-call `extras:` folded into the ETag); for a safe (GET/HEAD) request whose precondition matches, sends `304 Not Modified` and returns **false**; otherwise returns **true** (render the body). Mirrors Rails' `stale?` under a non-clashing name.
+- `set_cache_validators(resource = nil, etag:, last_modified:, extras:)` — sets `ETag`/`Last-Modified` (context folded in, `Vary` merged) without short-circuiting; returns the computed `{ etag:, last_modified: }`. An explicit `etag:` is kept verbatim only when there is no context to fold in.
+- `cache_etag_extras(extra = nil)` — the resolved `etag_with` values for this request plus `extra`, nils dropped; reuse it from a `cache_etag_for` override.
 - `request_matches_cache?(etag:, last_modified:)` — side-effect-free predicate.
 - `cache_etag_for(resource)` / `cache_last_modified_for(resource)` — override points for deriving validators.
 - `apply_http_cache_headers` — the `after_action` (public: `skip_after_action` it, or override).
@@ -89,6 +104,7 @@ end
 
 ## Notes & gotchas
 
+- **Context belongs in the ETag, not just in `Vary`.** `Vary: Accept-Language` tells caches to key on the header, but a client that switches locale and revalidates with its old ETag would still get a 304 unless the locale is part of the validator — `etag_with :locale` does both. Anything that changes the body without changing the record (fields, includes, role-based redaction) should be declared the same way.
 - The method names are deliberately distinct from `ActionController::ConditionalGet`, so this concern coexists with Rails' own `fresh_when`/`stale?`.
 - **Weak validators** signal semantic (not byte-for-byte) equivalence — the right choice for serialized representations that may differ in whitespace/ordering.
 - `no_store: true` overrides `max_age`/`visibility`; pair `:public` caching with care behind shared CDNs and proxies.

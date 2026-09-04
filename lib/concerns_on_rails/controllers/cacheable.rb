@@ -16,6 +16,8 @@ module ConcernsOnRails
     #
     #     http_cache_actions :index, :show, max_age: 5.minutes,
     #                        visibility: :public, vary: "Accept"
+    #     etag_with :locale                       # representation depends on I18n.locale
+    #     etag_with { current_user&.role }        # ...and on who is asking
     #
     #     def show
     #       @article = Article.find(params[:id])
@@ -41,6 +43,12 @@ module ConcernsOnRails
     #   * The 304 is only sent for safe requests (GET/HEAD) and still carries the
     #     validators AND the policy headers (Cache-Control rides the 304, like
     #     Deprecatable's headers ride the 410).
+    #   * `etag_with` (the analogue of Rails' class-level `etag { }`) folds
+    #     request context into the ETag — locale, requested fields, the current
+    #     user's role — so two representations of one resource never share a
+    #     validator, and each source adds its `Vary` header (`:locale` →
+    #     Accept-Language, `:format` → Accept). Per call: `stale_resource?(r,
+    #     extras: [...])`.
     #
     # Notes:
     #   * `no_store: true` overrides everything (emits the lone `no-store`).
@@ -59,8 +67,18 @@ module ConcernsOnRails
       VALID_VISIBILITY = %i[public private].freeze
       SAFE_METHODS = %w[GET HEAD].freeze
 
+      # `etag_with` presets: the value folded into the ETag and the Vary header
+      # it implies. Any other Symbol names a controller method.
+      ETAG_PRESETS = {
+        locale: { value: -> { I18n.locale if defined?(I18n) }, vary: ["Accept-Language"] },
+        format: { value: -> { request.format.to_s if respond_to?(:request) && request.respond_to?(:format) }, vary: ["Accept"] },
+        query: { value: -> { request.query_string if respond_to?(:request) && request.respond_to?(:query_string) }, vary: [] }
+      }.freeze
+
       included do
         class_attribute :cacheable_rules, instance_accessor: false, default: []
+        # [{ source: Symbol | Proc, vary: [header, ...] }] — see etag_with.
+        class_attribute :cacheable_etag_extras, instance_accessor: false, default: []
         # no_store is applied EARLY as well: rescue_from-rendered errors skip
         # after_action entirely, and for a no_store endpoint (tokens, PII) even
         # the error response must not be stored. Positive freshness policies
@@ -93,7 +111,42 @@ module ConcernsOnRails
           self.cacheable_rules = cacheable_rules + [rule]
         end
 
+        # Declare request context that shapes the representation and therefore
+        # belongs in the ETag: presets (:locale, :format, :query), Symbols naming
+        # controller methods, or a block (instance_exec'd). Repeatable; entries
+        # accumulate and nil values are ignored. `vary:` names the request
+        # headers the context depends on (default: the preset's — Accept-Language
+        # for :locale, Accept for :format; none for methods/blocks); `vary: false`
+        # suppresses it. Emitted whenever validators are written.
+        #
+        #   etag_with :locale, :format
+        #   etag_with :requested_fields, vary: "X-Fields"
+        #   etag_with { current_user&.role }
+        def etag_with(*sources, vary: nil, &block)
+          validate_etag_with!(sources, block)
+
+          vary_list = http_cache_etag_vary_list(vary)
+          entries = sources.map { |source| { source: source, vary: vary_list || ETAG_PRESETS.dig(source, :vary) || [] } }
+          entries << { source: block, vary: vary_list || [] } if block
+          self.cacheable_etag_extras = cacheable_etag_extras + entries
+        end
+
         private
+
+        def validate_etag_with!(sources, block)
+          raise ArgumentError, "#{LABEL}: etag_with needs at least one source or a block" if sources.empty? && block.nil?
+          return if sources.all?(Symbol)
+
+          raise ArgumentError, "#{LABEL}: etag_with sources must be Symbols (a preset or a controller method)"
+        end
+
+        # nil → use the preset default (nil here); false → none ([]); else a validated list.
+        def http_cache_etag_vary_list(vary)
+          return nil if vary.nil?
+          return [] if vary == false
+
+          http_cache_vary(vary)
+        end
 
         def validate_http_cache!(visibility:, max_age:, no_store:, must_revalidate:, stale_while_revalidate:)
           unless VALID_VISIBILITY.include?(visibility)
@@ -163,13 +216,13 @@ module ConcernsOnRails
       # Set ETag/Last-Modified validators for the resource, then — for a safe
       # request whose precondition matches — send 304 and return false. Returns
       # true when the client must be sent a fresh body. Mirrors Rails `stale?`.
-      def stale_resource?(resource = nil, etag: nil, last_modified: nil)
+      def stale_resource?(resource = nil, etag: nil, last_modified: nil, extras: nil)
         # Unsafe methods get neither a 304 nor validators: a POST response must
         # not advertise an ETag a client could replay against GET (pre-1.22 the
         # validators were written before the safe-method check).
         return true unless http_cache_safe_request?
 
-        validators = set_cache_validators(resource, etag: etag, last_modified: last_modified)
+        validators = set_cache_validators(resource, etag: etag, last_modified: last_modified, extras: extras)
         return true unless request_matches_cache?(etag: validators[:etag], last_modified: validators[:last_modified])
 
         http_cache_send_not_modified
@@ -177,12 +230,26 @@ module ConcernsOnRails
       end
 
       # Set the ETag/Last-Modified response headers (no short-circuit). Returns
-      # the computed { etag:, last_modified: } pair.
-      def set_cache_validators(resource = nil, etag: nil, last_modified: nil)
+      # the computed { etag:, last_modified: } pair. Class-level `etag_with`
+      # values and per-call `extras:` are folded into the ETag (an explicit
+      # `etag:` stays verbatim only when there are none), and the sources' Vary
+      # headers are merged into the response.
+      def set_cache_validators(resource = nil, etag: nil, last_modified: nil, extras: nil)
         etag ||= cache_etag_for(resource) unless resource.nil?
         last_modified ||= cache_last_modified_for(resource) unless resource.nil?
+        context = cache_etag_extras(extras)
+        etag = http_cache_combine_etag(etag, context) if etag && context.any?
         http_cache_write_validators(etag, last_modified)
+        http_cache_write_etag_vary
         { etag: etag, last_modified: last_modified }
+      end
+
+      # The resolved `etag_with` values for this request plus `extra`, nils
+      # dropped. Public so an override of cache_etag_for can reuse it.
+      def cache_etag_extras(extra = nil)
+        values = self.class.cacheable_etag_extras.map { |entry| http_cache_resolve_extra(entry[:source]) }
+        values.concat(Array(extra)) unless extra.nil?
+        values.compact
       end
 
       # Side-effect-free: does the request's precondition match these validators?
@@ -210,6 +277,29 @@ module ConcernsOnRails
       end
 
       private
+
+      def http_cache_resolve_extra(source)
+        return instance_exec(&source) if source.is_a?(Proc)
+        return instance_exec(&ETAG_PRESETS[source][:value]) if ETAG_PRESETS.key?(source)
+        return send(source) if respond_to?(source, true)
+
+        raise ArgumentError,
+              "#{LABEL}: etag_with #{source.inspect} is neither a preset (#{ETAG_PRESETS.keys.map(&:inspect).join(', ')}) " \
+              "nor a controller method"
+      end
+
+      # Re-hash the base validator with the context so distinct representations
+      # of one resource get distinct (still weak) ETags.
+      def http_cache_combine_etag(etag, context)
+        http_cache_weak_etag(([etag] + context).join("|"))
+      end
+
+      def http_cache_write_etag_vary
+        return unless respond_to?(:response) && response
+
+        headers = self.class.cacheable_etag_extras.flat_map { |entry| entry[:vary] }.uniq
+        response.set_header("Vary", http_cache_merge_vary(headers)) if headers.any?
+      end
 
       def http_cache_write_validators(etag, last_modified)
         return unless respond_to?(:response) && response
