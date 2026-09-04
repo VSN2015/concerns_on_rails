@@ -540,4 +540,174 @@ describe ConcernsOnRails::SoftDeletable do
       expect(gone.reload).not_to be_deleted
     end
   end
+  # `restore_all` and `really_destroy_all` used to route through the
+  # `soft_deleted` scope / a bare `unscope(where: deleted_at)`, which peels the
+  # default scope's `deleted_at IS NULL` off — and, with it, every predicate the
+  # CALLER put on that column. `deleted_within(1.hour).restore_all` therefore
+  # restored the whole trash can. Same defect `publish_all` fixed in 1.27.
+  describe 'restore_all / really_destroy_all keep a caller predicate on the soft-delete column' do
+    before(:all) do
+      ActiveRecord::Schema.define do
+        create_table :trash_restorables, force: true do |t|
+          t.string :name
+          t.string :kind
+          t.datetime :deleted_at
+          t.timestamps null: false
+        end
+      end
+    end
+
+    # touch: false + no overridden hooks => single-UPDATE fast path
+    let(:fast_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'trash_restorables'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, touch: false
+      end
+    end
+
+    # touch: true (default) => streaming per-record path through restore!
+    let(:per_record_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'trash_restorables'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at
+      end
+    end
+
+    let(:visible_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'trash_restorables'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, touch: false, default_scope: false
+      end
+    end
+
+    # A host model with its OWN default scope on top of the soft-delete one.
+    let(:tenant_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'trash_restorables'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, touch: false
+        default_scope { where(kind: 'a') }
+      end
+    end
+
+    def seed(klass)
+      klass.unscoped.delete_all
+      old = nil
+      travel_to(3.days.ago) { old = klass.create!(name: 'old', kind: 'a').tap(&:soft_delete!) }
+      recent = klass.create!(name: 'recent', kind: 'a').tap(&:soft_delete!)
+      live = klass.create!(name: 'live', kind: 'a')
+      other = klass.create!(name: 'other-kind', kind: 'b').tap(&:soft_delete!)
+      [old, recent, live, other]
+    end
+
+    def deleted?(klass, record)
+      klass.unscoped.find(record.id).deleted_at.present?
+    end
+
+    %i[fast_class per_record_class].each do |variant|
+      context "on the #{variant.to_s.tr('_', ' ')} path" do
+        let(:klass) { send(variant) }
+
+        it 'deleted_within(...).restore_all restores only the recent trash' do
+          old, recent, _live, other = seed(klass)
+          expect(klass.deleted_within(1.day).restore_all).to eq(2)
+          expect(deleted?(klass, recent)).to be(false)
+          expect(deleted?(klass, other)).to be(false)
+          expect(deleted?(klass, old)).to be(true)
+        end
+
+        it 'where(deleted_at: range).restore_all honours the range' do
+          old, recent, _live, other = seed(klass)
+          expect(klass.where(deleted_at: 1.day.ago..Time.zone.now).restore_all).to eq(2)
+          expect(deleted?(klass, recent)).to be(false)
+          expect(deleted?(klass, other)).to be(false)
+          expect(deleted?(klass, old)).to be(true)
+        end
+
+        it 'soft_deleted.where(...).restore_all honours a predicate added after the scope' do
+          old, recent, _live, other = seed(klass)
+          expect(klass.soft_deleted.where(klass.arel_table[:deleted_at].gteq(1.day.ago)).restore_all).to eq(2)
+          expect(deleted?(klass, recent)).to be(false)
+          expect(deleted?(klass, other)).to be(false)
+          expect(deleted?(klass, old)).to be(true)
+        end
+
+        it 'keeps a caller predicate on another column' do
+          old, recent, = seed(klass)
+          expect(klass.where(name: 'old').restore_all).to eq(1)
+          expect(deleted?(klass, old)).to be(false)
+          expect(deleted?(klass, recent)).to be(true)
+        end
+
+        it 'a bare restore_all on a default-scoped model still restores the whole trash can' do
+          old, recent, live, other = seed(klass)
+          expect(klass.restore_all).to eq(3)
+          [old, recent, live, other].each { |r| expect(deleted?(klass, r)).to be(false) }
+        end
+
+        it 'returns 0 and touches nothing when the narrowed relation is empty' do
+          seed(klass)
+          expect(klass.where(name: 'nope').restore_all).to eq(0)
+          expect(klass.soft_deleted.count).to eq(3)
+        end
+      end
+    end
+
+    it 'the fast path still collapses to a single UPDATE' do
+      seed(fast_class)
+      sql = []
+      callback = ->(*, payload) { sql << payload[:sql] if payload[:sql] =~ /\AUPDATE/i }
+      ActiveSupport::Notifications.subscribed(callback, 'sql.active_record') do
+        fast_class.deleted_within(1.day).restore_all
+      end
+      expect(sql.size).to eq(1)
+      expect(sql.first).to match(/deleted_at.*>=/m)
+    end
+
+    it 'with default_scope: false a caller predicate on the column is honoured too' do
+      old, recent, _live, other = seed(visible_class)
+      expect(visible_class.where(deleted_at: 1.day.ago..Time.zone.now).restore_all).to eq(2)
+      expect(deleted?(visible_class, recent)).to be(false)
+      expect(deleted?(visible_class, other)).to be(false)
+      expect(deleted?(visible_class, old)).to be(true)
+    end
+
+    it "preserves the host model's own default scope while peeling only the soft-delete one" do
+      old, recent, _live, other = seed(tenant_class)
+      expect(tenant_class.restore_all).to eq(2)
+      expect(deleted?(tenant_class, old)).to be(false)
+      expect(deleted?(tenant_class, recent)).to be(false)
+      expect(deleted?(tenant_class, other)).to be(true) # kind 'b' is outside the tenant default scope
+    end
+
+    describe 'really_destroy_all' do
+      it 'only_deleted.really_destroy_all purges the trash and nothing else' do
+        _old, _recent, live, other = seed(fast_class)
+        expect { fast_class.only_deleted.really_destroy_all }
+          .to change { fast_class.unscoped.count }.from(4).to(1)
+        expect(fast_class.unscoped.pluck(:name)).to eq(['live'])
+        expect(fast_class.unscoped.where(id: [live.id, other.id]).count).to eq(1)
+      end
+
+      it 'a predicate on another column still hard-deletes soft-deleted rows too' do
+        seed(fast_class)
+        expect { fast_class.where(name: %w[old live]).really_destroy_all }
+          .to change { fast_class.unscoped.count }.from(4).to(2)
+        expect(fast_class.unscoped.pluck(:name)).to match_array(%w[recent other-kind])
+      end
+
+      it 'deleted_within(...).really_destroy_all purges only the recent trash' do
+        seed(fast_class)
+        fast_class.deleted_within(1.day).really_destroy_all
+        expect(fast_class.unscoped.pluck(:name)).to match_array(%w[old live])
+      end
+    end
+  end
 end

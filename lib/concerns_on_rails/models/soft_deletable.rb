@@ -82,22 +82,27 @@ module ConcernsOnRails
           soft_delete_all
         end
 
-        # Hard-delete every record matching the CURRENT relation — including
-        # soft-deleted rows (only the soft-delete column's predicates are
-        # peeled off). Note that `unscope` also drops a caller's own condition
-        # on that column, so `only_deleted.really_destroy_all` widens to the
-        # whole relation — use `soft_deleted.delete_all` to purge trash only.
+        # Hard-delete every record matching the CURRENT relation — soft-deleted
+        # rows included. Only the default scope's own `deleted_at IS NULL` is
+        # peeled off; a caller's predicate on the column survives, so
+        # `only_deleted.really_destroy_all` purges the trash and nothing else
+        # and `deleted_within(30.days).really_destroy_all` purges recent trash.
         # (Before 1.22 this ignored the relation entirely and hard-deleted the
-        # complete table.)
+        # complete table; until this fix it unscoped the column outright, which
+        # widened `only_deleted.really_destroy_all` to the whole relation.)
         def really_destroy_all
-          all.unscope(where: soft_delete_field).delete_all
+          soft_delete_without_default_scope.delete_all
         end
 
-        # Restore every soft-deleted record (mirror of soft_delete_all):
-        # Integer count, RecordNotSaved + rollback on failure, single UPDATE
-        # when the fast path applies.
+        # Restore every soft-deleted record in the relation (mirror of
+        # soft_delete_all): Integer count, RecordNotSaved + rollback on
+        # failure, single UPDATE when the fast path applies. Built against the
+        # current relation rather than routed through the `soft_deleted` scope,
+        # whose `unscope(where: deleted_at)` also stripped the CALLER's predicate
+        # on the column — `deleted_within(1.hour).restore_all` restored the
+        # whole trash can. (Same defect `publish_all` fixed in 1.27.)
         def restore_all
-          deleted = all.public_send(soft_delete_scope_names.fetch(:soft_deleted))
+          deleted = soft_delete_without_default_scope.where.not(soft_delete_field => nil)
           return deleted.update_all(soft_delete_field => nil) if soft_delete_batch_fast_path?(:restore)
 
           ConcernsOnRails::Support::BatchOps.run(
@@ -109,6 +114,27 @@ module ConcernsOnRails
         end
 
         private
+
+        # The current relation with the DEFAULT SCOPE's soft-delete predicate
+        # peeled off — and nothing else. `unscope(where: field)` (what the
+        # scopes do) strips every predicate on the column, the caller's
+        # included; so unscope, then put back the predicates the caller added on
+        # that column. "Added by the caller" is the relation's where clause
+        # minus the default scope's own, using the same structural WhereClause
+        # arithmetic Rails' `merge`/`except` rely on. Predicates on OTHER
+        # columns — a host model's own `default_scope { where(tenant_id:) }`
+        # included — are never touched. With `default_scope: false` there is
+        # nothing to peel.
+        def soft_delete_without_default_scope
+          relation = all
+          return relation unless soft_delete_default_scope
+
+          callers = relation.where_clause - default_scoped.where_clause
+          callers_on_column = callers - callers.except(soft_delete_field.to_s)
+          peeled = relation.unscope(where: soft_delete_field)
+          peeled.where_clause += callers_on_column unless callers_on_column.empty?
+          peeled
+        end
 
         # Built here rather than inline in `included do` so the names can be
         # affixed. Every scope that references another scope resolves it
