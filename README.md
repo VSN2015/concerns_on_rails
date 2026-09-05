@@ -1760,9 +1760,14 @@ A declarative, **block-only** per-action authorization gate. Each rule is a pred
 class Api::BaseController < ApplicationController
   include ConcernsOnRails::Controllers::Authorizable
 
-  authorize_by { current_user.present? }                          # every action
+  authorize_by(name: :signed_in) { current_user.present? }        # every action
   authorize_by(only: %i[update destroy]) { |_action, user| user.admin? }
   require_role :admin, :editor, only: :publish                    # role sugar
+end
+
+class Api::PagesController < Api::BaseController
+  skip_authorization only: %i[index show]                         # public pages — even the inherited rules skip
+  helper_method :authorized?                                      # <%= link_to "Delete", ... if authorized?(:destroy) %>
 end
 ```
 
@@ -1770,13 +1775,17 @@ The predicate runs via `instance_exec`, so `current_user` (and any helper) resol
 
 **API**
 
-| Method         | Signature                                                                                  |
-|----------------|--------------------------------------------------------------------------------------------|
-| `authorize_by` | `authorize_by(only: nil, except: nil, status: :forbidden, message: "Forbidden", &block)`   |
-| `require_role` | `require_role(*roles, via: :current_user, role_method: :role, only:, except:, status:, message:)` |
+| Method                    | Signature                                                                                  |
+|---------------------------|--------------------------------------------------------------------------------------------|
+| `authorize_by`            | `authorize_by(only: nil, except: nil, status: :forbidden, message: "Forbidden", name: nil, &block)` |
+| `require_role`            | `require_role(*roles, via: :current_user, role_method: :role, only:, except:, status:, message:, name:)` |
+| `skip_authorization`      | `skip_authorization(only: nil, except: nil)` — exempt actions from every rule, inherited ones included; bare form exempts all |
+| `authorized?`             | `authorized?(action = action_name)` — evaluate the rules without rendering (for views / conditional UI) |
+| `on_authorization_denied` | `on_authorization_denied(rule)` — override point; instruments `authorization_denied.concerns_on_rails` (call `super` to keep the event) |
 
 **Notes**
 - Rules run in declaration order; the first failing rule renders and halts.
+- Every denial emits `authorization_denied.concerns_on_rails` with `controller`, `action`, `actor`, `rule` (the `name:`), `status`, `message` — subscribe for audit logs or alerting on repeated denials.
 - When `Respondable` is also included, denials delegate to `render_error` (envelope `{ success: false, error: { message:, code: "forbidden" } }`); otherwise the same envelope is rendered inline.
 - `only:` / `except:` are mutually exclusive (passing both raises `ArgumentError`); `authorize_by` requires a block and `require_role` requires at least one role.
 - **Non-goals**: no policy objects, no ability DSL, no resource inference — reach for [`pundit`](https://github.com/varvet/pundit) / [`cancancan`](https://github.com/CanCanCommunity/cancancan) when you outgrow a predicate per action.

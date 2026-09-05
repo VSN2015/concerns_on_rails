@@ -174,4 +174,132 @@ describe ConcernsOnRails::Controllers::Authorizable do
       expect { c.enforce_authorization }.to raise_error(/refusing to fail open/)
     end
   end
+
+  describe "instrumentation (#on_authorization_denied)" do
+    def denial_events(&block)
+      events = []
+      callback = ->(*args) { events << ActiveSupport::Notifications::Event.new(*args) }
+      ActiveSupport::Notifications.subscribed(callback, "authorization_denied.concerns_on_rails", &block)
+      events
+    end
+
+    it "instruments authorization_denied.concerns_on_rails with action, actor, rule name, status and message" do
+      events = denial_events do
+        c = controller(action: "destroy", user: AuthzActor.new("viewer")) do
+          require_role :admin, only: :destroy, name: :admins_only, message: "Admins only"
+        end
+        c.enforce_authorization
+        expect(c.rendered[:status]).to eq(:forbidden)
+      end
+      expect(events.size).to eq(1)
+      payload = events.first.payload
+      expect(payload).to include(action: "destroy", rule: :admins_only, status: :forbidden, message: "Admins only")
+      expect(payload[:actor].role).to eq("viewer")
+      expect(payload).to have_key(:controller)
+    end
+
+    it "stays silent for allowed requests and defaults the rule name to nil" do
+      events = denial_events do
+        controller(user: AuthzActor.new("admin")) { authorize_by { current_user.present? } }.enforce_authorization
+      end
+      expect(events).to be_empty
+
+      events = denial_events { controller(user: nil) { authorize_by { current_user.present? } }.enforce_authorization }
+      expect(events.first.payload[:rule]).to be_nil
+    end
+
+    it "is an override point — skipping super silences the event, the denial still renders" do
+      seen = []
+      events = denial_events do
+        c = controller(user: nil) do
+          authorize_by(name: :signed_in) { current_user.present? }
+          define_method(:on_authorization_denied) { |rule| seen << rule[:name] }
+        end
+        c.enforce_authorization
+        expect(c.rendered[:status]).to eq(:forbidden)
+      end
+      expect(seen).to eq([:signed_in])
+      expect(events).to be_empty
+    end
+  end
+
+  describe ".skip_authorization" do
+    let(:parent) do
+      Class.new(base_class) do
+        include ConcernsOnRails::Controllers::Authorizable
+
+        authorize_by(name: :signed_in) { current_user.present? }
+      end
+    end
+
+    def child(action:, &declaration)
+      klass = Class.new(parent) { class_eval(&declaration) }
+      c = klass.new
+      c.define_singleton_method(:action_name) { action }
+      c.define_singleton_method(:current_user) { nil }
+      c
+    end
+
+    it "exempts the listed actions from every rule, including inherited ones (only:)" do
+      c = child(action: "index") { skip_authorization only: %i[index show] }
+      expect(c.enforce_authorization).to be_nil
+      expect(c.rendered).to be_nil
+      expect(c.authorization_skipped?).to be(true)
+
+      c = child(action: "destroy") { skip_authorization only: %i[index show] }
+      c.enforce_authorization
+      expect(c.rendered[:status]).to eq(:forbidden)
+      expect(c.authorization_skipped?).to be(false)
+    end
+
+    it "supports except: and the bare form" do
+      c = child(action: "index") { skip_authorization except: :destroy }
+      expect(c.enforce_authorization).to be_nil
+      c = child(action: "destroy") { skip_authorization except: :destroy }
+      c.enforce_authorization
+      expect(c.rendered[:status]).to eq(:forbidden)
+
+      c = child(action: "destroy") { skip_authorization }
+      expect(c.enforce_authorization).to be_nil
+      expect(c.rendered).to be_nil
+    end
+
+    it "does not leak into the parent or siblings and rejects only: with except:" do
+      child(action: "index") { skip_authorization only: :index }
+      p = parent.new
+      p.define_singleton_method(:action_name) { "index" }
+      p.define_singleton_method(:current_user) { nil }
+      p.enforce_authorization
+      expect(p.rendered[:status]).to eq(:forbidden)
+
+      expect { child(action: "index") { skip_authorization only: :index, except: :show } }
+        .to raise_error(ArgumentError, /pass either :only or :except, not both/)
+    end
+  end
+
+  describe "#authorized?" do
+    it "evaluates the rules for the current action without rendering" do
+      viewer = AuthzActor.new("viewer")
+      c = controller(action: "destroy", user: viewer) do
+        authorize_by { current_user.present? }
+        require_role :admin, only: :destroy
+      end
+      expect(c.authorized?).to be(false)
+      expect(c.rendered).to be_nil
+
+      expect(controller(action: "index", user: viewer) { require_role :admin, only: :destroy }.authorized?).to be(true)
+      expect(controller(action: "index", user: nil) { authorize_by { current_user.present? } }.authorized?).to be(false)
+    end
+
+    it "accepts an explicit action so views can ask about other actions, honouring skips" do
+      c = controller(action: "index", user: AuthzActor.new("viewer")) do
+        require_role :admin, only: :destroy
+        skip_authorization only: :preview
+      end
+      expect(c.authorized?(:destroy)).to be(false)
+      expect(c.authorized?("index")).to be(true)
+      expect(c.authorized?(:preview)).to be(true)
+      expect(c.rendered).to be_nil
+    end
+  end
 end
