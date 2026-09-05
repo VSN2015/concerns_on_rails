@@ -67,6 +67,7 @@ module ConcernsOnRails
 
   module Support
     autoload :ColumnGuard,             "concerns_on_rails/support/column_guard"
+    autoload :IncludeTree,             "concerns_on_rails/support/include_tree"
     autoload :ScalarParam,             "concerns_on_rails/support/scalar_param"
     autoload :UniqueRetry,             "concerns_on_rails/support/unique_retry"
     autoload :ErrorEnvelope,           "concerns_on_rails/support/error_envelope"

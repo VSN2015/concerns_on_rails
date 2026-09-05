@@ -95,4 +95,77 @@ describe ConcernsOnRails::Controllers::Includable do
       expect(StoriesController.new.requested_fields).to eq({})
     end
   end
+
+  describe "nested includes, default: and strategy:" do
+    let(:klass) do
+      Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Includable
+
+        includable writer: :stories, remarks: :story, default: :writer, strategy: :preload
+      end
+    end
+
+    it "accepts dotted paths that follow the allow-list tree and drops the rest" do
+      c = klass.new(params: { include: "remarks.story, writer.stories,writer.secret,remarks.story.writer,remarks,,bogus" })
+      expect(c.requested_includes(as: :paths)).to eq(%w[remarks.story writer.stories remarks])
+      expect(c.requested_includes).to eq([{ remarks: :story }, { writer: :stories }])
+      expect(klass.includable_associations).to eq(%i[writer remarks])
+    end
+
+    it "mixes flat and nested entries in the query shape and nests the as_json shape" do
+      c = klass.new(params: { include: "writer,remarks.story" })
+      expect(c.requested_includes).to eq([:writer, { remarks: :story }])
+      expect(c.requested_includes(as: :json)).to eq([:writer, { remarks: { include: :story } }])
+
+      writer = Writer.create!(name: "Ann")
+      story = Story.create!(title: "T", writer: writer)
+      Remark.create!(content: "nice", story: story)
+      json = story.as_json(include: c.requested_includes(as: :json))
+      expect(json["writer"]["name"]).to eq("Ann")
+      expect(json["remarks"].first["story"]["title"]).to eq("T")
+    end
+
+    it "with_includes applies the configured strategy and really loads the nested graph" do
+      writer = Writer.create!(name: "Ann")
+      story = Story.create!(title: "T", writer: writer)
+      Remark.create!(content: "nice", story: story)
+
+      relation = klass.new(params: { include: "remarks.story" }).with_includes(Story.all)
+      expect(relation.preload_values).to eq([{ remarks: :story }])
+      expect(relation.includes_values).to eq([])
+      loaded = relation.to_a.first
+      expect(loaded.association(:remarks)).to be_loaded
+      expect(loaded.remarks.first.association(:story)).to be_loaded
+    end
+
+    it "uses default: when ?include is absent, and nothing when the client sends a blank include" do
+      expect(klass.new.requested_includes(as: :paths)).to eq(["writer"])
+      expect(klass.new.with_includes(Story.all).preload_values).to eq([:writer])
+      expect(klass.new(params: { include: "" }).requested_includes).to eq([])
+      expect(klass.new(params: { include: "remarks" }).requested_includes).to eq([:remarks])
+    end
+
+    it "accepts Array params, ignores hash-shaped garbage and rejects an unknown as:" do
+      c = klass.new(params: { include: ["writer", "remarks,secret"] })
+      expect(c.requested_includes).to eq(%i[writer remarks])
+      expect(klass.new(params: { include: { "x" => "y" } }).requested_includes).to eq([])
+      expect { c.requested_includes(as: :xml) }.to raise_error(ArgumentError, /as: must be :query, :paths or :json/)
+    end
+
+    it "validates default: against the allow-list, strategy:, and the declaration shape at class load" do
+      build = lambda do |**opts|
+        Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Includable
+
+          includable(*opts.delete(:assoc), **opts)
+        end
+      end
+      expect { build.call(assoc: [:writer], default: :remarks) }
+        .to raise_error(ArgumentError, /default: remarks is not an includable path/)
+      expect { build.call(assoc: [{ remarks: :story }], default: "remarks.story") }.not_to raise_error
+      expect { build.call(assoc: [:writer], strategy: :join) }
+        .to raise_error(ArgumentError, /strategy: must be one of includes, preload, eager_load/)
+      expect { build.call(assoc: [42]) }.to raise_error(ArgumentError, /associations must be Symbols, Strings, Arrays or Hashes/)
+    end
+  end
 end

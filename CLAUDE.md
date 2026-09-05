@@ -176,7 +176,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Sortable`** — allow-listed, multi-column ordering from `params[:sort]` (uses `reorder`).
 - **`Respondable`** — standard JSON success/error envelopes (`render_success`/`render_error`).
 - **`ErrorHandleable`** — `rescue_from` for RecordNotFound / ParameterMissing / RecordInvalid.
-- **`Includable`** — allow-listed association sideloading + sparse fieldsets.
+- **`Includable`** — allow-listed association sideloading (nested include trees via `Support::IncludeTree`,
+  `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets.
 - **`SecureHeadable`** — security response headers + native CSP DSL passthrough.
 - **`Localizable`** — per-request `I18n.locale` from params / `Accept-Language` (q-values).
 - **`Authorizable`** — declarative per-action authorization (`authorize_by`, `require_role`).
@@ -233,7 +234,8 @@ query-param coercion shared by the paginators/Filterable), `UniqueRetry` (bounde
 renderer used by seven controller concerns), `FilterParameterRegistry` (live
 filter_parameters registry consulted by the proc `ConcernsOnRails::Railtie` appends at
 boot), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,
-`SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `Affix` (affixed
+`SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
+allow-list trees + the includes/paths/as_json shapes for Includable), `Affix` (affixed
 scope/accessor-name computation + `prefix: true` normalization, shared by Activatable,
 Expirable, Lockable, Anonymizable, Stateable, Storable, Publishable, SoftDeletable and
 Schedulable; the latter three additionally use its guarded scope capture/retirement — a
