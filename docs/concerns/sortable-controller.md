@@ -1,11 +1,12 @@
-`ConcernsOnRails::Controllers::Sortable` adds URL-parameter-driven ordering to Rails controller index actions. It maintains a strict allow-list of permitted sort columns so that arbitrary user-supplied values — including SQL injection attempts — are silently rejected and fall back to a safe default, rather than being interpolated into a query.
+`ConcernsOnRails::Controllers::Sortable` adds URL-parameter-driven ordering to Rails controller index actions. It maintains a strict allow-list of permitted sort keys so that arbitrary user-supplied values — including SQL injection attempts — are silently rejected and fall back to a safe default, rather than being interpolated into a query. Keys can carry a per-column direction (`?sort=-created_at,title`), point at an association's column through a join, and pin `NULLS FIRST`/`NULLS LAST`.
 
 ## When to use it
 
-- An index action exposes a sortable table or list and the front end sends `?sort=title&direction=asc` query parameters.
+- An index action exposes a sortable table or list and the front end sends `?sort=-created_at,title` (JSON:API style) or `?sort=title&direction=asc` query parameters.
 - An API endpoint must support multiple sort orders without exposing every column name as a valid sort target.
+- A list needs to sort by a column on an associated table ("by author name") without hand-writing the join in every action.
+- Nullable columns (a `price`, a `published_at`) must sort with the blanks at the end regardless of direction.
 - You want to protect against SQL injection via sort parameters without writing the guard logic by hand in every controller.
-- Multiple controllers share the same allow-list pattern and you want consistent fallback behaviour without duplication.
 - You need to coexist with `ConcernsOnRails::Models::Sortable` (which manages persisted list position via `acts_as_list`) on a resource that also needs ad-hoc URL-driven ordering in its controller.
 
 ## Installation
@@ -17,6 +18,8 @@ class ArticlesController < ApplicationController
   include ConcernsOnRails::Controllers::Sortable
 
   sortable_by :created_at, :title, :published_at,
+              author: { column: "authors.name", joins: :author },
+              price:  { nulls: :last },
               default: :created_at, direction: :desc
 
   def index
@@ -27,25 +30,46 @@ end
 
 ## Configuration
 
-`sortable_by` is the sole configuration macro. It must be called at least once; omitting all positional arguments raises `ArgumentError`.
+`sortable_by` is the sole configuration macro. It must be called at least once; omitting every field raises `ArgumentError`.
 
 ```
-sortable_by(*allowed_fields, default: nil, direction: :asc)
+sortable_by(*allowed_fields, default: nil, direction: :asc, **rules)
 ```
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `*allowed_fields` | One or more `Symbol` or `String` positional arguments | — (required) | The exhaustive allow-list of column names that `params[:sort]` may reference. Any value not in this list is silently rejected. At least one field must be supplied or `ArgumentError` is raised. |
-| `default:` | `Symbol` or `String` | First field in `allowed_fields` | The column used when `params[:sort]` is absent or not whitelisted. When omitted, the first positional argument becomes the default. |
-| `direction:` | `:asc` or `:desc` | `:asc` | The sort direction used when `params[:direction]` is absent or invalid. Any value other than `:asc` / `:desc` is silently coerced to `:asc`. |
+| `*allowed_fields` | `Symbol` / `String` positional arguments | — | Plain sort keys: each sorts by the column of the same name on the relation's own table. |
+| `**rules` | `key: { column:, joins:, join:, nulls: }` | — | Sort keys with a rule (see below). At least one plain field or rule must be supplied or `ArgumentError` is raised. |
+| `default:` | `Symbol` or `String` | First declared key | The key used when `params[:sort]` is absent or contains no allow-listed key. Must be a declared key, or `ArgumentError` is raised. |
+| `direction:` | `:asc` or `:desc` | `:asc` | The direction used for un-prefixed keys when `params[:direction]` is absent or invalid. Any other value is silently coerced to `:asc`. |
+
+### Rule options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `column:` | `Symbol` or `"table.column"` `String` | the key | A Symbol names a column on the relation's own table; a qualified String names a column on a joined table. The String must match `identifier.identifier` — anything else (spaces, punctuation, raw SQL) raises `ArgumentError` at class load. Both parts are quoted with the connection's identifier quoting. |
+| `joins:` | anything `left_outer_joins` / `joins` accepts | `nil` | Association(s) to join **only when this key is requested**: `:author`, `[:author, :category]`, `{ author: :profile }`. |
+| `join:` | `:left` or `:inner` | `:left` | `:left` uses `left_outer_joins` (rows without the association are kept and sort as `NULL`); `:inner` uses `joins` (those rows are dropped). |
+| `nulls:` | `:first` or `:last` | `nil` | Appends `NULLS FIRST` / `NULLS LAST` to the `ORDER BY` term through Arel (Rails 6.1+). PostgreSQL and SQLite honour it; MySQL/MariaDB have no such syntax. |
+
+## Request parameters
+
+- **`params[:sort]`** — comma-separated sort keys in priority order. Each key may be prefixed with `-` (descending) or `+` (ascending): `?sort=-created_at,title`. Un-prefixed keys take `params[:direction]`, then the configured default direction. Keys not in the allow-list are dropped; when nothing valid remains the `default:` key is used with the fallback direction.
+- **`params[:direction]`** — `asc` / `desc`, case-insensitive. Applies to every un-prefixed key. Invalid values fall back to the declared default direction.
 
 ## Methods
+
+### Class attributes
+
+- `sortable_allowed_fields` — the declared keys, in declaration order (plain fields first, then rules).
+- `sortable_rules` — `{ key => { column:, joins:, join:, nulls: } }` after normalisation (plain fields become `{ column: key, joins: nil, join: :left, nulls: nil }`).
+- `sortable_default_field` / `sortable_default_direction`.
 
 ### Instance methods
 
 **`sorted(relation)`**
 
-Applies `ORDER BY` to the given `ActiveRecord::Relation` based on the current request's `params[:sort]` and `params[:direction]`. Returns the relation unchanged (without an `ORDER BY` clause) when no default field has been configured (i.e., `sortable_by` was never called). The method is public and is intended to be called directly from action methods.
+Applies the requested joins and then `reorder`s the given `ActiveRecord::Relation` with one Arel ordering node per requested key. Because it uses `reorder` (not `order`), the requested columns **replace** any `ORDER BY` the relation already carried — including a model `default_scope` order. Returns the relation unchanged when nothing is requested and no default is configured (i.e. `sortable_by` was never called).
 
 ```ruby
 def index
@@ -53,14 +77,15 @@ def index
 end
 ```
 
-The two private helper methods that `sorted` delegates to are not part of the public API:
+Private helpers (not public API, but overridable in a subclass):
 
-- `sort_field` — resolves `params[:sort]` against the allow-list, returning the default when the param is missing or not whitelisted.
-- `sort_direction` — resolves `params[:direction]`, normalising the value to lowercase before checking against `[:asc, :desc]`, returning the configured default direction when the value is invalid.
+- `sort_requests` — `[[key, :asc | :desc], ...]` parsed from `params[:sort]`, allow-listed, with the per-key direction resolved.
+- `sort_fields` — the keys from `sort_requests` (kept for subclasses that relied on it).
+- `sort_direction` — the fallback direction from `params[:direction]` / the configured default.
 
 ## Examples
 
-**Basic descending-by-date default with optional title sort**
+**Per-column directions (JSON:API style)**
 
 ```ruby
 class PostsController < ApplicationController
@@ -70,45 +95,67 @@ class PostsController < ApplicationController
               default: :created_at, direction: :desc
 
   def index
-    @posts = sorted(Post.published)
-    render json: @posts
+    render json: sorted(Post.published)
   end
 end
 
-# GET /posts             → ORDER BY created_at DESC (defaults)
-# GET /posts?sort=title&direction=asc  → ORDER BY title ASC
-# GET /posts?sort=body   → ORDER BY created_at DESC (body not whitelisted)
+# GET /posts                          → ORDER BY created_at DESC (defaults)
+# GET /posts?sort=-title,created_at   → ORDER BY title DESC, created_at DESC   (bare key → default direction)
+# GET /posts?sort=title,created_at&direction=asc → ORDER BY title ASC, created_at ASC
+# GET /posts?sort=+title&direction=desc → ORDER BY title ASC                  (prefix wins over params[:direction])
+# GET /posts?sort=body                → ORDER BY created_at DESC (body not allow-listed)
 ```
 
-**First declared field becomes the default when :default is omitted**
+**Sorting by an association column**
+
+```ruby
+class ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Sortable
+
+  sortable_by :created_at,
+              author: { column: "authors.name", joins: :author },
+              category: { column: "categories.name", joins: :category, join: :inner }
+
+  def index
+    render json: sorted(Article.all)
+  end
+end
+
+# GET /articles?sort=author    → LEFT OUTER JOIN authors … ORDER BY "authors"."name" ASC
+#                                (articles without an author are kept — they sort as NULL)
+# GET /articles?sort=-category → INNER JOIN categories … ORDER BY "categories"."name" DESC
+#                                (uncategorised articles are dropped)
+# GET /articles?sort=created_at → no join at all
+```
+
+**Pinning NULLs**
 
 ```ruby
 class ProductsController < ApplicationController
   include ConcernsOnRails::Controllers::Sortable
 
-  sortable_by :name, :price, :stock_count
-  # default field: :name, default direction: :asc
+  sortable_by :name, price: { nulls: :last }, discontinued_at: { nulls: :first }
 
   def index
     render json: sorted(Product.all)
   end
 end
 
-# GET /products                        → ORDER BY name ASC
-# GET /products?sort=price&direction=desc → ORDER BY price DESC
+# GET /products?sort=price   → ORDER BY "products"."price" ASC NULLS LAST
+# GET /products?sort=-price  → ORDER BY "products"."price" DESC NULLS LAST
 ```
 
-**Combining with scopes and pagination**
+**Combining with pagination**
 
 ```ruby
 class UsersController < ApplicationController
   include ConcernsOnRails::Controllers::Sortable
+  include ConcernsOnRails::Controllers::Paginatable
 
   sortable_by :last_name, :email, :created_at, default: :last_name
 
   def index
-    @users = sorted(User.active).page(params[:page])
-    render json: @users
+    render json: paginated(sorted(User.active))
   end
 end
 ```
@@ -116,10 +163,12 @@ end
 ## Notes & gotchas
 
 - **`sortable_by` must be called.** If the macro is never invoked, `sortable_default_field` remains `nil`. In that case `sorted` returns the relation unmodified — no ordering is applied and no error is raised.
-- **Calling `sortable_by` with no arguments raises `ArgumentError`.** The error message is `"ConcernsOnRails::Controllers::Sortable: at least one field is required"`.
-- **`params[:direction]` is case-insensitive.** The value is downcased before validation, so `"ASC"`, `"Asc"`, and `"asc"` are all accepted. Any other value (e.g., `"sideways"`, `""`) falls back to the configured default direction.
-- **Non-whitelisted `params[:sort]` values fall back silently.** SQL injection payloads such as `"; DROP TABLE articles;--"` are ignored; the default field is used instead. No error or warning is raised.
-- **The allow-list is stored as `class_attribute`.** Subclassing a controller and calling `sortable_by` again on the subclass creates an independent allow-list without affecting the parent. Standard Rails `class_attribute` inheritance semantics apply.
-- **`sorted` wraps `ActiveRecord::Relation#order`.** It appends ordering to whatever scopes or conditions the relation already carries. Call it last in a chain to avoid unexpected precedence with any existing `order` clauses in the relation.
-- **No database columns or migrations are required.** This is a pure controller concern; it reads only `params` and delegates to `ActiveRecord::Relation#order`. The column names in the allow-list must exist in the model's table, but the concern itself does not validate this at load time.
-- **Not the same as `ConcernsOnRails::Models::Sortable`.** The model concern integrates `acts_as_list` for persistent positional ordering. Both can coexist: the model manages list position while the controller concern handles URL-driven sort for other columns.
+- **Declarations are validated at class load.** An unknown rule option, a `column:` String that is not `table.column`, a `nulls:` other than `:first`/`:last`, a `join:` other than `:left`/`:inner`, or a `default:` that is not a declared key all raise `ArgumentError` with a message naming the offending key.
+- **`params[:direction]` is case-insensitive** and only affects un-prefixed keys; a `-`/`+` prefix always wins for its own key.
+- **Non-whitelisted `params[:sort]` values fall back silently.** SQL injection payloads such as `"-title; DROP TABLE articles;--"` are dropped as a whole token (the key `title; DROP TABLE articles;--` is not allow-listed); the default key is used instead. No error or warning is raised.
+- **Joins are lazy.** An association join is added to the relation only when its key appears in the request, so the common no-sort path stays a single-table query. A LEFT OUTER JOIN can duplicate rows when the association is `has_many`; use `belongs_to`/`has_one` targets or `distinct` the relation yourself.
+- **`nulls:` needs Rails 6.1+ and an adapter that supports it.** The macro raises at class load on older Rails (Arel ordering nodes lack `nulls_first`/`nulls_last`). On MySQL/MariaDB the generated `NULLS LAST` is a syntax error — emulate it with a `column: "ISNULL(price), price"`-style expression in a scope instead, or leave `nulls:` off (MySQL sorts NULLs first on ASC, last on DESC).
+- **The allow-list is stored as `class_attribute`.** Subclassing a controller and calling `sortable_by` again on the subclass creates an independent allow-list without affecting the parent.
+- **`sorted` wraps `ActiveRecord::Relation#reorder`.** It replaces any `ORDER BY` already on the relation, including a model `default_scope` order. Append a tiebreaker (`sorted(scope).order(:id)`) after it if you need deterministic pagination.
+- **No database columns or migrations are required.** The concern reads only `params`; column names in the allow-list must exist, but the concern does not check the schema at load time.
+- **Not the same as `ConcernsOnRails::Models::Sortable`.** The model concern integrates `acts_as_list` for persistent positional ordering. Both can coexist.
