@@ -121,7 +121,7 @@ module ConcernsOnRails
       # literally named that goes in a braced Hash.
       def duplicate(overrides = {}, **options)
         overrides = overrides.merge(options.except(:only, :except))
-        associations = duplicable_selected_associations(options.slice(:only, :except))
+        associations = duplicable_selected_associations(options.slice(:only, :except).compact)
 
         copy = dup
         duplicable_reset_attributes(copy)
@@ -146,13 +146,12 @@ module ConcernsOnRails
       # a controller param can never smuggle in an unvetted association.
       def duplicable_selected_associations(selection)
         declared = self.class.duplicable_config[:associations]
-        only = selection[:only]
-        except = selection[:except]
-        raise ArgumentError, "#{LABEL}: pass either :only or :except, not both" if only && except
-        return declared if only.nil? && except.nil?
+        raise ArgumentError, "#{LABEL}: pass either :only or :except, not both" if selection.size > 1
+        return declared if selection.empty?
 
-        chosen = duplicable_validate_selection!(Array(only || except).map(&:to_sym), declared)
-        only ? declared & chosen : declared - chosen
+        mode, names = selection.first
+        chosen = duplicable_validate_selection!(Array(names).map(&:to_sym), declared)
+        mode == :only ? declared & chosen : declared - chosen
       end
 
       def duplicable_validate_selection!(chosen, declared)
