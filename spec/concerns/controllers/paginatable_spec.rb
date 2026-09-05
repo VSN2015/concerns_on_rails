@@ -308,4 +308,69 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(controller.response.headers["X-Page"]).to eq("2")
     end
   end
+  describe "total: (a page that is already paginated — external APIs, search services)" do
+    let(:page_items) { (11..20).map { |i| "remote #{i}" } } # what the upstream returned for page 2 of 10
+
+    it "returns the collection unsliced and takes the totals from total:" do
+      controller = controller_class.new(params: { page: 2, per_page: 10 })
+      page = controller.paginated(page_items, total: 95)
+      expect(page).to eq(page_items)
+      expect(controller.response.headers).to include(
+        "X-Total-Count" => "95", "X-Page" => "2", "X-Per-Page" => "10", "X-Total-Pages" => "10"
+      )
+      expect(controller.pagination_meta).to eq(total: 95, page: 2, per_page: 10, total_pages: 10)
+    end
+
+    it "leaves a relation untouched too (no LIMIT/OFFSET, no COUNT)" do
+      controller = controller_class.new(params: { page: 3, per_page: 5 })
+      sql = []
+      callback = ->(*, payload) { sql << payload[:sql] if payload[:sql] =~ /\ASELECT/i }
+      records = ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+        controller.paginated(Widget.where(name: "Widget 1"), total: 42).to_a
+      end
+      expect(records.map(&:name)).to eq(["Widget 1"])
+      expect(sql.size).to eq(1)
+      expect(sql.first).not_to match(/LIMIT|COUNT/i)
+      expect(controller.response.headers["X-Total-Count"]).to eq("42")
+      expect(controller.response.headers["X-Total-Pages"]).to eq("9")
+    end
+
+    it "builds the Link header from total:" do
+      klass = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        define_method(:index) { render json: paginated(%w[a b], total: 45) }
+      end
+      result = IntegrationHarness.dispatch(klass, :index, query: "page=2&per_page=10")
+      expect(result.header("Link")).to include('<http://example.org/?page=5&per_page=10>; rel="last"')
+      expect(result.header("Link")).to include('<http://example.org/?page=3&per_page=10>; rel="next"')
+    end
+
+    it "pagination_meta accepts total: with or without a collection, skipping the COUNT" do
+      controller = controller_class.new(params: { page: 4, per_page: 20 })
+      expect(controller.pagination_meta(total: 61)).to eq(total: 61, page: 4, per_page: 20, total_pages: 4)
+      expect(controller.pagination_meta(Widget.all, total: 61)).to eq(total: 61, page: 4, per_page: 20, total_pages: 4)
+    end
+
+    it "handles total: 0 (empty page, no Link)" do
+      controller = controller_class.new
+      expect(controller.paginated([], total: 0)).to eq([])
+      expect(controller.response.headers["X-Total-Count"]).to eq("0")
+      expect(controller.response.headers["X-Total-Pages"]).to eq("0")
+      expect(controller.response.headers).not_to have_key("Link")
+    end
+
+    it "rejects a negative or non-Integer total:" do
+      controller = controller_class.new
+      expect { controller.paginated([], total: -1) }.to raise_error(ArgumentError, /total: must be a non-negative Integer/)
+      expect { controller.paginated([], total: "95") }.to raise_error(ArgumentError, /total: must be a non-negative Integer/)
+      expect { controller.pagination_meta(total: 1.5) }.to raise_error(ArgumentError, /total: must be a non-negative Integer/)
+    end
+
+    it "still slices and counts when total: is omitted" do
+      controller = controller_class.new(params: { page: 2, per_page: 3 })
+      expect(controller.paginated(page_items)).to eq(page_items[3, 3])
+      expect(controller.response.headers["X-Total-Count"]).to eq("10")
+    end
+  end
 end

@@ -61,18 +61,27 @@ module ConcernsOnRails
       # current page's Array slice (`[]` past the last page). The metadata is
       # memoized so a follow-up `pagination_meta` (no argument) reuses it.
       # Safe on empty collections.
-      def paginated(collection)
+      #
+      # `total:` says the collection IS the current page already — an external
+      # API or search service returned page N of a result set it counted for
+      # you. Nothing is sliced, limited or counted: the records come back
+      # untouched and `total` drives X-Total-Count, X-Total-Pages and the Link
+      # header. Ask the upstream for the same page/per_page you read here.
+      def paginated(collection, total: nil)
         @paginatable_meta = nil
         source = paginatable_source(collection)
+        pre_paginated = !total.nil?
         page = pagination_page
         per_page = pagination_per_page
         offset = (page - 1) * per_page
 
-        total = paginatable_total(source)
+        total = pre_paginated ? paginatable_validate_total!(total) : paginatable_total(source)
         total_pages = per_page.positive? ? (total.to_f / per_page).ceil : 0
 
         records =
-          if source.is_a?(Array)
+          if pre_paginated
+            source # the caller already fetched exactly this page: an Array stays an Array, a relation is not limited
+          elsif source.is_a?(Array)
             source[offset, per_page] || []
           else
             source.limit(per_page).offset(offset)
@@ -89,16 +98,11 @@ module ConcernsOnRails
       # with no argument after `paginated` to reuse its memoized meta — the
       # documented records+meta composition used to run the identical COUNT
       # twice per request. Pass a relation or collection to compute fresh.
-      def pagination_meta(collection = nil)
-        return @paginatable_meta if collection.nil? && @paginatable_meta
+      # With `total:` the COUNT is skipped (and the collection may be omitted).
+      def pagination_meta(collection = nil, total: nil)
+        return @paginatable_meta if collection.nil? && total.nil? && @paginatable_meta
 
-        if collection.nil?
-          raise ArgumentError,
-                "#{LABEL}: pagination_meta needs a relation or collection " \
-                "(no prior paginated call in this request to reuse)"
-        end
-
-        total = paginatable_total(paginatable_source(collection))
+        total = paginatable_meta_total(collection, total)
         per_page = pagination_per_page
         {
           total: total,
@@ -124,6 +128,23 @@ module ConcernsOnRails
         raise ArgumentError,
               "#{LABEL}: expected an ActiveRecord relation or an Enumerable (Array, Set, Range, ...), " \
               "got #{collection.class}#{hint}"
+      end
+
+      # `total:` wins (validated); otherwise COUNT the collection; neither
+      # given and nothing memoized is a caller error.
+      def paginatable_meta_total(collection, total)
+        return paginatable_validate_total!(total) unless total.nil?
+        return paginatable_total(paginatable_source(collection)) unless collection.nil?
+
+        raise ArgumentError,
+              "#{LABEL}: pagination_meta needs a relation or collection " \
+              "(no prior paginated call in this request to reuse)"
+      end
+
+      def paginatable_validate_total!(total)
+        return total if total.is_a?(Integer) && total >= 0
+
+        raise ArgumentError, "#{LABEL}: total: must be a non-negative Integer (got #{total.inspect})"
       end
 
       # Arrays already know their size. Relations COUNT with the clauses that

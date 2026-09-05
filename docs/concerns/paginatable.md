@@ -47,7 +47,7 @@ end
 
 ### Instance methods
 
-**`paginated(collection) → ActiveRecord::Relation | Array`**
+**`paginated(collection, total: nil) → ActiveRecord::Relation | Array`**
 
 Applies pagination to the given collection and sets the four standard response headers. The argument is not mutated. Two kinds of input are accepted:
 
@@ -56,9 +56,11 @@ Applies pagination to the given collection and sets the four standard response h
 
 A `Hash` is rejected with an `ArgumentError` rather than silently paginated as `[key, value]` pairs (call `.to_a` if that is what you mean); `nil` and non-collections (a String, an Integer) raise the same error, naming the class received.
 
-**`pagination_meta(collection = nil) → Hash`**
+**`total:`** — the collection is already the current page (an external API or search service returned page N of a set it counted for you). Nothing is sliced, limited or counted: an Array comes back as the same Array, a relation is not given `LIMIT`/`OFFSET`, no `COUNT` runs, and `total` drives `X-Total-Count`, `X-Total-Pages` and the `Link` header. Must be a non-negative Integer (`ArgumentError` otherwise). Request the same `page`/`per_page` upstream that this controller reads.
 
-Returns `{ total:, page:, per_page:, total_pages: }` **without** applying `LIMIT`/`OFFSET` or slicing — handy for body-based pagination composed with `Respondable`'s `meta:`. Called with no argument after `paginated`, it reuses that call's memoized metadata (no second `COUNT`); pass a relation or collection to compute fresh. Accepts exactly the same inputs as `paginated`.
+**`pagination_meta(collection = nil, total: nil) → Hash`**
+
+Returns `{ total:, page:, per_page:, total_pages: }` **without** applying `LIMIT`/`OFFSET` or slicing — handy for body-based pagination composed with `Respondable`'s `meta:`. Called with no argument after `paginated`, it reuses that call's memoized metadata (no second `COUNT`); pass a relation or collection to compute fresh. Accepts exactly the same inputs as `paginated`; with `total:` the `COUNT` is skipped and the collection may be omitted entirely (`pagination_meta(total: result.total_hits)`).
 
 The four `X-*` headers set on `response`:
 

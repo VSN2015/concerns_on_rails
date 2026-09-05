@@ -1470,6 +1470,15 @@ Anything answering `limit`/`offset` is treated as a relation; any other non-`Has
 (`Array`, `Set`, `Range`, `Enumerator` — consumed once) is materialized and sliced. A `Hash`,
 `nil` or a non-collection raises `ArgumentError` (call `.to_a` to paginate a Hash's pairs).
 
+**Already paginated upstream?** When an external API or search service hands you page N and the
+total it counted, pass `total:` — nothing is sliced, limited or counted; the collection comes back
+as-is and `total` drives `X-Total-Count`, `X-Total-Pages` and the `Link` header:
+
+```ruby
+result = Catalog.search(params[:q], page: params[:page], per_page: params[:per_page])
+render_success(data: paginated(result.hits, total: result.total_hits), meta: pagination_meta)
+```
+
 **URL params**
 
 | Param        | Default | Notes                              |
