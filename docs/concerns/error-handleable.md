@@ -79,6 +79,8 @@ handle_errors only: %i[not_found parameter_missing record_invalid] # the pre-exp
 
 All handlers are **public**, which is intentional: subclasses can override any one without re-declaring `rescue_from`. Each renders through the private `render_handled_error(key, message:, errors:)`, which takes `code` and status from the table; an override that wants the standard envelope with different wording can call `render_error_envelope(message:, code:, status:, errors:)`.
 
+**`on_handled_error(key, error, status:, message:)`** — public override point, called by the render funnel before each handled error is rendered. The default instruments `handled_error.concerns_on_rails` with `controller` (the controller path), `action`, `code` (the HANDLERS key), `status`, `message` (as rendered), `exception` and `exception_class`. `error` is the rescued exception — captured by an override of `rescue_with_handler`, so it is `nil` when a handler is called directly. Override it to report selectively (`Sentry.capture_exception(error) if key == :record_not_unique`); call `super` to keep the event, and rescue inside the override if the reporter itself can fail — it runs before the response is rendered.
+
 The private helper `render_error_envelope` is not part of the public API and should not be called directly.
 
 ## Examples
@@ -163,6 +165,29 @@ The JSON shape rendered is identical to the `Respondable` path:
 { "success": false, "error": { "message": "...", "code": "..." } }
 ```
 The `details` key is only present when there is something to list (validation messages, unpermitted parameter names).
+
+**Reporting handled errors selectively**
+
+```ruby
+class Api::BaseController < ApplicationController
+  include ConcernsOnRails::Controllers::Respondable
+  include ConcernsOnRails::Controllers::ErrorHandleable
+
+  REPORTABLE = %i[record_not_unique foreign_key_violation stale_object parse_error].freeze
+
+  def on_handled_error(key, error, **)
+    Sentry.capture_exception(error, tags: { handled_code: key }) if error && REPORTABLE.include?(key)
+    super
+  rescue StandardError => e
+    Rails.logger.warn("[errors] reporter failed: #{e.message}")   # never let the reporter break the 4xx
+  end
+end
+
+# config/initializers/handled_errors.rb — or subscribe instead of overriding:
+ActiveSupport::Notifications.subscribe("handled_error.concerns_on_rails") do |event|
+  StatsD.increment("api.handled_error", tags: ["code:#{event.payload[:code]}", "status:#{event.payload[:status]}"])
+end
+```
 
 ## Notes & gotchas
 

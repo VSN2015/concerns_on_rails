@@ -42,6 +42,11 @@ module ConcernsOnRails
     #
     # Each handler is a public instance method, so subclasses can override the
     # message wording or response shape without re-declaring the `rescue_from`.
+    #
+    # Every handled error instruments `handled_error.concerns_on_rails`
+    # (controller, action, code, status, message, exception) through the public
+    # `on_handled_error(key, error, status:, message:)` override point — the
+    # place to report the 409s to Sentry while letting the 404s pass quietly.
     module ErrorHandleable
       extend ActiveSupport::Concern
 
@@ -128,6 +133,31 @@ module ConcernsOnRails
         private :error_handleable_selection, :error_handleable_known_keys
       end
 
+      # Called before each handled error is rendered. Default: instrument
+      # `handled_error.concerns_on_rails` with the controller path, action, the
+      # envelope code (the HANDLERS key), status, rendered message, and the
+      # exception (nil when a handler is called directly rather than rescued).
+      # Override to report selectively — call super to keep the event, and
+      # rescue inside your override if the reporter itself can fail.
+      def on_handled_error(key, error, status:, message:)
+        ActiveSupport::Notifications.instrument(
+          "handled_error.concerns_on_rails",
+          controller: error_handleable_controller_name, action: error_handleable_action_name,
+          code: key, status: status, message: message, exception: error, exception_class: error&.class&.name
+        )
+      end
+
+      # Remember the exception being rescued so the render funnel can hand it to
+      # `on_handled_error` — the handlers themselves only pass a message along.
+      # Rescuable's `rescue_with_handler(exception, object:, visited_exceptions:)`
+      # is what ActionController's rescue path calls.
+      def rescue_with_handler(exception, **)
+        @error_handleable_exception = exception
+        super
+      ensure
+        @error_handleable_exception = nil
+      end
+
       def handle_record_not_found(_error)
         # Use a generic message: the raw RecordNotFound message leaks the model
         # class name and the queried attribute/value to API clients. Subclasses
@@ -208,7 +238,17 @@ module ConcernsOnRails
 
       # Renders the envelope for a HANDLERS key: code = key, status from the table.
       def render_handled_error(key, message:, errors: nil)
-        render_error_envelope(message: message, code: key.to_s, status: HANDLERS.fetch(key)[:status], errors: errors)
+        status = HANDLERS.fetch(key)[:status]
+        on_handled_error(key, @error_handleable_exception, status: status, message: message)
+        render_error_envelope(message: message, code: key.to_s, status: status, errors: errors)
+      end
+
+      def error_handleable_controller_name
+        respond_to?(:controller_path) ? controller_path : self.class.name
+      end
+
+      def error_handleable_action_name
+        respond_to?(:action_name) ? action_name.to_s : nil
       end
 
       # Kept for subclasses that call it from a handler override.

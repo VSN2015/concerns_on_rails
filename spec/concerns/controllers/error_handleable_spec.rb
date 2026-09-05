@@ -384,4 +384,61 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
         .to raise_error(ArgumentError, /not both/)
     end
   end
+
+  describe "instrumentation (#on_handled_error)" do
+    def handled_events(&block)
+      events = []
+      callback = ->(*args) { events << ActiveSupport::Notifications::Event.new(*args) }
+      ActiveSupport::Notifications.subscribed(callback, "handled_error.concerns_on_rails", &block)
+      events
+    end
+
+    it "instruments every rescued error with code, status, message, exception and action" do
+      controller.define_singleton_method(:action_name) { "show" }
+      error = ActiveRecord::RecordNotFound.new("Couldn't find User with 'id'=99")
+      events = handled_events { controller.rescue_with_handler(error) }
+
+      expect(events.size).to eq(1)
+      payload = events.first.payload
+      expect(payload).to include(code: :not_found, status: :not_found, action: "show",
+                                 exception: error, exception_class: "ActiveRecord::RecordNotFound")
+      expect(payload[:message]).to eq(controller.rendered[:json][:error][:message])
+      expect(payload).to have_key(:controller)
+    end
+
+    it "is an override point — replace it to report only some codes; skipping super silences the event" do
+      klass = Class.new(controller_class) do
+        def self.reports = (@reports ||= [])
+
+        def on_handled_error(key, error, **)
+          self.class.reports << [key, error.class.name] if key == :record_not_unique
+        end
+      end
+      c = klass.new
+      events = handled_events do
+        c.rescue_with_handler(ActiveRecord::RecordNotUnique.new("dup"))
+        c.rescue_with_handler(ActiveRecord::RecordNotFound.new("gone"))
+      end
+      expect(klass.reports).to eq([[:record_not_unique, "ActiveRecord::RecordNotUnique"]])
+      expect(events).to be_empty
+      expect(c.rendered[:status]).to eq(:not_found) # rendering is untouched
+    end
+
+    it "instruments a handler called directly too, with a nil exception" do
+      events = handled_events { controller.handle_stale_object(ActiveRecord::StaleObjectError.new) }
+      expect(events.first.payload).to include(code: :stale_object, status: :conflict, exception: nil, exception_class: nil)
+    end
+
+    it "fires through the real ActionController stack with the controller path" do
+      klass = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::ErrorHandleable
+
+        define_method(:index) { raise ActiveRecord::RecordNotUnique, "dup" }
+      end
+      events = handled_events { IntegrationHarness.dispatch(klass, :index) }
+      expect(events.size).to eq(1)
+      expect(events.first.payload).to include(code: :record_not_unique, status: :conflict, action: "index")
+      expect(events.first.payload[:controller]).to eq(klass.controller_path)
+    end
+  end
 end

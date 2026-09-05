@@ -1751,6 +1751,15 @@ handle_errors only: %i[not_found parameter_missing record_invalid] # just the or
 declarations keep precedence. Unknown keys raise `ArgumentError` listing the valid ones;
 `error_handleable_keys` returns the keys still active on a controller.
 
+**Reporting** — every handled error instruments `handled_error.concerns_on_rails` (`controller`, `action`, `code`, `status`, `message`, `exception`, `exception_class`) via the public `on_handled_error(key, error, status:, message:)` override point, so the 409s reach your error tracker while the 404s stay quiet:
+
+```ruby
+def on_handled_error(key, error, **)
+  Sentry.capture_exception(error) if %i[record_not_unique foreign_key_violation stale_object].include?(key)
+  super   # keep the event
+end
+```
+
 **Notes**
 - When `Respondable` is also included, the handlers delegate to `render_error` so the envelope shape stays in one place. Otherwise they render the same envelope inline.
 - Exceptions are registered by name (string), so a class your Rails version lacks is simply never matched.
