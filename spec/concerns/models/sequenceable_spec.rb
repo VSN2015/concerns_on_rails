@@ -27,7 +27,7 @@ describe ConcernsOnRails::Sequenceable do
 
     %i[Invoice StartAtInvoice PlainSequence ScopedInvoice YearlyInvoice TemplatedInvoice
        NoColumnInvoice NoIntoInvoice NoScopeColumnInvoice NoCreatedAtInvoice
-       BadResetInvoice BadTemplateInvoice].each do |const|
+       BadResetInvoice BadTemplateInvoice ManualInvoice ScopedManualInvoice BadAssignInvoice].each do |const|
       Object.send(:remove_const, const) if Object.const_defined?(const)
     end
   end
@@ -300,6 +300,84 @@ describe ConcernsOnRails::Sequenceable do
           sequenceable_by :sequence, template: "not-callable"
         end
       end.to raise_error(ArgumentError, /template must be callable/)
+    end
+  end
+
+  describe "assign: :manual (number on demand, e.g. when an invoice is finalized)" do
+    before do
+      class ManualInvoice < TestModel
+        self.table_name = "invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", padding: 5, assign: :manual
+      end
+    end
+
+    it "leaves the sequence blank on create and assigns it on demand, idempotently" do
+      invoice = ManualInvoice.create!
+      expect(invoice.sequence).to be_nil
+      expect(invoice.number).to be_nil
+      expect(invoice.sequence_assigned?).to be(false)
+      expect(ManualInvoice.pending_sequence).to eq([invoice])
+
+      expect(invoice.assign_sequence!).to be(true)
+      expect(invoice.sequence).to eq(1)
+      expect(invoice.number).to eq("INV-00001")
+      expect(invoice.reload.number).to eq("INV-00001") # persisted
+      expect(invoice.sequence_assigned?).to be(true)
+      expect(ManualInvoice.pending_sequence).to be_empty
+
+      expect(invoice.assign_sequence!).to be(false) # already numbered — nothing rewritten
+      expect(invoice.sequence).to eq(1)
+
+      second = ManualInvoice.create!
+      second.assign_sequence!
+      expect(second.number).to eq("INV-00002")
+    end
+
+    it "numbers in assignment order (not creation order) and respects scope:" do
+      class ScopedManualInvoice < TestModel
+        self.table_name = "invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, scope: :account_id, assign: :manual
+      end
+      a = ScopedManualInvoice.create!(account_id: 1)
+      b = ScopedManualInvoice.create!(account_id: 1)
+      c = ScopedManualInvoice.create!(account_id: 2)
+
+      b.assign_sequence!
+      a.assign_sequence!
+      c.assign_sequence!
+      expect([b.sequence, a.sequence, c.sequence]).to eq([1, 2, 1])
+      expect(ScopedManualInvoice.next_sequence(account_id: 1)).to eq(3)
+    end
+
+    it "assigns on an unsaved record without saving it, and validates assign:" do
+      invoice = ManualInvoice.new
+      expect(invoice.assign_sequence!).to be(true)
+      expect(invoice.sequence).to eq(1)
+      expect(invoice.number).to eq("INV-00001")
+      expect(invoice).to be_new_record
+      invoice.save!
+      expect(ManualInvoice.find(invoice.id).sequence).to eq(1)
+
+      expect do
+        class BadAssignInvoice < TestModel
+          self.table_name = "invoices"
+          include ConcernsOnRails::Sequenceable
+
+          sequenceable_by :sequence, assign: :later
+        end
+      end.to raise_error(ArgumentError, /unknown assign ':later'. Valid values: create, manual/)
+    end
+
+    it "keeps the create-time default: automatic numbering, assign_<field>! a no-op afterwards" do
+      invoice = Invoice.create!
+      expect(invoice.sequence).to eq(1)
+      expect(invoice.sequence_assigned?).to be(true)
+      expect(invoice.assign_sequence!).to be(false)
+      expect(Invoice.pending_sequence).to be_empty
     end
   end
 end

@@ -33,6 +33,7 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       RESET_PERIODS = %i[never year month day].freeze
+      ASSIGN_MODES = %i[create manual].freeze
       NAME = "ConcernsOnRails::Models::Sequenceable".freeze
 
       included do
@@ -54,26 +55,29 @@ module ConcernsOnRails
         #   scope:     column or array of columns the counter is scoped to (default nil)
         #   reset:     :never (default) | :year | :month | :day — restart per period (needs created_at)
         #   template:  ->(seq, record) { ... } full custom formatter; overrides prefix/padding/period
+        #   assign:    :create (default) numbers every record in before_create; :manual leaves the
+        #              column NULL until `assign_<field>!` — invoices numbered when finalized
         def sequenceable_by(field = :sequence, into: nil, prefix: "", padding: 0,
-                            separator: "-", start_at: 1, scope: nil, reset: :never, template: nil)
+                            separator: "-", start_at: 1, scope: nil, reset: :never, template: nil, assign: :create)
           field      = field.to_sym
           into       = into&.to_sym
           reset      = reset.to_sym
+          assign     = assign.to_sym
           scope_cols = Array(scope).map(&:to_sym)
 
           ensure_columns!(NAME, field, types: :integer)
           ensure_columns!(NAME, into, types: :string) if into
           ensure_columns!(NAME, *scope_cols) unless scope_cols.empty?
           ensure_columns!(NAME, :created_at, types: :datetime) unless reset == :never
-          validate_sequenceable_options!(reset, template)
+          validate_sequenceable_options!(reset, template, assign)
 
           self.sequenceable_config = sequenceable_config.merge(
             field => { into: into, prefix: prefix.to_s, padding: padding.to_i,
                        separator: separator.to_s, start_at: start_at.to_i,
-                       scope: scope_cols, reset: reset, template: template }
+                       scope: scope_cols, reset: reset, template: template, assign: assign }
           )
 
-          before_create -> { assign_sequenceable_value(field) }
+          before_create -> { assign_sequenceable_value(field) } if assign == :create
           define_sequenceable_methods(field)
         end
       end
@@ -93,13 +97,21 @@ module ConcernsOnRails
           define_singleton_method("next_#{field}") do |scope_attrs = {}|
             sequence_base_value(field, nil, scope_attrs)
           end
+
+          # On-demand numbering (the only way under assign: :manual), a
+          # predicate, and the "still awaiting a number" scope.
+          define_method("assign_#{field}!") { sequenceable_assign!(field) }
+          define_method("#{field}_assigned?") { self[field].present? }
+          scope "pending_#{field}", -> { where(field => nil) }
         end
 
-        def validate_sequenceable_options!(reset, template)
+        def validate_sequenceable_options!(reset, template, assign = :create)
           unless RESET_PERIODS.include?(reset)
             raise ArgumentError, "#{NAME}: unknown reset '#{reset}'. Valid values: #{RESET_PERIODS.join(', ')}"
           end
-
+          unless ASSIGN_MODES.include?(assign)
+            raise ArgumentError, "#{NAME}: unknown assign ':#{assign}'. Valid values: #{ASSIGN_MODES.join(', ')}"
+          end
           return if template.nil? || template.respond_to?(:call)
 
           raise ArgumentError, "#{NAME}: template must be callable (respond to #call)"
@@ -123,6 +135,19 @@ module ConcernsOnRails
 
         self[cfg[:into]] = self.class.send(:format_sequence, field, self[field], self)
       end
+
+      # Number the record now: the next value for its scope/period plus the
+      # into: string, save!d when the record is persisted and left for the
+      # caller's save when new. false (nothing rewritten) when already
+      # numbered, so a "finalize" action can be retried safely.
+      def sequenceable_assign!(field)
+        return false if self[field].present?
+
+        assign_sequenceable_value(field)
+        save! unless new_record?
+        true
+      end
+      private :sequenceable_assign!
 
       # Pin the row inside the period its number is drawn from: with reset:
       # enabled the period is computed from "now" during before_create, but

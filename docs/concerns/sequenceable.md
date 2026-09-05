@@ -68,6 +68,7 @@ end
 | `scope:` | Symbol / Array of Symbols / nil | `nil` | Column or array of columns that partition the counter. Each distinct combination of scope-column values maintains its own independent counter. |
 | `reset:` | Symbol | `:never` | Restarts the counter at `start_at` each calendar period. Valid values: `:never`, `:year`, `:month`, `:day`. Any value other than `:never` requires a `created_at` column. |
 | `template:` | Callable / nil | `nil` | A callable (e.g. a lambda) with signature `->(seq, record)` that returns the formatted string. When set, it completely overrides `prefix`, `padding`, `separator`, and the period token. Must respond to `#call`. |
+| `assign:` | Symbol | `:create` | When the number is assigned. `:create` registers the `before_create` callback (the default). `:manual` registers none — the column stays `NULL` until `assign_<field>!` is called, so a draft can exist without consuming a number and numbering follows finalization order. Any other value raises `ArgumentError`. |
 
 ### Default format by `reset:` value
 
@@ -94,7 +95,19 @@ Returns the formatted display string for the configured field. When an `into:` c
 
 Computes and assigns the next sequence value and, when `into:` is configured, the formatted string. Skips assignment if the integer column already has a value (caller-supplied values are respected). If the computed candidate is already taken, the value is incremented until a free slot is found, up to `MAX_GENERATION_ATTEMPTS` (10) retries.
 
+**`assign_<field>!`**
+
+Numbers the record now: computes the next value for its scope (and period), writes the integer and the `into:` string, and — when the record is persisted — `save!`s. On a new record the attributes are set and left for your own save. Returns `true` when a number was assigned and `false` when the record already had one (nothing is rewritten), so a "finalize" action can be retried safely. Available in both modes; it is the only way to number a record under `assign: :manual`.
+
+**`<field>_assigned?`**
+
+`true` when the integer column has a value.
+
 ### Class methods
+
+**`pending_<field>`**
+
+Scope: records still awaiting a number (`WHERE <field> IS NULL`) — the drafts, under `assign: :manual`.
 
 **`next_<field>(scope_attrs = {})`**
 
@@ -167,6 +180,28 @@ end
 
 Ticket.create!(department_code: "ENG").reference  # => "TKT-ENG-1000"
 Ticket.create!(department_code: "OPS").reference  # => "TKT-OPS-1001"
+```
+
+**Number when finalized, not when drafted**
+
+```ruby
+class Invoice < ApplicationRecord
+  include ConcernsOnRails::Sequenceable
+
+  sequenceable_by :sequence, into: :number, prefix: "INV-", padding: 5, scope: :account_id, assign: :manual
+
+  def finalize!
+    transaction do
+      assign_sequence!          # => true the first time, false on a retry
+      update!(state: "final")
+    end
+  end
+end
+
+draft = Invoice.create!(account_id: 1)   # sequence: nil, number: nil
+Invoice.pending_sequence                 # => [draft]
+draft.finalize!
+draft.number                             # => "INV-00001"
 ```
 
 ## Notes & gotchas
