@@ -89,24 +89,44 @@ module ConcernsOnRails
         before_save :encryptable_refresh_blind_indexes
       end
 
-      # Deterministic blind-index fingerprint for a field's value, applying the
-      # field's normalization `expression:`. Shared by the generated class
-      # finders and the before_save refresh. Returns nil for a nil value.
+      # Deterministic blind-index fingerprint for a field's value under the
+      # CURRENT key, applying the field's normalization `expression:` — what
+      # the before_save refresh (and reencrypt!) writes. nil for a nil value.
       def self.blind_fingerprint(rule, value)
+        blind_fingerprints(rule, value).first
+      end
+
+      # The fingerprints under every key that can currently decrypt — current
+      # first, then `previous_keys` — so lookups keep finding rows whose index
+      # was written before a rotation and not yet re-encrypted. A per-field
+      # `key:` has exactly one. Empty for a nil value.
+      def self.blind_fingerprints(rule, value)
         bi = rule[:blind_index]
-        return nil unless bi
-        return nil if value.nil?
+        return [] if bi.nil? || value.nil?
 
         normalized = bi[:expression] ? bi[:expression].call(value) : value
-        return nil if normalized.nil?
+        return [] if normalized.nil?
 
         config = ConcernsOnRails.encryption
         material = config.resolve_material(rule[:key])
-        return normalized.to_s if material == ConcernsOnRails::Encryption::PASSTHROUGH
+        return [normalized.to_s] if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
-        ConcernsOnRails::Support::Encryptor.blind_index(
-          normalized, key: material, salt: config.key_derivation_salt
-        )
+        blind_index_materials(rule, config, material).map do |key|
+          ConcernsOnRails::Support::Encryptor.blind_index(normalized, key: key, salt: config.key_derivation_salt)
+        end.uniq
+      end
+
+      # A per-field key is one key; gem-keyed fields fingerprint under the
+      # current key and every previous one.
+      def self.blind_index_materials(rule, config, current)
+        return [current] if rule[:key]
+
+        config.key_ids.filter_map { |id| config.key_material_for(id) }
+      end
+
+      # One digest → equality, several → IN.
+      def self.blind_index_predicate(fingerprints)
+        fingerprints.length == 1 ? fingerprints.first : fingerprints
       end
 
       # Custom type registered on each encrypted column. cast handles user input
@@ -200,13 +220,15 @@ module ConcernsOnRails
           end
         end
 
+        # Gem-keyed fields stamp the configured key_id so rotation can tell old
+        # rows apart; a per-field `key:` is outside rotation and always writes 0.
         def write_ciphertext(plaintext)
           config = ConcernsOnRails.encryption
           material = config.resolve_material(@key)
           return plaintext if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
           ConcernsOnRails::Support::Encryptor.encrypt(
-            plaintext, key: material, salt: config.key_derivation_salt
+            plaintext, key: material, key_id: @key ? 0 : config.key_id, salt: config.key_derivation_salt
           )
         end
 
@@ -215,6 +237,7 @@ module ConcernsOnRails
           material = config.resolve_material(@key)
           return stored if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
+          material = rotation_material(stored, config) unless @key
           ConcernsOnRails::Support::Encryptor.decrypt(
             stored, key: material, salt: config.key_derivation_salt
           )
@@ -222,6 +245,15 @@ module ConcernsOnRails
           raise if config.raise_on_decrypt_error
 
           nil
+        end
+
+        # The envelope says which key wrote it; the config says whether that key
+        # is still around (current or previous).
+        def rotation_material(stored, config)
+          id = ConcernsOnRails::Support::Encryptor.key_id(stored)
+          config.key_material_for(id) ||
+            raise(ConcernsOnRails::Encryption::DecryptionError,
+                  "value was encrypted with unknown key id #{id} — add it to ConcernsOnRails.encryption.previous_keys")
         end
       end
 
@@ -245,6 +277,55 @@ module ConcernsOnRails
             encryptable_define_blind_index(field, bi) if bi
             encryptable_register_filter_parameter(field)
           end
+        end
+
+        # Rows whose ciphertext for any of `fields` (default: every gem-keyed
+        # field) was written under a key other than the current one — the
+        # envelope header is a fixed 4-char Base64 prefix per key id, so this is
+        # a LIKE on the column, no decryption. Per-field `key:` fields never
+        # rotate and are ignored. Pick key ids in 0..25: their prefixes differ
+        # in a letter, not just its case, so MySQL's case-insensitive LIKE keeps
+        # them apart.
+        def needs_reencryption(*fields)
+          columns = encryptable_rotatable_fields(fields)
+          return none if columns.empty?
+
+          prefix = "#{ConcernsOnRails::Support::Encryptor.header_prefix(ConcernsOnRails.encryption.key_id)}%"
+          clauses = columns.map do |field|
+            quoted = "#{quoted_table_name}.#{connection.quote_column_name(field)}"
+            "(#{quoted} IS NOT NULL AND #{quoted} NOT LIKE ?)"
+          end
+          where(clauses.join(" OR "), *Array.new(columns.size, prefix))
+        end
+
+        # Rewrite every stale row (see needs_reencryption) under the current key,
+        # blind indexes included — one update_columns per row, streamed with
+        # find_each, no giant transaction (each row is valid before and after).
+        # Returns the Integer count of rows rewritten. Run it after every
+        # rotation, then drop the old id from `previous_keys`.
+        def reencrypt_all!(*fields)
+          columns = encryptable_rotatable_fields(fields)
+          return 0 if columns.empty? # e.g. only per-field-keyed fields were named
+
+          count = 0
+          needs_reencryption(*columns).find_each do |record|
+            count += 1 if record.reencrypt!(*columns)
+          end
+          count
+        end
+
+        # Gem-keyed encrypted fields (all, or the validated subset). Per-field
+        # `key:` fields are not part of rotation.
+        def encryptable_rotatable_fields(fields)
+          rotatable = encryptable_rules.reject { |_field, rule| rule[:key] }.keys
+          return rotatable if fields.empty?
+
+          fields.map(&:to_sym).each do |field|
+            next if encryptable_rules.key?(field)
+
+            raise ArgumentError, "#{LABEL}: #{field} is not an encryptable field (declared: #{encryptable_rules.keys.join(', ')})"
+          end
+          fields.map(&:to_sym) & rotatable
         end
 
         private
@@ -276,6 +357,11 @@ module ConcernsOnRails
           # plaintext is at rest.
           define_method("#{field}_ciphertext") { read_attribute_before_type_cast(field) }
           define_method("#{field}_encrypted?") { read_attribute_before_type_cast(field).present? }
+          # The key id in the stored envelope (nil when nothing is stored yet).
+          define_method("#{field}_key_id") do
+            stored = read_attribute_before_type_cast(field)
+            stored.nil? ? nil : ConcernsOnRails::Support::Encryptor.key_id(stored)
+          end
         end
 
         # find_by_<field> / where_<field> / <field>_fingerprint for equality
@@ -289,18 +375,23 @@ module ConcernsOnRails
           # Accepts one value, several, or an array — multiple values become an
           # IN query on the fingerprint column. Returns a Relation, so it chains
           # with scopes, `.or`, `.merge` (for joins), and further `.where`.
+          # Lookups match the digest under the current key AND every previous
+          # key, so rows not yet re-encrypted after a rotation are still found.
           define_singleton_method("where_#{field}") do |*values|
-            fingerprints = values.flatten.map { |v| public_send("#{field}_fingerprint", v) }.compact
+            rule = encryptable_rules.fetch(field)
+            fingerprints = values.flatten.flat_map { |v| ConcernsOnRails::Models::Encryptable.blind_fingerprints(rule, v) }
             # A nil value has no fingerprint; passing it through would build
             # `WHERE bidx IS NULL` and match every unfingerprinted row instead
             # of "value is nil".
             return none if fingerprints.empty?
 
-            where(column => fingerprints.length == 1 ? fingerprints.first : fingerprints)
+            where(column => ConcernsOnRails::Models::Encryptable.blind_index_predicate(fingerprints))
           end
           define_singleton_method("find_by_#{field}") do |value|
-            fingerprint = public_send("#{field}_fingerprint", value)
-            fingerprint.nil? ? nil : find_by(column => fingerprint)
+            fingerprints = ConcernsOnRails::Models::Encryptable.blind_fingerprints(encryptable_rules.fetch(field), value)
+            return nil if fingerprints.empty?
+
+            find_by(column => ConcernsOnRails::Models::Encryptable.blind_index_predicate(fingerprints))
           end
         end
 
@@ -332,6 +423,27 @@ module ConcernsOnRails
         rescue StandardError
           nil
         end
+      end
+
+      # Re-encrypt this record's gem-keyed fields (or the given subset) under
+      # the current key, refreshing their blind indexes — ONE update_columns,
+      # no validations/callbacks: the values don't change, only their
+      # ciphertext, and a callback (an Auditable capture, a webhook) must not
+      # fire for a key rotation. Returns true when something was rewritten.
+      def reencrypt!(*fields)
+        updates = {}
+        self.class.encryptable_rotatable_fields(fields).each do |field|
+          next if read_attribute_before_type_cast(field).nil?
+
+          rule = self.class.encryptable_rules.fetch(field)
+          value = public_send(field)
+          updates[field] = value
+          updates[rule[:blind_index][:column]] = ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, value) if rule[:blind_index]
+        end
+        return false if updates.empty?
+
+        update_columns(updates)
+        true
       end
 
       private

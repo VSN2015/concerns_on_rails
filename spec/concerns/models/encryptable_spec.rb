@@ -28,6 +28,8 @@ describe ConcernsOnRails::Models::Encryptable do
     ConcernsOnRails.encryption.key = nil
     ConcernsOnRails.encryption.on_missing_key = :raise
     ConcernsOnRails.encryption.raise_on_decrypt_error = true
+    ConcernsOnRails.encryption.key_id = 0
+    ConcernsOnRails.encryption.previous_keys = {}
 
     ActiveRecord::Base.connection.tables.each do |table|
       next if table == "schema_migrations"
@@ -376,6 +378,104 @@ describe ConcernsOnRails::Models::Encryptable do
         expect { model_class { encryptable :email, blind_index: { expression: 42 } } }
           .to raise_error(ArgumentError, /must be callable/)
       end
+    end
+  end
+
+  describe "key rotation" do
+    OLD_KEY = TEST_KEY
+    NEW_KEY = "concerns-on-rails-encryptable-rotated-key".freeze
+
+    def rotate!(previous: { 0 => OLD_KEY })
+      ConcernsOnRails.configure_encryption do |c|
+        c.key = NEW_KEY
+        c.key_id = 1
+        c.previous_keys = previous
+      end
+    end
+
+    let(:klass) { model_class { encryptable :ssn, :notes } }
+
+    it "keeps decrypting rows written under a previous key and writes new rows with the current key id" do
+      legacy = klass.create!(ssn: "111-11-1111")
+      expect(legacy.ssn_key_id).to eq(0)
+
+      rotate!
+      found = klass.find(legacy.id)
+      expect(found.ssn).to eq("111-11-1111")
+      expect(found.ssn_key_id).to eq(0)
+
+      fresh = klass.create!(ssn: "222-22-2222")
+      expect(fresh.ssn_key_id).to eq(1)
+      expect(ConcernsOnRails::Support::Encryptor.key_id(fresh.ssn_ciphertext)).to eq(1)
+      expect(klass.find(fresh.id).ssn).to eq("222-22-2222")
+      expect(klass.new.ssn_key_id).to be_nil
+    end
+
+    it "raises a DecryptionError naming the key id when a row's key is no longer configured" do
+      legacy = klass.create!(ssn: "111-11-1111")
+      rotate!(previous: {})
+      expect { klass.find(legacy.id).ssn }
+        .to raise_error(ConcernsOnRails::Encryption::DecryptionError, /encrypted with unknown key id 0/)
+    end
+
+    it "needs_reencryption finds stale rows and reencrypt_all! rewrites them with the current key, blind indexes included" do
+      klass = model_class do
+        encryptable :ssn
+        encryptable :email, blind_index: true
+      end
+      a = klass.create!(ssn: "111-11-1111", email: "a@example.com")
+      b = klass.create!(ssn: "333-33-3333")
+      klass.create!(notes: "no encrypted values") # nothing to rotate
+      old_bidx = a.email_bidx
+
+      rotate!
+      expect(klass.needs_reencryption.order(:id)).to eq([a, b])
+      expect(klass.needs_reencryption(:email).order(:id)).to eq([a])
+      expect(klass.reencrypt_all!).to eq(2)
+      expect(klass.needs_reencryption.count).to eq(0)
+
+      a.reload
+      expect(a.ssn_key_id).to eq(1)
+      expect(a.email_key_id).to eq(1)
+      expect(a.ssn).to eq("111-11-1111")
+      expect(a.email_bidx).not_to eq(old_bidx)
+      expect(a.email_bidx).to eq(klass.email_fingerprint("a@example.com"))
+      expect(klass.find_by_email("a@example.com")).to eq(a)
+      expect(b.reload.ssn_key_id).to eq(1)
+      expect(klass.reencrypt_all!).to eq(0) # idempotent
+    end
+
+    it "blind-index lookups still find rows fingerprinted under a previous key during the rotation window" do
+      klass = model_class { encryptable :email, blind_index: true }
+      legacy = klass.create!(email: "a@example.com")
+
+      rotate!
+      expect(klass.email_fingerprint("a@example.com")).not_to eq(legacy.email_bidx) # current-key digest differs
+      expect(klass.find_by_email("a@example.com")).to eq(legacy)
+      expect(klass.where_email("a@example.com").count).to eq(1)
+      expect(klass.where_email("nobody@example.com")).to be_empty
+      expect(klass.find_by_email("nobody@example.com")).to be_nil
+    end
+
+    it "leaves per-field keys out of rotation and validates the rotation config" do
+      klass = model_class do
+        encryptable :ssn
+        encryptable :notes, key: "field-specific-key"
+      end
+      record = klass.create!(ssn: "111-11-1111", notes: "pinned")
+      expect(record.notes_key_id).to eq(0)
+
+      rotate!
+      expect(klass.needs_reencryption(:notes).count).to eq(0)
+      expect(klass.reencrypt_all!(:notes)).to eq(0)
+      expect(klass.find(record.id).notes).to eq("pinned")
+      expect(klass.reencrypt_all!).to eq(1) # only :ssn was stale
+
+      expect { ConcernsOnRails.encryption.key_id = 256 }.to raise_error(ArgumentError, /key_id must be an Integer between 0 and 255/)
+      expect { ConcernsOnRails.encryption.previous_keys = { "0" => OLD_KEY } }
+        .to raise_error(ArgumentError, /previous_keys must map Integer key ids \(0-255\) to key material/)
+      expect { ConcernsOnRails.encryption.previous_keys = [OLD_KEY] }.to raise_error(ArgumentError, /previous_keys must map/)
+      expect { klass.needs_reencryption(:name) }.to raise_error(ArgumentError, /name is not an encryptable field/)
     end
   end
 end

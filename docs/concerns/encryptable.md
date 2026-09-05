@@ -18,6 +18,45 @@ ConcernsOnRails.configure_encryption do |c|
 end
 ```
 
+| Setting | Default | Description |
+|---|---|---|
+| `key` | `nil` | The key every new write is encrypted with (raw 32 bytes, 64-hex, a passphrase, or a Proc returning one). Missing → `MissingKeyError` at first use. |
+| `key_id` | `0` | The id (0–255) stamped into the envelope header of everything written with `key`. Bump it when you rotate. Prefer ids in 0..25 (see [Key rotation](#key-rotation)). |
+| `previous_keys` | `{}` | `{ key_id => material-or-Proc }` — keys that may still **decrypt** rows written before a rotation. Never used to encrypt. |
+| `key_derivation_salt` | fixed | PBKDF2 salt; part of the key's identity — keep it stable. |
+| `on_missing_key` | `:raise` | `:passthrough` stores/reads plaintext when no key is configured (dev/test escape hatch). |
+| `raise_on_decrypt_error` | `true` | `false` returns `nil` instead of raising on a bad read. |
+
+## Key rotation
+
+Every envelope carries the id of the key that wrote it, so old and new rows coexist and reads pick the right key automatically. Rotating is four steps:
+
+```ruby
+# 1. Deploy the new key as current, keep the old one for decrypting
+ConcernsOnRails.configure_encryption do |c|
+  c.key           = -> { Rails.application.credentials.dig(:encryption, :key_v2) }
+  c.key_id        = 1
+  c.previous_keys = { 0 => -> { Rails.application.credentials.dig(:encryption, :key_v1) } }
+end
+
+# 2. See what's left under old keys — a LIKE on the fixed 4-char Base64 header prefix, no decryption
+Patient.needs_reencryption.count           # every gem-keyed encrypted field
+Patient.needs_reencryption(:ssn).count     # one field
+
+# 3. Rewrite them under the current key (blind indexes refreshed) — idempotent, streams with find_each
+Patient.reencrypt_all!                     # => 12_034 rows
+patient.ssn_key_id                         # => 1   (nil before anything is stored)
+patient.reencrypt!                         # one record
+
+# 4. Once needs_reencryption is empty everywhere, drop `0 =>` from previous_keys
+```
+
+- **Blind indexes during the window.** `find_by_<field>` / `where_<field>` match the digest under the current key **and** every previous key, so a row indexed under key 0 is still found before it is re-encrypted; `<field>_fingerprint` returns the current-key digest (what gets written). `reencrypt_all!` rewrites the index column too.
+- **`reencrypt_all!` uses `update_columns`** — no validations, no callbacks, no `updated_at` bump: the values do not change, only their ciphertext, and an Auditable capture or webhook must not fire for a key rotation. Each row is valid before and after, so there is no wrapping transaction to hold.
+- **Per-field `key:` fields are outside rotation.** They always stamp key id 0, decrypt with their own key, and are skipped by `needs_reencryption` / `reencrypt_all!`. Rotate them by changing the field key and re-saving.
+- **Unknown key id.** A row whose id is neither `key_id` nor in `previous_keys` raises `DecryptionError` ("encrypted with unknown key id N") — you removed a previous key too early.
+- **Why 0..25?** The header's Base64 prefix for ids 0–25 differs by a *letter*; ids 26–51 reuse those letters in lower case, which MySQL's default case-insensitive `LIKE` cannot tell apart. Sequential ids never get near that in practice.
+
 ## Declaring encrypted fields
 
 ```ruby
@@ -146,8 +185,8 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 
 - `nil` stays `nil` (the column is left NULL) — a blank value is never encrypted.
 - Dirty tracking works on the decrypted plaintext: reassigning the same value is **not** dirty, and an unchanged field is not re-encrypted on save, despite the random IV.
-- The envelope is versioned (`ver`/`alg`/`key_id` bytes reserved), so **deterministic (queryable) fields and multi-key rotation** can be added later without a data migration.
-- Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need blind indexes, deterministic search, or built-in key rotation today.
+- The envelope is versioned (`ver`/`alg`/`key_id`): `key_id` drives [key rotation](#key-rotation); `alg 0x11` (deterministic encryption) is still reserved, so it can be added later without a data migration.
+- Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need deterministic search, KMS-backed or per-record keys, or Rails-managed key infrastructure.
 
 ## Changed in 1.22.0
 

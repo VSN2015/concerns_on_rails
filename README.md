@@ -1366,12 +1366,30 @@ Patient.where_email("a@b.com")       # chainable Relation (accepts arrays too)
 
 **Options** (`encryptable *fields, …`, repeatable): `type:` (cast the decrypted value — `:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`), `key:` (per-field override; a String or lazy Proc), `blind_index:` (`true`, or `{ column:, expression: }` — maintains a deterministic keyed-HMAC companion column, default `<field>_bidx`, for equality lookups; `expression:` normalizes symmetrically on write and query).
 
+**Key rotation** — bump the key id, keep the old key for decrypting, re-encrypt, drop the old key:
+
+```ruby
+ConcernsOnRails.configure_encryption do |c|
+  c.key           = ENV["ENCRYPTION_KEY_V2"]          # encrypts every new write
+  c.key_id        = 1                                 # stamped into the envelope header (0..255; prefer 0..25)
+  c.previous_keys = { 0 => ENV["ENCRYPTION_KEY_V1"] } # still DECRYPTS rows written before the rotation
+end
+
+Patient.needs_reencryption.count        # rows still under an old key — a LIKE on the envelope prefix, no decryption
+Patient.reencrypt_all!                  # rewrite them (and their blind indexes) under the current key → count
+patient.ssn_key_id                      # => 1
+# then remove `0 =>` from previous_keys
+```
+
+Reads pick the key by the envelope's id, so old and new rows coexist; `find_by_<field>` / `where_<field>` match blind-index digests under the current **and** previous keys during the window. Per-field `key:` fields sit outside rotation.
+
 **Notes**
 - The declared column must be `text`/binary (it stores an opaque envelope, not the logical type); a blind-index column holds a 64-char hex digest — add an index on it.
 - Ciphertext is non-deterministic (random IV), so `where(ssn: ...)` matches nothing — query through a blind index. `nil` stays `nil`; presence checks work normally.
 - Never `update_column(s)` an encrypted field — that bypasses the type and writes raw plaintext. Declaring a field with both `encryptable` and `auditable_by` raises (either order).
 - Wrong key / tampered ciphertext / malformed envelope raise `Encryption::DecryptionError`. Encrypted field names are auto-registered with Rails' `filter_parameters` (via the gem's railtie), so they're redacted from request logs.
-- Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need key rotation today or Rails-managed key infrastructure (rotation is planned — the envelope already reserves the `key_id` byte).
+- Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` writes with `update_columns` (no validations/callbacks — only the ciphertext changes) and streams with `find_each`. A row whose key id is no longer configured raises `DecryptionError` naming the id.
+- Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need Rails-managed key infrastructure (KMS, per-record keys) or deterministic encryption.
 
 ---
 
@@ -2056,7 +2074,7 @@ Both forms reference the same module, so you can freely mix them.
 | Tagging with contexts, ownership, or tag clouds | [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) |
 | Full-text search with ranking / stemming | [`pg_search`](https://github.com/Casecommons/pg_search) / Elasticsearch |
 | Versioned audit trails with undo/reify, who-dunnit queries, or association tracking | [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) |
-| Field encryption with managed key rotation / Rails-native key infrastructure | [`lockbox`](https://github.com/ankane/lockbox) / Rails 7+ native `encrypts` |
+| Field encryption with KMS-backed / per-record keys or Rails-native key infrastructure | [`lockbox`](https://github.com/ankane/lockbox) / Rails 7+ native `encrypts` |
 | Deep clone with per-attribute regex/prepend rules or belongs_to graph copying | [`amoeba`](https://github.com/amoeba-rb/amoeba) |
 
 `Sluggable` wraps [`friendly_id`](https://github.com/norman/friendly_id) and `Sortable` wraps [`acts_as_list`](https://github.com/brendon/acts_as_list), so you get those leaders' engines behind the declarative macro.
