@@ -41,17 +41,47 @@ module ConcernsOnRails
         class_attribute :paginatable_per_page, default: DEFAULT_PER_PAGE
         class_attribute :paginatable_max_per_page, default: DEFAULT_MAX_PER_PAGE
         class_attribute :paginatable_link_header, default: true
+        # Where page / per_page are read from — a path of param names (`["page"]`,
+        # or `["page", "number"]` for JSON:API's page[number]).
+        class_attribute :paginatable_page_param, default: %w[page].freeze
+        class_attribute :paginatable_per_page_param, default: %w[per_page].freeze
       end
 
-      class_methods do
+      # A real module (not `class_methods do`) so the macro and its private
+      # helpers share one `private` without tripping RuboCop's scope analysis.
+      module ClassMethods
         # Configure the default page size, the hard cap on per_page, and whether
         # the RFC 8288 Link header is emitted.
         # Example:
         #   paginate_by per_page: 50, max_per_page: 500, link_header: false
-        def paginate_by(per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE, link_header: true)
+        def paginate_by(per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE, link_header: true,
+                        page_param: nil, per_page_param: nil, style: :flat)
           self.paginatable_per_page = per_page.to_i
           self.paginatable_max_per_page = max_per_page.to_i
           self.paginatable_link_header = link_header ? true : false
+          defaults = paginatable_style_params!(style)
+          self.paginatable_page_param = paginatable_param_path!(:page_param, page_param || defaults[0])
+          self.paginatable_per_page_param = paginatable_param_path!(:per_page_param, per_page_param || defaults[1])
+        end
+
+        private
+
+        # :flat → page / per_page; :jsonapi → page[number] / page[size].
+        def paginatable_style_params!(style)
+          case style.to_sym
+          when :flat then [%w[page], %w[per_page]]
+          when :jsonapi then [%w[page number], %w[page size]]
+          else raise ArgumentError, "#{LABEL}: style: must be :flat or :jsonapi (got #{style.inspect})"
+          end
+        end
+
+        # A name or a non-empty path of names, normalized to Strings.
+        def paginatable_param_path!(option, value)
+          path = Array(value)
+          valid = path.any? && path.all? { |segment| (segment.is_a?(Symbol) || segment.is_a?(String)) && !segment.to_s.empty? }
+          raise ArgumentError, "#{LABEL}: #{option}: must be a param name or a path of names (got #{value.inspect})" unless valid
+
+          path.map(&:to_s).freeze
         end
       end
 
@@ -162,14 +192,40 @@ module ConcernsOnRails
       # Both readers route through ScalarParam: `?page[]=1` / `?page[x]=1`
       # arrive as Array/Parameters, and calling .to_i on those was a 500.
       def pagination_page
-        [ConcernsOnRails::Support::ScalarParam.to_i(params[:page], default: 0), 1].max
+        [ConcernsOnRails::Support::ScalarParam.to_i(pagination_param(self.class.paginatable_page_param), default: 0), 1].max
       end
 
       def pagination_per_page
-        requested = ConcernsOnRails::Support::ScalarParam.to_i(params[:per_page], default: 0)
+        requested = ConcernsOnRails::Support::ScalarParam.to_i(pagination_param(self.class.paginatable_per_page_param), default: 0)
         requested = self.class.paginatable_per_page if requested < 1
         cap = self.class.paginatable_max_per_page
         cap.positive? ? [requested, cap].min : requested
+      end
+
+      # Dig the configured path out of params: `["page"]` → params[:page];
+      # `["page", "number"]` → params[:page][:number]. A scalar where a Hash
+      # is expected yields nil (→ the default), like any other garbage.
+      def pagination_param(path)
+        path.reduce(params) do |node, key|
+          break nil unless node.respond_to?(:[]) && !node.is_a?(String) && !node.is_a?(Array)
+
+          node[key]
+        end
+      end
+
+      # The `overrides` for LinkHeader.url_for that set the page number under the
+      # configured name — replacing the whole nested Hash for a path so the
+      # other keys in it (page[size]) survive.
+      def pagination_page_override(number)
+        path = self.class.paginatable_page_param
+        return { path.first.to_sym => number } if path.size == 1
+
+        nested = request.query_parameters.to_h.transform_keys(&:to_s)[path.first]
+        nested = nested.is_a?(Hash) ? nested.deep_dup : {}
+        node = nested
+        path[1...-1].each { |key| node = (node[key] = node[key].is_a?(Hash) ? node[key] : {}) }
+        node[path.last] = number
+        { path.first.to_sym => nested }
       end
 
       def set_pagination_headers(total:, page:, per_page:, total_pages:)
@@ -188,7 +244,7 @@ module ConcernsOnRails
       def set_pagination_links(page:, total_pages:)
         return unless pagination_links_applicable?(total_pages)
 
-        page_url = ->(number) { ConcernsOnRails::Support::LinkHeader.url_for(request, page: number) }
+        page_url = ->(number) { ConcernsOnRails::Support::LinkHeader.url_for(request, **pagination_page_override(number)) }
         ConcernsOnRails::Support::LinkHeader.append(
           response,
           first: page_url.call(1),

@@ -1486,6 +1486,14 @@ render_success(data: paginated(result.hits, total: result.total_hits), meta: pag
 | `?page=`     | `1`     | Page numbers below 1 are clamped to 1 |
 | `?per_page=` | `25`    | Capped at `max_per_page` (default 200) |
 
+Rename them, or speak JSON:API — the `Link` header URLs follow whatever you pick:
+
+```ruby
+paginate_by page_param: :p, per_page_param: :limit                 # ?p=2&limit=10
+paginate_by style: :jsonapi                                        # ?page[number]=2&page[size]=10
+paginate_by page_param: %i[paging page], per_page_param: %i[paging per]   # any nested path
+```
+
 **Response headers**: `X-Total-Count`, `X-Page`, `X-Per-Page`, `X-Total-Pages`, and an RFC 8288 `Link`
 header with `first` / `prev` / `next` / `last` URLs rebuilt from the current request (other query params
 preserved; `prev`/`next` only when such a page exists; nothing for an empty collection) — the GitHub

@@ -373,4 +373,81 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(controller.response.headers["X-Total-Count"]).to eq("10")
     end
   end
+
+  describe "page_param: / per_page_param: / style: :jsonapi" do
+    def ids(klass, params)
+      klass.new(params: params).paginated(Widget.order(:id)).map(&:id)
+    end
+
+    it "reads custom top-level param names" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        paginate_by page_param: :p, per_page_param: :limit
+      end
+      controller = klass.new(params: { p: "2", limit: "10", page: "9", per_page: "3" })
+      expect(controller.paginated(Widget.order(:id)).map(&:id)).to eq((11..20).to_a)
+      expect(controller.response.headers).to include("X-Page" => "2", "X-Per-Page" => "10")
+      expect(klass.paginatable_page_param).to eq(["p"])
+    end
+
+    it "reads nested JSON:API page[number] / page[size] via style: :jsonapi, tolerating garbage" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        paginate_by style: :jsonapi
+      end
+      expect(ids(klass, page: { number: "3", size: "10" })).to eq((21..30).to_a)
+      expect(ids(klass, page: { number: "3", size: "10" }).size).to eq(10)
+      expect(ids(klass, page: "abc").size).to eq(25) # not a Hash → defaults
+      expect(ids(klass, page: { number: ["1"] }).first).to eq(1)
+      expect(ids(klass, {}).first).to eq(1)
+      expect(klass.paginatable_page_param).to eq(%w[page number])
+      expect(klass.paginatable_per_page_param).to eq(%w[page size])
+    end
+
+    it "accepts an explicit nested path and validates the options" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        paginate_by page_param: %i[paging page], per_page_param: %i[paging per]
+      end
+      expect(ids(klass, paging: { page: 2, per: 5 })).to eq((6..10).to_a)
+
+      build = lambda do |**opts|
+        Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Paginatable
+
+          paginate_by(**opts)
+        end
+      end
+      expect { build.call(style: :weird) }.to raise_error(ArgumentError, /style: must be :flat or :jsonapi/)
+      expect { build.call(page_param: []) }.to raise_error(ArgumentError, /page_param: must be a param name or a path/)
+      expect { build.call(per_page_param: 5) }.to raise_error(ArgumentError, /per_page_param: must be a param name or a path/)
+    end
+
+    it "builds the Link header with the configured names — nested ones encoded the Rack way" do
+      jsonapi = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        paginate_by style: :jsonapi
+        define_method(:index) { render json: paginated(Widget.order(:id)).map(&:id) }
+      end
+      result = IntegrationHarness.dispatch(jsonapi, :index, query: "page[number]=2&page[size]=10&q=abc")
+      header = result.header("Link")
+      expect(header).to include(%(<http://example.org/?page%5Bnumber%5D=3&page%5Bsize%5D=10&q=abc>; rel="next"))
+      expect(header).to include(%(<http://example.org/?page%5Bnumber%5D=5&page%5Bsize%5D=10&q=abc>; rel="last"))
+      expect(header).to include(%(<http://example.org/?page%5Bnumber%5D=1&page%5Bsize%5D=10&q=abc>; rel="first"))
+      expect(result.header("X-Page")).to eq("2")
+
+      flat = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        paginate_by page_param: :p, per_page_param: :limit
+        define_method(:index) { render json: paginated(Widget.order(:id)).map(&:id) }
+      end
+      result = IntegrationHarness.dispatch(flat, :index, query: "p=2&limit=10")
+      expect(result.header("Link")).to include(%(<http://example.org/?p=3&limit=10>; rel="next"))
+    end
+  end
 end

@@ -20,15 +20,24 @@ module ConcernsOnRails
       end
 
       # The request's URL with `overrides` merged into its query string (a nil
-      # value or a key in `drop:` removes that param). Existing params keep
-      # their order; nested params survive via Rack's nested-query encoding.
+      # value or a key in `drop:` removes that param; a Hash value replaces a
+      # nested param wholesale — `page: { "number" => 3, "size" => 10 }`).
+      # Existing params keep their order; nested params survive via Rack's
+      # nested-query encoding.
       def url_for(request, drop: [], **overrides)
         query = request.query_parameters.to_h.transform_keys(&:to_s)
-        overrides.each { |key, value| value.nil? ? query.delete(key.to_s) : query[key.to_s] = value.to_s }
+        overrides.each { |key, value| value.nil? ? query.delete(key.to_s) : query[key.to_s] = stringify_deep(value) }
         Array(drop).each { |key| query.delete(key.to_s) }
 
         base = "#{request.base_url}#{request.path}"
         query.empty? ? base : "#{base}?#{Rack::Utils.build_nested_query(query)}"
+      end
+
+      # build_nested_query wants String keys and String leaves.
+      def stringify_deep(value)
+        return value.to_h { |k, v| [k.to_s, stringify_deep(v)] } if value.is_a?(Hash)
+
+        value.to_s
       end
 
       # `links` is { rel => url }; nil urls are skipped and nothing is set when

@@ -35,6 +35,9 @@ end
 | `per_page` | Integer | `25` | Default number of records per page when the caller supplies no `?per_page=` param, or supplies a value less than 1. Coerced with `.to_i`. |
 | `max_per_page` | Integer | `200` | Hard upper bound on `per_page`. Any caller-supplied value above this cap is silently reduced to this value. When set to `0` or a negative integer the cap is disabled and any requested `per_page` is honored. Coerced with `.to_i`. |
 | `link_header` | Boolean | `true` | Emit the RFC 8288 `Link` header (`first`/`prev`/`next`/`last`) on every paginated response. Set `false` to send only the `X-*` headers. |
+| `page_param` | Symbol/String or Array | `:page` | Where the page number is read from: a top-level param name, or an Array path into nested params (`%i[page number]` → `?page[number]=2`). Must be a name or a non-empty path of names. |
+| `per_page_param` | Symbol/String or Array | `:per_page` | Same for the page size (`%i[page size]` → `?page[size]=10`). |
+| `style` | `:flat` or `:jsonapi` | `:flat` | Shortcut: `:jsonapi` sets `page_param: %i[page number]` and `per_page_param: %i[page size]` (the JSON:API page-based strategy); `:flat` keeps `page` / `per_page`. Explicit `page_param:`/`per_page_param:` win over the style. |
 
 **URL params read from `params`**
 
@@ -42,6 +45,8 @@ end
 |---|---|---|
 | `?page=` | `1` | Values below 1 (including negative numbers and zero) are clamped to `1`. |
 | `?per_page=` | value of `paginatable_per_page` | Values below 1 fall back to the class default; values above `max_per_page` are capped. |
+
+Both names are configurable (`page_param:` / `per_page_param:` / `style: :jsonapi`). Nested paths are read by digging through the params (`params[:page][:number]`); a non-Hash where a Hash is expected, or an Array/Hash where a scalar is expected, falls back to the default exactly like garbage in the flat form.
 
 ## Methods
 
@@ -70,7 +75,7 @@ The four `X-*` headers set on `response`:
 | `X-Page` | The resolved current page number (always >= 1). |
 | `X-Per-Page` | The resolved per-page value after applying defaults and the cap. |
 | `X-Total-Pages` | `ceil(total / per_page)`. Returns `"0"` when the relation is empty. |
-| `Link` | RFC 8288 web links: `<…?page=1>; rel="first", <…?page=1>; rel="prev", <…?page=3>; rel="next", <…?page=5>; rel="last"`. URLs are the current request's base URL + path with `page` replaced and every other query param preserved. `prev`/`next` appear only when such a page exists (past the end, `prev` points at the last page). Not emitted for an empty collection, when `link_header: false`, or when the controller has no request. Appended to an existing `Link` header, never replacing it. |
+| `Link` | RFC 8288 web links: `<…?page=1>; rel="first", <…?page=1>; rel="prev", <…?page=3>; rel="next", <…?page=5>; rel="last"`. URLs are the current request's base URL + path with the page param replaced — under the configured name, nested ones encoded by Rack (`page%5Bnumber%5D=3`) with the rest of that nested Hash (`page[size]`) preserved — and every other query param kept. `prev`/`next` appear only when such a page exists (past the end, `prev` points at the last page). Not emitted for an empty collection, when `link_header: false`, or when the controller has no request. Appended to an existing `Link` header, never replacing it. |
 
 ## Examples
 
@@ -139,6 +144,26 @@ class ReportsController < ApplicationController
     render json: paginated(Report.all)
   end
 end
+```
+
+**JSON:API page-based pagination**
+
+```ruby
+class Api::ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Paginatable
+
+  paginate_by style: :jsonapi, per_page: 20, max_per_page: 100
+
+  def index
+    articles = paginated(Article.order(:id))
+    render json: { data: articles, meta: pagination_meta }
+  end
+end
+
+# GET /api/articles?page[number]=2&page[size]=10&filter[state]=live
+# X-Page: 2   X-Per-Page: 10
+# Link: <…?page%5Bnumber%5D=1&page%5Bsize%5D=10&filter%5Bstate%5D=live>; rel="first",
+#       <…?page%5Bnumber%5D=1…>; rel="prev", <…?page%5Bnumber%5D=3…>; rel="next", <…?page%5Bnumber%5D=9…>; rel="last"
 ```
 
 ## Notes & gotchas
