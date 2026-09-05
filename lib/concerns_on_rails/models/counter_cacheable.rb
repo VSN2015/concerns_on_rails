@@ -91,17 +91,39 @@ module ConcernsOnRails
         end
 
         # Recompute every (or one) counter from scratch — drift repair / backfill.
+        # `parents:` (ids, records, or a relation of the parent class) limits the
+        # repair to those parents — zeroed and re-tallied — leaving every other
+        # row untouched, so fixing one imported post is O(its children), not
+        # O(the table). Needs the association when more than one is declared.
         # Returns { count_column => parents_with_a_nonzero_count }.
-        def recount_counter_caches!(only_association = nil)
+        def recount_counter_caches!(only_association = nil, parents: nil)
           rules = counter_cacheable_rules
           rules = rules.select { |r| r[:association] == only_association.to_sym } if only_association
+          parent_ids = counter_cacheable_parent_ids(parents, rules)
+          return rules.to_h { |rule| [rule[:count_column], 0] } if parent_ids && parent_ids.empty?
 
           rules.to_h do |rule|
-            [rule[:count_column], counter_cacheable_recount_rule(rule)]
+            [rule[:count_column], counter_cacheable_recount_rule(rule, parent_ids)]
           end
         end
 
         private
+
+        # nil → every parent. Otherwise normalize records/relations to ids; the
+        # rules must all target one association or the ids are ambiguous.
+        def counter_cacheable_parent_ids(parents, rules)
+          return nil if parents.nil?
+
+          associations = rules.map { |rule| rule[:association] }.uniq
+          if associations.size > 1
+            raise ArgumentError,
+                  "#{LABEL}: parents: needs the association when more than one is declared (#{associations.join(', ')})"
+          end
+
+          return parents.pluck(parents.primary_key) if parents.is_a?(ActiveRecord::Relation)
+
+          Array(parents).map { |parent| parent.respond_to?(:id) ? parent.id : parent }
+        end
 
         def validate_counter_cacheable!(association, reflection, condition, touch)
           if reflection.nil?
@@ -142,23 +164,23 @@ module ConcernsOnRails
           ensure_columns_on!(LABEL, klass, count_column, types: :integer)
         end
 
-        def counter_cacheable_recount_rule(rule)
+        def counter_cacheable_recount_rule(rule, parent_ids = nil)
           reflection = reflect_on_association(rule[:association])
           fk = reflection.foreign_key
           parent_class = reflection.klass
           column = rule[:count_column]
           condition = rule[:condition]
 
-          tally = if condition
-                    counter_cacheable_recount_tally(fk, condition)
-                  else
-                    unscoped.where.not(fk => nil).group(fk).count
-                  end
+          children = unscoped.where.not(fk => nil)
+          children = children.where(fk => parent_ids) if parent_ids
+          tally = condition ? counter_cacheable_recount_tally(children, fk, condition) : children.group(fk).count
 
           # One transaction so a crash mid-repair can't leave every counter at
           # the zeroed intermediate state.
           parent_class.transaction do
-            parent_class.unscoped.update_all(column => 0)
+            targets = parent_class.unscoped
+            targets = targets.where(parent_class.primary_key => parent_ids) if parent_ids
+            targets.update_all(column => 0)
             counter_cacheable_apply_tally(parent_class, column, tally)
           end
           tally.count { |_id, n| n.to_i.positive? }
@@ -177,9 +199,9 @@ module ConcernsOnRails
           end
         end
 
-        def counter_cacheable_recount_tally(foreign_key, condition)
+        def counter_cacheable_recount_tally(children, foreign_key, condition)
           tally = Hash.new(0)
-          unscoped.where.not(foreign_key => nil).find_each do |record|
+          children.find_each do |record|
             tally[record[foreign_key]] += 1 if record.instance_exec(&condition)
           end
           tally
