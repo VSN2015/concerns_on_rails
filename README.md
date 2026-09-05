@@ -275,6 +275,10 @@ sluggable_by :title, reserved_words: %w[new edit admin]
 
 # Let Model.find accept a slug directly (not just the id)
 sluggable_by :title, finders: true
+sluggable_by :title, candidates: [:title, %i[title city]]   # try "title", then "title-city", then friendly_id's uuid suffix on the first candidate
+sluggable_by :title, max_length: 60                        # truncate at a word boundary (uniqueness suffix added after)
+
+page.regenerate_slug!   # rebuild from the current source — even over a hand-assigned slug
 Post.find("hello-world")   # resolves by slug
 ```
 
@@ -282,6 +286,9 @@ Post.find("hello-world")   # resolves by slug
 - Schema must have a `slug` column (string).
 - `history: true` requires a `friendly_id_slugs` table — generate with `rails generate friendly_id` or add a manual migration.
 - `scope: :col` requires `col` to exist in the same table.
+- `candidates:` takes friendly_id's shapes — a Symbol/String method, a Proc, or an Array of those joined with `-` — tried in order until one is free (all taken → the first candidate plus a uuid); the slug still regenerates only when the **primary** field changes (a candidate-only change doesn't churn the URL), and a NULL slug backfills through the candidates.
+- `max_length:` truncates each candidate at the last `-` inside the limit (a single long word is hard-cut); friendly_id's conflict suffix is appended afterwards, so a colliding slug may exceed the limit — unlike friendly_id's own `slug_limit`, which squeezes the uuid inside it.
+- `regenerate_slug!` is the escape hatch for the explicit-slug rule: it forces regeneration and saves (`save!`), keeping uniqueness handling.
 - Falls back to `to_s` if the configured source field doesn't respond.
 - Uses friendly_id's `:slugged` (+ optionally `:history`, `:scoped`) strategies under the hood.
 

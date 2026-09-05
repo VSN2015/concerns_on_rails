@@ -17,10 +17,16 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       # instance methods
+      LABEL = "ConcernsOnRails::Models::Sluggable".freeze
+
       included do
         # declare class attributes and set default values
         class_attribute :sluggable_field, instance_accessor: false
         self.sluggable_field ||= :name
+        # `candidates:` — friendly_id slug candidates tried in order before the
+        # uuid fallback; `max_length:` — word-boundary truncation of the slug.
+        class_attribute :sluggable_candidates, instance_accessor: false, default: nil
+        class_attribute :sluggable_max_length, instance_accessor: false, default: nil
 
         extend FriendlyId
 
@@ -32,6 +38,8 @@ module ConcernsOnRails
         # we must override should_generate_new_friendly_id? to support update slug
         # if we don't override this method, friendly_id will not generate the new slug when update
         define_method :should_generate_new_friendly_id? do
+          return true if @sluggable_force_regenerate # regenerate_slug!
+
           field = self.class.sluggable_field
           slug_column = self.class.friendly_id_config.slug_column
 
@@ -49,6 +57,21 @@ module ConcernsOnRails
 
           source_changed || slug_missing
         end
+
+        # Defined on the class (like the method above) so it sits ABOVE
+        # FriendlyId::Slugged in the ancestor chain — a module-level override
+        # here would be shadowed by friendly_id's own. Truncates each candidate
+        # at a word (separator) boundary; the uniqueness suffix friendly_id
+        # appends on a conflict is added AFTER, on purpose — friendly_id's own
+        # `slug_limit` hard-cuts characters and squeezes the uuid inside the
+        # limit, which is rarely what a URL wants.
+        define_method :normalize_friendly_id do |value|
+          normalized = super(value)
+          limit = self.class.sluggable_max_length
+          return normalized unless limit && normalized.respond_to?(:truncate)
+
+          normalized.truncate(limit, omission: "", separator: friendly_id_config.sequence_separator)
+        end
       end
 
       # class methods
@@ -65,8 +88,13 @@ module ConcernsOnRails
         #   sluggable_by :title, scope: :account_id       # slugs unique per scope column
         #   sluggable_by :title, reserved_words: %w[new]  # block these slugs (a UUID is appended instead)
         #   sluggable_by :title, finders: true            # Model.find accepts a slug directly
-        def sluggable_by(field, history: false, scope: nil, reserved_words: nil, finders: false)
+        #   sluggable_by :title, candidates: [:title, %i[title city]]   # try "title", then "title-city", then a uuid
+        #   sluggable_by :title, max_length: 60                        # truncate at a word boundary
+        def sluggable_by(field, history: false, scope: nil, reserved_words: nil, finders: false,
+                         candidates: nil, max_length: nil)
           self.sluggable_field = field.to_sym
+          self.sluggable_candidates = sluggable_validate_candidates!(candidates)
+          self.sluggable_max_length = sluggable_validate_max_length!(max_length)
           # Validate the slug column too (a missing one used to fail at first save
           # with an opaque friendly_id error); an association scope: is exempt.
           scope_column = scope && reflect_on_association(scope.to_sym) ? nil : scope
@@ -80,6 +108,28 @@ module ConcernsOnRails
         end
 
         private
+
+        # friendly_id's candidate shapes: a Symbol/String (method), a Proc, or an
+        # Array of those (joined with the separator).
+        def sluggable_validate_candidates!(candidates)
+          return nil if candidates.nil?
+          unless candidates.is_a?(Array) && candidates.any?
+            raise ArgumentError,
+                  "#{LABEL}: candidates: must be an Array of Symbols/Procs/Arrays (got #{candidates.inspect})"
+          end
+
+          candidates
+        end
+
+        def sluggable_validate_max_length!(max_length)
+          return nil if max_length.nil?
+          unless max_length.is_a?(Integer) && max_length.positive?
+            raise ArgumentError,
+                  "#{LABEL}: max_length: must be a positive Integer (got #{max_length.inspect})"
+          end
+
+          max_length
+        end
 
         # Re-runs friendly_id with the extra modules. friendly_id merges config
         # across calls, so this layers :history / :scoped / :finders / :reserved onto :slugged.
@@ -109,8 +159,21 @@ module ConcernsOnRails
       # Example:
       #   record.slug_source
       def slug_source
+        candidates = self.class.sluggable_candidates
+        return candidates if candidates
+
         field = self.class.sluggable_field
         respond_to?(field) ? send(field) : to_s
+      end
+
+      # Rebuild the slug from the current source (candidates included) and
+      # save — even over a slug that was assigned by hand, which a normal save
+      # deliberately leaves alone. Conflicts still get friendly_id's suffix.
+      def regenerate_slug!
+        @sluggable_force_regenerate = true
+        save!
+      ensure
+        @sluggable_force_regenerate = false
       end
     end
   end

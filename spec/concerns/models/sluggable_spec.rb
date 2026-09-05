@@ -266,4 +266,78 @@ describe ConcernsOnRails::Sluggable do
       expect(FindablePage.find("hello-world")).to eq(page)
     end
   end
+
+  describe "candidates:, max_length: and regenerate_slug!" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :candidate_pages, force: true do |t|
+          t.string :title
+          t.string :subtitle
+          t.string :slug
+          t.timestamps
+        end
+      end
+    end
+
+    def candidate_class(**opts)
+      stub_const("CandidatePage", Class.new(TestModel) do
+        self.table_name = "candidate_pages"
+        include ConcernsOnRails::Sluggable
+
+        sluggable_by :title, **opts
+      end)
+      CandidatePage
+    end
+
+    it "tries the candidates in order before falling back to friendly_id's uuid suffix" do
+      klass = candidate_class(candidates: [:title, %i[title subtitle]])
+      expect(klass.create!(title: "Hello", subtitle: "one").slug).to eq("hello")
+      expect(klass.create!(title: "Hello", subtitle: "two").slug).to eq("hello-two")
+      # friendly_id resolves a total conflict by suffixing the FIRST candidate with a uuid
+      expect(klass.create!(title: "Hello", subtitle: "two").slug).to match(/\Ahello-[0-9a-f-]{36}\z/)
+      expect(klass.sluggable_candidates).to eq([:title, %i[title subtitle]])
+    end
+
+    it "keeps regenerating from the primary field only, and backfills through the candidates" do
+      klass = candidate_class(candidates: [:title, %i[title subtitle]])
+      page = klass.create!(title: "Hello", subtitle: "one")
+      page.update!(subtitle: "changed")
+      expect(page.slug).to eq("hello") # a candidate-only field change does not churn the URL
+      page.update!(title: "Bye")
+      expect(page.slug).to eq("bye")
+
+      page.update_column(:slug, nil)
+      page.reload.save!
+      expect(page.slug).to eq("bye")
+    end
+
+    it "max_length: truncates the slug at a word boundary (the uniqueness suffix is added after)" do
+      klass = candidate_class(max_length: 12)
+      first = klass.create!(title: "The quick brown fox jumps")
+      expect(first.slug).to eq("the-quick")
+      second = klass.create!(title: "The quick brown fox jumps")
+      expect(second.slug).to match(/\Athe-quick-[0-9a-f-]{36}\z/)
+      expect(klass.create!(title: "Short").slug).to eq("short")
+    end
+
+    it "regenerate_slug! rebuilds the slug from the current source, even over a manually assigned one" do
+      page = Page.create!(title: "First Post")
+      page.update!(slug: "custom-handle")
+      expect(page.reload.slug).to eq("custom-handle") # explicit assignment still wins on a normal save
+
+      expect(page.regenerate_slug!).to be(true)
+      expect(page.reload.slug).to eq("first-post")
+
+      Page.create!(title: "Taken")
+      other = Page.create!(title: "Other")
+      other.update!(title: "Taken")
+      other.regenerate_slug!
+      expect(other.slug).to match(/\Ataken-[0-9a-f-]{36}\z/) # still unique
+    end
+
+    it "validates candidates: and max_length:" do
+      expect { candidate_class(candidates: :title) }.to raise_error(ArgumentError, /candidates: must be an Array/)
+      expect { candidate_class(max_length: 0) }.to raise_error(ArgumentError, /max_length: must be a positive Integer/)
+    end
+  end
 end
