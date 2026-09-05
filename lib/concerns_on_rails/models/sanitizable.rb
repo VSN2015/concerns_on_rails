@@ -54,13 +54,15 @@ module ConcernsOnRails
         none: ->(v) { v }
       }.freeze
 
+      LABEL = "ConcernsOnRails::Models::Sanitizable".freeze
+
       included do
         # field => { sanitizer: <lambda>, on: :read|:write }
         class_attribute :sanitizable_rules, instance_accessor: false, default: {}
         before_validation :apply_sanitizations
       end
 
-      class_methods do
+      module ClassMethods
         include ConcernsOnRails::Support::ColumnGuard
 
         # Declare which string fields to sanitize, how, and when.
@@ -83,6 +85,41 @@ module ConcernsOnRails
 
             # Non-destructive default: a clean reader, with the raw column intact.
             define_method("sanitized_#{field}") { sanitizer.call(self[key]) } if on == :read
+          end
+        end
+
+        # Rewrite stored values in place for every record in the current scope —
+        # the repair tool for rows written around the `on: :write` callback
+        # (update_column / update_all / raw SQL / data that predates the concern).
+        # Runs each declared field's sanitizer (or just `fields`) and issues one
+        # update_columns per row whose values actually change; deliberately no
+        # validations, callbacks or updated_at bump (Anonymizable's contract).
+        # Returns the Integer count of rows rewritten.
+        def sanitize_all!(*fields)
+          fields = sanitizable_fields_for(fields.empty? || fields)
+          transaction do
+            count = 0
+            all.find_each do |record|
+              changes = record.send(:sanitizable_changes, fields)
+              next if changes.empty?
+
+              record.update_columns(changes)
+              count += 1
+            end
+            count
+          end
+        end
+
+        # true → every declared field; otherwise the given names, which must be
+        # declared (a typo must not silently leave a raw value in place).
+        def sanitizable_fields_for(selection)
+          declared = sanitizable_rules.keys
+          return declared if selection == true
+
+          Array(selection).map(&:to_sym).each do |field|
+            next if declared.include?(field)
+
+            raise ArgumentError, "#{LABEL}: #{field} is not a sanitizable field (declared: #{declared.join(', ')})"
           end
         end
       end
@@ -132,6 +169,30 @@ module ConcernsOnRails
         end
       end
 
+      # Every declared field (read- and write-mode alike) run through its
+      # sanitizer against the current value, keyed like `attributes`:
+      #   article.sanitized_attributes  # => { "body" => "<b>Hi</b>", "summary" => "sum" }
+      def sanitized_attributes
+        self.class.sanitizable_rules.to_h { |field, rule| [field.to_s, rule[:sanitizer].call(self[field])] }
+      end
+
+      # `sanitized: true` (all declared fields) or `sanitized: [:body, ...]`
+      # swaps the sanitized form into the serialized hash — the entry point for
+      # `as_json` / `to_json` too. Fields dropped by `only:`/`except:` stay
+      # dropped; undeclared fields in `sanitized:` raise.
+      def serializable_hash(options = nil)
+        hash = super
+        selection = options && options[:sanitized]
+        return hash unless selection
+
+        self.class.sanitizable_fields_for(selection).each do |field|
+          next unless hash.key?(field.to_s)
+
+          hash[field.to_s] = self.class.sanitizable_rules.fetch(field)[:sanitizer].call(self[field])
+        end
+        hash
+      end
+
       # Only fields declared with on: :write are mutated; on: :read fields keep
       # their raw column value and are exposed through their sanitized_ reader.
       def apply_sanitizations
@@ -144,6 +205,19 @@ module ConcernsOnRails
           self[field] = rule[:sanitizer].call(value) # plain String, never a SafeBuffer
         end
       end
+
+      # { field => sanitized } for the fields whose stored value would change;
+      # nil values are left alone (nothing to sanitize).
+      def sanitizable_changes(fields)
+        fields.each_with_object({}) do |field, changes|
+          value = self[field]
+          next if value.nil?
+
+          sanitized = self.class.sanitizable_rules.fetch(field)[:sanitizer].call(value)
+          changes[field] = sanitized unless sanitized == value
+        end
+      end
+      private :sanitizable_changes
     end
   end
 end

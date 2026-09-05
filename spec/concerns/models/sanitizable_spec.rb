@@ -305,4 +305,63 @@ describe ConcernsOnRails::Models::Sanitizable do
       end
     end
   end
+
+  describe "sanitized serialization and sanitize_all!" do
+    let(:klass) do
+      class SanitizableArticle < TestModel
+        self.table_name = "sanitizable_articles"
+        include ConcernsOnRails::Models::Sanitizable
+
+        sanitizable :body, with: :safe_list
+        sanitizable :summary, with: :strip
+        sanitizable :title, with: :strip, on: :write
+      end
+      SanitizableArticle
+    end
+    let(:raw_body) { "<b>Hi</b><script>alert(1)</script>" }
+    let(:article) { klass.create!(title: "<b>T</b>", body: raw_body, summary: "<i>sum</i>", code: "<x>", views: 3) }
+
+    it "sanitized_attributes applies every rule (read and write) to the current values, keyed like `attributes`" do
+      expect(article.sanitized_attributes).to eq("body" => "<b>Hi</b>alert(1)", "summary" => "sum", "title" => "T")
+      expect(article.body).to eq(raw_body)
+    end
+
+    it "as_json(sanitized: true) swaps the declared fields, leaves the rest raw, accepts a subset and rejects unknowns" do
+      json = article.as_json(sanitized: true)
+      expect(json.slice("body", "summary", "title", "code", "views"))
+        .to eq("body" => "<b>Hi</b>alert(1)", "summary" => "sum", "title" => "T", "code" => "<x>", "views" => 3)
+      expect(article.as_json["body"]).to eq(raw_body)
+
+      subset = article.as_json(sanitized: [:summary])
+      expect(subset["summary"]).to eq("sum")
+      expect(subset["body"]).to eq(raw_body)
+      expect(JSON.parse(article.to_json(sanitized: true, only: %i[id summary]))).to eq("id" => article.id, "summary" => "sum")
+      expect { article.as_json(sanitized: [:code]) }
+        .to raise_error(ArgumentError, /code is not a sanitizable field \(declared: body, summary, title\)/)
+    end
+
+    it "sanitize_all! rewrites legacy rows in place (skipping clean and nil values) and returns the count" do
+      clean = klass.create!(title: "clean", body: "<p>ok</p>", summary: "plain")
+      dirty = klass.create!(title: "x", body: "<script>bad</script><em>e</em>", summary: "<b>s</b>")
+      dirty.update_columns(title: "<u>legacy</u>") # a write that bypassed the on: :write callback
+      klass.create!(title: nil, body: nil, summary: nil)
+
+      expect(klass.sanitize_all!).to eq(1)
+      expect(dirty.reload.attributes.slice("title", "body", "summary"))
+        .to eq("title" => "legacy", "body" => "bad<em>e</em>", "summary" => "s")
+      expect(clean.reload.body).to eq("<p>ok</p>")
+      expect(klass.sanitize_all!).to eq(0) # idempotent
+    end
+
+    it "sanitize_all! follows the current scope and accepts a subset of fields" do
+      a = klass.create!(title: "a", body: "<script>x</script>", summary: "<b>a</b>")
+      b = klass.create!(title: "b", body: "<script>y</script>", summary: "<b>b</b>")
+
+      expect(klass.where(id: a.id).sanitize_all!(:summary)).to eq(1)
+      expect(a.reload.summary).to eq("a")
+      expect(a.body).to eq("<script>x</script>") # body not in the subset
+      expect(b.reload.summary).to eq("<b>b</b>") # outside the scope
+      expect { klass.sanitize_all!(:code) }.to raise_error(ArgumentError, /code is not a sanitizable field/)
+    end
+  end
 end

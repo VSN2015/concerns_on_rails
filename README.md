@@ -1099,9 +1099,21 @@ article.sanitized_body  # => "<b>Hi</b>alert(1)"                    (script tag 
 | `Hash`       | `{ tags: [...], attributes: [...] }` allow-list.                       |
 | `Proc`       | Used as-is (you own the non-String guard).                             |
 
+**Serialization & clean-up**
+
+```ruby
+article.sanitized_attributes                 # => { "body" => "<b>Hi</b>alert(1)", "summary" => "sum" } — every declared field, cleaned
+article.as_json(sanitized: true)             # declared fields swapped for their sanitized form, the rest raw
+render json: article.as_json(sanitized: [:body], only: %i[id body])   # subset; composes with only:/except:/methods:
+
+Article.sanitize_all!                        # rewrite legacy rows in place with each field's sanitizer → count changed
+Article.where(legacy: true).sanitize_all!(:body)   # scope-aware, subset of fields
+```
+
 **Notes**
 - `on: :read` (default) is **non-destructive**: it adds a `sanitized_<field>` reader and leaves the stored column untouched.
 - `on: :write` overwrites the column in `before_validation` — **lossy and irreversible** (never use it on code, Markdown, math, or prices), and bypassed by `update_column` / `update_all` / raw SQL.
+- `sanitize_all!` is the repair tool for that bypass (and for rows written before the concern was added): one `update_columns` per row that actually changes, skipping validations/callbacks on purpose, inside a transaction.
 - For full user-authored rich text, prefer [Action Text](https://guides.rubyonrails.org/action_text_overview.html).
 
 ---
