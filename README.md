@@ -741,6 +741,10 @@ class Subscription < ApplicationRecord
 
   activatable_by               # defaults to :active
   # activatable_by :enabled    # custom column name
+  # activatable_by timestamps: true                                    # stamps activated_at / deactivated_at
+  # activatable_by timestamps: { activated_at: :enabled_at, deactivated_at: nil }
+
+  def after_deactivate = Billing.pause!(self)   # before/after_activate, before/after_deactivate hooks
 end
 
 sub = Subscription.create!(active: true)
@@ -761,7 +765,7 @@ Subscription.active.deactivate_all     # => 3
 ```
 
 Both target the relation, return an Integer count, and run in a transaction. With
-`activate!`/`deactivate!` unoverridden and no validations on the model — neither
+`activate!`/`deactivate!` and the four hooks unoverridden and no validations on the model — neither
 `validates`/`validates_with`, a custom `validate :method`, nor an association's autosave
 validation (a bare `has_many` registers one, so most models with associations take the
 streaming path) — they collapse to a single
@@ -772,6 +776,8 @@ no batch analogue.
 
 **Notes**
 - `NULL` is treated as inactive (same convention as most apps' "unset = off").
+- Hooks (`before_activate` / `after_activate` / `before_deactivate` / `after_deactivate`) share one transaction with the write: a raising after-hook rolls the flip back, a failed `update` (validation) skips the after-hook and returns `false`. `toggle_active!` and the batch verbs go through the same path.
+- `timestamps: true` stamps `activated_at` on activate and `deactivated_at` on deactivate (the other column keeps its last value, so you can see both the last activation and the last deactivation); a Hash renames either column or drops a side with `nil`. Columns are validated at declaration.
 - The configured column must exist; `activatable_by` raises `ArgumentError` otherwise.
 - `SoftDeletable` also defines a `.active` scope (alias of `.without_deleted`). If both concerns are included on the same model, the later one wins — include the one whose `.active` semantics you want last, or stick to one of them.
 
