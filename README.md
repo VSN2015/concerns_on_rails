@@ -1422,6 +1422,8 @@ end
 
 copy = invoice.duplicate                # unsaved deep copy
 copy = invoice.duplicate!(title: "Q3")  # saved (one transaction, autosaved children)
+copy = invoice.duplicate!(except: :line_items)          # this copy skips the line items
+copy = invoice.duplicate!(only: [])                     # shallow copy — attributes only
 ```
 
 **Auto-reset identity columns** (no configuration): `created_at`/`updated_at`, Sluggable slug, Tokenizable/Hashable tokens, Sequenceable sequence + `into:` columns, Auditable trail, SoftDeletable timestamp, Lockable attempts/locked_at. Business state (Publishable, Stateable, …) is a judgment call — list it in `reset:`.
@@ -1430,6 +1432,7 @@ copy = invoice.duplicate!(title: "Q3")  # saved (one transaction, autosaved chil
 
 **Notes**
 - The macro is optional — bare `include` gives `duplicate`/`duplicate!` with the auto resets.
+- `only:` / `except:` on `duplicate` / `duplicate!` pick which of the declared associations this particular copy carries ("Duplicate with line items?" checkbox); names outside the allow-list raise. They are reserved keys — pass overrides for attributes literally named `only`/`except` as a braced Hash.
 - Override `on_duplicate(copy)` for custom tweaks; it receives the unsaved copy last.
 - Reach for [`amoeba`](https://github.com/amoeba-rb/amoeba) when you need per-attribute regex/prepend rules or belongs_to graph copying.
 

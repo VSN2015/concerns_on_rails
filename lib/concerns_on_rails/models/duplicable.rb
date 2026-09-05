@@ -113,25 +113,55 @@ module ConcernsOnRails
       # Unsaved deep copy: attributes via `dup`, identity columns blanked,
       # `reset:` columns blanked, `suffix:` strings appended, `overrides`
       # assigned, allow-listed associations copied, then `on_duplicate`.
-      def duplicate(overrides = {})
+      #
+      # `only:` / `except:` pick which of the macro's associations THIS copy
+      # carries (`duplicate!(except: :line_items)`; `only: []` is a shallow
+      # copy). Braceless overrides arrive through **options too (Ruby 3
+      # keyword rules), so `only`/`except` are reserved keys — an attribute
+      # literally named that goes in a braced Hash.
+      def duplicate(overrides = {}, **options)
+        overrides = overrides.merge(options.except(:only, :except))
+        associations = duplicable_selected_associations(options.slice(:only, :except))
+
         copy = dup
         duplicable_reset_attributes(copy)
         duplicable_apply_suffixes(copy)
         overrides.each { |attribute, value| copy.public_send("#{attribute}=", value) }
-        duplicable_copy_associations(copy)
+        duplicable_copy_associations(copy, associations)
         on_duplicate(copy)
         copy
       end
 
       # Persisted deep copy — the copy and its copied children save together
       # (autosave) inside one transaction. Returns the saved copy.
-      def duplicate!(overrides = {})
-        copy = duplicate(overrides)
+      def duplicate!(overrides = {}, **)
+        copy = duplicate(overrides, **)
         transaction { copy.save! }
         copy
       end
 
       private
+
+      # The macro's list is the ceiling: a per-call name outside it raises, so
+      # a controller param can never smuggle in an unvetted association.
+      def duplicable_selected_associations(selection)
+        declared = self.class.duplicable_config[:associations]
+        only = selection[:only]
+        except = selection[:except]
+        raise ArgumentError, "#{LABEL}: pass either :only or :except, not both" if only && except
+        return declared if only.nil? && except.nil?
+
+        chosen = duplicable_validate_selection!(Array(only || except).map(&:to_sym), declared)
+        only ? declared & chosen : declared - chosen
+      end
+
+      def duplicable_validate_selection!(chosen, declared)
+        chosen.each do |name|
+          next if declared.include?(name)
+
+          raise ArgumentError, "#{LABEL}: #{name} is not a duplicable association (declared: #{declared.join(', ')})"
+        end
+      end
 
       def duplicable_reset_attributes(copy)
         (duplicable_auto_reset_columns + self.class.duplicable_config[:reset]).each do |column|
@@ -177,8 +207,8 @@ module ConcernsOnRails
         self.class.include?(concern)
       end
 
-      def duplicable_copy_associations(copy)
-        self.class.duplicable_config[:associations].each do |name|
+      def duplicable_copy_associations(copy, associations)
+        associations.each do |name|
           reflection = self.class.reflect_on_association(name)
           case reflection.macro
           when :has_many
