@@ -1579,9 +1579,9 @@ class Api::ArticlesController < ApplicationController
   def create
     article = Article.new(article_params)
     if article.save
-      render_success(data: article, status: :created)
+      render_created(data: article, location: article_url(article))   # 201 + Location
     else
-      render_error(message: "Invalid", errors: article.errors.full_messages)
+      render_invalid(article)                                          # 422 record_invalid + full_messages
     end
   end
 end
@@ -1615,7 +1615,9 @@ respondable_by error_format: :problem_details, problem_type_base: "https://api.e
 
 | Method            | Signature                                                                                  |
 |-------------------|--------------------------------------------------------------------------------------------|
-| `render_success`  | `render_success(data: nil, status: :ok, meta: {})`                                         |
+| `render_success`  | `render_success(data: nil, status: :ok, meta: {}, location: nil, headers: {})` — `location:` sets the `Location` header (a String, or anything `url_for` resolves); `headers:` sets extra response headers |
+| `render_created`  | `render_created(data: nil, location: nil, meta: {}, headers: {})` — `render_success` with `status: :created` |
+| `render_invalid`  | `render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")` — `render_error` with `errors.full_messages` as `details` (omitted when empty); same shape as ErrorHandleable's `RecordInvalid` handler, problem-details aware |
 | `render_error`    | `render_error(message:, status: :unprocessable_entity, code: nil, errors: nil)`            |
 
 > `data:` is a keyword arg (not positional) on purpose — it sidesteps Ruby 3's behavior of treating hash literals as kwargs when a method declares any keyword params.

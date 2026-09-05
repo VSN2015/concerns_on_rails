@@ -188,4 +188,81 @@ describe ConcernsOnRails::Controllers::Respondable do
       expect(JSON.parse(result.body)).to include("type" => "about:blank", "status" => 410, "detail" => "Gone fishing", "code" => "gone")
     end
   end
+
+  describe "location:/headers:, #render_created and #render_invalid" do
+    unless defined?(RespondableInvalidModel)
+      RespondableInvalidModel = Struct.new(:name) do
+        include ActiveModel::Validations
+
+        validates :name, presence: true
+      end
+    end
+
+    it "render_success sets Location and extra response headers" do
+      controller.render_success(data: { id: 7 }, status: :created, location: "/articles/7",
+                                headers: { "X-Request-Id" => "abc" })
+      expect(controller.rendered).to eq(json: { success: true, data: { id: 7 } }, status: :created)
+      expect(controller.response.headers).to include("Location" => "/articles/7", "X-Request-Id" => "abc")
+
+      plain = controller_class.new
+      plain.render_success(data: 1)
+      expect(plain.response.headers).not_to have_key("Location")
+    end
+
+    it "resolves a non-String location through url_for when the controller has it" do
+      controller.define_singleton_method(:url_for) { |target| "/resolved/#{target[:id]}" }
+      controller.render_success(data: nil, location: { id: 9 })
+      expect(controller.response.headers["Location"]).to eq("/resolved/9")
+    end
+
+    it "render_created is a 201 with an optional Location" do
+      controller.render_created(data: { id: 3 }, location: "/articles/3", meta: { version: 2 })
+      expect(controller.rendered).to eq(json: { success: true, data: { id: 3 }, meta: { version: 2 } }, status: :created)
+      expect(controller.response.headers["Location"]).to eq("/articles/3")
+    end
+
+    it "render_invalid renders the record's errors as a 422 record_invalid envelope" do
+      record = RespondableInvalidModel.new(nil)
+      record.valid?
+      controller.render_invalid(record)
+      expect(controller.rendered).to eq(
+        json: { success: false, error: { message: "Validation failed", code: "record_invalid", details: ["Name can't be blank"] } },
+        status: :unprocessable_entity
+      )
+
+      custom = controller_class.new
+      custom.render_invalid(record, message: "Bad article", status: :bad_request, code: "bad_article")
+      expect(custom.rendered[:json][:error]).to include(message: "Bad article", code: "bad_article")
+      expect(custom.rendered[:status]).to eq(:bad_request)
+    end
+
+    it "render_invalid accepts an errors object, omits empty details and rejects other things" do
+      record = RespondableInvalidModel.new(nil)
+      record.valid?
+      via_errors = controller_class.new
+      via_errors.render_invalid(record.errors)
+      expect(via_errors.rendered[:json][:error][:details]).to eq(["Name can't be blank"])
+
+      clean = controller_class.new
+      clean.render_invalid(RespondableInvalidModel.new("ok"))
+      expect(clean.rendered[:json][:error]).not_to have_key(:details)
+
+      expect { controller.render_invalid("nope") }
+        .to raise_error(ArgumentError, /render_invalid expects a record \(responding to #errors\) or an ActiveModel::Errors/)
+    end
+
+    it "render_invalid follows the problem-details format when configured" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Respondable
+
+        respondable_by error_format: :problem_details, problem_type_base: "https://api.example.com/problems"
+      end
+      record = RespondableInvalidModel.new(nil)
+      record.valid?
+      c = klass.new
+      c.render_invalid(record)
+      expect(c.rendered[:json]).to include(type: "https://api.example.com/problems/record_invalid", status: 422,
+                                           detail: "Validation failed", errors: ["Name can't be blank"])
+    end
+  end
 end

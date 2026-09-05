@@ -61,7 +61,7 @@ Every concern in this gem that renders an error delegates to `render_error` when
 
 ### Instance methods
 
-#### `render_success(data: nil, status: :ok, meta: {})`
+#### `render_success(data: nil, status: :ok, meta: {}, location: nil, headers: {})`
 
 Renders a JSON success envelope and halts the action. Returns the result of `render`.
 
@@ -70,6 +70,8 @@ Renders a JSON success envelope and halts the action. Returns the result of `ren
 | `data` | any JSON-serializable value | `nil` | The primary response payload. Placed under the `data` key as-is; can be a Hash, Array, ActiveRecord model, or `nil`. |
 | `status` | Symbol or Integer | `:ok` | HTTP status code passed directly to `render`. Any status symbol or integer accepted by Rails is valid (e.g. `:created`, `:ok`, `200`). |
 | `meta` | Hash | `{}` | Optional metadata (pagination counts, cursors, etc.). Included in the body only when the hash is non-empty; omitted entirely otherwise. |
+| `location` | String, or anything `url_for` accepts | `nil` | Sets the `Location` response header — the REST convention for `201 Created` (and `202`/`303`). A String is used verbatim; any other value (a record, a Hash of route options) is passed through the controller's `url_for` when it has one. Nothing is set when `nil`. |
+| `headers` | Hash | `{}` | Extra response headers to set alongside the body (`"X-Request-Id" => request.request_id`, `"Deprecation"`, …). Values are written as given. |
 
 Output envelope:
 
@@ -78,6 +80,25 @@ Output envelope:
 ```
 
 The `meta` key is absent when `meta` is empty (the default), keeping simple responses clean.
+
+---
+
+#### `render_created(data: nil, location: nil, meta: {}, headers: {})`
+
+`render_success` with `status: :created` — the create-action one-liner: `render_created(data: article, location: article_url(article))`. Same envelope, same `Location`/`headers` handling.
+
+---
+
+#### `render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")`
+
+Renders a validation failure as an error envelope (or problem document) with the object's `errors.full_messages` as `details` — omitted when there are none, exactly the shape `ErrorHandleable` produces for a rescued `ActiveRecord::RecordInvalid`, so an `if record.save … else render_invalid(record)` action and a `save!` action look identical to clients.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `record_or_errors` | anything responding to `#errors`, or an `ActiveModel::Errors` | _(required)_ | The invalid object (an ActiveRecord model, a form object) or its errors collection. Anything else raises `ArgumentError`. |
+| `message` | String | `"Validation failed"` | `error.message` (`detail` in problem-details format). |
+| `status` | Symbol or Integer | `:unprocessable_entity` | HTTP status. |
+| `code` | String | `"record_invalid"` | `error.code` — and the `type` suffix under problem details. |
 
 ---
 
@@ -179,13 +200,41 @@ class Api::UsersController < Api::BaseController
 end
 ```
 
+**The create action, both ways**
+
+```ruby
+class Api::ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Respondable
+
+  def create
+    article = Article.new(article_params)
+    if article.save
+      render_created(data: article, location: article_url(article),
+                     headers: { "X-Request-Id" => request.request_id })
+    else
+      render_invalid(article)
+    end
+  end
+end
+
+# 201 Created
+# Location: https://api.example.com/articles/42
+# X-Request-Id: 8f3e…
+# { "success": true, "data": { "id": 42, ... } }
+
+# 422 Unprocessable Content
+# { "success": false, "error": { "message": "Validation failed", "code": "record_invalid",
+#                                "details": ["Title can't be blank"] } }
+```
+
 ## Notes & gotchas
 
 - **`data:` is always a keyword argument.** This is intentional. Ruby 3 treats a trailing Hash literal as keyword arguments when the receiving method declares any keyword params. Keeping `data:` as a named keyword means callers can pass a plain `{}` hash without surprises — `render_success(data: { id: 1 })` is unambiguous in all Ruby 3.x versions.
 - **`meta` is omitted, not `null`, when empty.** Passing `meta: {}` (the default) results in a response body with no `meta` key at all. A client checking `response.meta` must guard against the key being absent, not just `null`.
 - **`code` and `details` follow the same omit-when-nil rule.** The minimal error body is `{ "success": false, "error": { "message": "..." } }`. Both `code` and `details` only appear when explicitly provided.
 - **`render_success` accepts `nil` data.** Calling `render_success` with no arguments is valid and produces `{ "success": true, "data": null }`. This is useful for actions that confirm an operation (e.g. `DELETE`) without returning a resource body.
-- **No state, no callbacks, no configuration macro.** The concern adds exactly two instance methods to the including controller. There are no `before_action` hooks, class-level macros, or instance variables introduced.
+- **No callbacks, no instance state.** The concern adds four instance methods (`render_success`, `render_created`, `render_invalid`, `render_error`) and one optional class macro (`respondable_by`); there are no `before_action` hooks or instance variables.
+- **`location:` goes through `url_for` for non-Strings.** In a real controller `render_created(data: article, location: article)` emits the polymorphic URL; the fake test harness has no `url_for`, so pass a String there. When the controller lacks `url_for`, a non-String location is written with `to_s`.
 - **HTTP status symbols follow Rails conventions.** Any symbol or integer recognized by `Rack::Utils::SYMBOL_TO_STATUS_CODE` is accepted — the arguments are passed directly to `render`. Passing an invalid status symbol raises the same `ArgumentError` Rails itself would raise.
 - **`meta` must be a Hash.** The implementation checks `meta.is_a?(Hash) && meta.any?` before including it. Passing a non-Hash value (e.g. an Array) for `meta` causes it to be silently dropped from the response body.
 - **Pairing with `ErrorHandleable`.** When `ConcernsOnRails::Controllers::ErrorHandleable` is included alongside `Respondable` (in either order), its `rescue_from` handlers detect the presence of `render_error` and delegate to it rather than rendering inline. Include `Respondable` before `ErrorHandleable` in the class body to make the delegation intent explicit.
