@@ -103,4 +103,67 @@ describe ConcernsOnRails::Controllers::Timezoneable do
       end.to raise_error(ArgumentError, /unknown time zone/)
     end
   end
+
+  describe "persist:, response_header: and #time_zone_source" do
+    it "persists a zone chosen via params into the cookie — and only a param-sourced zone" do
+      jar = {}
+      c = controller(params: { time_zone: "London" }, cookies: jar) { timezoneable cookie: :time_zone, persist: true }
+      c.switch_time_zone { :ran }
+      expect(jar[:time_zone]).to include(value: "London")
+      expect(jar[:time_zone][:expires]).to eq(1.year) # a Duration — the cookie jar resolves it at write time
+
+      from_header = {}
+      controller(time_zone_header: "London", cookies: from_header) { timezoneable cookie: :time_zone, persist: true }
+        .switch_time_zone { :ran }
+      expect(from_header).to be_empty
+
+      from_cookie = { time_zone: "London" }
+      controller(cookies: from_cookie) { timezoneable cookie: :time_zone, persist: true }.switch_time_zone { :ran }
+      expect(from_cookie[:time_zone]).to eq("London") # not rewritten
+    end
+
+    it "takes cookie options through persist: and requires cookie:" do
+      jar = {}
+      c = controller(params: { tz: "London" }, cookies: jar) do
+        timezoneable param: :tz, cookie: :zone, persist: { expires: 30.days, same_site: :lax, secure: true }
+      end
+      c.switch_time_zone { :ran }
+      expect(jar[:zone]).to include(value: "London", same_site: :lax, secure: true)
+      expect(jar[:zone][:expires]).to eq(30.days)
+
+      expect { controller { timezoneable persist: true } }
+        .to raise_error(ArgumentError, /persist: requires cookie:/)
+    end
+
+    it "emits the resolved zone in a response header on request, appending Vary when the header source is on" do
+      c = controller(params: { time_zone: "London" }) { timezoneable response_header: true }
+      c.switch_time_zone { :ran }
+      expect(c.response.headers["X-Time-Zone"]).to eq("London")
+      expect(c.response.headers["Vary"]).to eq("Time-Zone")
+
+      c = controller(params: { time_zone: "London" }) { timezoneable response_header: "X-Tz", header: false }
+      c.response.set_header("Vary", "Accept")
+      c.switch_time_zone { :ran }
+      expect(c.response.headers["X-Tz"]).to eq("London")
+      expect(c.response.headers["Vary"]).to eq("Accept") # header source off → nothing to vary on
+
+      c = controller(time_zone_header: "London") { timezoneable response_header: true }
+      c.response.set_header("Vary", "Accept, time-zone")
+      c.switch_time_zone { :ran }
+      expect(c.response.headers["Vary"]).to eq("Accept, time-zone") # already present, case-insensitively
+
+      c = controller(params: { time_zone: "London" }) { timezoneable }
+      c.switch_time_zone { :ran }
+      expect(c.response.headers).not_to have_key("X-Time-Zone") # off by default
+    end
+
+    it "reports which source won through time_zone_source" do
+      expect(controller(params: { time_zone: "London" }) { timezoneable }.time_zone_source).to eq(:param)
+      expect(controller(time_zone_header: "London") { timezoneable }.time_zone_source).to eq(:header)
+      expect(controller(cookies: { time_zone: "London" }) { timezoneable cookie: true }.time_zone_source).to eq(:cookie)
+      expect(controller { timezoneable default: "London" }.time_zone_source).to eq(:default)
+      expect(controller { timezoneable }.time_zone_source).to eq(:current)
+      expect(controller(params: { time_zone: "Mars" }) { timezoneable }.time_zone_source).to eq(:current)
+    end
+  end
 end

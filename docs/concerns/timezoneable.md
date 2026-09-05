@@ -1,4 +1,4 @@
-`Timezoneable` is a controller concern that sets `Time.zone` to a per-request value for the duration of each action, then restores it afterward. It solves the common Rails problem of serving users across multiple time zones: without explicit zone switching, all timestamp arithmetic and display defaults to the application's global `Time.zone`, producing incorrect local times in views and serializers. The concern wraps the action in `Time.use_zone`, pulling the desired zone from request params, a `Time-Zone` header, or an optional cookie — in that priority order — and falling back to a configured default or the current `Time.zone` when nothing matches.
+`Timezoneable` is a controller concern that sets `Time.zone` to a per-request value for the duration of each action, then restores it afterward. It solves the common Rails problem of serving users across multiple time zones: without explicit zone switching, all timestamp arithmetic and display defaults to the application's global `Time.zone`, producing incorrect local times in views and serializers. The concern wraps the action in `Time.use_zone`, pulling the desired zone from request params, a `Time-Zone` header, or an optional cookie — in that priority order — and falling back to a configured default or the current `Time.zone` when nothing matches. Opt-in extras make the choice sticky (`persist:` writes a param-chosen zone into the cookie) and visible (`response_header:` emits the zone the response was rendered in, with `Vary: Time-Zone` for caches).
 
 ## When to use it
 
@@ -7,6 +7,8 @@
 - A booking or scheduling app where date boundaries (start-of-day, end-of-day) must align with the requesting user's local time, not the server's.
 - Any controller that pairs with model concerns such as `Publishable`, `Schedulable`, or `Expirable`, where `.where("published_at > ?", Time.current)` must be evaluated in the right zone.
 - Applications that want a strict allow-list of supported zones, rejecting arbitrary zone names from untrusted clients without crashing.
+- A settings page or footer link (`?time_zone=London`) that should change the zone for every following request without a user record to store it on — `persist: true`.
+- Cached or CDN-fronted responses whose timestamps depend on the `Time-Zone` header, which therefore need `Vary: Time-Zone` and a header saying which zone was used.
 
 ## Installation
 
@@ -46,6 +48,8 @@ The `timezoneable` class macro accepts the following keyword options.
 | `param:` | `Symbol` | `:time_zone` | The request parameter key inspected for a zone name, e.g. `params[:time_zone]`. Set to a custom symbol to use a different param name. The param source is skipped entirely if `params` is unavailable. |
 | `header:` | `Boolean` | `true` | When `true`, the `Time-Zone` HTTP request header is read as a zone source. Set to `false` to disable header-based zone selection. |
 | `cookie:` | `Boolean` or `Symbol` | `false` | Controls cookie-based zone reading. `false` disables it. `true` reads the cookie named `:time_zone`. Pass any other symbol (e.g. `:user_time_zone`) to read that specific cookie key instead. |
+| `persist:` | `Boolean` or `Hash` | `false` | When truthy, a zone resolved from **`params[param]`** (an explicit user choice — never the header or the cookie itself) is written to the `cookie:` cookie as `{ value: zone.name, expires: 1.year }`. Pass a Hash to override/extend the cookie options (`expires:`, `same_site:`, `secure:`, `httponly:`, `domain:` …). Requires `cookie:`; `persist:` without it raises `ArgumentError` at declaration time. |
+| `response_header:` | `Boolean` or `String` | `false` | `true` emits the resolved zone's name in an `X-Time-Zone` response header; a String uses that header name instead. When the header source is enabled (`header: true`), `Time-Zone` is appended to the response's `Vary` header (case-insensitively, existing values kept) so caches key on the request header. |
 
 ## Methods
 
@@ -56,6 +60,9 @@ An `around_action` registered automatically on include. Calls `Time.use_zone(res
 
 **`resolved_time_zone → ActiveSupport::TimeZone`**
 Returns the `ActiveSupport::TimeZone` chosen for the current request. Evaluates sources in order — param, header, cookie, configured default — and returns the first that produces a valid zone matching the allow-list. Falls back to the current `Time.zone` if nothing resolves. Exposed as a public method so controllers or views can reference the selected zone directly (e.g., to render a timezone indicator).
+
+**`time_zone_source → Symbol`**
+Which source produced `resolved_time_zone`: `:param`, `:header`, `:cookie`, `:default`, or `:current` (nothing matched; the ambient `Time.zone` is in effect). Memoized with the zone. Useful for UI hints ("times shown in London — from your browser settings") and it is what `persist:` consults.
 
 ## Examples
 
@@ -109,6 +116,27 @@ class ApplicationController < ActionController::Base
 end
 ```
 
+**Sticky zone picker + cache-safe API responses**
+
+```ruby
+class ApplicationController < ActionController::Base
+  include ConcernsOnRails::Controllers::Timezoneable
+
+  # A footer link `?time_zone=London` switches the zone and writes the cookie;
+  # every later request resolves it from the cookie without the param.
+  timezoneable available: ActiveSupport::TimeZone.all.map(&:name), default: "UTC",
+               cookie: :time_zone, persist: { expires: 1.year, same_site: :lax }
+end
+
+class Api::BaseController < ActionController::API
+  include ConcernsOnRails::Controllers::Timezoneable
+
+  # Clients send `Time-Zone: America/New_York`; responses say which zone was used
+  # and carry `Vary: Time-Zone` so a shared cache never serves London times to New York.
+  timezoneable default: "UTC", response_header: true
+end
+```
+
 ## Notes & gotchas
 
 - **Fail-fast validation at class load time.** Both `available:` and `default:` are resolved through `ActiveSupport::TimeZone[]` when `timezoneable` is called, not on the first request. An unrecognized name (e.g. `"Pluto"`) raises `ArgumentError` with a descriptive message immediately, so misconfiguration surfaces during boot rather than under production load.
@@ -127,6 +155,8 @@ end
 
 - **`switch_time_zone` is public by design.** Subclasses can override it to add logging, metrics, or additional fallback logic while still calling `super` to retain the zone-switching behavior.
 
+- **`persist:` writes only param-sourced zones.** Header- and cookie-sourced zones are never written back: the header is the client's per-request statement, and re-writing the cookie with its own value would just refresh it on every hit. The write happens in `switch_time_zone` before the action runs, so the cookie is set even when the action renders nothing.
+- **`response_header:` names a non-standard header.** `X-Time-Zone` mirrors the `Time-Zone` request header this concern reads; rename it via a String if your API uses another convention. `Vary: Time-Zone` is only appended when the header source is on — with `header: false` the response cannot depend on it.
 - **Cookie reading requires the controller to expose `cookies`.** If the controller does not respond to `cookies` (e.g., an API-mode controller that does not include the cookie middleware), the cookie source is silently skipped. The same applies to `params` for the param source and `request` for the header source.
 
 ## Changed in 1.22.0
