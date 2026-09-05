@@ -23,7 +23,8 @@ describe ConcernsOnRails::Hashable do
       ActiveRecord::Base.connection.drop_table(table)
     end
 
-    %i[Order UuidOrder IntOrder CustomOrder PresetOrder NoColumnOrder BadTypeOrder BadCustomOrder].each do |const|
+    %i[Order UuidOrder IntOrder CustomOrder PresetOrder NoColumnOrder BadTypeOrder BadCustomOrder
+       PrefixedOrder ParamOrder].each do |const|
       Object.send(:remove_const, const) if Object.const_defined?(const)
     end
   end
@@ -203,6 +204,57 @@ describe ConcernsOnRails::Hashable do
       allow(SecureRandom).to receive(:hex).and_return("taken-value", "fresh-value")
       record = klass.create!
       expect(record.token).to eq("fresh-value")
+    end
+  end
+
+  describe "prefix: and to_param: (public IDs)" do
+    it "prepends prefix: to every generated value — Stripe-style IDs — and keeps uniqueness on the full value" do
+      class PrefixedOrder < TestModel
+        self.table_name = "orders"
+        include ConcernsOnRails::Hashable
+
+        hashable_by :token, type: :custom, length: 8, alphabet: "ABC123", prefix: "ord_", unique: true
+      end
+
+      order = PrefixedOrder.create!
+      expect(order.token).to match(/\Aord_[ABC123]{8}\z/)
+      before = order.token
+      order.regenerate_token!
+      expect(order.reload.token).to match(/\Aord_[ABC123]{8}\z/)
+      expect(order.token).not_to eq(before)
+      expect(PrefixedOrder.generate_hashable_value).to start_with("ord_")
+      expect(PrefixedOrder.create!(token: "custom").token).to eq("custom") # explicit values are still respected
+    end
+
+    it "to_param: true makes the hashed field the URL parameter, falling back to the id" do
+      class ParamOrder < TestModel
+        self.table_name = "orders"
+        include ConcernsOnRails::Hashable
+
+        hashable_by :token, type: :uuid, to_param: true
+      end
+
+      order = ParamOrder.create!
+      expect(order.to_param).to eq(order.token)
+      expect(ParamOrder.new.to_param).to be_nil
+      order.token = nil
+      expect(order.to_param).to eq(order.id.to_s)
+      expect(Order.create!.to_param).to match(/\A\d+\z/) # default unchanged
+    end
+
+    it "validates prefix: and to_param: at class load" do
+      build = lambda do |**opts|
+        Class.new(TestModel) do
+          self.table_name = "orders"
+          include ConcernsOnRails::Hashable
+
+          hashable_by :token, **opts
+        end
+      end
+      expect { build.call(type: :integer, length: 6, prefix: "n") }
+        .to raise_error(ArgumentError, /prefix: is not supported for type :integer/)
+      expect { build.call(prefix: 42) }.to raise_error(ArgumentError, /prefix: must be a String/)
+      expect { build.call(to_param: :yes) }.to raise_error(ArgumentError, /to_param: must be true or false/)
     end
   end
 end
