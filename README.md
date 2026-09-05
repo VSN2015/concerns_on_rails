@@ -1134,6 +1134,18 @@ end
 
 `mask:` sets the mask character (default `*`). Nil and non-string values pass through untouched. To strip dangerous HTML instead, see [Sanitizable](#-sanitizable).
 
+**Serialization** — mask in the response, not just in the view
+
+```ruby
+user.masked_attributes            # => { "email" => "j****@example.com", "card" => "**** **** **** 4242" }
+user.as_json(masked: true)        # every declared field swapped for its masked form, the rest raw
+user.as_json(masked: [:email])    # just these fields (undeclared ones raise)
+user.to_json(masked: true, only: %i[id email])   # composes with only:/except:/methods:/include:
+render json: users.map { |u| u.as_json(masked: true) }
+```
+
+Plain `as_json` / `to_json` are untouched, so nothing changes until you ask.
+
 ---
 
 ## 💰 Monetizable

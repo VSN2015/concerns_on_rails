@@ -29,9 +29,17 @@ module ConcernsOnRails
     #   Proc         — used as-is (the caller owns the non-String guard)
     #
     # `mask:` sets the mask character (default "*") for the preset forms.
+    #
+    # Serialization: `masked_attributes` returns every declared field masked
+    # (String keys, like `attributes`), and `as_json(masked: true)` /
+    # `to_json(masked: true)` / `serializable_hash(masked: true)` swap the
+    # declared fields for their masked forms in the usual Rails serialization
+    # path — `masked: [:email]` limits it to a subset — so an API can render
+    # `user.as_json(masked: true)` without a serializer per audience.
     module Maskable
       extend ActiveSupport::Concern
 
+      LABEL = "ConcernsOnRails::Models::Maskable".freeze
       PRESETS = %i[email phone credit_card last4 all].freeze
 
       included do
@@ -55,7 +63,7 @@ module ConcernsOnRails
         end
       end
 
-      class_methods do
+      module ClassMethods
         private
 
         def resolve_masker(with, mask)
@@ -75,6 +83,41 @@ module ConcernsOnRails
           end
         end
       end
+
+      # Every declared field, masked, keyed like `attributes` (String keys):
+      #   user.masked_attributes  # => { "email" => "j***@x.com", "card" => "**** **** **** 4242" }
+      def masked_attributes
+        self.class.maskable_rules.to_h { |field, masker| [field.to_s, masker.call(self[field])] }
+      end
+
+      # `masked: true` (all declared fields) or `masked: [:email, ...]` swaps
+      # the masked form into the serialized hash — the entry point for
+      # `as_json` / `to_json` too. Fields dropped by `only:`/`except:` stay
+      # dropped; undeclared fields in `masked:` raise.
+      def serializable_hash(options = nil)
+        hash = super
+        masked = options && options[:masked]
+        return hash unless masked
+
+        maskable_fields_for(masked).each do |field|
+          next unless hash.key?(field.to_s)
+
+          hash[field.to_s] = self.class.maskable_rules.fetch(field).call(self[field])
+        end
+        hash
+      end
+
+      def maskable_fields_for(masked)
+        declared = self.class.maskable_rules.keys
+        return declared if masked == true
+
+        Array(masked).map(&:to_sym).each do |field|
+          next if declared.include?(field)
+
+          raise ArgumentError, "#{LABEL}: #{field} is not a maskable field (declared: #{declared.join(', ')})"
+        end
+      end
+      private :maskable_fields_for
     end
   end
 end
