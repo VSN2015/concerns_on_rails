@@ -1,5 +1,66 @@
 <!-- CHANGELOG.md -->
 
+## 1.28.0 (2026-09-06)
+
+Pagination is the theme: the four-PR Paginatable stack (#40, #45, #62, #83)
+from the September enhancement loop. Paginatable now paginates in-memory
+collections, both paginators emit RFC 8288 `Link` headers, results that were
+already paginated upstream can pass `total:`, and the page / per-page parameter
+names (including JSON:API's `page[number]` / `page[size]`) are configurable.
+Controller-only: no new columns, migrations or runtime dependencies. 1303
+examples, 0 failures.
+
+### Added
+- **Controllers::Paginatable**: `paginated` / `pagination_meta` accept in-memory
+  collections — an `Array`, `Set`, `Range` or any other non-Hash `Enumerable` —
+  not only ActiveRecord relations. The collection is materialized once, the
+  total is its size and the current page comes back as an `Array` with the same
+  `X-Total-Count` / `X-Page` / `X-Per-Page` / `X-Total-Pages` headers and
+  memoized meta. Relations still paginate in SQL. A `Hash`, `nil` or a
+  non-collection raises `ArgumentError` naming the class received. (#40)
+- **Controllers::Paginatable / CursorPaginatable**: RFC 8288 `Link` response
+  header — `first`/`prev`/`next`/`last` page URLs for Paginatable, `next`
+  (+ `prev` in bidirectional mode, `first` once a cursor is in play) for
+  CursorPaginatable — rebuilt from the current request with every other query
+  param preserved and appended to any existing `Link` header. Opt out with
+  `link_header: false` on either macro. Backed by the new shared
+  `Support::LinkHeader`. (#45)
+- **Controllers::Paginatable**: `paginated(collection, total:)` /
+  `pagination_meta(total:)` for collections that are already one page — an
+  external API's or search service's page N plus its total: nothing is sliced
+  or counted, and `total` drives the `X-*` headers and the `Link` header.
+  `total:` must be a non-negative Integer. (#62)
+- **Controllers::Paginatable**: `paginate_by page_param:` / `per_page_param:`
+  (a top-level name or a nested path such as `%i[page number]`) and
+  `style: :jsonapi` (`?page[number]=&page[size]=`); explicit `*_param:` options
+  win over the style, anything else raises at declaration. Readers dig the path
+  through `ScalarParam`, so a scalar where a Hash is expected falls back to the
+  default instead of raising. The `Link` header URLs are rebuilt under the
+  configured names (nested paths Rack-encoded, sibling keys preserved). (#83)
+
+### Notes
+The `Link` header is **on by default**, so every non-empty paginated response
+grows by one header. Its URLs are built from `request.base_url` + `request.path`,
+i.e. whatever host Rails sees — behind a proxy configure `trusted_proxies` /
+forwarded headers, or pass `link_header: false`. The `X-*` headers are
+unchanged either way, and the existing `?page=&per_page=` behaviour is
+byte-for-byte the same when no `page_param:` / `per_page_param:` / `style:` is
+given.
+
+### Internal
+- New `Support::LinkHeader` (autoloaded): `available?(controller)` — a request
+  exposing `base_url` / `path` / `query_parameters` (the dependency-free
+  `FakeController` has none, so emission is silently skipped); `url_for(request,
+  drop:, **overrides)` — Rack nested-query encoding, nested params survive, Hash
+  override values deep-stringified, `nil` / `drop:` removes a key;
+  `append(response, rels)` — never clobbers an existing `Link`.
+- `Paginatable.paginate_by` moved into `module ClassMethods` alongside its new
+  private helpers (RuboCop scope rule; the Stateable precedent).
+- Development dependencies: simplecov `~> 1.1`, sqlite3 `~> 2.9.6`, rubocop
+  `~> 1.89`; GitHub Actions `checkout` v7, `configure-pages` v6, `deploy-pages`
+  v5, `upload-pages-artifact` v5. The lockfile now resolves `permittable` 0.2.0
+  (the `~> 0.1` runtime pin is unchanged).
+
 ## 1.27.0 (2026-08-29)
 
 Scope-name collisions finally have an escape hatch on the eight concerns whose
