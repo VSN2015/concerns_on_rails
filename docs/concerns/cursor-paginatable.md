@@ -38,6 +38,7 @@ end
 | `order_param` | Symbol | `:order` | Query param that selects the preset. |
 | `bidirectional` | Boolean | `false` | Mints `X-Prev-Cursor` / `X-Has-Prev` (and `prev_cursor` / `has_prev` in meta) so clients can page backward. Also a per-call override on `cursor_paginated`. |
 | `predicate` | Symbol | `:auto` | Keyset WHERE strategy. `:auto`: row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when all directions are uniform (walks a composite index directly), otherwise the portable OR-expansion. `:row` forces tuples (raises on mixed directions); `:or` forces the expansion. |
+| `link_header:` | Boolean | `true` | Emit the RFC 8288 `Link` header (`next`, `prev` in bidirectional mode, `first`). |
 
 `order:` and `per_page:` can also be passed per call: `cursor_paginated(scope, order: { score: :desc }, per_page: 50)`.
 
@@ -75,6 +76,7 @@ With no arguments: the meta Hash memoized by the last `cursor_paginated` call (n
 | `X-Count` | Rows on **this** page — *not* Paginatable's `X-Total-Count`; totals are deliberately never computed. |
 | `X-Has-More` | `"true"` / `"false"`. |
 | `X-Next-Cursor` | Opaque token for the next page. Only set while more pages exist. |
+| `Link` | RFC 8288 web links: `rel="next"` is the current URL with `cursor=<X-Next-Cursor>` (only while more pages exist), `rel="prev"` the same with the prev cursor (bidirectional mode), `rel="first"` the current URL with `cursor` dropped (once a cursor is in play). `per_page` and the order preset param are preserved. Off with `cursor_paginate_by link_header: false`; skipped without a request. Appended to an existing `Link` header. |
 | `X-Has-Prev` | `"true"` / `"false"` — bidirectional mode only. |
 | `X-Prev-Cursor` | Opaque token for the previous page — bidirectional mode only, set when the page has something before it. |
 
@@ -123,6 +125,7 @@ end
 
 ## Notes & gotchas
 
+- **`Link` header is on by default.** `rel="next"` carries the same token as `X-Next-Cursor`, so a client can follow links instead of assembling URLs; `rel="first"` (cursor dropped) appears once a cursor is in play, `rel="prev"` only in bidirectional mode. URLs come from `request.base_url + request.path` — behind a proxy make sure the forwarded host/proto reach Rails. `cursor_paginate_by link_header: false` disables it.
 - **No database columns required**, but ordering columns should be `NOT NULL`. A NULL value on a page-boundary row raises a descriptive `ArgumentError` instead of silently corrupting the walk; on NULLs-last databases (PostgreSQL ASC), NULL-valued tail rows are skipped by the strict keyset comparison without ever reaching a boundary. Use NOT NULL columns or COALESCE in a view.
 - **Forward-only by default.** `bidirectional: true` adds prev cursors: a backward fetch runs the inverted ordering and flips the page back to canonical order, the `limit+1` probe detects `has_prev`, and cursors are minted only from non-empty pages (an over-walked empty page returns no cursors — clients keep their previous tokens). Direction is pinned inside the token: prev tokens replayed against a forward-only endpoint get a 400, and pre-bidirectional (direction-less) tokens stay valid as forward cursors.
 - **Cursors are readable, not secret.** The token is Base64 JSON — the boundary row's values are visible to anyone holding it. Don't order by sensitive columns (emails, balances). Tampering is detected structurally; HMAC signing is out of scope.

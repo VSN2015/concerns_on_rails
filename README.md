@@ -1455,6 +1455,30 @@ class ArticlesController < ApplicationController
 end
 ```
 
+**Arrays and other Enumerables work too.** Results that never touched the database — an
+external API response, a loaded association, a hand-built list of Structs — get the same
+slicing, headers and `pagination_meta`. Relations still paginate in SQL (`LIMIT`/`OFFSET`);
+an in-memory collection is sliced in Ruby and comes back as an `Array`:
+
+```ruby
+def search
+  render json: paginated(ExternalCatalog.search(params[:q]))   # Array in, current page out
+end
+```
+
+Anything answering `limit`/`offset` is treated as a relation; any other non-`Hash` `Enumerable`
+(`Array`, `Set`, `Range`, `Enumerator` — consumed once) is materialized and sliced. A `Hash`,
+`nil` or a non-collection raises `ArgumentError` (call `.to_a` to paginate a Hash's pairs).
+
+**Already paginated upstream?** When an external API or search service hands you page N and the
+total it counted, pass `total:` — nothing is sliced, limited or counted; the collection comes back
+as-is and `total` drives `X-Total-Count`, `X-Total-Pages` and the `Link` header:
+
+```ruby
+result = Catalog.search(params[:q], page: params[:page], per_page: params[:per_page])
+render_success(data: paginated(result.hits, total: result.total_hits), meta: pagination_meta)
+```
+
 **URL params**
 
 | Param        | Default | Notes                              |
@@ -1462,7 +1486,19 @@ end
 | `?page=`     | `1`     | Page numbers below 1 are clamped to 1 |
 | `?per_page=` | `25`    | Capped at `max_per_page` (default 200) |
 
-**Response headers**: `X-Total-Count`, `X-Page`, `X-Per-Page`, `X-Total-Pages`.
+Rename them, or speak JSON:API — the `Link` header URLs follow whatever you pick:
+
+```ruby
+paginate_by page_param: :p, per_page_param: :limit                 # ?p=2&limit=10
+paginate_by style: :jsonapi                                        # ?page[number]=2&page[size]=10
+paginate_by page_param: %i[paging page], per_page_param: %i[paging per]   # any nested path
+```
+
+**Response headers**: `X-Total-Count`, `X-Page`, `X-Per-Page`, `X-Total-Pages`, and an RFC 8288 `Link`
+header with `first` / `prev` / `next` / `last` URLs rebuilt from the current request (other query params
+preserved; `prev`/`next` only when such a page exists; nothing for an empty collection) — the GitHub
+convention, so clients follow links instead of computing page numbers. Appended to any `Link` header
+already set (Deprecatable, CDN hints). `paginate_by link_header: false` turns it off.
 
 ---
 
@@ -1490,7 +1526,7 @@ end
 | `?per_page=` | `25`    | Capped at `max_per_page` (default 200; `0` disables the cap) |
 | `?order=`    | first preset | With `order_presets:` only — selects a named ordering from the allow-list (unknown names → 400 `invalid_order_preset`) |
 
-**Response headers**: `X-Per-Page`, `X-Count` (rows on **this** page — totals are deliberately not computed), `X-Has-More`, `X-Next-Cursor` (only while more pages exist). With `bidirectional: true`: also `X-Has-Prev`, `X-Prev-Cursor`.
+**Response headers**: `X-Per-Page`, `X-Count` (rows on **this** page — totals are deliberately not computed), `X-Has-More`, `X-Next-Cursor` (only while more pages exist). With `bidirectional: true`: also `X-Has-Prev`, `X-Prev-Cursor`. Plus an RFC 8288 `Link` header: `rel="next"` carries the next-cursor URL, `rel="prev"` the prev-cursor URL (bidirectional), `rel="first"` the current URL with the cursor dropped (once a cursor is in play); `per_page` and the order preset are preserved. `cursor_paginate_by link_header: false` turns it off.
 
 **Notes**
 - The primary key is always appended as a tiebreaker, so duplicate values never skip or repeat rows; ordering columns are chosen **in code** (never from params) and should be `NOT NULL` (a NULL boundary value raises rather than silently dropping rows).
