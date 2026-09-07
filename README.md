@@ -1494,6 +1494,41 @@ paginate_by style: :jsonapi                                        # ?page[numbe
 paginate_by page_param: %i[paging page], per_page_param: %i[paging per]   # any nested path
 ```
 
+**Page window for a pagination bar**
+
+`window:` adds a `pages:` key to `pagination_meta` — the first page, the last page, and N pages
+either side of the current one, with `:gap` standing in for the runs left out. It is opt-in:
+without `window:` the key is absent entirely. No extra query either way — it is arithmetic over
+the total already counted.
+
+```ruby
+paginate_by per_page: 10, window: 3
+
+pagination_meta
+# => { total: 1000, page: 47, per_page: 10, total_pages: 100,
+#      pages: [1, :gap, 44, 45, 46, 47, 48, 49, 50, :gap, 100] }
+```
+
+Render it straight into a `1 … 44 45 46 [47] 48 49 50 … 100` bar:
+
+```erb
+<% pagination_meta[:pages].each do |page| %>
+  <%= page == :gap ? "…" : link_to(page, url_for(page: page)) %>
+<% end %>
+```
+
+| Situation | `pages:` |
+|-----------|----------|
+| `?page=47` of 100 | `[1, :gap, 44, 45, 46, 47, 48, 49, 50, :gap, 100]` |
+| `?page=2` of 100 | `[1, 2, 3, 4, 5, :gap, 100]` — no leading gap once the window reaches page 1 |
+| `?page=6` of 100 | `[1, 2, 3, 4, 5, 6, 7, 8, 9, :gap, 100]` — a one-page gap is filled, never `1 … 3` |
+| 5 pages total | `[1, 2, 3, 4, 5]` — the window spans everything |
+| empty collection | key absent |
+| `window: 0` | `[1, :gap, 47, :gap, 100]` — first, current and last only |
+
+`?page=` past the last page windows around the last page (as `rel="prev"` already does), and
+`window:` must be a non-negative Integer or `nil`/`false` — validated at declaration.
+
 **Response headers**: `X-Total-Count`, `X-Page`, `X-Per-Page`, `X-Total-Pages`, and an RFC 8288 `Link`
 header with `first` / `prev` / `next` / `last` URLs rebuilt from the current request (other query params
 preserved; `prev`/`next` only when such a page exists; nothing for an empty collection) — the GitHub

@@ -38,6 +38,7 @@ end
 | `page_param` | Symbol/String or Array | `:page` | Where the page number is read from: a top-level param name, or an Array path into nested params (`%i[page number]` → `?page[number]=2`). Must be a name or a non-empty path of names. |
 | `per_page_param` | Symbol/String or Array | `:per_page` | Same for the page size (`%i[page size]` → `?page[size]=10`). |
 | `style` | `:flat` or `:jsonapi` | `:flat` | Shortcut: `:jsonapi` sets `page_param: %i[page number]` and `per_page_param: %i[page size]` (the JSON:API page-based strategy); `:flat` keeps `page` / `per_page`. Explicit `page_param:`/`per_page_param:` win over the style. |
+| `window` | Integer, `nil` or `false` | `nil` | Half-width of the page window published as `pagination_meta[:pages]` — first, last, and this many pages either side of the current page. `nil`/`false` omit the `pages:` key entirely; `0` is meaningful (first, current, last). A negative or non-Integer value raises `ArgumentError` at declaration. |
 
 **URL params read from `params`**
 
@@ -65,7 +66,23 @@ A `Hash` is rejected with an `ArgumentError` rather than silently paginated as `
 
 **`pagination_meta(collection = nil, total: nil) → Hash`**
 
-Returns `{ total:, page:, per_page:, total_pages: }` **without** applying `LIMIT`/`OFFSET` or slicing — handy for body-based pagination composed with `Respondable`'s `meta:`. Called with no argument after `paginated`, it reuses that call's memoized metadata (no second `COUNT`); pass a relation or collection to compute fresh. Accepts exactly the same inputs as `paginated`; with `total:` the `COUNT` is skipped and the collection may be omitted entirely (`pagination_meta(total: result.total_hits)`).
+Returns `{ total:, page:, per_page:, total_pages: }` (plus `pages:` when `window:` is declared) **without** applying `LIMIT`/`OFFSET` or slicing — handy for body-based pagination composed with `Respondable`'s `meta:`. Called with no argument after `paginated`, it reuses that call's memoized metadata (no second `COUNT`); pass a relation or collection to compute fresh. Accepts exactly the same inputs as `paginated`; with `total:` the `COUNT` is skipped and the collection may be omitted entirely (`pagination_meta(total: result.total_hits)`).
+
+**`pagination_meta[:pages]` — the page window**
+
+Declaring `window: N` adds a `pages:` key: an Array of page numbers with the Symbol `:gap` standing in for each run of pages left out. It is built from the `total` already counted, so it costs no extra query, and it is absent (not `nil`) unless `window:` is declared — `meta.key?(:pages)` is a clean opt-in probe.
+
+The rules, for `window: 3` over 100 pages:
+
+| Current page | `pages:` | Why |
+|---|---|---|
+| `47` | `[1, :gap, 44, 45, 46, 47, 48, 49, 50, :gap, 100]` | first, ±3, last |
+| `2` | `[1, 2, 3, 4, 5, :gap, 100]` | the window already reaches page 1, so no leading gap |
+| `6` | `[1, 2, 3, 4, 5, 6, 7, 8, 9, :gap, 100]` | the gap would hide only page 2 — a `:gap` marker is no narrower than the number it replaces, so the page is emitted instead |
+| `99` | `[1, :gap, 96, 97, 98, 99, 100]` | mirror of `page: 2` |
+| `999` | `[1, :gap, 97, 98, 99, 100]` | a page past the end windows around the last page, matching what `rel="prev"` already does |
+
+With fewer pages than the window spans, every page is listed and no gap appears (`[1, 2, 3, 4, 5]` for 5 pages; `[1]` for one). An empty collection has `total_pages == 0` and gets no `pages:` key at all.
 
 The four `X-*` headers set on `response`:
 
@@ -171,6 +188,8 @@ end
 - **`Link` header is on by default.** Every non-empty paginated response carries `first`/`prev`/`next`/`last` links built from `request.base_url + request.path` and the current query string — behind a proxy, make sure `X-Forwarded-Host`/`-Proto` reach Rails (`config.action_dispatch.trusted_proxies`) or the links will name the internal host. `paginate_by link_header: false` disables it; the `X-*` headers are unaffected.
 - **`Link` is appended, not set.** If Deprecatable (or a CDN hint) already put a `Link` header on the response, the pagination links are appended after it with a comma.
 - **No database columns required.** This is a pure controller concern with no model-layer dependency.
+- **`pages:` is body-only, by design.** The page window is published through `pagination_meta`, never as headers — the current page is already `X-Page`, and a dozen `rel="page"` entries would bloat the `Link` header without telling a client anything it cannot compute from `X-Total-Pages`. Render it in the response body (or a view) instead.
+- **`:gap` is a Symbol, so JSON turns it into a string.** `pages: [1, :gap, 47]` serializes as `[1, "gap", 47]`. Compare against `"gap"` on the client, or map the Symbol to whatever your serializer wants (`nil`, `"…"`) before rendering.
 - **In-memory collections are sliced in Ruby.** The whole collection is already in memory by definition, so `paginated(array)` costs one `to_a` plus an `Array#[]` — there is no lazy path. If the data lives in a table, pass the relation so the database does the work.
 - **Relation detection is duck-typed.** Anything answering `limit` and `offset` takes the SQL path; that includes association proxies and model classes, and keeps a `has_many` collection paginating in the database rather than loading it.
 - **Headers require a live `response` object.** The `set_pagination_headers` method guards with `respond_to?(:response) && response`. In plain unit tests without a real HTTP response object, headers are silently skipped; the return value (the paginated relation) is still correct.

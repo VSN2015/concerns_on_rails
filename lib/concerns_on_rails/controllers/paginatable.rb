@@ -41,6 +41,9 @@ module ConcernsOnRails
         class_attribute :paginatable_per_page, default: DEFAULT_PER_PAGE
         class_attribute :paginatable_max_per_page, default: DEFAULT_MAX_PER_PAGE
         class_attribute :paginatable_link_header, default: true
+        # Half-width of the page window in `pagination_meta[:pages]`; nil = no
+        # window, and no `pages:` key at all.
+        class_attribute :paginatable_window, default: nil
         # Where page / per_page are read from — a path of param names (`["page"]`,
         # or `["page", "number"]` for JSON:API's page[number]).
         class_attribute :paginatable_page_param, default: %w[page].freeze
@@ -55,10 +58,11 @@ module ConcernsOnRails
         # Example:
         #   paginate_by per_page: 50, max_per_page: 500, link_header: false
         def paginate_by(per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE, link_header: true,
-                        page_param: nil, per_page_param: nil, style: :flat)
+                        page_param: nil, per_page_param: nil, style: :flat, window: nil)
           self.paginatable_per_page = per_page.to_i
           self.paginatable_max_per_page = max_per_page.to_i
           self.paginatable_link_header = link_header ? true : false
+          self.paginatable_window = paginatable_window!(window)
           defaults = paginatable_style_params!(style)
           self.paginatable_page_param = paginatable_param_path!(:page_param, page_param || defaults[0])
           self.paginatable_per_page_param = paginatable_param_path!(:per_page_param, per_page_param || defaults[1])
@@ -73,6 +77,15 @@ module ConcernsOnRails
           when :jsonapi then [%w[page number], %w[page size]]
           else raise ArgumentError, "#{LABEL}: style: must be :flat or :jsonapi (got #{style.inspect})"
           end
+        end
+
+        # nil / false disable the window (no `pages:` key). `0` is meaningful:
+        # first, current and last only.
+        def paginatable_window!(value)
+          return nil if value.nil? || value == false
+          return value if value.is_a?(Integer) && !value.negative?
+
+          raise ArgumentError, "#{LABEL}: window: must be a non-negative Integer or nil (got #{value.inspect})"
         end
 
         # A name or a non-empty path of names, normalized to Strings.
@@ -117,8 +130,9 @@ module ConcernsOnRails
             source.limit(per_page).offset(offset)
           end
 
-        @paginatable_meta = { total: total, page: page, per_page: per_page, total_pages: total_pages }
-        set_pagination_headers(**@paginatable_meta)
+        @paginatable_meta =
+          paginatable_windowed(total: total, page: page, per_page: per_page, total_pages: total_pages)
+        set_pagination_headers(total: total, page: page, per_page: per_page, total_pages: total_pages)
         set_pagination_links(page: page, total_pages: total_pages)
         records
       end
@@ -134,12 +148,12 @@ module ConcernsOnRails
 
         total = paginatable_meta_total(collection, total)
         per_page = pagination_per_page
-        {
+        paginatable_windowed(
           total: total,
           page: pagination_page,
           per_page: per_page,
           total_pages: per_page.positive? ? (total.to_f / per_page).ceil : 0
-        }
+        )
       end
 
       private
@@ -226,6 +240,39 @@ module ConcernsOnRails
         path[1...-1].each { |key| node = (node[key] = node[key].is_a?(Hash) ? node[key] : {}) }
         node[path.last] = number
         { path.first.to_sym => nested }
+      end
+
+      # Adds `pages:` to a meta Hash when `window:` is declared, and leaves the
+      # Hash untouched otherwise — the key is absent, never nil, so
+      # `meta.key?(:pages)` is a clean opt-in probe.
+      def paginatable_windowed(meta)
+        pages = paginatable_page_window(meta[:page], meta[:total_pages])
+        pages ? meta.merge(pages: pages) : meta
+      end
+
+      # First, last, and `window` pages either side of the current page, with
+      # :gap standing in for the runs left out — [1, :gap, 46, 47, 48, :gap, 100].
+      # Pure arithmetic over the total already counted: no extra query. A page
+      # past the last one windows around the last page, as `prev` already does.
+      def paginatable_page_window(page, total_pages)
+        window = self.class.paginatable_window
+        return nil if window.nil? || total_pages < 1
+
+        current = page.clamp(1, total_pages)
+        from = [current - window, 1].max
+        to = [current + window, total_pages].min
+        paginatable_insert_gaps(([1, total_pages] + (from..to).to_a).uniq.sort)
+      end
+
+      # A jump of exactly two pages is filled with the page it would have
+      # hidden — "1 2 3", never the wider "1 … 3"; anything longer collapses
+      # into one :gap.
+      def paginatable_insert_gaps(numbers)
+        numbers.each_cons(2).with_object([numbers.first]) do |(previous, current), result|
+          result << (previous + 1) if current - previous == 2
+          result << :gap if current - previous > 2
+          result << current
+        end
       end
 
       def set_pagination_headers(total:, page:, per_page:, total_pages:)
