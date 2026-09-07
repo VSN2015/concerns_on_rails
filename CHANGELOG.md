@@ -1,5 +1,37 @@
 <!-- CHANGELOG.md -->
 
+## 1.28.1 (2026-09-07)
+
+One additive Paginatable option (#89): `pagination_meta` can now publish the
+page window a pagination bar needs — first, last and N pages either side of the
+current page — instead of leaving every client to compute it from
+`total_pages`. Opt-in, controller-only, no extra query, and existing responses
+are byte-for-byte unchanged. 1314 examples, 0 failures.
+
+### Added
+- **Controllers::Paginatable**: `paginate_by window: 3` adds a `pages:` key to
+  `pagination_meta` — the first page, the last page, and N pages either side of
+  the current one, with the Symbol `:gap` standing in for each run left out
+  (`[1, :gap, 44, 45, 46, 47, 48, 49, 50, :gap, 100]`) — enough to render a
+  `1 … 44 45 46 [47] 48 49 50 … 100` bar straight from the meta Hash. Opt-in:
+  without `window:` the key is absent entirely (not `nil`), so no existing
+  meta Hash or serialized body changes shape, and `meta.key?(:pages)` is a
+  clean probe. The window is arithmetic over the `total` already counted, so it
+  costs no extra query on either the memoized `paginated` path or the fresh
+  `pagination_meta` one. A jump of exactly two pages is filled with the page it
+  would have hidden (`1 2 3`, never the wider `1 … 3`), and a `?page=` past the
+  last page windows around the last page as `rel="prev"` already does.
+  `window:` is validated at declaration — a non-negative Integer, or
+  `nil`/`false` to disable; `0` yields first, current and last only. Headers
+  and `Link` rels are unchanged: `pages:` is body-only by design. (#89)
+
+### Internal
+- `set_pagination_headers` no longer splats the memoized meta Hash, which
+  raised `unknown keyword: :pages` once that Hash could carry the window; the
+  four header values are passed explicitly.
+- README's advertised example counts were stale (1,160 and 1,303) and now read
+  1,314.
+
 ## 1.28.0 (2026-09-06)
 
 Pagination is the theme: the four-PR Paginatable stack (#40, #45, #62, #83)
