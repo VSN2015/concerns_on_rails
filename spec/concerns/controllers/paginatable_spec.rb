@@ -450,4 +450,84 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(result.header("Link")).to include(%(<http://example.org/?p=3&limit=10>; rel="next"))
     end
   end
+
+  describe "window:" do
+    # `total:` drives total_pages without materializing thousands of rows:
+    # total 1000 / per_page 10 => 100 pages.
+    def meta(window:, page:, total:, per_page: 10)
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Paginatable
+      end
+      klass.paginate_by(window: window)
+      klass.new(params: { page: page, per_page: per_page }).pagination_meta(total: total)
+    end
+
+    it "returns first, last and a window of pages either side of the current page" do
+      expect(meta(window: 3, page: 47, total: 1000)[:pages])
+        .to eq([1, :gap, 44, 45, 46, 47, 48, 49, 50, :gap, 100])
+    end
+
+    it "omits the leading gap when the window reaches the first page" do
+      expect(meta(window: 3, page: 2, total: 1000)[:pages]).to eq([1, 2, 3, 4, 5, :gap, 100])
+    end
+
+    it "fills a one-page gap rather than hiding a single page behind an ellipsis" do
+      expect(meta(window: 3, page: 6, total: 1000)[:pages]).to eq([1, 2, 3, 4, 5, 6, 7, 8, 9, :gap, 100])
+    end
+
+    it "omits the trailing gap when the window reaches the last page" do
+      expect(meta(window: 3, page: 99, total: 1000)[:pages]).to eq([1, :gap, 96, 97, 98, 99, 100])
+    end
+
+    it "lists every page when the window spans the whole collection" do
+      expect(meta(window: 3, page: 3, total: 50)[:pages]).to eq([1, 2, 3, 4, 5])
+      expect(meta(window: 3, page: 1, total: 4)[:pages]).to eq([1])
+    end
+
+    it "clamps a page past the last page into the window" do
+      expect(meta(window: 2, page: 999, total: 1000)[:pages]).to eq([1, :gap, 98, 99, 100])
+    end
+
+    it "keeps only first, current and last with window: 0" do
+      expect(meta(window: 0, page: 47, total: 1000)[:pages]).to eq([1, :gap, 47, :gap, 100])
+    end
+
+    it "omits pages: entirely for an empty collection" do
+      expect(meta(window: 3, page: 1, total: 0)).not_to have_key(:pages)
+    end
+
+    it "omits pages: entirely when window: is not declared" do
+      controller = controller_class.new(params: { page: 2, per_page: 10 })
+      controller.paginated(Widget.order(:id))
+      expect(controller.pagination_meta).not_to have_key(:pages)
+      expect(controller.pagination_meta(total: 1000)).not_to have_key(:pages)
+    end
+
+    it "includes pages: in the meta memoized by paginated" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Paginatable
+      end
+      klass.paginate_by(window: 0, per_page: 5)
+      controller = klass.new(params: { page: 5 })
+      controller.paginated(Widget.order(:id)) # 50 widgets / 5 => 10 pages
+      expect(controller.pagination_meta[:pages]).to eq([1, :gap, 5, :gap, 10])
+      expect(controller.response.headers["X-Total-Pages"]).to eq("10")
+    end
+
+    it "validates window: at declaration" do
+      build = lambda do |window|
+        Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Paginatable
+
+          paginate_by(window: window)
+        end
+      end
+      expect { build.call(-1) }.to raise_error(ArgumentError, /window: must be a non-negative Integer/)
+      expect { build.call("3") }.to raise_error(ArgumentError, /window: must be a non-negative Integer/)
+      expect { build.call(2.5) }.to raise_error(ArgumentError, /window: must be a non-negative Integer/)
+      expect(build.call(nil).paginatable_window).to be_nil
+      expect(build.call(false).paginatable_window).to be_nil
+      expect(build.call(0).paginatable_window).to eq(0)
+    end
+  end
 end
