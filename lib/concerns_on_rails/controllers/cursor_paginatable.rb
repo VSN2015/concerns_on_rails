@@ -3,6 +3,8 @@ require "concerns_on_rails/support/error_envelope"
 require "concerns_on_rails/support/scalar_param"
 require "json"
 require "concerns_on_rails/support/link_header"
+require "openssl"
+require "active_support/security_utils"
 require "time" # Time#iso8601(fraction_digits) lives in the stdlib time library
 
 module ConcernsOnRails
@@ -143,6 +145,9 @@ module ConcernsOnRails
         class_attribute :cursor_paginatable_bidirectional, default: false
         class_attribute :cursor_paginatable_predicate, default: :auto
         class_attribute :cursor_paginatable_link_header, default: true
+        # false (unsigned), true (Rails.application.secret_key_base), a String
+        # key, or a callable returning the key — see cursor_paginate_by.
+        class_attribute :cursor_paginatable_signed, default: false
 
         # Real controllers (anything with ActiveSupport::Rescuable) get the 400
         # handlers automatically; bare objects let the errors propagate.
@@ -163,7 +168,7 @@ module ConcernsOnRails
         # max_per_page: 0 (or negative) disables the per_page cap.
         def cursor_paginate_by(order: nil, order_presets: nil, default_preset: nil, order_param: :order,
                                per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE,
-                               bidirectional: false, predicate: :auto, link_header: true)
+                               bidirectional: false, predicate: :auto, link_header: true, signed: false)
           self.cursor_paginatable_order = order && CursorPaginatable.normalize_order!(order)
           self.cursor_paginatable_order_presets = order_presets && CursorPaginatable.normalize_presets!(order_presets)
           self.cursor_paginatable_default_preset =
@@ -174,7 +179,17 @@ module ConcernsOnRails
           self.cursor_paginatable_bidirectional = bidirectional ? true : false
           self.cursor_paginatable_predicate = CursorPaginatable.validate_predicate!(predicate)
           self.cursor_paginatable_link_header = link_header ? true : false
+          self.cursor_paginatable_signed = CursorPaginatable.validate_signed!(signed)
         end
+      end
+
+      # `signed:` — false, true (the app's secret_key_base), a non-blank String,
+      # or a callable (resolved per request, so keys can rotate).
+      def self.validate_signed!(signed)
+        return signed if [true, false].include?(signed) || signed.respond_to?(:call)
+        return signed if signed.is_a?(String) && !signed.strip.empty?
+
+        raise ArgumentError, "#{name}: signed: must be true, false, a String or a callable"
       end
 
       # Run the keyset query (limit + 1 to detect has_more), set the standard
@@ -339,7 +354,55 @@ module ConcernsOnRails
           "d" => direction,
           "v" => pairs.map { |col, _dir| serialize_cursor_value(cursor_boundary_value!(record, col)) }
         }
-        cursor_base64_encode(JSON.generate(payload))
+        token = cursor_base64_encode(JSON.generate(payload))
+        cursor_signing_key ? "#{token}.#{cursor_signature(token)}" : token
+      end
+
+      # Signed cursors are `<url-safe base64 payload>.<hex HMAC-SHA256>` — the
+      # dot never appears in the payload alphabet, so the split is unambiguous
+      # and the whole token stays URL-safe. Verification is constant-time and
+      # happens BEFORE the payload is parsed; an unsigned or mis-signed token
+      # on a signed endpoint is rejected (fail closed). Turning signing on
+      # therefore invalidates in-flight cursors: clients restart from page one.
+      def cursor_signature(payload_token)
+        OpenSSL::HMAC.hexdigest("SHA256", cursor_signing_key, payload_token)
+      end
+
+      # nil when unsigned; the key otherwise. `true` reads
+      # Rails.application.secret_key_base (raising a setup hint outside Rails).
+      def cursor_signing_key
+        configured = self.class.cursor_paginatable_signed
+        return nil if configured == false || configured.nil?
+        return cursor_rails_secret_key_base if configured == true
+
+        key = configured.respond_to?(:call) ? configured.call : configured
+        raise ArgumentError, "#{self.class.name}: signed: resolved to a blank key" if key.to_s.strip.empty?
+
+        key.to_s
+      end
+
+      def cursor_rails_secret_key_base
+        app = defined?(Rails) && Rails.respond_to?(:application) ? Rails.application : nil
+        key = app.respond_to?(:secret_key_base) ? app.secret_key_base : nil
+        return key.to_s unless key.to_s.strip.empty?
+
+        raise ArgumentError,
+              "ConcernsOnRails::Controllers::CursorPaginatable: signed: true needs Rails.application.secret_key_base; " \
+              "outside a Rails app pass signed: -> { ... } (a callable returning the key) or a String."
+      end
+
+      # Splits and verifies a signed token, returning the payload half; raises
+      # InvalidCursor when the endpoint is signed and the token is not (or its
+      # signature does not match).
+      def verify_cursor_signature!(raw)
+        return raw unless cursor_signing_key
+
+        payload, signature, extra = raw.split(".", 3)
+        valid = extra.nil? && !payload.to_s.empty? && signature.to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                ActiveSupport::SecurityUtils.secure_compare(signature, cursor_signature(payload))
+        raise InvalidCursor, "Invalid pagination cursor." unless valid
+
+        payload
       end
 
       # A NULL boundary value would emit `col > NULL` — never TRUE in SQL
@@ -375,7 +438,7 @@ module ConcernsOnRails
       def decode_cursor(raw, pairs, model, bidirectional:)
         return nil if raw.nil? || raw.to_s.strip.empty?
 
-        payload = parse_cursor_payload(raw.to_s)
+        payload = parse_cursor_payload(verify_cursor_signature!(raw.to_s))
         raise InvalidCursor, "Invalid pagination cursor." unless payload
 
         verify_cursor_scope!(payload, pairs, model)
