@@ -431,6 +431,22 @@ describe ConcernsOnRails::Storable do
       end
     end
 
+    it "refuses to query a column the host app serialized with a non-JSON coder" do
+      # Reads and writes are supported on such a column, but it holds YAML, so
+      # json_extract would fail deep in the adapter ("malformed JSON").
+      klass = Class.new(TestModel) do
+        self.table_name = "storable_accounts"
+        serialize :settings, coder: YAML, type: Hash
+        include ConcernsOnRails::Storable
+
+        storable_by :settings, theme: { default: "light" }
+      end
+      klass.create!(theme: "dark")
+
+      expect { klass.where_theme("dark").to_a }
+        .to raise_error(ArgumentError, /serialized with a non-JSON coder/)
+    end
+
     it "filters a text-column store by key with typed values" do
       dark = klass.create!(theme: "dark", items_per_page: 50, notifications: false, ratio: 1.5, price: "19.99",
                            trial_ends_at: Time.utc(2026, 1, 2, 3, 4, 5))

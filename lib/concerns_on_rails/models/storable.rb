@@ -148,6 +148,11 @@ module ConcernsOnRails
           if spec[:type] == :json
             raise ArgumentError, "#{LABEL}: where_#{spec[:accessor]}: :json keys are not queryable (equality on a scalar only)"
           end
+          unless storable_queryable_column?(column)
+            raise ArgumentError,
+                  "#{LABEL}: where_#{spec[:accessor]}: '#{column}' is serialized with a non-JSON coder, " \
+                  "so the adapter's JSON functions cannot read it"
+          end
 
           expression = storable_json_expression(column, key)
           return where("#{expression} IS NULL") if value.nil?
@@ -156,6 +161,21 @@ module ConcernsOnRails
         end
 
         private
+
+        # A column the host app serialized with YAML (or any non-JSON coder) is
+        # supported for reads/writes but holds no JSON, so json_extract / ->> /
+        # JSON_EXTRACT would blow up at query time ("malformed JSON" on SQLite).
+        def storable_queryable_column?(column)
+          type = type_for_attribute(column.to_s)
+          return true unless defined?(ActiveRecord::Type::Serialized) && type.is_a?(ActiveRecord::Type::Serialized)
+
+          coder = type.coder
+          coder == ActiveRecord::Coders::JSON ||
+            (defined?(ActiveSupport::JSON) && coder == ActiveSupport::JSON) ||
+            coder.class.name.to_s.include?("JSON")
+        rescue StandardError
+          true
+        end
 
         def storable_adapter
           name = connection.adapter_name.to_s.downcase
@@ -274,7 +294,12 @@ module ConcernsOnRails
         # live schema; without one (db:create, precompile) it is skipped — the
         # method checks below still run.
         def storable_method_taken?(method_name, accessor)
-          return singleton_class.method_defined?(method_name) if method_name.start_with?("where_")
+          # Compare the exact generated name: sniffing the "where_" prefix made a
+          # key literally named where_used skip the column/instance checks entirely.
+          if method_name.to_s == "where_#{accessor}"
+            return singleton_class.method_defined?(method_name) ||
+                   ActiveRecord::Relation.method_defined?(method_name)
+          end
           return true if schema_reachable? && column_names.include?(accessor.to_s)
 
           method_defined?(method_name) || private_method_defined?(method_name)
