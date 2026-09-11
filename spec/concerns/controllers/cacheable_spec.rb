@@ -16,7 +16,10 @@ describe ConcernsOnRails::Controllers::Cacheable do
     end
   end
 
-  FakeCacheRequest = Struct.new(:request_method, :headers) unless defined?(FakeCacheRequest)
+  # format/query_string are here so the :format and :query etag_with presets
+  # actually fold a VALUE; without them both lambdas' respond_to? guards
+  # short-circuit and only their Vary side gets exercised.
+  FakeCacheRequest = Struct.new(:request_method, :headers, :format, :query_string) unless defined?(FakeCacheRequest)
 
   let(:base_class) do
     Class.new(FakeController) do
@@ -33,9 +36,9 @@ describe ConcernsOnRails::Controllers::Cacheable do
     end
   end
 
-  def instance(klass, action: "show", method: "GET", headers: {}, params: {})
+  def instance(klass, action: "show", method: "GET", headers: {}, params: {}, format: nil, query_string: nil)
     controller = klass.new(params: params)
-    request = FakeCacheRequest.new(method, headers)
+    request = FakeCacheRequest.new(method, headers, format, query_string)
     controller.define_singleton_method(:request) { request }
     controller.define_singleton_method(:action_name) { action }
     controller
@@ -223,6 +226,19 @@ describe ConcernsOnRails::Controllers::Cacheable do
     it "is deterministic — the same context yields the same ETag" do
       klass = cacheable_class { etag_with :locale }
       expect(etag_of(instance(klass))).to eq(etag_of(instance(klass)))
+    end
+
+    it "folds the :format and :query preset VALUES, not just their Vary" do
+      formats = cacheable_class { etag_with :format }
+      json = etag_of(instance(formats, format: "application/json"))
+      xml = etag_of(instance(formats, format: "application/xml"))
+      expect(json).not_to eq(xml)
+      expect(etag_of(instance(formats, format: "application/json"))).to eq(json)
+
+      queries = cacheable_class { etag_with :query }
+      first = etag_of(instance(queries, query_string: "page=1"))
+      second = etag_of(instance(queries, query_string: "page=2"))
+      expect(first).not_to eq(second)
     end
 
     it "accepts a block (instance_exec'd) and a Symbol naming a controller method" do

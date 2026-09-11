@@ -1955,7 +1955,7 @@ end
 
 # A matching response then carries:
 #   Cache-Control: public, max-age=300
-#   Vary: Accept, Accept-Language
+#   Vary: Accept-Language, Accept
 #   ETag: W/"…"
 #   Last-Modified: Thu, 01 Jan 2026 12:00:00 GMT
 ```
