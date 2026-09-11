@@ -737,6 +737,10 @@ describe ConcernsOnRails::Models::Addressable do
       other = klass.create!(apple.merge(line1: "500 Oracle Pkwy", city: "Redwood City", postal_code: "94065"))
       blank = klass.new(line1: nil, city: nil, postal_code: nil, country: nil)
       blank.save(validate: false) # required parts missing — bypass validation for the fixture
+      # save(validate: false) skips before_validation, so assert the nil-for-blank
+      # contract against the method itself too — the stored-column check alone
+      # would pass even if address_fingerprint digested an empty address.
+      expect(blank.address_fingerprint).to be_nil
 
       expect(first.reload[:address_fingerprint]).to eq(first.address_fingerprint)
       expect(second.reload[:address_fingerprint]).to eq(first[:address_fingerprint])
@@ -746,6 +750,9 @@ describe ConcernsOnRails::Models::Addressable do
       expect(klass.with_address(first).where.not(id: first.id)).to eq([second]) # "the duplicates of first"
       expect(klass.with_address(first[:address_fingerprint]).count).to eq(2)
       expect(klass.with_address(other).count).to eq(1)
+      # Tolerant like with_address: nil / a non-record answers false, not NoMethodError.
+      expect(first.same_address_as?(nil)).to be(false)
+      expect(first.same_address_as?("deadbeef")).to be(false)
       expect(klass.with_address(blank)).to be_empty
       expect(klass.with_address(nil)).to be_empty
 

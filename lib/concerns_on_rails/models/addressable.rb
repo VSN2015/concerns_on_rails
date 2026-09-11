@@ -278,6 +278,11 @@ module ConcernsOnRails
 
       # Equal fingerprints — never true for two blank addresses.
       def same_address_as?(other)
+        # Tolerant like the sibling `with_address`, which accepts a record, a
+        # digest String or nil: a bare `other.address_fingerprint` turned
+        # `same_address_as?(nil)` into a NoMethodError.
+        return false unless other.respond_to?(:address_fingerprint)
+
         fingerprint = address_fingerprint
         !fingerprint.nil? && fingerprint == other.address_fingerprint
       end

@@ -136,7 +136,7 @@ The macro `addressable_by` accepts any combination of column-override keyword pa
 | `with_address(record_or_fingerprint)` | Records whose stored fingerprint equals the given record's `address_fingerprint` (or the given hex String). Requires `fingerprint:`; raises `ArgumentError` otherwise. A `nil` fingerprint returns `none`. Chain `.where.not(id: record.id)` for "the duplicates of". |
 
 
-The `addressable_by` macro is the sole class-level entry point. There are no additional public class methods.
+`addressable_by` is the configuration macro; with `fingerprint:` it also defines the `with_address` scope documented above.
 
 ## Examples
 
@@ -237,11 +237,11 @@ class Location < ApplicationRecord
 end
 
 a = Location.create!(line1: "  1 Infinite  Loop ", city: "Cupertino", state: "ca", postal_code: "95014", country: "us")
-b = Location.create!(line1: "1 INFINITE LOOP", city: "cupertino", state: "CA", postal_code: "95014")   # country → default "US"
+b = Location.create!(line1: "1 INFINITE LOOP", city: "cupertino", state: "CA", postal_code: "95014", country: "US")
 
 a.same_address_as?(b)                      # => true
 Location.with_address(a).where.not(id: a.id)   # => [b]
-Location.group(:address_fingerprint).having("COUNT(*) > 1").count   # every duplicated address, one query
+Location.where.not(address_fingerprint: nil).group(:address_fingerprint).having("COUNT(*) > 1").count   # every duplicated address, one query
 ```
 
 ## Notes & gotchas
