@@ -1,4 +1,4 @@
-`Monetizable` adds float-free money accessors to any ActiveRecord model that stores monetary amounts as integer subunits (e.g. cents) in the database. Rather than reading and writing raw integers or tolerating binary-float rounding errors, the concern exposes a reader that returns a `BigDecimal`, a writer that accepts any numeric input and rounds it to whole subunits, and a display formatter — all derived automatically from the column name. No external money library is required.
+`Monetizable` adds float-free money accessors to any ActiveRecord model that stores monetary amounts as integer subunits (e.g. cents) in the database. Rather than reading and writing raw integers or tolerating binary-float rounding errors, the concern exposes a reader that returns a `BigDecimal`, a writer that accepts any numeric input and rounds it to whole subunits, a display formatter, and scope-aware class-level aggregates (`sum_price`, `average_price`, `formatted_sum_price`, …) — all derived automatically from the column name. No external money library is required.
 
 ## When to use it
 
@@ -7,6 +7,7 @@
 - An invoicing system must format amounts in different locales — e.g. `€1.999,99` for European display — using per-field delimiter and separator options.
 - A multi-currency ledger uses a non-standard subunit ratio (e.g. Japanese yen, where `subunit_to_unit: 1`) and needs the formatter to reflect that.
 - Any model where rounding money through floating-point arithmetic is unacceptable and explicit cent-level storage is preferred.
+- Reports and dashboards that need totals and averages per scope (`Order.paid.this_month.formatted_sum_total`) without repeating the cents-to-units division and formatting in every view.
 
 ## Installation
 
@@ -70,13 +71,15 @@ All method names below use `price` as the example base name, derived from a colu
 |-----------|---------|-------------|
 | `price` | `BigDecimal` or `nil` | Divides the raw integer column value by `subunit_to_unit` using `BigDecimal` arithmetic. Returns `nil` when the column is `nil`. |
 | `price=(amount)` | — | Multiplies `amount` by `subunit_to_unit`, rounds to the nearest whole subunit, and writes the result back to the integer column. Accepts any value coercible to `BigDecimal` (numeric, string). Assigns `nil` when `amount` is `nil`. |
-| `formatted_price` | `String` or `nil` | Returns a human-readable string using the `unit`, `precision`, `delimiter`, and `separator` options configured at class load time. Negative values are rendered with a leading minus before the unit symbol (e.g. `"-$5.00"`). Returns `nil` when the column is `nil`. |
+| `formatted_price(**overrides)` | `String` or `nil` | Returns a human-readable string using the `unit`, `precision`, `delimiter`, and `separator` options configured at class load time. Any of those (plus `subunit_to_unit`) can be overridden per call — `formatted_price(unit: "€", delimiter: ".", separator: ",")` — and an unknown key raises `ArgumentError`. Negative values are rendered with a leading minus before the unit symbol (e.g. `"-$5.00"`). Returns `nil` when the column is `nil`. |
 
 ### Class methods
 
 | Signature | Description |
 |-----------|-------------|
-| `monetizable(*fields, **options)` | Configuration macro. Validates that each field exists in the schema, then defines the three accessors for each field. Stores the field-to-name mapping in the class attribute `monetizable_rules`. |
+| `monetizable(*fields, **options)` | Configuration macro. Validates that each field exists in the schema, then defines the three instance accessors and the eight class-level aggregates for each field. Stores the field-to-name mapping in the class attribute `monetizable_rules`. |
+| `sum_price` / `average_price` / `minimum_price` / `maximum_price` | Scope-aware aggregates: `SUM`/`AVG`/`MIN`/`MAX` of the cents column divided by `subunit_to_unit`, as a `BigDecimal`. Because they are class methods, a relation delegates to them inside its scoping — `Product.in_stock.sum_price`, `Order.where(...).average_total`. `sum_` is `0` on an empty set; the other three return `nil`. |
+| `formatted_sum_price` / `formatted_average_price` / `formatted_minimum_price` / `formatted_maximum_price` (`**overrides`) | The same aggregates rendered through the field's formatting options (`"$1,234.56"`), with the same per-call overrides as `formatted_price`. `nil` when the aggregate is `nil`. |
 
 The class attribute `monetizable_rules` (a `Hash`) maps each raw cents column name (as a `Symbol`) to the derived method base name (as a `Symbol`). It is not part of the public API but is accessible for introspection.
 
@@ -127,6 +130,23 @@ invoice = Invoice.new(total_cents: 199_999)
 invoice.formatted_total # => "€1.999,99"
 ```
 
+**Scope-aware aggregates and report formatting**
+
+```ruby
+class Order < ApplicationRecord
+  include ConcernsOnRails::Monetizable
+
+  monetizable :total_cents, unit: "€", delimiter: ".", separator: ","
+  scope :paid, -> { where(state: "paid") }
+end
+
+Order.sum_total                     # => BigDecimal("3500.5")   SUM(total_cents) / 100
+Order.paid.average_total            # => BigDecimal("1750.25")  AVG over the paid scope only
+Order.paid.formatted_sum_total      # => "€3.500,50"
+Order.none.average_total            # => nil   (sum_total is 0)
+Order.paid.formatted_sum_total(unit: "EUR ")   # => "EUR 3.500,50"
+```
+
 ## Notes & gotchas
 
 - **Column must exist at class-load time.** `monetizable` calls `ensure_columns!` immediately when the macro is evaluated. If the migration has not been run, an `ArgumentError` is raised with the message `"'<field>' does not exist in the database (table: <table_name>)."` followed by a ready-to-paste `bin/rails generate migration ... <field>:integer` command. This means you cannot call `monetizable` in a model before running the corresponding migration.
@@ -147,6 +167,7 @@ invoice.formatted_total # => "€1.999,99"
 
 - **No ActiveRecord validations are added.** The concern defines no presence, numericality, or format validations. Add those to your model manually if required.
 
+- **Aggregates are class methods, not scopes.** `sum_price` and friends call `sum`/`average`/`minimum`/`maximum` on the current scope, so they work at the end of any relation chain but return a value, not a relation. `average` follows SQL semantics and skips `NULL` rows. On PostgreSQL the raw `AVG` is already a `BigDecimal`; on SQLite/MySQL it is cast through `BigDecimal(value.to_s)` before the division, so there is no float drift.
 - **No scope or callback hooks are defined.** This concern is purely about accessor and formatting methods; it does not touch `default_scope`, `before_save`, or any other ActiveRecord callback.
 
 ## Changed in 1.22.0

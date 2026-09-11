@@ -1174,9 +1174,17 @@ product.formatted_price # => "$19.99"
 |-------------------|-----------------------------------------------|
 | `price`           | the amount as a `BigDecimal` (cents ÷ 100)    |
 | `price=`          | assign in major units; rounded to whole cents |
-| `formatted_price` | a display string (`"$1,234.56"`)              |
+| `formatted_price` | a display string (`"$1,234.56"`); accepts per-call overrides: `formatted_price(unit: "€", delimiter: ".", separator: ",")` |
 
-**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all three methods.
+**Aggregates** — class methods that follow the current scope, exact and float-free:
+
+```ruby
+Product.sum_price                      # => BigDecimal   SUM(price_cents) / 100
+Product.in_stock.average_price         # average_ / minimum_ / maximum_ too — nil on an empty set (sum is 0)
+Order.paid.formatted_sum_total         # => "€3.500,50"  every aggregate has a formatted_ twin (overrides accepted)
+```
+
+**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors.
 
 ---
 

@@ -130,4 +130,60 @@ describe ConcernsOnRails::Models::Monetizable do
       expect(ConcernsOnRails::Support::Money.format(-1, subunit_to_unit: 100_000)).to eq("$0.00")
     end
   end
+
+  describe "class-level aggregates and formatting overrides" do
+    let(:klass) do
+      product_class do
+        monetizable :price_cents
+        monetizable :total_cents, unit: "€", delimiter: ".", separator: ","
+      end
+    end
+
+    before do
+      klass.create!(price_cents: 1999, total_cents: 100_000)
+      klass.create!(price_cents: 501, total_cents: 250_050)
+      klass.create!(price_cents: nil, total_cents: 0)
+    end
+
+    it "sum_/average_/minimum_/maximum_<name> return BigDecimals in major units" do
+      expect(klass.sum_price).to eq(BigDecimal("25.00"))
+      expect(klass.average_price).to eq(BigDecimal("12.5")) # AVG skips the NULL row
+      expect(klass.minimum_price).to eq(BigDecimal("5.01"))
+      expect(klass.maximum_price).to eq(BigDecimal("19.99"))
+      expect(klass.sum_price).to be_a(BigDecimal)
+    end
+
+    it "is relation-aware and nil-safe on empty sets" do
+      expect(klass.where("price_cents > 1000").sum_price).to eq(BigDecimal("19.99"))
+      expect(klass.where(total_cents: 0).sum_total).to eq(0)
+      expect(klass.none.sum_price).to eq(0)
+      expect(klass.none.average_price).to be_nil
+      expect(klass.none.maximum_price).to be_nil
+    end
+
+    it "formatted_<aggregate>_<name> uses the field's formatting options" do
+      expect(klass.formatted_sum_price).to eq("$25.00")
+      expect(klass.formatted_average_price).to eq("$12.50")
+      expect(klass.formatted_sum_total).to eq("€3.500,50")
+      expect(klass.where("price_cents > 1000").formatted_maximum_price).to eq("$19.99")
+      expect(klass.none.formatted_average_price).to be_nil
+    end
+
+    it "formatted_<name> and the formatted aggregates accept per-call overrides" do
+      expect(klass.new(price_cents: 123_456).formatted_price(unit: "€", delimiter: ".", separator: ",")).to eq("€1.234,56")
+      expect(klass.formatted_sum_price(unit: "£")).to eq("£25.00")
+      expect(klass.new(price_cents: 1999).formatted_price).to eq("$19.99") # defaults untouched
+      expect { klass.new(price_cents: 1).formatted_price(units: "x") }
+        .to raise_error(ArgumentError, /unknown formatting option\(s\): units/)
+    end
+
+    it "derives the aggregate names from as: too" do
+      amounts = product_class { monetizable :balance, as: :amount, unit: "£" }
+      amounts.delete_all
+      amounts.create!(balance: 100)
+      amounts.create!(balance: 250)
+      expect(amounts.sum_amount).to eq(BigDecimal("3.50"))
+      expect(amounts.formatted_sum_amount).to eq("£3.50")
+    end
+  end
 end
