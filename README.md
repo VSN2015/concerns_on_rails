@@ -854,6 +854,7 @@ Invoice.next_sequence(account_id: 1)   # => 4  (peek the next value, without cre
 | `scope:`             | `nil`       | Column (or array of columns) the counter is scoped to — e.g. one sequence per `account_id`. |
 | `reset:`             | `:never`    | `:never` / `:year` / `:month` / `:day` — restart numbering each period (needs `created_at`). |
 | `template:`          | `nil`       | `->(seq, record) { ... }` full custom formatter; overrides `prefix` / `padding` / period. |
+| `assign:`            | `:create`   | `:create` numbers every record in `before_create`; `:manual` leaves the column NULL until `assign_<field>!` is called — for invoices that get their number when finalized, not when drafted. |
 
 **Default format**
 
@@ -870,10 +871,14 @@ Invoice.next_sequence(account_id: 1)   # => 4  (peek the next value, without cre
 |-----------------------------------|---------------------------------------------------------------------------------------|
 | `formatted_<field>`               | The formatted string — the persisted `into:` value when set, otherwise computed.      |
 | `Model.next_<field>(scope_attrs)` | Peek the next integer for a scope without creating a record.                           |
+| `assign_<field>!`                 | Number the record now (`assign: :manual`, or any row still blank): next value + `into:` string, `save!`d when persisted, left for your save when new. `true` when assigned, `false` when already numbered. |
+| `<field>_assigned?`               | Whether the record has its number.                                                    |
+| `Model.pending_<field>`           | Scope: rows still awaiting a number (`WHERE <field> IS NULL`).                          |
 
 **Notes**
 - The next value is `MAX(<field>) + 1` within the scope (and period), so numbering is dense and ordered — not random.
 - Caller-supplied values are respected: `Invoice.create!(sequence: 100)` is not overwritten (and its `into:` string is still formatted from `100`).
+- With `assign: :manual`, numbering follows **assignment** order (the first invoice finalized is #1, whenever it was drafted); with `reset:` the period is still taken from the row's `created_at`, exactly as on create.
 - Generation reads `MAX` then inserts, so two concurrent inserts can race. It's **best-effort** — add a **scoped unique index** on `<field>` (and on `into:`) for a real guarantee, the same way you would for any `MAX`-based numbering.
 - `reset:` requires a `created_at` column; the period is taken from each row's creation time.
 - For fixed-width display (`00042`), make the `into:` column a **string** — integer columns drop leading zeros.
