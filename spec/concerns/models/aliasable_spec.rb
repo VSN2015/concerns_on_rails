@@ -266,8 +266,10 @@ describe ConcernsOnRails::Aliasable do
   describe "query side" do
     it "joins(:alias) joins the source table, aliased when the where-hash references the alias" do
       expect(Author.joins(:works).to_sql).to include('INNER JOIN "books"')
+      # Rails <= 8.0 renders the table alias as `"books" "works"`; Rails 8.1
+      # renders it as `"books" AS "works"`. Both are the same join.
       expect(Author.joins(:works).where(works: { title: "X" }).to_sql)
-        .to include('INNER JOIN "books" "works"')
+        .to match(/INNER JOIN "books" (?:AS )?"works"/)
     end
 
     it "joins(:alias).where(alias: {...}) finds matching rows" do
