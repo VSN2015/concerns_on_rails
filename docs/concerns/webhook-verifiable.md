@@ -44,8 +44,8 @@ Each call appends a rule; the **first** rule matching the current action wins (n
 | `header:` | `String` | scheme preset | Required for `:hex`/`:base64` (they have no standard header); overrides the preset for the others. |
 | `tolerance:` | positive duration | `300` (Stripe only) | Replay window for `:stripe` — rejects `\|now − t\| > tolerance`. Raises if passed with any other scheme. |
 | `digest:` | `Symbol` | `:sha256` | `:sha1`/`:sha512` allowed for `:hex`/`:base64` only; the provider presets pin SHA256. |
-| `replay:` | `true` or a store | `nil` (off) | Replay protection. After the signature verifies, `SHA256(signature header)` is written to the store with `unless_exist:` and `replay_ttl:`; a second delivery with the same signature is rejected with 409 `webhook_replayed`. `true` uses `ConcernsOnRails.config.cache_store` (raises with a setup hint when none is configured); any object with `#write(key, value, expires_in:, unless_exist:)` works. Forged traffic never consumes a slot; keys are scoped per controller action. |
-| `replay_ttl:` | positive duration | `24.hours` | How long a seen signature stays blocked. Requires `replay:`. For Stripe the `tolerance:` window already bounds replays, so a shorter ttl is fine there. |
+| `replay:` | `true` or a store | `nil` (off) | Replay protection. After the signature verifies, `SHA256(signature header)` is written to the store with `unless_exist:` and `replay_ttl:`; a second delivery with the same signature is rejected with 409 `webhook_replayed`. `true` uses `ConcernsOnRails.config.cache_store` (raises with a setup hint when none is configured); any object with `#write(key, value, expires_in:, unless_exist:)`, `#read(key)` and `#delete(key)` works. Forged traffic never consumes a slot; keys are scoped per controller action. |
+| `replay_ttl:` | positive duration | `24.hours` | How long a seen signature stays blocked, counted from when the action **completed**. Requires `replay:`. For Stripe the `tolerance:` window already bounds replays, so a shorter ttl is fine there. |
 
 ### Schemes
 

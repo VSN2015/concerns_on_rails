@@ -85,9 +85,16 @@ module ConcernsOnRails
       MAX_STRIPE_SIGNATURES = 16
       STRIPE_TIMESTAMP_FORMAT = /\A\d+\z/
 
+      # Seconds a replay claim survives when the action never completed. Long
+      # enough to serialise concurrent duplicate deliveries, short enough that
+      # a provider retrying a delivery whose handler failed is not locked out
+      # for the whole replay_ttl.
+      REPLAY_CLAIM_TTL = 60
+
       included do
         class_attribute :webhook_rules, instance_accessor: false, default: []
         before_action :verify_webhook_signature!
+        after_action :commit_webhook_replay_claim
       end
 
       module ClassMethods
@@ -205,6 +212,24 @@ module ConcernsOnRails
         !!@webhook_verified
       end
 
+      # Promote the short claim to the configured replay_ttl once the action
+      # has run (the after_action half of the replay check). A 5xx means the
+      # delivery was not processed, so release the claim outright and let the
+      # provider retry immediately. An action that raises never reaches here,
+      # so its claim simply expires.
+      def commit_webhook_replay_claim
+        claim = @webhook_replay_claim
+        return unless claim
+
+        @webhook_replay_claim = nil
+        store = claim[:store]
+        if webhook_response_status.to_i >= 500
+          store.delete(claim[:key]) if store.respond_to?(:delete)
+        else
+          store.write(claim[:key], 1, expires_in: claim[:ttl])
+        end
+      end
+
       # Single funnel for all failure outcomes (override point). Uses
       # Respondable's render_error when available, otherwise the same inline
       # envelope as Throttleable / Idempotentable.
@@ -256,7 +281,32 @@ module ConcernsOnRails
         store = webhook_replay_store!(rule)
         digest = Digest::SHA256.hexdigest(read_webhook_header(rule).to_s)
         key = "webhook_replay:#{webhook_replay_scope}:#{digest}"
-        !store.write(key, 1, expires_in: rule[:replay_ttl], unless_exist: true)
+
+        # Claim for a SHORT window only. The full replay_ttl is written by
+        # commit_webhook_replay_claim once the action has actually completed.
+        # Writing replay_ttl here would mean one handler that 500s locks the
+        # provider's identical retries out for the whole window — and for the
+        # timestamp-less schemes this targets, every retry of the same body
+        # carries the same signature, so the delivery would be lost for good.
+        if store.write(key, 1, expires_in: REPLAY_CLAIM_TTL, unless_exist: true)
+          @webhook_replay_claim = { store: store, key: key, ttl: rule[:replay_ttl] }
+          return false
+        end
+
+        # A falsy write is ambiguous: either someone else holds the key, or the
+        # store is unreachable — Rails' Redis and memcached stores swallow
+        # connection errors and return false. Confirm with a read, which fails
+        # safe to nil, so a cache outage lets webhooks through instead of
+        # rejecting every single one.
+        return false unless store.respond_to?(:read)
+
+        !store.read(key).nil?
+      end
+
+      def webhook_response_status
+        return 200 unless respond_to?(:response) && response.respond_to?(:status)
+
+        response.status || 200
       end
 
       def webhook_replay_store!(rule)
