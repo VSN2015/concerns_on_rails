@@ -183,6 +183,7 @@ instead of per controller class:
 # config/initializers/concerns_on_rails.rb
 ConcernsOnRails.setup do |config|
   config.cache_store = -> { Rails.cache }   # fallback for Throttleable / Idempotentable
+  config.audit_actor = -> { Current.user&.id } # fallback "by" for every Auditable model
 end
 
 # Encryptable's key lives in its own config (see the Encryptable section):
@@ -1190,9 +1191,12 @@ class Product < ApplicationRecord
 
   auditable_by :price, :status                       # default column :audit_log
   # auditable_by :price, into: :history,
-  #              actor: -> { Current.user&.email },  # stamps "by" on each entry
+  #              actor: -> { Current.user&.email },  # stamps "by" on each entry (or actor: :updated_by_id)
   #              max_entries: 50                     # keep the newest 50
 end
+
+# Or set the actor once for every audited model — models without actor: use it, actor: false opts out:
+ConcernsOnRails.setup { |config| config.audit_actor = -> { Current.user&.id } }
 
 product.update!(price: 200)
 product.audit_trail
@@ -1204,7 +1208,7 @@ product.clear_audit_trail!                 # wipe the column (skips callbacks)
 
 One entry is recorded **per changed field per save** (creates record `"from" => nil`), appended in the same `INSERT`/`UPDATE` via `before_save` — zero extra queries.
 
-**Options**: `into:` (`:audit_log`), `actor:` (callable, `instance_exec`'d on the record; `"by"` omitted when absent), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited), `max_value_length:` (`nil`; truncates long String `from`/`to` values to the first N characters + `…`).
+**Options**: `into:` (`:audit_log`), `actor:` (a callable `instance_exec`'d on the record, or a Symbol naming a record method such as `:updated_by_id`; defaults to the gem-wide `config.audit_actor`, `false` opts out of it; `"by"` omitted when it resolves to nil), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited), `max_value_length:` (`nil`; truncates long String `from`/`to` values to the first N characters + `…`).
 
 **Notes**
 - Writes that skip callbacks (`update_column(s)`, `touch`, `increment!`) are **not** audited; `save(validate: false)` is.

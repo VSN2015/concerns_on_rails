@@ -415,4 +415,84 @@ describe ConcernsOnRails::Auditable do
       expect(p.reload.audit_trail.map { |e| e["to"] }).to eq([1])
     end
   end
+  describe "actor defaults (gem-wide audit_actor, actor: false, Symbol actors)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :audited_docs, force: true do |t|
+          t.string :title
+          t.string :editor_email
+          t.text :audit_log
+        end
+      end
+    end
+
+    after { ConcernsOnRails.config.audit_actor = nil }
+
+    def doc_class(**options)
+      Class.new(TestModel) do
+        self.table_name = "audited_docs"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :title, **options
+      end
+    end
+
+    it "falls back to the gem-wide audit_actor when the model passes no actor:" do
+      ConcernsOnRails.setup { |c| c.audit_actor = -> { "system@example.com" } }
+      doc = doc_class.create!(title: "a")
+      expect(doc.audit_trail.last["by"]).to eq("system@example.com")
+    end
+
+    it "instance_execs the gem-wide actor on the record (record attributes and globals in scope)" do
+      ConcernsOnRails.setup { |c| c.audit_actor = -> { editor_email } }
+      doc = doc_class.create!(title: "a", editor_email: "e@x.com")
+      expect(doc.audit_trail.last["by"]).to eq("e@x.com")
+    end
+
+    it "lets a model-level actor: win over the gem-wide default" do
+      ConcernsOnRails.setup { |c| c.audit_actor = -> { "global" } }
+      doc = doc_class(actor: -> { "local" }).create!(title: "a")
+      expect(doc.audit_trail.last["by"]).to eq("local")
+    end
+
+    it "actor: false opts one model out of the gem-wide default" do
+      ConcernsOnRails.setup { |c| c.audit_actor = -> { "global" } }
+      doc = doc_class(actor: false).create!(title: "a")
+      expect(doc.audit_trail.last).not_to have_key("by")
+      expect(doc.class.auditable_actor).to be(false)
+    end
+
+    it "actor: with a Symbol calls that method on the record (by omitted when it returns nil)" do
+      doc = doc_class(actor: :editor_email).create!(title: "a", editor_email: "sym@x.com")
+      expect(doc.audit_trail.last["by"]).to eq("sym@x.com")
+
+      blank = doc_class(actor: :editor_email).create!(title: "b")
+      expect(blank.audit_trail.last).not_to have_key("by")
+    end
+
+    it "resolves the gem-wide actor lazily, per save" do
+      doc = doc_class.create!(title: "a")
+      expect(doc.audit_trail.last).not_to have_key("by")
+
+      ConcernsOnRails.setup { |c| c.audit_actor = -> { "later" } }
+      doc.update!(title: "b")
+      expect(doc.audit_trail.last["by"]).to eq("later")
+    end
+
+    it "JSON-coerces the resolved actor (a Hash of ids is fine)" do
+      ConcernsOnRails.setup { |c| c.audit_actor = -> { { id: 7, type: :User } } }
+      doc = doc_class.create!(title: "a")
+      expect(doc.audit_trail.last["by"]).to eq("id" => 7, "type" => "User")
+    end
+
+    it "rejects an actor: that is neither callable, a Symbol, nil nor false" do
+      expect { doc_class(actor: "nope") }.to raise_error(ArgumentError, /actor must be callable.*Symbol.*nil or false/)
+    end
+
+    it "rejects a non-callable gem-wide audit_actor when it is set" do
+      expect { ConcernsOnRails.setup { |c| c.audit_actor = "nope" } }
+        .to raise_error(ArgumentError, /audit_actor must be callable/)
+      expect(ConcernsOnRails.config.audit_actor).to be_nil
+    end
+  end
 end

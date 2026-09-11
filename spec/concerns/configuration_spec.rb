@@ -21,6 +21,15 @@ RSpec.describe "ConcernsOnRails.setup / Configuration" do
     expect(calls).to eq(2)
   end
 
+  it "stores a callable audit_actor (the Auditable fallback) and rejects anything else" do
+    actor = -> { "ops@example.com" }
+    ConcernsOnRails.setup { |config| config.audit_actor = actor }
+    expect(ConcernsOnRails.config.audit_actor).to equal(actor)
+    expect { ConcernsOnRails.config.audit_actor = :not_a_proc }.to raise_error(ArgumentError, /audit_actor must be callable/)
+    ConcernsOnRails.config.audit_actor = nil
+    expect(ConcernsOnRails.config.audit_actor).to be_nil
+  end
+
   it "resolves to nil when nothing is configured" do
     expect(ConcernsOnRails.config.resolved_cache_store).to be_nil
   end
