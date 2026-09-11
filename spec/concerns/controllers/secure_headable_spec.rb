@@ -140,4 +140,75 @@ describe ConcernsOnRails::Controllers::SecureHeadable do
       expect(forwarded).to eq(block)
     end
   end
+  describe "modern presets and bundles" do
+    def headers_for(*presets)
+      klass = controller_class(base_class) { secure_headers(*presets) }
+      controller = klass.new
+      controller.apply_secure_headers
+      controller.response.headers
+    end
+
+    it "adds HSTS, the cross-origin trio (COOP / COEP / CORP) and a conservative Permissions-Policy" do
+      headers = headers_for(:hsts, :same_origin_opener, :require_corp_embedder, :same_origin_resource, :no_sensitive_permissions)
+      expect(headers["Strict-Transport-Security"]).to eq("max-age=31536000; includeSubDomains")
+      expect(headers["Cross-Origin-Opener-Policy"]).to eq("same-origin")
+      expect(headers["Cross-Origin-Embedder-Policy"]).to eq("require-corp")
+      expect(headers["Cross-Origin-Resource-Policy"]).to eq("same-origin")
+      expect(headers["Permissions-Policy"])
+        .to eq("accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()")
+    end
+
+    it "offers the popup-friendly COOP variant" do
+      expect(headers_for(:same_origin_opener_allow_popups)["Cross-Origin-Opener-Policy"]).to eq("same-origin-allow-popups")
+    end
+
+    it ":recommended bundles the break-nothing baseline (no COEP/CORP/HSTS)" do
+      headers = headers_for(:recommended)
+      expect(headers).to include(
+        "X-Content-Type-Options" => "nosniff",
+        "X-Frame-Options" => "DENY",
+        "Referrer-Policy" => "strict-origin-when-cross-origin",
+        "X-Permitted-Cross-Domain-Policies" => "none",
+        "X-XSS-Protection" => "0",
+        "Cross-Origin-Opener-Policy" => "same-origin-allow-popups"
+      )
+      expect(headers).to have_key("Permissions-Policy")
+      expect(headers).not_to have_key("Cross-Origin-Embedder-Policy")
+      expect(headers).not_to have_key("Cross-Origin-Resource-Policy")
+      expect(headers).not_to have_key("Strict-Transport-Security")
+      expect(headers.size).to eq(7)
+    end
+
+    it ":cross_origin_isolation bundles COOP same-origin + COEP require-corp + CORP same-origin" do
+      headers = headers_for(:cross_origin_isolation)
+      expect(headers).to eq(
+        "Cross-Origin-Opener-Policy" => "same-origin",
+        "Cross-Origin-Embedder-Policy" => "require-corp",
+        "Cross-Origin-Resource-Policy" => "same-origin"
+      )
+    end
+
+    it "lets a later preset or custom value relax a bundled header (order wins)" do
+      relaxed = headers_for(:recommended, :sameorigin_frame)
+      expect(relaxed["X-Frame-Options"]).to eq("SAMEORIGIN")
+
+      klass = controller_class(base_class) do
+        secure_headers :recommended
+        secure_headers "Permissions-Policy" => "geolocation=(self)"
+      end
+      controller = klass.new
+      controller.apply_secure_headers
+      expect(controller.response.headers["Permissions-Policy"]).to eq("geolocation=(self)")
+    end
+
+    it "lists presets and bundles in the unknown-preset error" do
+      expect { controller_class(base_class) { secure_headers :nope } }
+        .to raise_error(ArgumentError, /unknown preset 'nope'.*Valid presets: nosniff.*hsts.*Bundles: cross_origin_isolation, recommended/)
+    end
+
+    it "exposes the bundle map" do
+      expect(described_class::BUNDLES.keys).to match_array(%i[cross_origin_isolation recommended])
+      described_class::BUNDLES.each_value { |members| expect(members - described_class::PRESETS.keys).to be_empty }
+    end
+  end
 end
