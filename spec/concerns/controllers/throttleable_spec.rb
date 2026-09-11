@@ -146,4 +146,155 @@ describe ConcernsOnRails::Controllers::Throttleable do
       end.to raise_error(ArgumentError, /:only or :except/)
     end
   end
+  describe "conditional rules (if: / unless:)" do
+    it "skips a rule whose if: callable is falsy — no counter, no headers" do
+      c = controller(store: store) { throttle_by limit: 1, period: 60, if: -> { params[:staff] != "1" } }
+      c.params[:staff] = "1"
+      c.enforce_throttles
+      c.enforce_throttles
+
+      expect(c.rendered).to be_nil
+      expect(c.response.headers["X-RateLimit-Limit"]).to be_nil
+    end
+
+    it "applies a rule whose if: callable is truthy" do
+      klass = throttled_class(store) { throttle_by limit: 1, period: 60, if: -> { params[:staff] != "1" } }
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        first = instance(klass)
+        second = instance(klass)
+        [first, second].each(&:enforce_throttles)
+        expect(second.rendered[:status]).to eq(:too_many_requests)
+      end
+    end
+
+    it "accepts a Symbol naming a controller method for if: and unless:" do
+      klass = throttled_class(store) do
+        throttle_by limit: 1, period: 60, unless: :internal_client?, name: "public"
+
+        def internal_client?
+          request.remote_ip.start_with?("10.")
+        end
+      end
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        internal = [instance(klass, remote_ip: "10.0.0.5"), instance(klass, remote_ip: "10.0.0.5")]
+        internal.each(&:enforce_throttles)
+        expect(internal.map(&:rendered)).to eq([nil, nil])
+
+        external = [instance(klass, remote_ip: "8.8.8.8"), instance(klass, remote_ip: "8.8.8.8")]
+        external.each(&:enforce_throttles)
+        expect(external.last.rendered[:status]).to eq(:too_many_requests)
+      end
+    end
+
+    it "requires BOTH conditions to pass when if: and unless: are given together" do
+      c = controller(store: store) do
+        throttle_by limit: 1, period: 60, if: -> { true }, unless: -> { true }
+      end
+      c.enforce_throttles
+      expect(c.response.headers["X-RateLimit-Limit"]).to be_nil
+    end
+
+    it "composes with only:/except:" do
+      c = controller(store: store, action: "index") { throttle_by limit: 1, period: 60, only: :index, if: -> { false } }
+      c.enforce_throttles
+      expect(c.response.headers["X-RateLimit-Limit"]).to be_nil
+    end
+
+    it "rejects a non-callable, non-Symbol if:/unless:" do
+      expect { throttled_class(store) { throttle_by limit: 1, period: 60, if: "nope" } }
+        .to raise_error(ArgumentError, /:if must be a Symbol or callable/)
+      expect { throttled_class(store) { throttle_by limit: 1, period: 60, unless: 42 } }
+        .to raise_error(ArgumentError, /:unless must be a Symbol or callable/)
+    end
+  end
+
+  describe "instrumentation" do
+    def capture_events
+      events = []
+      subscriber = ActiveSupport::Notifications.subscribe("rate_limited.concerns_on_rails") do |*args|
+        events << ActiveSupport::Notifications::Event.new(*args)
+      end
+      yield
+      events
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscriber)
+    end
+
+    it "emits rate_limited.concerns_on_rails ONLY when a request is throttled, with the rule details" do
+      klass = throttled_class(store) { throttle_by limit: 1, period: 60, name: "login" }
+
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        events = capture_events do
+          instance(klass, remote_ip: "5.5.5.5", action: "create").enforce_throttles
+          instance(klass, remote_ip: "5.5.5.5", action: "create").enforce_throttles
+        end
+
+        expect(events.size).to eq(1)
+        payload = events.first.payload
+        expect(payload).to include(
+          rule: "login", discriminator: "5.5.5.5", count: 2, limit: 1, period: 60, action: "create"
+        )
+        expect(payload[:retry_after]).to be_between(1, 60)
+        expect(payload[:reset_at]).to eq(Time.utc(2026, 1, 1, 12, 1, 0).to_i)
+        expect(payload).to have_key(:controller)
+      end
+    end
+
+    it "still emits when throttled_response is overridden (the event lives in enforce_throttles)" do
+      klass = throttled_class(store) do
+        throttle_by limit: 1, period: 60
+
+        def throttled_response(_rule, _result)
+          render json: { custom: true }, status: :too_many_requests
+        end
+      end
+      events = capture_events do
+        2.times { instance(klass, remote_ip: "6.6.6.6").enforce_throttles }
+      end
+      expect(events.size).to eq(1)
+    end
+  end
+
+  describe "headers with several applicable rules" do
+    it "reflect the tightest rule (fewest remaining), not the last declared" do
+      c = controller(store: store) do
+        throttle_by limit: 3,  period: 60, name: "burst"
+        throttle_by limit: 10, period: 60, name: "sustained"
+      end
+      c.enforce_throttles
+
+      expect(c.response.headers["X-RateLimit-Limit"]).to eq("3")
+      expect(c.response.headers["X-RateLimit-Remaining"]).to eq("2")
+    end
+
+    it "switch to whichever rule is tighter as counters diverge" do
+      klass = throttled_class(store) do
+        throttle_by limit: 100, period: 60, name: "per_ip"
+        throttle_by limit: 2, period: 3600, name: "per_hour"
+      end
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        first = instance(klass, remote_ip: "7.7.7.7")
+        first.enforce_throttles
+        expect(first.response.headers["X-RateLimit-Limit"]).to eq("2")
+        expect(first.response.headers["X-RateLimit-Remaining"]).to eq("1")
+        expect(first.response.headers["X-RateLimit-Reset"]).to eq(Time.utc(2026, 1, 1, 13, 0, 0).to_i.to_s)
+      end
+    end
+
+    it "on a 429 carry the exceeded rule's limit, zero remaining and Retry-After" do
+      klass = throttled_class(store) do
+        throttle_by limit: 100, period: 60, name: "per_ip"
+        throttle_by limit: 1, period: 60, name: "strict"
+      end
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        first = instance(klass, remote_ip: "8.8.4.4")
+        second = instance(klass, remote_ip: "8.8.4.4")
+        [first, second].each(&:enforce_throttles)
+        expect(second.rendered[:status]).to eq(:too_many_requests)
+        expect(second.response.headers["X-RateLimit-Limit"]).to eq("1")
+        expect(second.response.headers["X-RateLimit-Remaining"]).to eq("0")
+        expect(second.response.headers["Retry-After"]).to eq("60")
+      end
+    end
+  end
 end
