@@ -2,13 +2,16 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
+require "securerandom"
+require "active_support/security_utils"
 
 module ConcernsOnRails
   module Models
     # Failed-attempt tracking + account lockout ("Devise lockable-lite") for
     # apps rolling their own authentication (Rails 8 generator,
     # has_secure_password) — which ships no brute-force protection at all.
-    # Two columns on the model's own table, no tokens, no mailers.
+    # Two columns on the model's own table, no mailers — plus an optional
+    # unlock-token column for self-service unlock links.
     #
     #   class User < ApplicationRecord
     #     include ConcernsOnRails::Lockable
@@ -24,6 +27,11 @@ module ConcernsOnRails
     #   user.reset_failed_attempts!     # call on successful login
     #   user.lock_access! / user.unlock_access!
     #   User.locked / User.unlocked     # expiry-aware scopes
+    #
+    #   # Self-service unlock (Devise's :email strategy, minus the mailer):
+    #   lockable_by max_attempts: 5, unlock_token: :unlock_token   # a string column
+    #   user.lock_access!; user.unlock_token   # minted in the same write — mail it as a link
+    #   User.unlock_by_token(params[:token])   # constant-time lookup; unlocks once, returns the user or nil
     #
     # Notes:
     #   * `unlock_in: nil` (the default) means locked until unlock_access! is
@@ -46,8 +54,11 @@ module ConcernsOnRails
     #     after_lock, before/after_unlock) run in a transaction — a raising
     #     hook rolls the write back. reset_failed_attempts! fires no hooks.
     #   * All bang methods raise ArgumentError on unsaved records.
-    #   * Reach for Devise's lockable when you need unlock tokens, unlock
-    #     emails, or per-strategy unlocks.
+    #   * `unlock_token:` mints a 43-char URL-safe token when the account locks
+    #     (kept while locked, cleared by every unlock path — manual, batch
+    #     expiry, the quiet stale-lock reset) and `unlock_by_token` consumes it:
+    #     one link, one unlock. The mailer is yours. Reach for Devise's lockable
+    #     when you need per-strategy unlocks or its full mailer stack.
     module Lockable
       extend ActiveSupport::Concern
 
@@ -61,6 +72,7 @@ module ConcernsOnRails
         class_attribute :lockable_locked_at_field, instance_accessor: false, default: DEFAULT_LOCKED_AT_FIELD
         class_attribute :lockable_max_attempts, instance_accessor: false, default: DEFAULT_MAX_ATTEMPTS
         class_attribute :lockable_unlock_in, instance_accessor: false, default: nil
+        class_attribute :lockable_unlock_token_field, instance_accessor: false, default: nil
         class_attribute :lockable_scope_names, instance_accessor: false,
                                                default: { locked: :locked, unlocked: :unlocked }.freeze
       end
@@ -70,19 +82,67 @@ module ConcernsOnRails
 
         # Configure the lockout columns and policy. See the module docs.
         def lockable_by(attempts: DEFAULT_ATTEMPTS_FIELD, locked_at: DEFAULT_LOCKED_AT_FIELD,
-                        max_attempts: DEFAULT_MAX_ATTEMPTS, unlock_in: nil, prefix: nil, suffix: nil)
+                        max_attempts: DEFAULT_MAX_ATTEMPTS, unlock_in: nil, prefix: nil, suffix: nil,
+                        unlock_token: nil)
           attempts = attempts.to_sym
           locked_at = locked_at.to_sym
-          validate_lockable!(attempts, locked_at, max_attempts: max_attempts, unlock_in: unlock_in)
+          unlock_token = unlock_token&.to_sym
+          validate_lockable!(attempts, locked_at, max_attempts: max_attempts, unlock_in: unlock_in, unlock_token: unlock_token)
 
           self.lockable_attempts_field = attempts
           self.lockable_locked_at_field = locked_at
           self.lockable_max_attempts = max_attempts
           self.lockable_unlock_in = unlock_in
+          self.lockable_unlock_token_field = unlock_token
           ensure_columns!(LABEL, attempts, locked_at,
                           types: { attempts => :integer, locked_at => :datetime })
+          ensure_columns!(LABEL, unlock_token, types: "string:uniq") if unlock_token
           validate_lockable_attempts_column!(attempts)
           define_lockable_scopes(prefix, suffix)
+        end
+
+        # Self-service unlock: look the token up (constant-time compare on the
+        # fetched row, Tokenizable's pattern), unlock through unlock_access!
+        # (hooks fire, token cleared — so a link works exactly once) and
+        # return the record; nil for a blank, unknown or already-used token.
+        def unlock_by_token(token)
+          field = lockable_unlock_token_field
+          raise ArgumentError, "#{LABEL}: unlock_token: is not configured (lockable_by unlock_token: :unlock_token)" unless field
+
+          given = token.to_s
+          return nil if given.strip.empty?
+
+          record = unscoped.find_by(field => given)
+          return nil unless record
+
+          stored = record[field].to_s
+          return nil unless stored.bytesize == given.bytesize && ActiveSupport::SecurityUtils.secure_compare(stored, given)
+
+          unlock_by_claimed_token(record, field, given)
+        end
+
+        # Claim the token with a conditional UPDATE before unlocking, the way
+        # Tokenizable's consume_<field> does. Read-then-write would let two
+        # concurrent clicks on the same link both unlock and both fire
+        # after_unlock; here they serialize on the row and only the one that
+        # still matched the token gets a row back. Inside a transaction, so a
+        # raising hook puts the token back instead of burning the link.
+        def unlock_by_claimed_token(record, field, given)
+          unlocked = nil
+          transaction do
+            next if unscoped.where(primary_key => record.id, field => given).update_all(field => nil).zero?
+
+            record[field] = nil
+            unlocked = record if record.unlock_access!
+          end
+          unlocked
+        end
+
+        # {} or { unlock_token_field => value } — merged into every write that
+        # locks or unlocks, so the token's lifetime is exactly the lock's.
+        def lockable_token_attributes(value)
+          field = lockable_unlock_token_field
+          field ? { field => value } : {}
         end
 
         # Unlock every row whose lock window has fully elapsed, clearing
@@ -107,7 +167,7 @@ module ConcernsOnRails
           # already skips validations and timestamps, so the two paths agree.
           if ConcernsOnRails::Support::BatchOps.unoverridden?(self, ConcernsOnRails::Models::Lockable,
                                                               :before_unlock, :after_unlock, :unlock_access!)
-            return expired.update_all(locked_field => nil, attempts_field => 0)
+            return expired.update_all({ locked_field => nil, attempts_field => 0 }.merge(lockable_token_attributes(nil)))
           end
 
           ConcernsOnRails::Support::BatchOps.run(
@@ -120,8 +180,11 @@ module ConcernsOnRails
 
         private
 
-        def validate_lockable!(attempts, locked_at, max_attempts:, unlock_in:)
+        def validate_lockable!(attempts, locked_at, max_attempts:, unlock_in:, unlock_token: nil)
           raise ArgumentError, "#{LABEL}: attempts and locked_at must be different columns" if attempts == locked_at
+          if unlock_token && [attempts, locked_at].include?(unlock_token)
+            raise ArgumentError, "#{LABEL}: unlock_token must be a different column from attempts and locked_at"
+          end
           unless positive_integer_or_nil?(max_attempts)
             raise ArgumentError, "#{LABEL}: max_attempts must be a positive Integer or nil (nil = never auto-lock)"
           end
@@ -223,9 +286,9 @@ module ConcernsOnRails
         return true if access_locked?
 
         field = self.class.lockable_locked_at_field
-        lockable_write_with_hooks(field => self[field]) do
+        lockable_write_with_hooks({ field => self[field] }.merge(lockable_token_snapshot)) do
           before_lock
-          update_columns(field => Time.zone.now)
+          update_columns({ field => Time.zone.now }.merge(self.class.lockable_token_attributes(SecureRandom.urlsafe_base64(32))))
           after_lock
         end
       end
@@ -238,10 +301,10 @@ module ConcernsOnRails
         return true if self[locked_field].nil?
 
         attempts_field = self.class.lockable_attempts_field
-        lockable_write_with_hooks(locked_field => self[locked_field],
-                                  attempts_field => self[attempts_field]) do
+        lockable_write_with_hooks({ locked_field => self[locked_field],
+                                    attempts_field => self[attempts_field] }.merge(lockable_token_snapshot)) do
           before_unlock
-          update_columns(locked_field => nil, attempts_field => 0)
+          update_columns({ locked_field => nil, attempts_field => 0 }.merge(self.class.lockable_token_attributes(nil)))
           after_unlock
         end
       end
@@ -332,8 +395,14 @@ module ConcernsOnRails
 
       # No hooks on purpose — see register_failed_attempt!.
       def lockable_clear_expired_lock!
-        update_columns(self.class.lockable_locked_at_field => nil,
-                       self.class.lockable_attempts_field => 0)
+        update_columns({ self.class.lockable_locked_at_field => nil,
+                         self.class.lockable_attempts_field => 0 }.merge(self.class.lockable_token_attributes(nil)))
+      end
+
+      # The token column's current value, for rollback when a hook aborts.
+      def lockable_token_snapshot
+        field = self.class.lockable_unlock_token_field
+        field ? { field => self[field] } : {}
       end
 
       # Read the post-increment count back. unscoped, so a coexisting
