@@ -109,6 +109,7 @@ The macro `addressable_by` accepts any combination of column-override keyword pa
 | `lengths:` | Hash | `{}` | Per-part length constraints keyed by canonical part name. An `Integer` value (e.g. `line1: 100`) sets a positive maximum with no minimum. A `Range` value (e.g. `city: 3..50`) sets both bounds; endless (`3..`) and beginless (`..50`) ranges are supported. Bounds must be non-negative integers; inverted, empty, or float ranges raise `ArgumentError` at load time. Length is measured on the normalized value. |
 | `allow_blank:` | Boolean or Array of Symbols | `false` | Parts whose length check is skipped when the value is blank. `true` exempts all parts; an Array (e.g. `%i[state line2]`) exempts specific parts. Independent of `required:` — a required part that is blank still fails presence validation regardless of this setting. |
 | `normalize_country:` | Boolean | `false` | When `true`, canonicalizes the country value to its ISO 3166-1 alpha-2 code during normalization: recognized English names (`"Canada"`, `"United States"`) and ISO alpha-3 codes (`"CAN"`, `"USA"`) are mapped to their alpha-2 equivalents. Unrecognized values are left unchanged. Also enables postal-code and state validation to recognize named countries. |
+| `fingerprint:` | `Symbol` | `nil` | A `string` column that receives `address_fingerprint` in `before_validation`, after normalization, whenever the value differs. Add a (non-unique) index on it; it is what `with_address` queries. Validated at declaration. |
 | `verify_with:` | Callable | `nil` | An optional callable (lambda or proc) that receives the record and performs real-world deliverability verification. Runs only after all structural validations pass. Return values are interpreted as described in the Examples section. |
 | `if:` | Symbol, Proc, or Array | `nil` | Standard Rails validation condition. When present, address validations are skipped unless the condition holds. Normalization (`before_validation`) always runs unconditionally. |
 | `unless:` | Symbol, Proc, or Array | `nil` | Standard Rails validation condition. When present, address validations are skipped when the condition holds. Normalization still runs unconditionally. |
@@ -124,10 +125,18 @@ The macro `addressable_by` accepts any combination of column-override keyword pa
 | `address_present?` | Returns `true` if any configured part has a value. |
 | `address_complete?` | Returns `true` if every `required:` part has a value (presence check only; no format validation). |
 | `address_attributes` | Returns a Hash of `{ canonical_part => value }` for every present part. Useful for passing to serializers or external verifiers. |
+| `address_fingerprint` | SHA-256 hex digest of the normalized address: every canonical part downcased and squished, the postal code with its spaces removed, the country resolved the way validation resolves it (a blank country becomes `default_country`, a name/alpha-3 becomes alpha-2 under `normalize_country: true`). Two rows that differ only in case, whitespace, postal formatting or an omitted default country hash the same; a change to any part (including `line2`) changes it. `nil` when no address part is present (a country alone does not count). |
+| `same_address_as?(other)` | `true` when both records have a fingerprint and they are equal. Two blank addresses are never "the same". |
+| `address_changed?` | `true` when any mapped address column has an unsaved change. |
 
 ### Class methods
 
-The `addressable_by` macro is the sole class-level entry point. There are no additional public class methods.
+| Signature | Description |
+|-----------|-------------|
+| `with_address(record_or_fingerprint)` | Records whose stored fingerprint equals the given record's `address_fingerprint` (or the given hex String). Requires `fingerprint:`; raises `ArgumentError` otherwise. A `nil` fingerprint returns `none`. Chain `.where.not(id: record.id)` for "the duplicates of". |
+
+
+`addressable_by` is the configuration macro; with `fingerprint:` it also defines the `with_address` scope documented above.
 
 ## Examples
 
@@ -217,6 +226,23 @@ The verifier callable may return:
 - A `String` — added as a `:base` error
 - An `Array` — each element added as a `:base` error
 - Alternatively, the callable may call `record.errors.add(...)` directly and return any value
+
+**Deduplicating addresses**
+
+```ruby
+class Location < ApplicationRecord
+  include ConcernsOnRails::Addressable
+
+  addressable_by fingerprint: :address_fingerprint   # t.string :address_fingerprint, index: true
+end
+
+a = Location.create!(line1: "  1 Infinite  Loop ", city: "Cupertino", state: "ca", postal_code: "95014", country: "us")
+b = Location.create!(line1: "1 INFINITE LOOP", city: "cupertino", state: "CA", postal_code: "95014", country: "US")
+
+a.same_address_as?(b)                      # => true
+Location.with_address(a).where.not(id: a.id)   # => [b]
+Location.where.not(address_fingerprint: nil).group(:address_fingerprint).having("COUNT(*) > 1").count   # every duplicated address, one query
+```
 
 ## Notes & gotchas
 

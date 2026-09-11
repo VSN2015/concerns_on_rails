@@ -1010,6 +1010,7 @@ end
 | `allow_blank:`    | `false`                              | Per-field opt-out for the length check: an Array of parts (e.g. `%i[line2 state]`), or `true` for all parts. A blank value for an allowed part skips its length check. Independent of `required:`. |
 | `normalize_country:` | `false`                           | When `true`, canonicalize the country to its ISO 3166-1 alpha-2 code: an English name (`"Canada"`, `"United States"`) or a 3-letter alpha-3 (`"CAN"`, `"USA"`) maps to the alpha-2 (`"CA"`, `"US"`); unrecognized values are left untouched. This also lets postal/state validation recognize a named country. |
 | `verify_with:`    | `nil`                                | A callable for real-world verification (see below).                 |
+| `fingerprint:`    | `nil`                                | A `string` column to store `address_fingerprint` in (stamped in `before_validation`, after normalization) so duplicates are one indexed query away: `Location.with_address(record)`. |
 | `if:` / `unless:` | `nil`                                | Standard Rails validation conditions (Symbol, Proc, or Array) gating the address **validations** — e.g. `if: :on_addresses?`. Normalization still runs unconditionally. |
 
 **What it normalizes** (in `before_validation`)
@@ -1032,6 +1033,18 @@ end
 | `false`           | adds a generic `:base` error                    |
 | `String`          | added as a `:base` error                        |
 | `Array`           | each element added as a `:base` error           |
+
+**Dedupe helpers**
+
+```ruby
+loc.address_fingerprint        # => "9f2c…" — SHA-256 of the normalized parts: case, whitespace, postal spacing
+                               #    and a blank country (→ default_country) don't change it; nil for a blank address
+loc.same_address_as?(other)    # fingerprints equal (never true for two blanks)
+loc.address_changed?           # any mapped column dirty
+
+addressable_by fingerprint: :address_fingerprint     # add a string column + index
+Location.with_address(loc).where.not(id: loc.id)     # the duplicates of loc (or pass a fingerprint)
+```
 
 **Notes**
 - Scope is **format/structure only** — it checks shape, not real-world deliverability. Plug a USPS/Google/Smarty client into `verify_with:` for that.

@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "digest"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/address_data"
 
@@ -49,6 +50,7 @@ module ConcernsOnRails
         class_attribute :addressable_allow_blank, instance_accessor: false, default: [].freeze
         class_attribute :addressable_normalize_country, instance_accessor: false, default: false
         class_attribute :addressable_validation_registered, instance_accessor: false, default: false
+        class_attribute :addressable_fingerprint_column, instance_accessor: false, default: nil
 
         # `validate :validate_address` is registered by `addressable_by` (not here) so it can
         # carry the optional if:/unless: condition. Normalization always runs.
@@ -65,7 +67,7 @@ module ConcernsOnRails
         # keyword pairs; everything else tunes behavior. See the module docs.
         def addressable_by(required: DEFAULT_REQUIRED, default_country: "US",
                            validate_state: false, verify_with: nil,
-                           lengths: {}, allow_blank: false, normalize_country: false, **mapping)
+                           lengths: {}, allow_blank: false, normalize_country: false, fingerprint: nil, **mapping)
           condition = extract_validation_condition!(mapping)
           self.addressable_fields = resolve_addressable_fields(mapping)
           self.addressable_required = Array(required).map(&:to_sym)
@@ -75,11 +77,35 @@ module ConcernsOnRails
           self.addressable_lengths = resolve_lengths(lengths)
           self.addressable_allow_blank = resolve_allow_blank(allow_blank)
           self.addressable_normalize_country = normalize_country
+          self.addressable_fingerprint_column = resolve_fingerprint_column(fingerprint)
           ensure_required_columns!
           register_address_validation(condition)
         end
 
+        # Records stored with the same address fingerprint as `value` (a record,
+        # or a fingerprint String). Needs `fingerprint:` — the digest has to be
+        # persisted to be queryable. A nil fingerprint (blank address) matches
+        # nothing rather than every other blank row.
+        def with_address(value)
+          column = addressable_fingerprint_column
+          unless column
+            raise ArgumentError,
+                  "#{LABEL}: with_address needs `addressable_by fingerprint:` (a column to store address_fingerprint in)"
+          end
+
+          fingerprint = value.respond_to?(:address_fingerprint) ? value.address_fingerprint : value
+          fingerprint.nil? ? none : where(column => fingerprint)
+        end
+
         private
+
+        def resolve_fingerprint_column(fingerprint)
+          return nil if fingerprint.nil?
+
+          column = fingerprint.to_sym
+          ensure_columns!(LABEL, column, types: :string)
+          column
+        end
 
         def resolve_addressable_fields(mapping)
           unknown = mapping.keys.map(&:to_sym) - DEFAULT_FIELDS.keys
@@ -192,6 +218,7 @@ module ConcernsOnRails
           normalized = normalize_part(part, country, value)
           self[column] = normalized unless normalized == value
         end
+        stamp_address_fingerprint
       end
 
       # --- Validation -----------------------------------------------------------
@@ -237,7 +264,62 @@ module ConcernsOnRails
         end
       end
 
+      # SHA-256 of the normalized address — every part downcased and squished,
+      # the postal code without spaces, the country resolved the way validation
+      # resolves it (blank → default_country) — so rows that differ only in
+      # case, whitespace, postal formatting or an omitted default country hash
+      # the same. nil for a blank address (a country alone is not an address).
+      def address_fingerprint
+        return nil unless address_fingerprintable?
+
+        parts = DEFAULT_FIELDS.keys.map { |part| address_fingerprint_part(part) }
+        Digest::SHA256.hexdigest(parts.join("\n"))
+      end
+
+      # Equal fingerprints — never true for two blank addresses.
+      def same_address_as?(other)
+        # Tolerant like the sibling `with_address`, which accepts a record, a
+        # digest String or nil: a bare `other.address_fingerprint` turned
+        # `same_address_as?(nil)` into a NoMethodError.
+        return false unless other.respond_to?(:address_fingerprint)
+
+        fingerprint = address_fingerprint
+        !fingerprint.nil? && fingerprint == other.address_fingerprint
+      end
+
+      # Any mapped address column has an unsaved change.
+      def address_changed?
+        self.class.addressable_fields.values.any? { |column| attribute_changed?(column) }
+      end
+
       private
+
+      # Something beyond the country must be present — a country alone is not
+      # an address, and the default country is always "present".
+      def address_fingerprintable?
+        self.class.addressable_fields.any? { |part, column| part != :country && self[column].present? }
+      end
+
+      def address_fingerprint_part(part)
+        column = self.class.addressable_fields[part]
+        return "" unless column
+
+        raw = self[column]
+        return (resolved_country || raw).to_s.squish.downcase if part == :country
+
+        value = raw.to_s.squish.downcase
+        part == :postal_code ? value.delete(" ") : value
+      end
+
+      # Keep the fingerprint column (when configured) in step with the
+      # normalized address; written only when it actually differs.
+      def stamp_address_fingerprint
+        column = self.class.addressable_fingerprint_column
+        return unless column
+
+        fingerprint = address_fingerprint
+        self[column] = fingerprint unless self[column] == fingerprint
+      end
 
       def ordered_parts
         DEFAULT_FIELDS.keys.select { |part| self.class.addressable_fields.key?(part) }
