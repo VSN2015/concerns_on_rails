@@ -569,6 +569,9 @@ Promotion.current                    # WHERE starts_at <= NOW AND (ends_at IS NU
 Promotion.upcoming                   # WHERE starts_at > NOW
 Promotion.expired                    # WHERE ends_at <= NOW
 Promotion.active_at(time)            # active at an arbitrary time
+Promotion.overlapping(from, to)      # windows intersecting [from, to) — clashing bookings, a calendar page
+Promotion.overlapping(from..to)      # Range form; `..` makes the end inclusive; nil on either side = unbounded
+promo.overlaps?(from, to)            # the instance-side predicate
 ```
 
 **Configuration**

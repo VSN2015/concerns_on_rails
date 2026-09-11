@@ -78,6 +78,7 @@ All scopes are added in the `included` block, so they are available without call
 | `.current` | Delegates to `.active_at(Time.zone.now)`. |
 | `.upcoming` | Records whose start column is strictly after `Time.zone.now`. Returns `none` if `starts_at` is configured as `nil`. |
 | `.expired` | Records whose end column is on or before `Time.zone.now`. Returns `none` if `ends_at` is configured as `nil`. |
+| `.overlapping(from, to = nil)` | Records whose window intersects the query window `[from, to)` — the clash check for bookings, the query for a calendar page. Same boundary rules as `.active_at` (inclusive start, exclusive end): a record whose window merely touches the query window (`ends_at == from` or `starts_at == to`) does not overlap. Either side may be `nil` (unbounded). Accepts a `Range` instead of two arguments; `from..to` makes the end inclusive, `from...to` keeps it exclusive. Unstarted records (`nil` start) never overlap, matching `.active_at`. An inverted window raises `ArgumentError`. Affixable like the other scopes. |
 
 ```ruby
 # Active right now
@@ -101,6 +102,7 @@ Promotion.expired
 |---|---|
 | `active_at?(time) → Boolean` | Returns `true` when the record's start time is on or before `time` AND the end time is either `nil` or strictly after `time`. Boundary semantics: inclusive start, exclusive end. |
 | `current? → Boolean` | Calls `active_at?(Time.zone.now)`. |
+| `overlaps?(from, to = nil) → Boolean` | Instance-side mirror of `.overlapping`: does this record's window intersect `[from, to)`? Same boundary, `nil`-side and `Range` rules. |
 | `upcoming? → Boolean` | Returns `true` when the start column value is strictly after `Time.zone.now`. Returns `false` if the start field is not configured or the value is `nil`. |
 | `expired? → Boolean` | Returns `true` when the end column value is on or before `Time.zone.now`. Returns `false` if the end field is not configured or the value is `nil`. |
 | `start!(time = Time.zone.now)` | Writes `time` to the configured start column and persists with `update`. Raises a plain `RuntimeError` if no start field is configured. |
@@ -179,6 +181,7 @@ Coupon.upcoming # => []
 
 ## Notes & gotchas
 
+- **`overlapping` uses the standard interval test** — `starts_at < to AND (ends_at IS NULL OR ends_at > from)` — with the exclusive end matching `active_at`, so back-to-back bookings (`09:00–10:00`, `10:00–11:00`) do not clash. Pass `from..to` when you want an inclusive end.
 - **Boundary semantics are inclusive-start, exclusive-end.** A record is active at exactly `starts_at` but is not active at exactly `ends_at`. This matches the behavior of SQL half-open intervals and is verified by the spec's `freeze_time` boundary tests.
 - **`nil` column values have defined semantics.** A `nil` start value means "not yet started" — the record is not `current?` or `upcoming?`. A `nil` end value means "never expires" — the record remains `current?` indefinitely once started. A record with both `nil` is not current, not upcoming, and not expired.
 - **No `default_scope`.** Unlike `SoftDeletable`, `Schedulable` does not hide records automatically. All records are returned by plain `Model.all`; time-filtering must be applied explicitly via `.current`, `.upcoming`, `.expired`, or `.active_at`.
