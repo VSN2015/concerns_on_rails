@@ -1681,22 +1681,42 @@ end
 
 ## 🛟 ErrorHandleable
 
-Install `rescue_from` handlers for the three most common controller exceptions and render them as the same JSON envelope used by Respondable.
+Install `rescue_from` handlers for the controller exceptions a JSON API meets in practice and render them as the same JSON envelope used by Respondable.
 
 ```ruby
 class Api::BaseController < ApplicationController
   include ConcernsOnRails::Controllers::Respondable       # recommended
   include ConcernsOnRails::Controllers::ErrorHandleable
+
+  handle_errors except: :stale_object                     # optional — let some propagate
 end
 ```
 
 **Handled exceptions**
 
-| Exception                              | Status | `code`                |
-|----------------------------------------|--------|-----------------------|
-| `ActiveRecord::RecordNotFound`         | 404    | `"not_found"`         |
-| `ActionController::ParameterMissing`   | 400    | `"parameter_missing"` |
-| `ActiveRecord::RecordInvalid`          | 422    | `"record_invalid"`    |
+| Key (= `code`)               | Exception                                      | Status | `details`                    |
+|------------------------------|------------------------------------------------|--------|------------------------------|
+| `not_found`                  | `ActiveRecord::RecordNotFound`                 | 404    | —                            |
+| `parameter_missing`          | `ActionController::ParameterMissing`           | 400    | —                            |
+| `record_invalid`             | `ActiveRecord::RecordInvalid`                  | 422    | `errors.full_messages`       |
+| `validation_error`           | `ActiveModel::ValidationError`                 | 422    | `model.errors.full_messages` |
+| `record_not_saved`           | `ActiveRecord::RecordNotSaved`                 | 422    | record errors, if any        |
+| `record_not_destroyed`       | `ActiveRecord::RecordNotDestroyed`             | 422    | record errors, if any        |
+| `stale_object`               | `ActiveRecord::StaleObjectError`               | 409    | —                            |
+| `record_not_unique`          | `ActiveRecord::RecordNotUnique`                | 409    | —                            |
+| `foreign_key_violation`      | `ActiveRecord::InvalidForeignKey`              | 409    | —                            |
+| `unpermitted_parameters`     | `ActionController::UnpermittedParameters`      | 400    | the parameter names          |
+| `invalid_authenticity_token` | `ActionController::InvalidAuthenticityToken`   | 422    | —                            |
+| `bad_request`                | `ActionController::BadRequest`                 | 400    | —                            |
+| `parse_error`                | `ActionDispatch::Http::Parameters::ParseError` | 400    | —                            |
+| `unknown_format`             | `ActionController::UnknownFormat`              | 406    | —                            |
+
+Statuses follow Rails' own `rescue_responses` wherever Rails has an opinion; the two database-constraint
+races Rails leaves as 500s (`RecordNotUnique`, `InvalidForeignKey`) get the REST-conventional 409. Messages
+for database- and parser-level errors are deliberately generic (`"Resource already exists"`,
+`"Malformed request body"`, …): the raw messages carry SQL fragments, table/column names, model class
+names or the offending input, none of which belongs in an API response. `details` is present only when
+there is something to list.
 
 Response shape (matches `Respondable#render_error`):
 
@@ -1718,8 +1738,32 @@ class Api::BaseController < ApplicationController
 end
 ```
 
+**Trimming the map**
+
+```ruby
+handle_errors except: :stale_object                               # let optimistic-lock conflicts reach the error tracker
+handle_errors except: %i[record_not_unique foreign_key_violation]  # calls accumulate
+handle_errors only: %i[not_found parameter_missing record_invalid] # just the original trio
+```
+
+`handle_errors` removes only the concern's own registrations (matched on exception *and* handler), so a
+`rescue_from` you declared yourself for the same exception is untouched, and it never re-adds — your later
+declarations keep precedence. Unknown keys raise `ArgumentError` listing the valid ones;
+`error_handleable_keys` returns the keys still active on a controller.
+
+**Reporting** — every handled error instruments `handled_error.concerns_on_rails` (`controller`, `action`, `code`, `status`, `message`, `exception`, `exception_class`) via the public `on_handled_error(key, error, status:, message:)` override point, so the 409s reach your error tracker while the 404s stay quiet:
+
+```ruby
+def on_handled_error(key, error, **)
+  Sentry.capture_exception(error) if %i[record_not_unique foreign_key_violation stale_object].include?(key)
+  super   # keep the event
+end
+```
+
 **Notes**
 - When `Respondable` is also included, the handlers delegate to `render_error` so the envelope shape stays in one place. Otherwise they render the same envelope inline.
+- Exceptions are registered by name (string), so a class your Rails version lacks is simply never matched.
+- `ActionController::UnpermittedParameters` is only raised with `config.action_controller.action_on_unpermitted_parameters = :raise`.
 - `RecordInvalid.details` are populated from `error.record.errors.full_messages`.
 
 ---
