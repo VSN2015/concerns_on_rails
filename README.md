@@ -509,7 +509,7 @@ end
 
 ## 🔐 Hashable
 
-Auto-generate random values on create — tokens, codes, UUIDs, or anything from a custom alphabet.
+Auto-generate random values on create — tokens, codes, UUIDs, or anything from a custom alphabet — and, optionally, use them as the public ID in your URLs.
 
 ```ruby
 class Order < ApplicationRecord
@@ -538,13 +538,22 @@ hashable_by :external_id, type: :uuid
 hashable_by :code,        type: :integer, length: 6
 hashable_by :code,        type: :custom,  length: 8,
             alphabet: "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # Crockford-style, no ambiguous chars
+
+# Public IDs: a Stripe-style prefix and the value as the URL parameter
+hashable_by :public_id, type: :custom, length: 14, prefix: "ord_", unique: true, to_param: true,
+            alphabet: "abcdefghijklmnopqrstuvwxyz0123456789"
+order.public_id          # => "ord_k7m3pq9a2x5n8v"
+order_path(order)        # => "/orders/ord_k7m3pq9a2x5n8v"
+Order.find_by!(public_id: params[:id])
 ```
 
 **Notes**
 - Auto-assigns in `before_create` only when the field is blank — callers can pass an explicit value.
 - A `regenerate_<field>!` instance method is defined dynamically.
+- `prefix:` is prepended to every generated value (string types only — not `:integer`); the uniqueness check sees the full prefixed value.
+- `to_param: true` overrides `to_param` to return the hashed field, falling back to the id while it is blank — pair it with `find_by!(field: params[:id])`.
+- `unique: true` prechecks for collisions and retries a bounded number of times (still add a unique index — that is the real guarantee).
 - For fixed-width numeric codes (e.g. `000042`), use a **string** column — integer columns drop leading zeros.
-- No uniqueness retry is built in. For collision-prone configs (short integer codes), add a unique index and rescue at the app level.
 - If your model has `validates :<field>, presence: true`, switch this concern's hook to `before_validation` in your model — it uses `before_create` by default.
 
 ---

@@ -6,9 +6,15 @@ require "securerandom"
 
 module ConcernsOnRails
   module Models
+    # Random identifier generation for one column — hex tokens, UUIDs, numeric
+    # codes or values from a custom alphabet — assigned in before_create when
+    # the field is blank. `prefix:` prepends a literal (Stripe-style public
+    # IDs: "ord_k7m3pq9a"), `unique:` prechecks + retries collisions, and
+    # `to_param: true` makes the field the URL parameter.
     module Hashable
       extend ActiveSupport::Concern
 
+      LABEL = "ConcernsOnRails::Models::Hashable".freeze
       VALID_TYPES = %i[hex uuid integer custom].freeze
       MAX_GENERATION_ATTEMPTS = 10
 
@@ -18,6 +24,8 @@ module ConcernsOnRails
         class_attribute :hashable_length, instance_accessor: false, default: 16
         class_attribute :hashable_alphabet, instance_accessor: false, default: nil
         class_attribute :hashable_unique, instance_accessor: false, default: false
+        class_attribute :hashable_prefix, instance_accessor: false, default: nil
+        class_attribute :hashable_to_param, instance_accessor: false, default: false
       end
 
       class_methods do
@@ -30,12 +38,16 @@ module ConcernsOnRails
         #   hashable_by :external_id, type: :uuid
         #   hashable_by :code, type: :integer, length: 6
         #   hashable_by :code, type: :custom, length: 8, alphabet: "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-        def hashable_by(field, type: :hex, length: 16, alphabet: nil, unique: false)
+        #   hashable_by :public_id, type: :custom, length: 14, alphabet: "abcdefghijklmnopqrstuvwxyz0123456789",
+        #               prefix: "ord_", unique: true, to_param: true      # => "ord_k7m3pq9a2x5n8v" in URLs
+        def hashable_by(field, type: :hex, length: 16, alphabet: nil, unique: false, prefix: nil, to_param: false)
           self.hashable_field = field.to_sym
           self.hashable_type = type.to_sym
           self.hashable_length = length.to_i
           self.hashable_alphabet = alphabet
           self.hashable_unique = unique
+          self.hashable_prefix = prefix
+          self.hashable_to_param = to_param
 
           ensure_columns!("ConcernsOnRails::Models::Hashable", hashable_field,
                           types: hashable_unique ? "string:uniq" : :string)
@@ -56,14 +68,16 @@ module ConcernsOnRails
       end
 
       class_methods do
-        # Generate a new random value using the configured type/length/alphabet.
+        # Generate a new random value using the configured type/length/alphabet,
+        # with `prefix:` prepended when configured.
         def generate_hashable_value
-          case hashable_type
-          when :hex     then SecureRandom.hex(hashable_length)
-          when :uuid    then SecureRandom.uuid
-          when :integer then hashable_fixed_width_integer
-          when :custom  then ConcernsOnRails::Support::RandomValue.from_alphabet(hashable_alphabet, hashable_length)
-          end
+          value = case hashable_type
+                  when :hex     then SecureRandom.hex(hashable_length)
+                  when :uuid    then SecureRandom.uuid
+                  when :integer then hashable_fixed_width_integer
+                  when :custom  then ConcernsOnRails::Support::RandomValue.from_alphabet(hashable_alphabet, hashable_length)
+                  end
+          hashable_prefix ? "#{hashable_prefix}#{value}" : value
         end
 
         private
@@ -77,7 +91,7 @@ module ConcernsOnRails
         end
       end
 
-      class_methods do
+      module ClassMethods
         def validate_hashable_options!
           unless VALID_TYPES.include?(hashable_type)
             raise ArgumentError,
@@ -88,15 +102,56 @@ module ConcernsOnRails
             raise ArgumentError, "ConcernsOnRails::Models::Hashable: length must be a positive integer"
           end
 
-          return unless hashable_type == :custom && (!hashable_alphabet.is_a?(String) || hashable_alphabet.empty?)
+          if hashable_type == :custom && (!hashable_alphabet.is_a?(String) || hashable_alphabet.empty?)
+            raise ArgumentError, "ConcernsOnRails::Models::Hashable: type :custom requires a non-empty alphabet: String"
+          end
 
-          raise ArgumentError, "ConcernsOnRails::Models::Hashable: type :custom requires a non-empty alphabet: String"
+          validate_hashable_extras!
+        end
+
+        # prefix: is a literal String prepended to string-typed values only —
+        # an Integer code can't carry one; to_param: is a plain flag.
+        def validate_hashable_extras!
+          unless hashable_prefix.nil? || hashable_prefix.is_a?(String)
+            raise ArgumentError, "#{LABEL}: prefix: must be a String (got #{hashable_prefix.inspect})"
+          end
+          if hashable_prefix && hashable_type == :integer
+            raise ArgumentError, "#{LABEL}: prefix: is not supported for type :integer (use :custom with a digit alphabet)"
+          end
+          unless [true, false].include?(hashable_to_param)
+            raise ArgumentError, "#{LABEL}: to_param: must be true or false (got #{hashable_to_param.inspect})"
+          end
+
+          validate_hashable_to_param_conflict!
+        end
+
+        # Sluggable pulls in friendly_id, which also overrides to_param. Which
+        # one wins is decided purely by the order the two concerns are included
+        # — so one of `to_param: true` and friendly URLs silently loses. Refuse
+        # the ambiguity instead of letting include order decide it.
+        def validate_hashable_to_param_conflict!
+          return unless hashable_to_param && respond_to?(:friendly_id_config)
+
+          raise ArgumentError,
+                "#{LABEL}: to_param: true conflicts with Sluggable/friendly_id, which also overrides to_param " \
+                "(the winner would depend on include order). Drop one, or override to_param on the model yourself."
         end
 
         # :uuid ignores length; the others derive their size from it.
         def length_bearing_hashable_type?
           %i[hex integer custom].include?(hashable_type)
         end
+      end
+
+      # With `to_param: true` the hashed field is the URL parameter
+      # (`order_path(order)` → "/orders/ord_k7m3pq9a"), falling back to Rails'
+      # primary-key behaviour while the field is blank. Lookups stay explicit:
+      # `Model.find_by!(field => params[:id])`.
+      def to_param
+        return super unless self.class.hashable_to_param
+
+        value = self[self.class.hashable_field]
+        value.present? ? value.to_s : super
       end
 
       # Assigns the generated value only when the field is blank,
