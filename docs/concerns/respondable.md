@@ -71,7 +71,7 @@ Renders a JSON success envelope and halts the action. Returns the result of `ren
 | `status` | Symbol or Integer | `:ok` | HTTP status code passed directly to `render`. Any status symbol or integer accepted by Rails is valid (e.g. `:created`, `:ok`, `200`). |
 | `meta` | Hash | `{}` | Optional metadata (pagination counts, cursors, etc.). Included in the body only when the hash is non-empty; omitted entirely otherwise. |
 | `location` | String, or anything `url_for` accepts | `nil` | Sets the `Location` response header — the REST convention for `201 Created` (and `202`/`303`). A String is used verbatim; any other value (a record, a Hash of route options) is passed through the controller's `url_for` when it has one. Nothing is set when `nil`. |
-| `headers` | Hash | `{}` | Extra response headers to set alongside the body (`"X-Request-Id" => request.request_id`, `"Deprecation"`, …). Values are written as given. |
+| `headers` | Hash | `{}` | Extra response headers to set alongside the body (`"X-Request-Id" => request.request_id`, `"Deprecation"`, …). Values are coerced with `to_s` and stripped of CR/LF, so an Integer cannot break `Rack::Lint` and caller data cannot split the response. |
 
 Output envelope:
 

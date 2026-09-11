@@ -209,6 +209,16 @@ describe ConcernsOnRails::Controllers::Respondable do
       expect(plain.response.headers).not_to have_key("Location")
     end
 
+    it "stringifies header values and strips CR/LF so caller data cannot split the response" do
+      controller.render_success(data: nil, location: "/ok\r\nX-Injected: yes",
+                                headers: { "X-Retry-Count" => 3, "X-Note" => "a\nb" })
+
+      # An Integer would fail Rack::Lint; the CR/LF would start a new header.
+      expect(controller.response.headers["X-Retry-Count"]).to eq("3")
+      expect(controller.response.headers["X-Note"]).to eq("ab")
+      expect(controller.response.headers["Location"]).to eq("/okX-Injected: yes")
+    end
+
     it "resolves a non-String location through url_for when the controller has it" do
       controller.define_singleton_method(:url_for) { |target| "/resolved/#{target[:id]}" }
       controller.render_success(data: nil, location: { id: 9 })

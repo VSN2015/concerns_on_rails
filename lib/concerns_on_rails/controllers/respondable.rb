@@ -134,8 +134,16 @@ module ConcernsOnRails
       def respondable_set_headers(location, headers)
         return unless respond_to?(:response) && response.respond_to?(:set_header)
 
-        response.set_header("Location", respondable_location(location)) if location
-        headers.each { |name, value| response.set_header(name.to_s, value) }
+        response.set_header("Location", respondable_header_value(respondable_location(location))) if location
+        headers.each { |name, value| response.set_header(name.to_s, respondable_header_value(value)) }
+      end
+
+      # These are the gem's first response headers built from CALLER-supplied
+      # values, so coerce to String (an Integer fails Rack::Lint and breaks any
+      # middleware calling String methods on it) and strip CR/LF, which would
+      # otherwise let `location: params[:next]` split the response.
+      def respondable_header_value(value)
+        value.to_s.gsub(/[\r\n]/, "")
       end
 
       # A String is a URL already; a record / route Hash goes through the
