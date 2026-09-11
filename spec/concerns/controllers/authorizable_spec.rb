@@ -264,6 +264,21 @@ describe ConcernsOnRails::Controllers::Authorizable do
       expect(c.rendered).to be_nil
     end
 
+    it "refuses a nil only:/except: instead of quietly exempting everything" do
+      # skip_authorization only: PUBLIC_ACTIONS with a nil constant used to
+      # degrade to the bare form and exempt every action of the controller and
+      # all of its subclasses.
+      expect { child(action: "index") { skip_authorization only: nil } }
+        .to raise_error(ArgumentError, %r{given a nil :only/:except})
+      expect { child(action: "index") { skip_authorization except: nil } }
+        .to raise_error(ArgumentError, %r{given a nil :only/:except})
+
+      # An empty list is still a valid "exempt nothing".
+      c = child(action: "index") { skip_authorization only: [] }
+      c.enforce_authorization
+      expect(c.rendered[:status]).to eq(:forbidden)
+    end
+
     it "does not leak into the parent or siblings and rejects only: with except:" do
       child(action: "index") { skip_authorization only: :index }
       p = parent.new

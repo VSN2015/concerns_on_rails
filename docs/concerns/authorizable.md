@@ -79,7 +79,7 @@ Calling `require_role` without at least one role argument raises `ArgumentError`
 skip_authorization(only: nil, except: nil)
 ```
 
-Exempts actions from **every** rule — the ones declared on this controller and the ones inherited from a parent, which `skip_before_action :enforce_authorization` can only do wholesale. `only:` lists the exempt actions, `except:` lists the enforced ones (mutually exclusive; both raise `ArgumentError`), and the bare form exempts all actions. Stored in the `authorizable_skip` class attribute, so subclasses inherit it and can re-declare it.
+Exempts actions from **every** rule — the ones declared on this controller and the ones inherited from a parent, which `skip_before_action :enforce_authorization` can only do wholesale. `only:` lists the exempt actions, `except:` lists the enforced ones (mutually exclusive; both raise `ArgumentError`), and the bare form exempts all actions. A **nil** `only:`/`except:` raises rather than degrading to the bare form — `skip_authorization only: PUBLIC_ACTIONS` with an undefined constant would otherwise exempt every action of this controller and all of its subclasses. An empty list is valid and exempts nothing. Stored in the `authorizable_skip` class attribute, so subclasses inherit it and can re-declare it.
 
 ```ruby
 class Api::PagesController < Api::BaseController   # BaseController requires a signed-in user

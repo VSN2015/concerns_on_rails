@@ -37,6 +37,8 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       LABEL = "ConcernsOnRails::Controllers::Authorizable".freeze
+      # Sentinel so a nil only:/except: is distinguishable from "not passed".
+      UNSET = Object.new.freeze
 
       included do
         class_attribute :authorizable_rules, instance_accessor: false, default: []
@@ -59,12 +61,12 @@ module ConcernsOnRails
         # ones, which `skip_before_action` can't do selectively. `only:`/`except:`
         # (mutually exclusive) pick the actions; bare `skip_authorization`
         # exempts them all. Inherited by subclasses; re-declare to change it.
-        def skip_authorization(only: nil, except: nil)
-          raise ArgumentError, "#{LABEL}: pass either :only or :except, not both" if only && except
+        def skip_authorization(only: UNSET, except: UNSET)
+          validate_skip_authorization!(only, except)
 
           self.authorizable_skip = {
-            only: only && Array(only).map(&:to_s),
-            except: except && Array(except).map(&:to_s)
+            only: skip_authorization_actions(only),
+            except: skip_authorization_actions(except)
           }
         end
 
@@ -92,6 +94,23 @@ module ConcernsOnRails
         end
 
         private
+
+        def validate_skip_authorization!(only, except)
+          raise ArgumentError, "#{LABEL}: pass either :only or :except, not both" if only != UNSET && except != UNSET
+          return unless only.nil? || except.nil?
+
+          # A nil only:/except: must NOT silently degrade to the bare form.
+          # `skip_authorization only: PUBLIC_ACTIONS` with a nil constant would
+          # otherwise exempt EVERY action of this controller and all of its
+          # subclasses — the widest possible failure from the smallest typo.
+          raise ArgumentError,
+                "#{LABEL}: skip_authorization was given a nil :only/:except. Pass a list of actions, " \
+                "or call skip_authorization with no arguments to exempt every action."
+        end
+
+        def skip_authorization_actions(value)
+          value == UNSET ? nil : Array(value).map(&:to_s)
+        end
 
         def add_authorization_rule(check:, only:, except:, status:, message:, name:)
           raise ArgumentError, "#{LABEL}: pass either :only or :except, not both" if only && except
