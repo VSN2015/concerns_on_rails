@@ -60,6 +60,24 @@ Per declared key (names affixed as `<prefix>_<key>_<suffix>`):
 
 Class level: `Account.storable_keys` exposes the normalized registry (`{ settings: { theme: { type:, default:, in:, accessor: } } }`).
 
+### Querying: `where_<accessor>(value)`
+
+Every key also gets a scope that filters on the stored value with the database's own JSON functions — chainable like any scope:
+
+| Adapter | Expression used |
+|---|---|
+| SQLite (3.38+ / JSON1) | `json_extract("accounts"."settings", '$.theme')` |
+| PostgreSQL | `("accounts"."settings" ->> 'theme')` — a `json`/`jsonb` column as-is, a `text` column cast via `::jsonb` (every row must hold valid JSON) |
+| MySQL 5.7+ / MariaDB 10.2+ | `JSON_UNQUOTE(JSON_EXTRACT("accounts"."settings", '$.theme'))` |
+
+The value is cast **exactly as the writer stores it** (`:integer` → integer, `:boolean` → boolean, `:decimal` → the precision-safe string, `:datetime` → the UTC ISO8601 string), then compared for equality; on SQLite booleans compare as `1`/`0`, on PostgreSQL/MySQL every extracted scalar is text. `where_<accessor>(nil)` matches an unset key and a `NULL` column on every adapter, and an explicit JSON `null` on SQLite and PostgreSQL. On MySQL `JSON_UNQUOTE(JSON_EXTRACT(...))` renders an explicit JSON `null` as the 4-character string `'null'`, so `IS NULL` does not match it there. `:json` keys are not queryable (raise), a column the host app serialized with a non-JSON coder raises rather than emitting JSON SQL it cannot read, and other adapters raise `ArgumentError` naming the adapter. The scope name takes part in the macro-time collision check like the accessors do.
+
+```ruby
+Account.where_theme("dark")
+Account.active.where_flag_beta(true).where_items_per_page("50")   # "50" casts like the writer
+Account.where_trial_ends_at(nil)                                  # never set / cleared
+```
+
 ## Examples
 
 ```ruby
@@ -89,7 +107,8 @@ account.reset_theme           # key removed: reads back "light" again
 - **Precision**: `:decimal` is stored as a precision-safe String (`BigDecimal`); `:datetime` as UTC ISO8601 with microseconds; `:date` as `YYYY-MM-DD`.
 - **Read-side safety**: corrupt column JSON decodes as `{}` (defaults apply); garbage values cast to `nil`. Readers never raise.
 - **Undeclared keys** already in the column are preserved through typed writes.
-- Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) when you need to **query** into the store (jsonb operators, store-backed scopes).
+- **Defaults are not queryable.** A key that was never written is absent from the stored JSON, so `where_notifications(true)` does not find records that merely *read* `true` through the default; `where_notifications(nil)` finds them. Backfill the key if you need to query it.
+- **Equality only, one key per scope.** Ranges, containment, ordering by a key and jsonb operators are out of scope — reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) there. PostgreSQL `text` stores are cast with `::jsonb`, so a row holding corrupt JSON makes the whole query fail (Storable itself always writes valid JSON).
 
 ## Changed in 1.22.0
 

@@ -1312,6 +1312,10 @@ account.notifications?           # boolean keys get a predicate
 account.items_per_page_changed?  # per-key dirty (and items_per_page_was)
 account.reset_theme              # drop the key → the default applies again
 account.flag_beta                # affixed accessor
+
+Account.where_theme("dark")       # one scope per key, cast like the writer — SQLite json_extract,
+Account.active.where_flag_beta(true).where_items_per_page(50)   # PostgreSQL ->>, MySQL JSON_EXTRACT
+Account.where_theme(nil)         # unset key, explicit null, or NULL column
 ```
 
 **Options** (per key): `type:` (`:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`, `:json`), `default:` (a value, or a Proc `instance_exec`'d per read), `in:` (inclusion validation, errors on the accessor name). Macro options: `prefix:` / `suffix:` affix the generated method names (the collision escape hatch). The macro is repeatable — repeat calls for the same column merge keys, different columns are independent, and subclasses can add keys without affecting the parent.
@@ -1321,7 +1325,7 @@ account.flag_beta                # affixed accessor
 - nil vs unset: a written `nil` (explicit JSON null) reads back as `nil` and does **not** fall back to the default; `reset_<key>` removes the key so the default applies again. `:decimal` is stored as a precision-safe string, `:date`/`:datetime` as ISO8601 (datetime in UTC at microsecond precision).
 - Writing one key dirties (and saves) the **whole column** — concurrent writers to different keys are last-write-wins on the hash. Undeclared keys are preserved. `:json` readers return a dup: reassign, don't mutate in place.
 - Generated names are collision-checked against existing methods and columns at macro time (`ArgumentError`; affix to escape). Read-side casting never raises — corrupt column JSON decodes as `{}`, garbage values cast to `nil`.
-- Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) when you need to **query** into the store (jsonb operators, store-backed scopes).
+- **Querying**: every key gets a `where_<accessor>(value)` scope — `json_extract` on SQLite, `->>` on PostgreSQL (a `text` column is cast to `jsonb`, so it must hold valid JSON), `JSON_UNQUOTE(JSON_EXTRACT())` on MySQL/MariaDB. Equality only; the value is cast exactly as the writer stores it, so `where_items_per_page("50")` works. Defaults are **not** queryable (a never-written key is absent in the DB — `where_<key>(nil)` finds it), `:json` keys raise, other adapters raise. Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) for jsonb operators, ranges or containment queries.
 
 ---
 

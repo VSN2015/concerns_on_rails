@@ -414,4 +414,97 @@ describe ConcernsOnRails::Storable do
       end
     end
   end
+
+  describe "querying: where_<key> scopes" do
+    let(:klass) do
+      model_class do
+        storable_by :settings,
+                    theme: { default: "light", in: %w[light dark] },
+                    notifications: { type: :boolean, default: true },
+                    items_per_page: { type: :integer },
+                    ratio: { type: :float },
+                    price: { type: :decimal },
+                    trial_ends_at: { type: :datetime },
+                    widgets: { type: :json }
+        storable_by :prefs, digest: { type: :string }, seats: { type: :integer }
+        storable_by :flags, { beta: { type: :boolean } }, prefix: :flag
+      end
+    end
+
+    it "refuses to query a column the host app serialized with a non-JSON coder" do
+      # Reads and writes are supported on such a column, but it holds YAML, so
+      # json_extract would fail deep in the adapter ("malformed JSON").
+      klass = Class.new(TestModel) do
+        self.table_name = "storable_accounts"
+        serialize :settings, coder: YAML, type: Hash
+        include ConcernsOnRails::Storable
+
+        storable_by :settings, theme: { default: "light" }
+      end
+      klass.create!(theme: "dark")
+
+      expect { klass.where_theme("dark").to_a }
+        .to raise_error(ArgumentError, /serialized with a non-JSON coder/)
+    end
+
+    it "filters a text-column store by key with typed values" do
+      dark = klass.create!(theme: "dark", items_per_page: 50, notifications: false, ratio: 1.5, price: "19.99",
+                           trial_ends_at: Time.utc(2026, 1, 2, 3, 4, 5))
+      light = klass.create!(theme: "light", items_per_page: 25, notifications: true)
+      klass.create! # never writes a key — defaults are not queryable
+
+      expect(klass.where_theme("dark")).to eq([dark])
+      expect(klass.where_items_per_page(50)).to eq([dark])
+      expect(klass.where_items_per_page("25")).to eq([light]) # cast like the writer
+      expect(klass.where_notifications(false)).to eq([dark])
+      expect(klass.where_notifications(true)).to eq([light]) # the third row never stored the key — defaults are not queryable
+      expect(klass.where_ratio(1.5)).to eq([dark])
+      expect(klass.where_price(BigDecimal("19.99"))).to eq([dark])
+      expect(klass.where_price("19.99")).to eq([dark])
+      expect(klass.where_trial_ends_at(Time.utc(2026, 1, 2, 3, 4, 5))).to eq([dark])
+    end
+
+    it "nil matches an unset key, an explicit JSON null and a NULL column, and the scope chains" do
+      unset = klass.create!(name: "u")
+      explicit = klass.create!(name: "e", theme: nil)
+      klass.create!(name: "d", theme: "dark")
+
+      expect(klass.where_theme(nil).order(:id)).to eq([unset, explicit])
+      expect(klass.where(name: "d").where_theme("dark").count).to eq(1)
+      expect(klass.where(name: "u").where_theme("dark").count).to eq(0)
+    end
+
+    it "works on native json columns and affixed accessors" do
+      klass.create!(digest: "daily", seats: 3, flag_beta: true)
+      klass.create!(digest: "weekly", seats: 3, flag_beta: false)
+
+      expect(klass.where_digest("daily").count).to eq(1)
+      expect(klass.where_seats(3).count).to eq(2)
+      expect(klass.where_flag_beta(true).count).to eq(1)
+      expect(klass.where_flag_beta(false).count).to eq(1)
+    end
+
+    it "emits json_extract on SQLite and refuses :json keys" do
+      sql = klass.where_theme("dark").to_sql
+      expect(sql).to include(%(json_extract("storable_accounts"."settings", '$.theme') = 'dark'))
+      expect(klass.where_theme(nil).to_sql).to include(%(json_extract("storable_accounts"."settings", '$.theme') IS NULL))
+      expect { klass.where_widgets([]) }.to raise_error(ArgumentError, /where_widgets: :json keys are not queryable/)
+    end
+
+    it "treats the scope name as a generated method for collision purposes" do
+      expect do
+        model_class do
+          def self.where_theme(*); end
+
+          storable_by :settings, theme: {}
+        end
+      end.to raise_error(ArgumentError, /'where_theme' collides/)
+
+      merged = model_class do
+        storable_by :settings, theme: { default: "light" }
+        storable_by :settings, theme: { default: "dark" } # same key re-declared — merge, no collision
+      end
+      expect(merged).to respond_to(:where_theme)
+    end
+  end
 end

@@ -138,7 +138,82 @@ module ConcernsOnRails
           end
         end
 
+        # `where_<accessor>(value)` — equality on one stored key through the
+        # adapter's JSON functions (json_extract / ->> / JSON_EXTRACT), the value
+        # cast exactly as the writer stores it. nil matches an unset key, an
+        # explicit JSON null and a NULL column. Public because scope bodies run
+        # on the relation, which only delegates to public class methods.
+        def storable_where(column, key, value)
+          spec = storable_keys.fetch(column).fetch(key)
+          if spec[:type] == :json
+            raise ArgumentError, "#{LABEL}: where_#{spec[:accessor]}: :json keys are not queryable (equality on a scalar only)"
+          end
+          unless storable_queryable_column?(column)
+            raise ArgumentError,
+                  "#{LABEL}: where_#{spec[:accessor]}: '#{column}' is serialized with a non-JSON coder, " \
+                  "so the adapter's JSON functions cannot read it"
+          end
+
+          expression = storable_json_expression(column, key)
+          return where("#{expression} IS NULL") if value.nil?
+
+          where("#{expression} = ?", storable_query_value(spec[:type], value))
+        end
+
         private
+
+        # A column the host app serialized with YAML (or any non-JSON coder) is
+        # supported for reads/writes but holds no JSON, so json_extract / ->> /
+        # JSON_EXTRACT would blow up at query time ("malformed JSON" on SQLite).
+        def storable_queryable_column?(column)
+          type = type_for_attribute(column.to_s)
+          return true unless defined?(ActiveRecord::Type::Serialized) && type.is_a?(ActiveRecord::Type::Serialized)
+
+          coder = type.coder
+          coder == ActiveRecord::Coders::JSON ||
+            (defined?(ActiveSupport::JSON) && coder == ActiveSupport::JSON) ||
+            coder.class.name.to_s.include?("JSON")
+        rescue StandardError
+          true
+        end
+
+        def storable_adapter
+          name = connection.adapter_name.to_s.downcase
+          return :sqlite if name.include?("sqlite")
+          return :postgresql if name.include?("postg")
+          return :mysql if name.match?(/mysql|mariadb|trilogy/)
+
+          :other
+        end
+
+        # SQLite: json_extract(col, '$.key'); PostgreSQL: col ->> 'key' (a text
+        # column cast to jsonb first); MySQL: JSON_UNQUOTE(JSON_EXTRACT(...)).
+        def storable_json_expression(column, key)
+          quoted = "#{quoted_table_name}.#{connection.quote_column_name(column)}"
+          case storable_adapter
+          when :sqlite then "json_extract(#{quoted}, #{connection.quote("$.#{key}")})"
+          when :postgresql
+            source = %i[json jsonb].include?(columns_hash[column.to_s]&.type) ? quoted : "(#{quoted})::jsonb"
+            "(#{source} ->> #{connection.quote(key.to_s)})"
+          when :mysql then "JSON_UNQUOTE(JSON_EXTRACT(#{quoted}, #{connection.quote("$.#{key}")}))"
+          else
+            raise ArgumentError, "#{LABEL}: querying store keys is not supported on the #{connection.adapter_name} adapter"
+          end
+        end
+
+        # The stored representation of `value` for this key's type. SQLite's
+        # json_extract yields SQL-native scalars (booleans as 1/0, numbers as
+        # numbers); PostgreSQL's ->> and MySQL's JSON_UNQUOTE yield text.
+        def storable_query_value(type, value)
+          stored = Casting.write(type, value)
+          return stored.to_s unless storable_adapter == :sqlite
+
+          case stored
+          when true then 1
+          when false then 0
+          else stored
+          end
+        end
 
         def storable_merge_key_specs(keys, kw_keys)
           raise ArgumentError, "#{LABEL}: keys must be a Hash of name => spec (got #{keys.class})" unless keys.is_a?(Hash)
@@ -208,16 +283,23 @@ module ConcernsOnRails
         # reports the bare accessor name.
         def storable_method_names(accessor, type)
           base = accessor.to_s
-          names = [base, "#{base}=", "#{base}_changed?", "#{base}_was", "reset_#{base}"]
+          names = [base, "#{base}=", "#{base}_changed?", "#{base}_was", "reset_#{base}", "where_#{base}"]
           names << "#{base}?" if type == :boolean
           names.map(&:to_sym)
         end
 
         # A name is taken when it shadows a column's (lazily defined) attribute
-        # accessors or any already-defined instance method. The column check
-        # needs a live schema; without one (db:create, precompile) it is
-        # skipped — the method checks below still run.
+        # accessors or any already-defined instance method — or, for the
+        # `where_` scope, an existing class method. The column check needs a
+        # live schema; without one (db:create, precompile) it is skipped — the
+        # method checks below still run.
         def storable_method_taken?(method_name, accessor)
+          # Compare the exact generated name: sniffing the "where_" prefix made a
+          # key literally named where_used skip the column/instance checks entirely.
+          if method_name.to_s == "where_#{accessor}"
+            return singleton_class.method_defined?(method_name) ||
+                   ActiveRecord::Relation.method_defined?(method_name)
+          end
           return true if schema_reachable? && column_names.include?(accessor.to_s)
 
           method_defined?(method_name) || private_method_defined?(method_name)
@@ -241,6 +323,7 @@ module ConcernsOnRails
           define_method("#{base}_was") { storable_key_was(column, key) }
           define_method("reset_#{base}") { storable_reset(column, key) }
           define_method("#{base}?") { storable_get(column, key) == true } if spec[:type] == :boolean
+          scope "where_#{base}", ->(value) { storable_where(column, key, value) }
         end
 
         def storable_detect_native_hash(column)
@@ -395,74 +478,87 @@ module ConcernsOnRails
       end
 
       # ---- casting ----
+      # Shared by the instance readers/writers and the class-level query
+      # scopes: the stored representation of a value for a key type.
+      module Casting
+        module_function
+
+        def read(type, raw)
+          case type
+          when :json     then raw.deep_dup
+          when :decimal  then read_decimal(raw)
+          when :date     then CASTERS[:date].cast(raw)
+          when :datetime then read_time(raw)
+          else CASTERS[type].cast(raw)
+          end
+        rescue StandardError
+          # ActiveModel casting tolerates garbage already; BigDecimal()/Time.iso8601
+          # do not, so swallow and follow the "cast to nil" convention.
+          nil
+        end
+
+        def read_decimal(raw)
+          return raw if raw.is_a?(BigDecimal)
+
+          BigDecimal(raw.to_s)
+        end
+
+        def read_time(raw)
+          return raw if raw.is_a?(Time)
+
+          Time.iso8601(raw.to_s)
+        end
+
+        def write(type, value)
+          case type
+          when :json     then value
+          when :decimal  then write_decimal(value)
+          when :date     then write_date(value)
+          when :datetime then write_datetime(value)
+          else CASTERS[type].cast(value)
+          end
+        end
+
+        # Precision-safe String (the Auditable precedent): BigDecimal#to_s("F").
+        def write_decimal(value)
+          return nil if value.nil?
+
+          big = value.is_a?(BigDecimal) ? value : BigDecimal(value.to_s)
+          big.to_s("F")
+        rescue ArgumentError, TypeError
+          nil
+        end
+
+        def write_date(value)
+          CASTERS[:date].cast(value)&.iso8601
+        end
+
+        # UTC iso8601(6): microsecond precision, the lesson CursorPaginatable learned.
+        def write_datetime(value)
+          coerce_time(value)&.utc&.iso8601(6)
+        end
+
+        # A bare Date becomes midnight UTC (deterministic — Date#to_time would
+        # anchor to the host's zone).
+        def coerce_time(value)
+          case value
+          when nil then nil
+          when ActiveSupport::TimeWithZone, Time then value
+          when DateTime then value.to_time
+          when Date then Time.utc(value.year, value.month, value.day)
+          else CASTERS[:datetime].cast(value)
+          end
+        rescue ArgumentError, TypeError
+          nil
+        end
+      end
 
       def storable_cast_read(type, raw)
-        case type
-        when :json     then raw.deep_dup
-        when :decimal  then storable_read_decimal(raw)
-        when :date     then CASTERS[:date].cast(raw)
-        when :datetime then storable_read_time(raw)
-        else CASTERS[type].cast(raw)
-        end
-      rescue StandardError
-        # ActiveModel casting tolerates garbage already; BigDecimal()/Time.iso8601
-        # do not, so swallow and follow the "cast to nil" convention.
-        nil
-      end
-
-      def storable_read_decimal(raw)
-        return raw if raw.is_a?(BigDecimal)
-
-        BigDecimal(raw.to_s)
-      end
-
-      def storable_read_time(raw)
-        return raw if raw.is_a?(Time)
-
-        Time.iso8601(raw.to_s)
+        Casting.read(type, raw)
       end
 
       def storable_cast_write(type, value)
-        case type
-        when :json     then value
-        when :decimal  then storable_write_decimal(value)
-        when :date     then storable_write_date(value)
-        when :datetime then storable_write_datetime(value)
-        else CASTERS[type].cast(value)
-        end
-      end
-
-      # Precision-safe String (the Auditable precedent): BigDecimal#to_s("F").
-      def storable_write_decimal(value)
-        return nil if value.nil?
-
-        big = value.is_a?(BigDecimal) ? value : BigDecimal(value.to_s)
-        big.to_s("F")
-      rescue ArgumentError, TypeError
-        nil
-      end
-
-      def storable_write_date(value)
-        CASTERS[:date].cast(value)&.iso8601
-      end
-
-      # UTC iso8601(6): microsecond precision, the lesson CursorPaginatable learned.
-      def storable_write_datetime(value)
-        storable_coerce_time(value)&.utc&.iso8601(6)
-      end
-
-      # A bare Date becomes midnight UTC (deterministic — Date#to_time would
-      # anchor to the host's zone).
-      def storable_coerce_time(value)
-        case value
-        when nil then nil
-        when ActiveSupport::TimeWithZone, Time then value
-        when DateTime then value.to_time
-        when Date then Time.utc(value.year, value.month, value.day)
-        else CASTERS[:datetime].cast(value)
-        end
-      rescue ArgumentError, TypeError
-        nil
+        Casting.write(type, value)
       end
 
       # ---- validation ----
