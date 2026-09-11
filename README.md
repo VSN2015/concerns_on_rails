@@ -732,13 +732,22 @@ Article.search("ruby framework")  # title OR body must contain "ruby" AND "frame
 # match: :prefix           — term%  (starts with)
 # match: :exact            — term   (full match)
 searchable_by :sku, match: :prefix
+
+# ranked: true — best matches first: exact, then prefix, then substring hits;
+# within a tier the earlier-declared column wins. Portable CASE expression, no index needed.
+searchable_by :title, :body, ranked: true
+Article.search("ruby")                        # "ruby" (title) → "Ruby" (body) → "Rubyists…" → "…about ruby"
+Article.search("ruby", ranked: false)         # per-call override (and `ranked: true` opts in per call)
+Article.recent.search("ruby")                 # relevance leads; the existing ORDER BY breaks ties
+Article.search(q).pluck(:id, Article.search_rank(q))  # the score itself (0 = exact hit on the first column)
 ```
 
 **Notes**
 - Uses Arel's `matches`, which emits `ILIKE` on Postgres (case-insensitive) and `LIKE` elsewhere.
 - The query is escaped before interpolation — `%`, `_`, and `\` from user input are treated as literals, not wildcards.
 - Blank or nil queries return the relation unchanged, so it's safe to drop into a controller pipeline.
-- Reach for `pg_search` / Elasticsearch when you need ranking, stemming, or full-text indexes.
+- `ranked:` uses `reorder`, so relevance is always the primary sort; under `mode: :all` the per-term scores are summed.
+- Reach for `pg_search` / Elasticsearch when you need stemming, weighting by frequency, or full-text indexes.
 
 ---
 

@@ -218,4 +218,101 @@ describe ConcernsOnRails::Searchable do
       end.to raise_error(ArgumentError, /unknown match/)
     end
   end
+  describe "relevance ranking (ranked:)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :ranked_posts, force: true do |t|
+          t.string :title
+          t.text :body
+        end
+      end
+      stub_const("RankedPost", Class.new(TestModel) do
+        self.table_name = "ranked_posts"
+        include ConcernsOnRails::Searchable
+
+        searchable_by :title, :body, ranked: true
+      end)
+      stub_const("UnrankedPost", Class.new(TestModel) do
+        self.table_name = "ranked_posts"
+        include ConcernsOnRails::Searchable
+
+        searchable_by :title, :body
+      end)
+      RankedPost.create!(title: "Introduction to Ruby", body: "ruby basics") # title contains, body prefix
+      RankedPost.create!(title: "ruby", body: "the language")                # title exact
+      RankedPost.create!(title: "Rubyists unite", body: "")                  # title prefix
+      RankedPost.create!(title: "Gems", body: "Ruby")                        # body exact
+      RankedPost.create!(title: "Other", body: "loves ruby")                 # body contains
+    end
+
+    it "orders exact before prefix before substring matches, earlier columns first within a tier" do
+      expect(RankedPost.search("ruby").pluck(:title))
+        .to eq(["ruby", "Gems", "Rubyists unite", "Introduction to Ruby", "Other"])
+    end
+
+    it "keeps the relation's existing ORDER BY as the tiebreaker" do
+      RankedPost.create!(title: "ruby", body: "another exact")
+      expect(RankedPost.order(body: :desc).search("ruby").pluck(:body).first(2)).to eq(["the language", "another exact"])
+      expect(RankedPost.order(body: :asc).search("ruby").pluck(:body).first(2)).to eq(["another exact", "the language"])
+    end
+
+    it "can be switched on or off per call" do
+      expect(UnrankedPost.search("ruby").order_values).to be_empty
+      expect(UnrankedPost.search("ruby", ranked: true).pluck(:title).first).to eq("ruby")
+      expect(RankedPost.search("ruby", ranked: false).order_values).to be_empty
+    end
+
+    it "leaves blank queries unordered and unfiltered" do
+      expect(RankedPost.search("").order_values).to be_empty
+      expect(RankedPost.search(nil).count).to eq(5)
+    end
+
+    it "sums the per-term scores under mode: :all" do
+      RankedPost.delete_all
+      stub_const("AllRankedPost", Class.new(TestModel) do
+        self.table_name = "ranked_posts"
+        include ConcernsOnRails::Searchable
+
+        searchable_by :title, :body, mode: :all, ranked: true
+      end)
+      AllRankedPost.create!(title: "Introduction to Ruby", body: "gems galore") # 4 + 3
+      AllRankedPost.create!(title: "Ruby", body: "gems")                        # 0 + 1
+      AllRankedPost.create!(title: "rubygems", body: "")                        # 2 + 4
+      AllRankedPost.create!(title: "python", body: "gems")                      # excluded: no "ruby"
+
+      expect(AllRankedPost.search("ruby gems").pluck(:title)).to eq(["Ruby", "rubygems", "Introduction to Ruby"])
+    end
+
+    it "ranks by column position alone under match: :exact" do
+      RankedPost.delete_all
+      stub_const("ExactRankedPost", Class.new(TestModel) do
+        self.table_name = "ranked_posts"
+        include ConcernsOnRails::Searchable
+
+        searchable_by :title, :body, match: :exact, ranked: true
+      end)
+      ExactRankedPost.create!(title: "x", body: "ruby")
+      ExactRankedPost.create!(title: "ruby", body: "x")
+      ExactRankedPost.create!(title: "rubyist", body: "rubyist")
+
+      expect(ExactRankedPost.search("ruby").pluck(:title)).to eq(%w[ruby x])
+    end
+
+    it "exposes the rank expression through search_rank for select/pluck" do
+      ranks = RankedPost.search("ruby").pluck(RankedPost.search_rank("ruby"))
+      expect(ranks).to eq([0, 1, 2, 3, 5])
+      expect { RankedPost.search_rank("  ") }.to raise_error(ArgumentError, /search_rank needs a non-blank query/)
+    end
+
+    it "validates ranked: at class load" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "ranked_posts"
+          include ConcernsOnRails::Searchable
+
+          searchable_by :title, ranked: :maybe
+        end
+      end.to raise_error(ArgumentError, /ranked: must be true or false/)
+    end
+  end
 end

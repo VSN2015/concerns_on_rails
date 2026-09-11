@@ -1,4 +1,4 @@
-A lightweight LIKE-based full-text search concern for ActiveRecord models. `Searchable` adds a `.search` scope that queries one or more string columns using SQL `LIKE` / `ILIKE` patterns, handling input escaping automatically. It requires no external search engine, no background indexing, and no additional gems — making it a practical first choice for applications where ranked or stemmed full-text search is not yet needed.
+A lightweight LIKE-based full-text search concern for ActiveRecord models. `Searchable` adds a `.search` scope that queries one or more string columns using SQL `LIKE` / `ILIKE` patterns, handling input escaping automatically. It requires no external search engine, no background indexing, and no additional gems — making it a practical first choice for applications where stemmed, indexed full-text search is not yet needed. An opt-in `ranked:` mode orders results by relevance (exact → prefix → substring) with a portable `CASE` expression.
 
 ## When to use it
 
@@ -6,6 +6,7 @@ A lightweight LIKE-based full-text search concern for ActiveRecord models. `Sear
 - An admin interface that needs a quick "search by title or body" filter across a `posts` or `articles` table.
 - A customer support tool that must search open tickets by subject line using a simple starts-with or contains pattern.
 - Any model where search inputs come from untrusted user input and you need SQL wildcard characters (`%`, `_`, `\`) to be treated as literals automatically.
+- A search-as-you-type box or admin lookup where the exact or prefix hit should be the first row, not buried among substring matches (`ranked: true`).
 - Prototyping or early-stage apps where `pg_search` or Elasticsearch would be premature — you can swap the concern out later without changing call sites.
 
 ## Installation
@@ -25,6 +26,9 @@ class Article < ApplicationRecord
 
   # OR: require an exact, case-sensitive match
   # searchable_by :code, match: :exact, case_sensitive: true
+
+  # OR: order results by relevance (exact → prefix → substring)
+  # searchable_by :title, :body, ranked: true
 end
 ```
 
@@ -54,7 +58,7 @@ end
 The single macro `searchable_by` configures the concern. It must be called at least once; calling it a second time on the same class replaces all previous settings.
 
 ```
-searchable_by(*fields, mode:, match:, case_sensitive:)
+searchable_by(*fields, mode:, match:, case_sensitive:, ranked:)
 ```
 
 | Option | Type | Default | Description |
@@ -63,8 +67,11 @@ searchable_by(*fields, mode:, match:, case_sensitive:)
 | `mode:` | `:any` \| `:all` | `:any` | `:any` treats the entire query string as a single term. `:all` splits the query on whitespace and requires every term to match at least one of the configured columns (each term adds an `AND` `WHERE` clause; columns for that term are combined with `OR`). |
 | `match:` | `:contains` \| `:prefix` \| `:exact` | `:contains` | Controls the LIKE pattern shape. `:contains` wraps the term as `%term%`. `:prefix` appends a trailing wildcard: `term%`. `:exact` emits the term verbatim with no wildcards. |
 | `case_sensitive:` | `Boolean` | `false` | When `false`, Arel emits `ILIKE` on PostgreSQL (case-insensitive). When `true`, plain `LIKE` is emitted on all adapters. SQLite's `LIKE` is case-insensitive for ASCII by default regardless of this setting. |
+| `ranked:` | `Boolean` | `false` | When `true`, `.search` orders results by relevance: exact matches first, then prefix matches, then substring matches; within a tier the earlier-declared column wins. Built as a `CASE` expression over the same `LIKE`/`ILIKE` predicates (so it follows `case_sensitive:`), applied with `reorder` — the relation's existing `ORDER BY` becomes the tiebreaker. Under `mode: :all` the per-term scores are summed. Anything other than `true`/`false` raises `ArgumentError`. |
 
 Valid values for `mode:` are `:any` and `:all`. Valid values for `match:` are `:contains`, `:prefix`, and `:exact`. Passing any other value raises `ArgumentError` at class-load time.
+
+The tiers `ranked:` can distinguish depend on `match:` — `:contains` ranks exact → prefix → substring, `:prefix` ranks exact → prefix, and `:exact` (where every hit is exact) ranks by column position alone.
 
 ## Scopes
 
@@ -72,7 +79,7 @@ Valid values for `mode:` are `:any` and `:all`. Valid values for `match:` are `:
 
 | Scope | Description |
 |---|---|
-| `.search(query)` | Returns records where at least one configured column matches `query`. When `query` is `nil` or blank (including whitespace-only strings), returns the unfiltered relation unchanged. Fully chainable with other scopes and `where` clauses. |
+| `.search(query, ranked: nil)` | Returns records where at least one configured column matches `query`. When `query` is `nil` or blank (including whitespace-only strings), returns the unfiltered relation unchanged (and unordered). Fully chainable with other scopes and `where` clauses. `ranked: true` / `false` overrides the macro's `ranked:` for this call. |
 
 ```ruby
 # Basic usage
@@ -94,7 +101,8 @@ Article.search("rails").where(published: true).order(:created_at)
 | Method | Signature | Description |
 |---|---|---|
 | `searchable_by` | `searchable_by(*fields, mode: :any, match: :contains, case_sensitive: false)` | Configuration macro. Sets the columns, match mode, pattern style, and case sensitivity for the `.search` scope. Raises `ArgumentError` for empty field lists, missing columns, or unrecognised option values. |
-| `search_relation` | `search_relation(query) → ActiveRecord::Relation` | Public class method backing the `.search` scope. Accepts a query string and returns a relation. Called by the scope lambda; can also be called directly when composing queries programmatically. |
+| `search_relation` | `search_relation(query, ranked: nil) → ActiveRecord::Relation` | Public class method backing the `.search` scope. Accepts a query string and returns a relation. Called by the scope lambda; can also be called directly when composing queries programmatically. |
+| `search_rank` | `search_rank(query) → Arel node` | The relevance expression `ranked:` orders by — lower is better, `0` is an exact hit on the first declared column, `tier × columns + column position` in general. Pass it to `pluck`/`select` to expose scores. Raises `ArgumentError` for a blank query. |
 
 ### Instance methods
 
@@ -158,6 +166,32 @@ Book.search("ruby language").pluck(:title)
 # => ["Ruby"]
 ```
 
+**Relevance ranking**
+
+```ruby
+class Article < ApplicationRecord
+  include ConcernsOnRails::Searchable
+
+  searchable_by :title, :body, ranked: true
+end
+
+Article.create!(title: "Introduction to Ruby", body: "ruby basics")
+Article.create!(title: "ruby",                 body: "the language")
+Article.create!(title: "Rubyists unite",       body: "")
+Article.create!(title: "Gems",                 body: "Ruby")
+Article.create!(title: "Other",                body: "loves ruby")
+
+Article.search("ruby").pluck(:title)
+# => ["ruby", "Gems", "Rubyists unite", "Introduction to Ruby", "Other"]
+#     exact title, exact body, prefix title, prefix body, substring body
+
+Article.search("ruby").pluck(:title, Article.search_rank("ruby"))
+# => [["ruby", 0], ["Gems", 1], ["Rubyists unite", 2], ["Introduction to Ruby", 3], ["Other", 5]]
+
+Article.order(created_at: :desc).search("ruby")   # relevance first, newest first within a tier
+Article.search("ruby", ranked: false)             # plain filter, no ORDER BY
+```
+
 ## Notes & gotchas
 
 - **At least one field is required.** Calling `searchable_by` with no arguments raises `ArgumentError` immediately at class-load time (message includes "at least one field").
@@ -168,4 +202,7 @@ Book.search("ruby language").pluck(:title)
 - **Case sensitivity is adapter-dependent.** With `case_sensitive: false` (the default), Arel emits `ILIKE` on PostgreSQL, which is genuinely case-insensitive. On SQLite, `LIKE` is used and is case-insensitive for ASCII characters by default, but case-sensitive for non-ASCII. On MySQL, case sensitivity depends on the column collation, not the `ILIKE`/`LIKE` distinction.
 - **`mode: :all` splits on whitespace only.** The split is `String#split` with no argument, which splits on any whitespace run. There is no phrase-quoting or stop-word handling. A query of `"ruby on rails"` produces three terms: `"ruby"`, `"on"`, `"rails"`.
 - **`searchable_by` is not additive.** Calling it a second time on the same class replaces `searchable_fields`, `searchable_mode`, `searchable_match`, and `searchable_case_sensitive` entirely — it does not merge with a previous call.
+- **`ranked:` replaces the ORDER BY head.** It calls `reorder(rank, *existing_orders)`, so relevance is always the primary key and whatever the relation was already ordered by breaks ties. Add your own `.reorder` after `.search` if you need something else on top.
+- **`ranked:` and `DISTINCT`/`GROUP BY`.** PostgreSQL requires ORDER BY expressions to appear in the select list under `SELECT DISTINCT`; select `search_rank(q)` explicitly or drop `distinct` when ranking.
+- **Ranking is by match shape, not frequency.** A row that mentions the term ten times scores the same as one that mentions it once; prefer `pg_search`'s `ts_rank` when term frequency matters.
 - **No full-text indexes are created.** For large tables, performance depends entirely on a sequential scan against the LIKE pattern. Consider `pg_search` (PostgreSQL) or a dedicated search service when the table grows beyond a few hundred thousand rows or when ranking and stemming are needed.
