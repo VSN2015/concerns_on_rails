@@ -120,9 +120,28 @@ module ConcernsOnRails
                   "#{LABEL}: parents: needs the association when more than one is declared (#{associations.join(', ')})"
           end
 
-          return parents.pluck(parents.primary_key) if parents.is_a?(ActiveRecord::Relation)
+          parent_class = reflect_on_association(associations.first).klass
+          if parents.is_a?(ActiveRecord::Relation)
+            counter_cacheable_check_parent_class!(parents.klass, parent_class)
+            return parents.pluck(parents.primary_key)
+          end
 
-          Array(parents).map { |parent| parent.respond_to?(:id) ? parent.id : parent }
+          Array(parents).map do |parent|
+            next parent unless parent.is_a?(ActiveRecord::Base)
+
+            counter_cacheable_check_parent_class!(parent.class, parent_class)
+            parent.id
+          end
+        end
+
+        # Ids from the wrong table would zero and rewrite whichever parent rows
+        # happen to share them — silent corruption from a plausible mix-up, in
+        # the one method whose job is destructive repair.
+        def counter_cacheable_check_parent_class!(given, expected)
+          return if given <= expected
+
+          raise ArgumentError,
+                "#{LABEL}: parents: must contain #{expected.name} records (got #{given.name})"
         end
 
         def validate_counter_cacheable!(association, reflection, condition, touch)

@@ -54,7 +54,7 @@ Repeatable — each call maintains another counter. Rules accumulate (reassigned
 
 Class method. Recomputes every counter (or only those for one association) from scratch and returns `{ count_column => parents_with_a_nonzero_count }`. Portable across adapters: unconditional counters use `group(fk).count`, conditional counters tally in Ruby.
 
-`parents:` limits the repair to specific parents — ids, records, or a relation of the parent class (`Post.where(...)`) — which are zeroed and re-tallied while every other row is left untouched. A listed parent with no matching children ends at `0`; an empty list/relation is a no-op returning `0` per column. Because the ids belong to one parent table, `parents:` needs the `association` argument when the child declares counters for more than one association (`ArgumentError` otherwise).
+`parents:` limits the repair to specific parents — ids, records, or a relation of the parent class (`Post.where(...)`) — which are zeroed and re-tallied while every other row is left untouched. A listed parent with no matching children ends at `0`; an empty list/relation is a no-op returning `0` per column. Because the ids belong to one parent table, `parents:` needs the `association` argument when the child declares counters for more than one association (`ArgumentError` otherwise), and records or a relation of a different class are rejected with `ArgumentError` rather than zeroing whichever rows happen to share those ids.
 
 | Call | Cost | Use |
 |---|---|---|

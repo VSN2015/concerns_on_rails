@@ -348,5 +348,17 @@ describe ConcernsOnRails::Models::CounterCacheable do
       expect(Comment.recount_counter_caches!(:author, parents: author)).to eq(posts_count: 1)
       expect(author.reload.posts_count).to eq(1)
     end
+
+    it "refuses parents: from the wrong class instead of rewriting whatever shares those ids" do
+      author = User.create!
+      expect { Comment.recount_counter_caches!(:post, parents: author) }
+        .to raise_error(ArgumentError, /parents: must contain Post records \(got User\)/)
+      expect { Comment.recount_counter_caches!(:post, parents: User.where(id: author.id)) }
+        .to raise_error(ArgumentError, /parents: must contain Post records \(got User\)/)
+
+      # Still the drifted 99 the before block wrote: the refused calls neither
+      # zeroed nor rewrote anything.
+      expect(post.reload.comments_count).to eq(99)
+    end
   end
 end
