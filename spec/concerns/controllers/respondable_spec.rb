@@ -89,6 +89,25 @@ describe ConcernsOnRails::Controllers::Respondable do
       )
     end
 
+    it "maps the renamed Rack status symbols without warning" do
+      # Rack 3.1 renamed 422 to :unprocessable_content and warns on every
+      # Rack::Utils.status_code call for the old name. 422 is render_error's
+      # default and the status of several ErrorHandleable handlers, so falling
+      # through would log a deprecation line on every validation failure.
+      c = problem_class.new
+      output = Kernel.instance_method(:warn)
+      captured = []
+      Kernel.send(:define_method, :warn) { |*args| captured.concat(args) }
+      begin
+        c.render_error(message: "nope", status: :unprocessable_entity, code: "record_invalid")
+      ensure
+        Kernel.send(:define_method, :warn, output)
+      end
+
+      expect(c.rendered[:json][:status]).to eq(422)
+      expect(captured.join).not_to include("deprecated")
+    end
+
     it "uses about:blank as the type without a code, and without a type base; omits absent members" do
       c = problem_class.new
       c.render_error(message: "Not here", status: :not_found)

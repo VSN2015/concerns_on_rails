@@ -50,6 +50,14 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       LABEL = "ConcernsOnRails::Controllers::Respondable".freeze
+      # Rack 3.1+ renamed these status phrases; see problem_status_code.
+      RENAMED_STATUS_SYMBOLS = {
+        unprocessable_entity: :unprocessable_content,
+        request_entity_too_large: :content_too_large,
+        payload_too_large: :content_too_large,
+        request_uri_too_long: :uri_too_long
+      }.freeze
+
       ERROR_FORMATS = %i[envelope problem_details].freeze
       PROBLEM_JSON = "application/problem+json".freeze
 
@@ -125,16 +133,18 @@ module ConcernsOnRails
         "#{base.chomp('/')}/#{code}"
       end
 
-      # Symbol → integer. Rack 3.1+ renamed some phrases (422 is
-      # "Unprocessable Content") and only warns for the old symbols, so the old
-      # names are looked up in its obsolete table before falling through.
+      # Symbol → integer. Rack 3.1+ renamed some phrases (422 became
+      # "Unprocessable Content") and `Rack::Utils.status_code` warns on every
+      # call for the old names. Rails >= 8.1 rewrites them before calling Rack
+      # for exactly that reason; mirror it, so a problem-details app does not
+      # log a deprecation line on every validation failure. (Rack's own
+      # obsolete-symbol table is private_constant, so it cannot be consulted.)
       def problem_status_code(status)
         return status.to_i if status.is_a?(Integer) || status.to_s.match?(/\A\d+\z/)
 
         symbol = status.to_sym
-        Rack::Utils::SYMBOL_TO_STATUS_CODE[symbol] ||
-          (defined?(Rack::Utils::OBSOLETE_SYMBOLS_TO_STATUS_CODES) ? Rack::Utils::OBSOLETE_SYMBOLS_TO_STATUS_CODES[symbol] : nil) ||
-          Rack::Utils.status_code(status)
+        symbol = RENAMED_STATUS_SYMBOLS.fetch(symbol, symbol) unless Rack::Utils::SYMBOL_TO_STATUS_CODE.key?(symbol)
+        Rack::Utils::SYMBOL_TO_STATUS_CODE[symbol] || Rack::Utils.status_code(symbol)
       end
     end
   end
