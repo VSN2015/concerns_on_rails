@@ -68,7 +68,7 @@ Called once at the class level. Registers the backing column, validates its exis
 | `prefix:` / `suffix:` | Symbol / `true` | `nil` | Affix the `.active` / `.inactive` scope names so they don't collide with a sibling concern's. |
 | `timestamps:` | `true`, `false` or `Hash` | `false` | `true` stamps `activated_at` when a record is activated and `deactivated_at` when it is deactivated (`activate!`, `deactivate!`, `toggle_active!`, `activate_all`, `deactivate_all`). A Hash renames either column (`{ activated_at: :enabled_at }`) or drops a side (`deactivated_at: nil`); unknown keys raise. Columns must exist as `datetime` (validated at declaration). The other column keeps its previous value, so the last activation and the last deactivation are both visible. |
 
-The macro accepts only the positional `field` argument. There are no keyword options.
+Besides the positional `field`, the macro takes the `prefix:`, `suffix:` and `timestamps:` keywords documented in the table above.
 
 ## Scopes
 
@@ -94,7 +94,7 @@ Subscription.inactive  # WHERE active = FALSE OR active IS NULL
 | `inactive?` | Returns `!active?`. |
 | `activate!` | Runs `before_activate`, persists `true` (and the `activated_at` stamp when configured) via `update`, then `after_activate` — all in one transaction. Returns the result of `update`; a `false` (validation failure) skips the after-hook, a raising after-hook rolls the write back. |
 | `deactivate!` | The mirror image: `before_deactivate`, `false` (+ `deactivated_at`), `after_deactivate`. |
-| `before_activate` / `after_activate` / `before_deactivate` / `after_deactivate` | No-op override points. Overriding any of them (or the bang methods) moves `activate_all` / `deactivate_all` to the per-record path so the hooks run for every record. |
+| `before_activate` / `after_activate` / `before_deactivate` / `after_deactivate` | No-op override points. Gating is per direction: overriding a direction's bang method or either of its two hooks moves **that** verb to the per-record path, so the hooks run for every record. Overriding `after_deactivate` leaves `activate_all` on the single-`UPDATE` fast path. |
 | `toggle_active!` | Calls `deactivate!` if currently active, `activate!` otherwise. A `NULL` column is treated as inactive, so toggling it sets the column to `true`. |
 
 ### Class methods

@@ -345,6 +345,9 @@ describe ConcernsOnRails::Activatable do
         .to raise_error(ArgumentError, /timestamps: must be true, false or a Hash/)
       expect { stamped_class { activatable_by timestamps: { bogus: :enabled_at } } }
         .to raise_error(ArgumentError, /unknown timestamps: key\(s\): bogus/)
+      # A truthy non-column value used to raise NoMethodError on to_sym.
+      expect { stamped_class { activatable_by timestamps: { activated_at: true } } }
+        .to raise_error(ArgumentError, /timestamps: activated_at must be a column name/)
     end
 
     it "batch verbs stamp on the single-UPDATE fast path and run the hooks on the per-record path" do

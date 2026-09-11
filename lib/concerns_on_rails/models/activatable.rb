@@ -100,7 +100,7 @@ module ConcernsOnRails
         # The column writes for a transition: the flag plus the configured
         # stamp (activated_at / deactivated_at) for that direction. Shared by
         # the per-record path and the batch fast path so both agree.
-        def activatable_attributes(value, kind, time = Time.current)
+        def activatable_attributes(value, kind, time = Time.zone.now)
           attributes = { activatable_field => value }
           stamp = activatable_timestamps[kind == :activate ? :activated_at : :deactivated_at]
           attributes[stamp] = time if stamp
@@ -124,9 +124,20 @@ module ConcernsOnRails
           unknown = mapping.keys.map(&:to_sym) - TIMESTAMP_KEYS
           raise ArgumentError, "#{LABEL}: unknown timestamps: key(s): #{unknown.join(', ')}" if unknown.any?
 
+          mapping.each { |key, column| activatable_check_timestamp_column!(key, column) }
+
           stamps = mapping.to_h { |key, column| [key.to_sym, column&.to_sym] }.compact
           ensure_columns!(LABEL, *stamps.values, types: :datetime) if stamps.any?
           stamps.freeze
+        end
+
+        # `timestamps: { activated_at: true }` used to die with NoMethodError on
+        # to_sym instead of the concern's own ArgumentError.
+        def activatable_check_timestamp_column!(key, column)
+          return if column.nil? || column.is_a?(Symbol) || column.is_a?(String)
+
+          raise ArgumentError,
+                "#{LABEL}: timestamps: #{key} must be a column name (Symbol or String), got #{column.inspect}"
         end
 
         def activatable_timestamps_mapping(option)
