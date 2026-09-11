@@ -1371,7 +1371,7 @@ Patient.where_email("a@b.com")       # chainable Relation (accepts arrays too)
 ```ruby
 ConcernsOnRails.configure_encryption do |c|
   c.key           = ENV["ENCRYPTION_KEY_V2"]          # encrypts every new write
-  c.key_id        = 1                                 # stamped into the envelope header (0..255; prefer 0..25)
+  c.key_id        = 1                                 # stamped into the envelope header (any id 0..255)
   c.previous_keys = { 0 => ENV["ENCRYPTION_KEY_V1"] } # still DECRYPTS rows written before the rotation
 end
 
@@ -1386,7 +1386,7 @@ Reads pick the key by the envelope's id, so old and new rows coexist; `find_by_<
 **Notes**
 - The declared column must be `text`/binary (it stores an opaque envelope, not the logical type); a blind-index column holds a 64-char hex digest — add an index on it.
 - Ciphertext is non-deterministic (random IV), so `where(ssn: ...)` matches nothing — query through a blind index. `nil` stays `nil`; presence checks work normally.
-- Never `update_column(s)` an encrypted field — that bypasses the type and writes raw plaintext. Declaring a field with both `encryptable` and `auditable_by` raises (either order).
+- `update_column(s)` on an encrypted field DOES encrypt (the value still serializes through the attribute type), but it skips validations, callbacks, dirty tracking and the blind-index refresh — so a value written that way is unsearchable until the row is saved normally. Declaring a field with both `encryptable` and `auditable_by` raises (either order).
 - Wrong key / tampered ciphertext / malformed envelope raise `Encryption::DecryptionError`. Encrypted field names are auto-registered with Rails' `filter_parameters` (via the gem's railtie), so they're redacted from request logs.
 - Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` writes with `update_columns` (no validations/callbacks — only the ciphertext changes) and streams with `find_each`. A row whose key id is no longer configured raises `DecryptionError` naming the id.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need Rails-managed key infrastructure (KMS, per-record keys) or deterministic encryption.

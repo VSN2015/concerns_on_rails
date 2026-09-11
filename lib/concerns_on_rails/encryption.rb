@@ -70,8 +70,12 @@ module ConcernsOnRails
 
       def previous_keys=(value)
         unless value.is_a?(Hash) && value.keys.all? { |id| id.is_a?(Integer) && id.between?(0, 255) }
+          # Report the SHAPE only. The rejected value is key material, and the
+          # most likely mistake (String ids) would otherwise put a live secret
+          # into the exception message, the backtrace, the log and the tracker.
+          got = value.is_a?(Hash) ? "Hash with keys #{value.keys.inspect}" : value.class.to_s
           raise ArgumentError,
-                "ConcernsOnRails::Encryption: previous_keys must map Integer key ids (0-255) to key material (got #{value.inspect})"
+                "ConcernsOnRails::Encryption: previous_keys must map Integer key ids (0-255) to key material (got #{got})"
         end
 
         @previous_keys = value.dup.freeze

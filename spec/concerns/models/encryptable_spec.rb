@@ -477,5 +477,48 @@ describe ConcernsOnRails::Models::Encryptable do
       expect { ConcernsOnRails.encryption.previous_keys = [OLD_KEY] }.to raise_error(ArgumentError, /previous_keys must map/)
       expect { klass.needs_reencryption(:name) }.to raise_error(ArgumentError, /name is not an encryptable field/)
     end
+
+    it "never puts key material in the previous_keys error message" do
+      secret = "super-secret-production-key-material"
+      expect { ConcernsOnRails.encryption.previous_keys = { "0" => secret } }
+        .to raise_error(ArgumentError) { |e| expect(e.message).not_to include(secret) }
+      expect { ConcernsOnRails.encryption.previous_keys = secret }
+        .to raise_error(ArgumentError) { |e| expect(e.message).not_to include(secret) }
+    end
+
+    it "detects stale rows for key ids above 25, where a case-folding LIKE could not" do
+      # Base64 prefixes for ids 26..51 reuse the letters of 0..25 in the other
+      # case, and SQLite's LIKE (and MySQL's default collation) fold case.
+      legacy = klass.create!(ssn: "111-11-1111")
+      ConcernsOnRails.configure_encryption do |c|
+        c.key = NEW_KEY
+        c.key_id = 26
+        c.previous_keys = { 0 => OLD_KEY }
+      end
+
+      expect(klass.needs_reencryption).to eq([legacy])
+      expect(klass.reencrypt_all!).to eq(1)
+      expect(klass.needs_reencryption.count).to eq(0)
+      expect(klass.find(legacy.id).ssn).to eq("111-11-1111")
+      expect(klass.find(legacy.id).ssn_key_id).to eq(26)
+    end
+
+    it "refuses to overwrite ciphertext it could not decrypt, even when errors are swallowed" do
+      record = klass.create!(ssn: "111-11-1111")
+      before = klass.find(record.id).ssn_ciphertext
+
+      # Old key dropped AND raise_on_decrypt_error off: the plaintext reads as
+      # nil. Writing that back would NULL exactly the rows a rotation exists to
+      # rescue, so the field must be skipped instead.
+      ConcernsOnRails.configure_encryption do |c|
+        c.key = NEW_KEY
+        c.key_id = 1
+        c.previous_keys = {}
+        c.raise_on_decrypt_error = false
+      end
+
+      expect(klass.reencrypt_all!).to eq(0)
+      expect(klass.find(record.id).ssn_ciphertext).to eq(before)
+    end
   end
 end

@@ -282,20 +282,33 @@ module ConcernsOnRails
         # Rows whose ciphertext for any of `fields` (default: every gem-keyed
         # field) was written under a key other than the current one — the
         # envelope header is a fixed 4-char Base64 prefix per key id, so this is
-        # a LIKE on the column, no decryption. Per-field `key:` fields never
-        # rotate and are ignored. Pick key ids in 0..25: their prefixes differ
-        # in a letter, not just its case, so MySQL's case-insensitive LIKE keeps
-        # them apart.
+        # a prefix comparison on the column, no decryption. Per-field `key:`
+        # fields never rotate and are ignored.
+        #
+        # The comparison must be case-EXACT: Base64 prefixes for ids 26..51
+        # reuse the letters of 0..25 in the other case, and both SQLite's LIKE
+        # and MySQL's default collation fold case — which silently matched
+        # every row and made this return nothing. Hence SUBSTR + `<>`, with
+        # MySQL forced onto a binary collation.
         def needs_reencryption(*fields)
           columns = encryptable_rotatable_fields(fields)
           return none if columns.empty?
 
-          prefix = "#{ConcernsOnRails::Support::Encryptor.header_prefix(ConcernsOnRails.encryption.key_id)}%"
+          prefix = ConcernsOnRails::Support::Encryptor.header_prefix(ConcernsOnRails.encryption.key_id)
           clauses = columns.map do |field|
             quoted = "#{quoted_table_name}.#{connection.quote_column_name(field)}"
-            "(#{quoted} IS NOT NULL AND #{quoted} NOT LIKE ?)"
+            "(#{quoted} IS NOT NULL AND #{encryptable_prefix_mismatch_sql(quoted)})"
           end
           where(clauses.join(" OR "), *Array.new(columns.size, prefix))
+        end
+
+        # Case-exact "the first 4 characters are not this prefix", per adapter.
+        def encryptable_prefix_mismatch_sql(quoted)
+          if connection.adapter_name.to_s.downcase.include?("mysql")
+            "CAST(SUBSTRING(#{quoted}, 1, 4) AS BINARY) <> ?"
+          else
+            "SUBSTR(#{quoted}, 1, 4) <> ?"
+          end
         end
 
         # Rewrite every stale row (see needs_reencryption) under the current key,
@@ -437,6 +450,13 @@ module ConcernsOnRails
 
           rule = self.class.encryptable_rules.fetch(field)
           value = public_send(field)
+          # A rotation must never be able to destroy data. Under
+          # `raise_on_decrypt_error = false` a field that cannot be decrypted
+          # reads as nil, and writing that back would NULL the ciphertext AND
+          # the blind index of exactly the rows a rotation exists to save.
+          # Refuse the field instead — re-running once the key is restored fixes it.
+          next if value.nil?
+
           updates[field] = value
           updates[rule[:blind_index][:column]] = ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, value) if rule[:blind_index]
         end

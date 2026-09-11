@@ -21,7 +21,7 @@ end
 | Setting | Default | Description |
 |---|---|---|
 | `key` | `nil` | The key every new write is encrypted with (raw 32 bytes, 64-hex, a passphrase, or a Proc returning one). Missing → `MissingKeyError` at first use. |
-| `key_id` | `0` | The id (0–255) stamped into the envelope header of everything written with `key`. Bump it when you rotate. Prefer ids in 0..25 (see [Key rotation](#key-rotation)). |
+| `key_id` | `0` | The id (0–255) stamped into the envelope header of everything written with `key`. Bump it when you rotate. Any id in the range works. |
 | `previous_keys` | `{}` | `{ key_id => material-or-Proc }` — keys that may still **decrypt** rows written before a rotation. Never used to encrypt. |
 | `key_derivation_salt` | fixed | PBKDF2 salt; part of the key's identity — keep it stable. |
 | `on_missing_key` | `:raise` | `:passthrough` stores/reads plaintext when no key is configured (dev/test escape hatch). |
@@ -52,10 +52,10 @@ patient.reencrypt!                         # one record
 ```
 
 - **Blind indexes during the window.** `find_by_<field>` / `where_<field>` match the digest under the current key **and** every previous key, so a row indexed under key 0 is still found before it is re-encrypted; `<field>_fingerprint` returns the current-key digest (what gets written). `reencrypt_all!` rewrites the index column too.
-- **`reencrypt_all!` uses `update_columns`** — no validations, no callbacks, no `updated_at` bump: the values do not change, only their ciphertext, and an Auditable capture or webhook must not fire for a key rotation. Each row is valid before and after, so there is no wrapping transaction to hold.
+- **`reencrypt_all!` uses `update_columns`** — no validations, no callbacks, no `updated_at` bump: the values do not change, only their ciphertext, and an Auditable capture or webhook must not fire for a key rotation. Each row is valid before and after, so there is no wrapping transaction to hold. This is the one `*_all` verb that does NOT go through `Support::BatchOps`: it is re-runnable rather than atomic, so a row that raises mid-stream leaves the rows before it already rotated. It also writes `WHERE id = ?` with no guard on the old ciphertext, so run it against rows the app is not concurrently writing, or a concurrent update can be reverted to the value read at load.
 - **Per-field `key:` fields are outside rotation.** They always stamp key id 0, decrypt with their own key, and are skipped by `needs_reencryption` / `reencrypt_all!`. Rotate them by changing the field key and re-saving.
 - **Unknown key id.** A row whose id is neither `key_id` nor in `previous_keys` raises `DecryptionError` ("encrypted with unknown key id N") — you removed a previous key too early.
-- **Why 0..25?** The header's Base64 prefix for ids 0–25 differs by a *letter*; ids 26–51 reuse those letters in lower case, which MySQL's default case-insensitive `LIKE` cannot tell apart. Sequential ids never get near that in practice.
+- **Every key id 0..255 works.** `needs_reencryption` compares the envelope's 4-character Base64 header with `SUBSTR(...) <> ?` (a binary cast on MySQL), not `LIKE`. A case-folding comparison would have confused ids 26–51 with 0–25, whose prefixes differ only in case, and quietly reported that nothing needed rotating.
 
 ## Declaring encrypted fields
 
@@ -178,7 +178,7 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - **AES-256-GCM is authenticated.** A wrong key, a tampered ciphertext, or a corrupted envelope fails the auth tag and raises `DecryptionError` — it never returns garbage plaintext.
 - **The header is authenticated too.** The version/algorithm/key-id bytes are fed to GCM as additional authenticated data (AAD), so they cannot be altered.
 - **Non-deterministic by design.** Every write uses a fresh random IV, so identical plaintext yields different ciphertext — no equality leakage, but also no equality queries.
-- **Never `update_column` / `update_columns` an encrypted field.** Those bypass the type and write raw plaintext straight to the column.
+- **`update_column` / `update_columns` on an encrypted field still encrypt** — the value serializes through the attribute type — but they skip validations, callbacks, dirty tracking and the blind-index refresh, so the row's fingerprint goes stale and the value stops being findable until a normal save.
 - **Keep the KDF salt stable.** It is part of the key's identity; rotating it orphans existing ciphertext.
 
 ## Notes & gotchas

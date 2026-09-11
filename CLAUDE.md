@@ -140,9 +140,11 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `find_by_<field>`/`where_<field>`/`<field>_fingerprint` finders (nil values
   return none/nil, never `bidx IS NULL` matches). Key rotation: gem-level
   `key_id` / `previous_keys` config, envelope-driven multi-key decrypt, blind-index
-  lookups match current + previous digests, `needs_reencryption` (LIKE on the 4-char
-  header prefix) / `reencrypt_all!` / `reencrypt!` / `<field>_key_id`; per-field
-  `key:` fields sit outside rotation. Fields auto-register with Rails
+  lookups match current + previous digests, `needs_reencryption` (case-exact SUBSTR on the
+  4-char header prefix, binary cast on MySQL) / `reencrypt_all!` / `reencrypt!` /
+  `<field>_key_id`; per-field `key:` fields sit outside rotation. `reencrypt_all!`
+  is the ONE `*_all` verb that deliberately skips `Support::BatchOps` — re-runnable,
+  not atomic — and it never writes a field it could not decrypt. Fields auto-register with Rails
   filter_parameters via `FilterParameterRegistry` + the railtie.
 - **`CounterCacheable`** — conditional denormalized counters ("counter_culture-lite"),
   declared on the CHILD. `counter_cacheable_by association, count:, if:, touch:`
