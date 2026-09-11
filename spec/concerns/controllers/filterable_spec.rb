@@ -253,6 +253,36 @@ describe ConcernsOnRails::Controllers::Filterable do
       expect(klass.new(params: { since: (Time.zone.today + 2).iso8601 }).filtered(Product.order(:id)).pluck(:name)).to eq([])
     end
 
+    it "hands a with: lambda the RAW value when no type: is declared, even on a real column" do
+      # The param name matches a column, but without type: the lambda must
+      # still receive the String it always did — an existing lambda comparing
+      # v == "1" or doing string work must not silently stop matching.
+      seen = nil
+      probe = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :stock, with: lambda { |rel, v|
+          seen = v
+          rel
+        }
+      end
+      probe.new(params: { stock: "5" }).filtered(Product.all)
+      expect(seen).to eq("5")
+      expect(seen).to be_a(String)
+
+      seen_date = nil
+      dates = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :discontinued_at, with: lambda { |rel, v|
+          seen_date = v
+          rel
+        }
+      end
+      dates.new(params: { discontinued_at: "2020-01-02" }).filtered(Product.all)
+      expect(seen_date).to eq("2020-01-02")
+    end
+
     it "records the rule so the configuration is introspectable" do
       expect(controller_class.filterable_rules[:price]).to include(operators: described_class::OPERATORS, type: nil)
     end

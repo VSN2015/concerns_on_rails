@@ -110,7 +110,10 @@ module ConcernsOnRails
 
       def apply_filter(relation, field, value, options)
         if options[:with]
-          options[:with].call(relation, filter_cast(relation, field, value, options))
+          # `type:` pre-casts a with: lambda's value; the column's own type must
+          # NOT, or every existing lambda on a column-backed param silently
+          # starts receiving true / a Time where it used to get "1" / "2020-01-02".
+          options[:with].call(relation, options[:type] ? options[:type].cast(value) : value)
         elsif options[:scope]
           relation.public_send(options[:scope])
         elsif filterable_scalar?(value)
