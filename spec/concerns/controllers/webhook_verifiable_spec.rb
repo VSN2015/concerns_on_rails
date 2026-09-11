@@ -12,6 +12,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
   let(:base_class) do
     Class.new(FakeController) do
       def self.before_action(*); end
+      def self.after_action(*); end
     end
   end
 
@@ -516,6 +517,190 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
     it "rejects a non-sha256 digest with a provider preset scheme" do
       declare { verify_webhook :a, secret: "s", scheme: :github, digest: :sha1 }
         .to raise_error(ArgumentError, /pins SHA256/)
+    end
+  end
+  describe "replay protection (replay: / replay_ttl:)" do
+    class FakeReplayStore
+      attr_reader :data, :writes
+
+      def initialize
+        @data = {}
+        @writes = []
+      end
+
+      # nil (not false) on a lost unless_exist race — the same falsey contract
+      # Rails.cache#write exposes, minus RuboCop calling a writer a predicate.
+      def write(key, value, options = {})
+        return nil if options[:unless_exist] && @data.key?(key)
+
+        @writes << [key, value, options]
+        @data[key] = value
+        true
+      end
+
+      def read(key)
+        @data[key]
+      end
+
+      # Returns the removed value (nil when absent), like Hash#delete —
+      # WebhookVerifiable ignores the return value of delete.
+      def delete(key)
+        @data.delete(key)
+      end
+    end
+
+    # Every write fails the way Rails' Redis/memcached stores fail when the
+    # server is unreachable: falsy return, nothing stored, no exception.
+    class UnreachableReplayStore
+      def write(_key, _value, _options = {})
+        nil
+      end
+
+      def read(_key)
+        nil
+      end
+
+      def delete(_key)
+        nil
+      end
+    end
+
+    let(:store) { FakeReplayStore.new }
+
+    after { ConcernsOnRails.config.cache_store = nil }
+
+    def replay_class(replay: store, **extra)
+      s = replay
+      verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :hex, header: "X-Sig", replay: s, **extra }
+    end
+
+    it "accepts the first delivery and rejects an identical second one with 409 webhook_replayed" do
+      klass = replay_class
+      headers = { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) }
+
+      first = instance(klass, headers: headers)
+      first.verify_webhook_signature!
+      expect(first.rendered).to be_nil
+      expect(first.webhook_verified?).to be(true)
+
+      second = instance(klass, headers: headers)
+      second.verify_webhook_signature!
+      expect_failure(second, :conflict, "webhook_replayed")
+    end
+
+    it "lets a different delivery (different body, different signature) through" do
+      klass = replay_class
+      instance(klass, headers: { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) }).verify_webhook_signature!
+      other_body = '{"event":"order.refunded","id":43}'
+      c = instance(klass, headers: { "X-Sig" => hex_hmac(WH_SECRET, other_body) }, body: other_body)
+      c.verify_webhook_signature!
+      expect(c.rendered).to be_nil
+      expect(c.webhook_verified?).to be(true)
+    end
+
+    it "lets the provider retry when the handler failed, instead of burning the delivery" do
+      klass = replay_class
+      headers = { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) }
+
+      # The handler 500s, so the delivery was never processed. Every retry of
+      # the same body carries the same signature, so a claim held for the full
+      # replay_ttl would lose the delivery permanently.
+      failed = instance(klass, headers: headers)
+      failed.verify_webhook_signature!
+      failed.response.status = 500
+      failed.commit_webhook_replay_claim
+
+      retried = instance(klass, headers: headers)
+      retried.verify_webhook_signature!
+      expect(retried.rendered).to be_nil
+      expect(retried.webhook_verified?).to be(true)
+
+      # And once a delivery really is handled, the duplicate is still rejected.
+      retried.commit_webhook_replay_claim
+      duplicate = instance(klass, headers: headers)
+      duplicate.verify_webhook_signature!
+      expect_failure(duplicate, :conflict, "webhook_replayed")
+    end
+
+    it "accepts deliveries while the store is unreachable instead of rejecting every one" do
+      klass = replay_class(replay: UnreachableReplayStore.new)
+      c = instance(klass, headers: { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) })
+      c.verify_webhook_signature!
+      expect(c.rendered).to be_nil
+      expect(c.webhook_verified?).to be(true)
+    end
+
+    it "records the key only after the signature verified — a forged delivery consumes nothing" do
+      klass = replay_class
+      forged = instance(klass, headers: { "X-Sig" => "deadbeef" })
+      forged.verify_webhook_signature!
+      expect_failure(forged, :unauthorized, "webhook_signature_invalid")
+      expect(store.writes).to be_empty
+    end
+
+    it "writes the digest of the signature header with unless_exist and the ttl (default 24 hours)" do
+      klass = replay_class
+      instance(klass, headers: { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) }).verify_webhook_signature!
+      key, _value, options = store.writes.first
+      expect(key).to match(/\Awebhook_replay:.+#receive:[0-9a-f]{64}\z/)
+      expect(key).not_to include(hex_hmac(WH_SECRET, WH_BODY))
+      expect(options).to eq(expires_in: 60, unless_exist: true)
+
+      fresh_store = FakeReplayStore.new
+      short = replay_class(replay: fresh_store, replay_ttl: 10.minutes)
+      c = instance(short, headers: { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) })
+      c.verify_webhook_signature!
+      expect(fresh_store.writes.last[2][:expires_in]).to eq(60) # the claim
+      c.commit_webhook_replay_claim
+      expect(fresh_store.writes.last[2][:expires_in]).to eq(600) # the real ttl
+    end
+
+    it "scopes the replay key per controller action" do
+      klass = verifiable_class do
+        verify_webhook :receive, :backup, secret: WH_SECRET, scheme: :hex, header: "X-Sig", replay: FakeReplayStore.new
+      end
+      headers = { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) }
+      instance(klass, action: "receive", headers: headers).verify_webhook_signature!
+      other = instance(klass, action: "backup", headers: headers)
+      other.verify_webhook_signature!
+      expect(other.rendered).to be_nil
+    end
+
+    it "replay: true uses the gem-wide cache_store, and raises the setup hint when none is configured" do
+      klass = replay_class(replay: true)
+      headers = { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) }
+      expect { instance(klass, headers: headers).verify_webhook_signature! }
+        .to raise_error(ArgumentError, /no store configured.*replay:/)
+
+      ConcernsOnRails.setup { |c| c.cache_store = store }
+      instance(klass, headers: headers).verify_webhook_signature!
+      second = instance(klass, headers: headers)
+      second.verify_webhook_signature!
+      expect_failure(second, :conflict, "webhook_replayed")
+    end
+
+    it "protects Stripe deliveries too (same header replayed within tolerance)" do
+      now = Time.now.to_i
+      klass = verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :stripe, replay: FakeReplayStore.new }
+      headers = { "Stripe-Signature" => stripe_header(WH_SECRET, WH_BODY, at: now) }
+      instance(klass, headers: headers).verify_webhook_signature!
+      second = instance(klass, headers: headers)
+      second.verify_webhook_signature!
+      expect_failure(second, :conflict, "webhook_replayed")
+    end
+
+    it "validates the options at class load" do
+      expect { replay_class(replay: nil, replay_ttl: 1.hour) }.to raise_error(ArgumentError, /:replay_ttl requires :replay/)
+      expect { replay_class(replay: "nope") }.to raise_error(ArgumentError, /:replay must be true or a store responding to #write/)
+      expect { replay_class(replay_ttl: 0) }.to raise_error(ArgumentError, /:replay_ttl must be a positive duration/)
+    end
+
+    it "exposes the replay settings on the rule" do
+      rule = replay_class(replay_ttl: 1.hour).webhook_rules.first
+      expect(rule[:replay]).to equal(store)
+      expect(rule[:replay_ttl]).to eq(3600)
+      plain = verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :hex, header: "X" }
+      expect(plain.webhook_rules.first[:replay]).to be_nil
     end
   end
 end
