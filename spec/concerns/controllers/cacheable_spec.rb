@@ -16,7 +16,10 @@ describe ConcernsOnRails::Controllers::Cacheable do
     end
   end
 
-  FakeCacheRequest = Struct.new(:request_method, :headers) unless defined?(FakeCacheRequest)
+  # format/query_string are here so the :format and :query etag_with presets
+  # actually fold a VALUE; without them both lambdas' respond_to? guards
+  # short-circuit and only their Vary side gets exercised.
+  FakeCacheRequest = Struct.new(:request_method, :headers, :format, :query_string) unless defined?(FakeCacheRequest)
 
   let(:base_class) do
     Class.new(FakeController) do
@@ -33,9 +36,9 @@ describe ConcernsOnRails::Controllers::Cacheable do
     end
   end
 
-  def instance(klass, action: "show", method: "GET", headers: {}, params: {})
+  def instance(klass, action: "show", method: "GET", headers: {}, params: {}, format: nil, query_string: nil)
     controller = klass.new(params: params)
-    request = FakeCacheRequest.new(method, headers)
+    request = FakeCacheRequest.new(method, headers, format, query_string)
     controller.define_singleton_method(:request) { request }
     controller.define_singleton_method(:action_name) { action }
     controller
@@ -185,6 +188,151 @@ describe ConcernsOnRails::Controllers::Cacheable do
     it "rejects a non-boolean no_store" do
       expect { cacheable_class { http_cache_actions :show, no_store: "yes" } }
         .to raise_error(ArgumentError, /:no_store/)
+    end
+  end
+  describe "ETag extras (etag_with) and automatic Vary" do
+    def etag_of(controller)
+      controller.stale_resource?(resource)
+      controller.response.headers["ETag"]
+    end
+
+    it "folds a :locale preset into the ETag and adds Vary: Accept-Language" do
+      klass = cacheable_class { etag_with :locale }
+      en = de = nil
+      I18n.with_locale(:en) { en = etag_of(instance(klass)) }
+      I18n.with_locale(:de) { de = etag_of(instance(klass)) }
+
+      expect(en).to match(%r{\AW/"[0-9a-f]{32}"\z})
+      expect(en).not_to eq(de)
+      expect(en).not_to eq(etag) # no longer the bare resource ETag
+      expect(instance(klass).tap { |c| c.stale_resource?(resource) }.response.headers["Vary"]).to eq("Accept-Language")
+    end
+
+    it "does not send 304 for a validator minted under another locale" do
+      klass = cacheable_class { etag_with :locale }
+      en = nil
+      I18n.with_locale(:en) { en = etag_of(instance(klass)) }
+
+      I18n.with_locale(:de) do
+        c = instance(klass, headers: { "If-None-Match" => en })
+        expect(c.stale_resource?(resource)).to be(true)
+      end
+      I18n.with_locale(:en) do
+        c = instance(klass, headers: { "If-None-Match" => en })
+        expect(c.stale_resource?(resource)).to be(false)
+      end
+    end
+
+    it "is deterministic — the same context yields the same ETag" do
+      klass = cacheable_class { etag_with :locale }
+      expect(etag_of(instance(klass))).to eq(etag_of(instance(klass)))
+    end
+
+    it "folds the :format and :query preset VALUES, not just their Vary" do
+      formats = cacheable_class { etag_with :format }
+      json = etag_of(instance(formats, format: "application/json"))
+      xml = etag_of(instance(formats, format: "application/xml"))
+      expect(json).not_to eq(xml)
+      expect(etag_of(instance(formats, format: "application/json"))).to eq(json)
+
+      queries = cacheable_class { etag_with :query }
+      first = etag_of(instance(queries, query_string: "page=1"))
+      second = etag_of(instance(queries, query_string: "page=2"))
+      expect(first).not_to eq(second)
+    end
+
+    it "accepts a block (instance_exec'd) and a Symbol naming a controller method" do
+      klass = cacheable_class do
+        etag_with :requested_fields
+        etag_with { params[:role] }
+
+        def requested_fields
+          params[:fields]
+        end
+      end
+      a = etag_of(instance(klass, params: { fields: "id,title", role: "admin" }))
+      b = etag_of(instance(klass, params: { fields: "id", role: "admin" }))
+      c = etag_of(instance(klass, params: { fields: "id,title", role: "guest" }))
+      d = etag_of(instance(klass, params: { fields: "id,title", role: "admin" }))
+      expect([a, b, c].uniq.size).to eq(3)
+      expect(d).to eq(a)
+      expect(instance(klass).tap { |x| x.stale_resource?(resource) }.response.headers).not_to have_key("Vary")
+    end
+
+    it "ignores nil extras so an absent context leaves the ETag alone" do
+      klass = cacheable_class { etag_with { params[:missing] } }
+      expect(etag_of(instance(klass))).to eq(etag)
+    end
+
+    it "supports per-call extras: merged after the class-level ones" do
+      klass = cacheable_class
+      plain = etag_of(instance(klass))
+      c = instance(klass)
+      c.stale_resource?(resource, extras: ["v2"])
+      with_extra = c.response.headers["ETag"]
+      expect(with_extra).not_to eq(plain)
+
+      again = instance(klass)
+      again.stale_resource?(resource, extras: ["v2"])
+      expect(again.response.headers["ETag"]).to eq(with_extra)
+    end
+
+    it "combines an explicit etag: with extras (and keeps it verbatim without extras)" do
+      klass = cacheable_class { etag_with :locale }
+      c = instance(klass)
+      c.stale_resource?(etag: %(W/"custom"))
+      expect(c.response.headers["ETag"]).to match(%r{\AW/"[0-9a-f]{32}"\z})
+      expect(c.response.headers["ETag"]).not_to eq(%(W/"custom"))
+
+      bare = instance(cacheable_class)
+      bare.stale_resource?(etag: %(W/"custom"))
+      expect(bare.response.headers["ETag"]).to eq(%(W/"custom"))
+    end
+
+    it ":format varies on Accept, vary: overrides a preset default and vary: false suppresses it" do
+      c = instance(cacheable_class { etag_with :format })
+      c.stale_resource?(resource)
+      expect(c.response.headers["Vary"]).to eq("Accept")
+
+      c = instance(cacheable_class { etag_with :locale, vary: %w[Accept-Language X-Locale] })
+      c.stale_resource?(resource)
+      expect(c.response.headers["Vary"]).to eq("Accept-Language, X-Locale")
+
+      c = instance(cacheable_class { etag_with :locale, vary: false })
+      c.stale_resource?(resource)
+      expect(c.response.headers).not_to have_key("Vary")
+    end
+
+    it "merges etag_with Vary with the http_cache_actions policy Vary, de-duplicated" do
+      klass = cacheable_class do
+        http_cache_actions :show, max_age: 60, vary: %w[Accept Accept-Language]
+        etag_with :locale
+      end
+      c = instance(klass)
+      c.stale_resource?(resource)
+      c.apply_http_cache_headers
+      expect(c.response.headers["Vary"]).to eq("Accept-Language, Accept")
+    end
+
+    it "does not touch validators or Vary on an unsafe request" do
+      c = instance(cacheable_class { etag_with :locale }, method: "POST")
+      expect(c.stale_resource?(resource)).to be(true)
+      expect(c.response.headers).not_to have_key("ETag")
+      expect(c.response.headers).not_to have_key("Vary")
+    end
+
+    it "exposes the declared extras and validates the macro" do
+      klass = cacheable_class { etag_with :locale, :format }
+      expect(klass.cacheable_etag_extras.map { |e| e[:source] }).to eq(%i[locale format])
+
+      expect { cacheable_class { etag_with } }.to raise_error(ArgumentError, /etag_with needs at least one source or a block/)
+      expect { cacheable_class { etag_with "locale" } }.to raise_error(ArgumentError, /sources must be Symbols/)
+      expect { cacheable_class { etag_with :locale, vary: "" } }.to raise_error(ArgumentError, /:vary must be/)
+    end
+
+    it "raises a clear error at request time for a Symbol that is neither a preset nor a controller method" do
+      c = instance(cacheable_class { etag_with :nope })
+      expect { c.stale_resource?(resource) }.to raise_error(ArgumentError, /etag_with :nope.*neither a preset.*nor a controller method/)
     end
   end
 end
