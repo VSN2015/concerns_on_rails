@@ -302,4 +302,63 @@ describe ConcernsOnRails::Models::CounterCacheable do
       expect(updates.length).to eq(2) # old parent −, new parent + (both counters batched)
     end
   end
+
+  describe ".recount_counter_caches! with parents:" do
+    let(:third) { Post.create! }
+
+    before do
+      Comment.create!(post: post, approved: true)
+      Comment.create!(post: post)
+      Comment.create!(post: other)
+      3.times { Comment.create!(post: third) }
+      Post.update_all(comments_count: 99, approved_comments_count: 99) # drift everywhere
+    end
+
+    it "repairs only the given parents — ids, records or a relation — and leaves the rest alone" do
+      result = Comment.recount_counter_caches!(:post, parents: [post.id, other])
+      expect(result).to eq(comments_count: 2, approved_comments_count: 1)
+      expect(post.reload.values_at(:comments_count, :approved_comments_count)).to eq([2, 1])
+      expect(other.reload.values_at(:comments_count, :approved_comments_count)).to eq([1, 0])
+      expect(third.reload.values_at(:comments_count, :approved_comments_count)).to eq([99, 99])
+
+      Comment.recount_counter_caches!(:post, parents: Post.where(id: third.id))
+      expect(third.reload.values_at(:comments_count, :approved_comments_count)).to eq([3, 0])
+      expect(post.reload.comments_count).to eq(2)
+    end
+
+    it "zeroes a listed parent that has no children and treats an empty parents: as a no-op" do
+      lonely = Post.create!
+      Post.where(id: lonely.id).update_all(comments_count: 5)
+
+      expect(Comment.recount_counter_caches!(:post, parents: lonely)).to eq(comments_count: 0, approved_comments_count: 0)
+      expect(lonely.reload.comments_count).to eq(0)
+
+      expect(Comment.recount_counter_caches!(:post, parents: Post.none)).to eq(comments_count: 0, approved_comments_count: 0)
+      expect(Comment.recount_counter_caches!(:post, parents: [])).to eq(comments_count: 0, approved_comments_count: 0)
+      expect(third.reload.comments_count).to eq(99)
+    end
+
+    it "requires the association when parents: would be ambiguous" do
+      expect { Comment.recount_counter_caches!(parents: [post.id]) }
+        .to raise_error(ArgumentError, /parents: needs the association when more than one is declared \(post, author\)/)
+
+      author = User.create!
+      Comment.create!(author: author)
+      User.update_all(posts_count: 42)
+      expect(Comment.recount_counter_caches!(:author, parents: author)).to eq(posts_count: 1)
+      expect(author.reload.posts_count).to eq(1)
+    end
+
+    it "refuses parents: from the wrong class instead of rewriting whatever shares those ids" do
+      author = User.create!
+      expect { Comment.recount_counter_caches!(:post, parents: author) }
+        .to raise_error(ArgumentError, /parents: must contain Post records \(got User\)/)
+      expect { Comment.recount_counter_caches!(:post, parents: User.where(id: author.id)) }
+        .to raise_error(ArgumentError, /parents: must contain Post records \(got User\)/)
+
+      # Still the drifted 99 the before block wrote: the refused calls neither
+      # zeroed nor rewrote anything.
+      expect(post.reload.comments_count).to eq(99)
+    end
+  end
 end

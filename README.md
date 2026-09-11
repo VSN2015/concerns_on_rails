@@ -1344,6 +1344,7 @@ end
 
 post.comments_count                # maintained on create / destroy / update
 Comment.recount_counter_caches!    # repair drift / backfill every counter
+Comment.recount_counter_caches!(:post, parents: imported_posts)   # repair just these parents (ids, records or a relation)
 ```
 
 Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose.
@@ -1353,7 +1354,7 @@ Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,
 **Notes**
 - The `belongs_to` must be declared **before** the macro (the reflection is validated at declaration). Polymorphic associations are not supported.
 - Don't also set native `counter_cache: true` on the same column — both would fire and double-count.
-- Counters track the **persisted** record; writes that skip callbacks (`update_column(s)`, `update_all`, `delete`) are not tracked — run `recount_counter_caches!` to reconcile. It rewrites every parent (portable across adapters, but O(n) for conditional counters) — a maintenance operation, run it offline.
+- Counters track the **persisted** record; writes that skip callbacks (`update_column(s)`, `update_all`, `delete`) are not tracked — run `recount_counter_caches!` to reconcile. Bare, it rewrites every parent (portable across adapters, but O(n) for conditional counters) — a maintenance operation, run it offline. With `parents:` it zeroes and re-tallies only those parents (O(their children)), so repairing one imported post is safe on the request path.
 - Reach for [`counter_culture`](https://github.com/magnusvk/counter_culture) when you need multi-level rollups, delta columns, or after-commit execution.
 
 ---
