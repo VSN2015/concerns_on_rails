@@ -1952,15 +1952,18 @@ class ApplicationController < ActionController::Base
 
   timezoneable available: ["UTC", "Eastern Time (US & Canada)"], default: "UTC"
   # timezoneable param: :tz, header: false, cookie: :time_zone
+  # timezoneable cookie: :time_zone, persist: true          # ?time_zone=London sticks for a year
+  # timezoneable response_header: true                       # X-Time-Zone: London (+ Vary: Time-Zone)
 end
 ```
 
 Resolution order: `params[param]` → `Time-Zone` header → cookie (if enabled) → `default` → the current `Time.zone`. Every value — the configured `available:` / `default:` **and** each request candidate — is resolved through `ActiveSupport::TimeZone[...]`, so a zone accepted at boot can never be rejected at request time.
 
-**Options**: `available:` (allow-list applied to param/header/cookie matching; `default:` bypasses it, mirroring Localizable), `default:`, `param:` (default `:time_zone`), `header:` (default `true`, reads the `Time-Zone` header), `cookie:` (default `false`; `true` reads the `:time_zone` cookie, or pass a cookie name).
+**Options**: `available:` (allow-list applied to param/header/cookie matching; `default:` bypasses it, mirroring Localizable), `default:`, `param:` (default `:time_zone`), `header:` (default `true`, reads the `Time-Zone` header), `cookie:` (default `false`; `true` reads the `:time_zone` cookie, or pass a cookie name), `persist:` (default `false`; `true` or a Hash of cookie options — writes a **param**-chosen zone into the `cookie:` so a settings link makes it stick; needs `cookie:`), `response_header:` (default `false`; `true` emits `X-Time-Zone`, or pass a header name — `Vary: Time-Zone` is appended when the header source is on).
 
 **Notes**
-- An unknown `available:` / `default:` zone raises `ArgumentError` at declaration time (fail-fast on misconfiguration).
+- An unknown `available:` / `default:` zone raises `ArgumentError` at declaration time (fail-fast on misconfiguration); so does `persist:` without `cookie:`.
+- `time_zone_source` tells you which source won (`:param`, `:header`, `:cookie`, `:default`, `:current`) — handy for a "times shown in London (from your browser)" hint.
 - Pairs naturally with the model concerns that read the clock (`Schedulable`, `Publishable`, `Expirable`, `SoftDeletable`).
 
 ---
