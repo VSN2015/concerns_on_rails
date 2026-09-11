@@ -325,4 +325,103 @@ describe ConcernsOnRails::Expirable do
       expect(invalid.reload.expires_at).to be_nil
     end
   end
+  describe "lifecycle hooks (before_expire / after_expire)" do
+    let(:hooked) do
+      Class.new(TestModel) do
+        self.table_name = "api_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by
+
+        attr_reader :log
+
+        def before_expire
+          (@log ||= []) << :before_expire
+        end
+
+        def after_expire
+          (@log ||= []) << :after_expire
+        end
+      end
+    end
+
+    it "fires around expire! (and expire_in!), not around extend_expiry! or clear_expiry!" do
+      token = hooked.create!
+      token.expire!
+      expect(token.log).to eq(%i[before_expire after_expire])
+
+      token.instance_variable_set(:@log, nil)
+      token.expire_in!(1.hour)
+      expect(token.log).to eq(%i[before_expire after_expire])
+
+      token.instance_variable_set(:@log, nil)
+      token.extend_expiry!(by: 1.day)
+      token.clear_expiry!
+      expect(token.log).to be_nil
+    end
+
+    it "shares one transaction — a raising after_expire rolls the expiry back" do
+      failing = Class.new(hooked) do
+        def after_expire
+          raise "boom"
+        end
+      end
+      token = failing.create!(expires_at: nil)
+      expect { token.expire! }.to raise_error("boom")
+      expect(token.reload.expires_at).to be_nil
+    end
+
+    it "skips after_expire and returns false when the write fails validation" do
+      invalid = Class.new(hooked) do
+        validates :value, presence: true
+      end
+      token = invalid.new(value: "ok").tap { |t| t.save!(validate: false) }
+      token.value = nil
+      expect(token.expire!).to be(false)
+      expect(token.log).to eq(%i[before_expire])
+      expect(token.reload.expires_at).to be_nil
+    end
+
+    it "expire_all takes the per-record path when a hook is overridden, firing it once per record" do
+      stub_const("HookedToken", hooked)
+      2.times { HookedToken.create!(expires_at: nil) }
+      seen = 0
+      counting = Class.new(HookedToken) do
+        define_method(:after_expire) { seen += 1 }
+      end
+      expect(counting.expire_all).to eq(2)
+      expect(seen).to eq(2)
+    end
+
+    it "expire_all still collapses to a single UPDATE when the hooks are not overridden" do
+      2.times { ApiToken.create!(expires_at: nil) }
+      sql = []
+      callback = ->(*, payload) { sql << payload[:sql] if payload[:sql] =~ /\AUPDATE/i }
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+        expect(ApiToken.expire_all).to eq(2)
+      end
+      expect(sql.size).to eq(1)
+    end
+  end
+
+  describe "#expire_in! and #clear_expiry!" do
+    it "expire_in!(duration) sets an absolute lifetime from now, whatever the current expiry" do
+      token = ApiToken.create!(expires_at: 10.days.from_now)
+      travel_to(Time.utc(2026, 7, 1, 12)) { token.expire_in!(15.minutes) }
+      expect(token.reload.expires_at).to eq(Time.utc(2026, 7, 1, 12, 15))
+
+      expired = ApiToken.create!(expires_at: 1.day.ago)
+      travel_to(Time.utc(2026, 7, 1, 12)) { expired.expire_in!(1.hour) }
+      expect(expired.reload.expires_at).to eq(Time.utc(2026, 7, 1, 13))
+    end
+
+    it "clear_expiry! makes the record never expire" do
+      token = ApiToken.create!(expires_at: 1.day.ago)
+      expect(token.expired?).to be(true)
+      expect(token.clear_expiry!).to be(true)
+      expect(token.reload.expires_at).to be_nil
+      expect(token.active?).to be(true)
+      expect(token.time_until_expiry).to be_nil
+    end
+  end
 end
