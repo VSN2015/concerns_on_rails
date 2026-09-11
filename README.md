@@ -502,8 +502,11 @@ post.restore!            # brings back the comments/cover the cascade deleted �
 post.soft_delete!(at: 1.day.ago)   # new at: keyword — backdate, or hand a timestamp down a cascade
 ```
 
-Dependents go through their own `soft_delete!` / `restore!` (hooks and nested cascades run; a raising
-dependent rolls the whole thing back). Restore matches on the parent's timestamp, so independently
+Dependents go through their own `soft_delete!` / `restore!` (hooks and nested cascades run). A dependent
+that fails — whether it raises or just fails validation — aborts the cascade with
+`ActiveRecord::RecordNotSaved` and rolls the parent back with it, so you never end up with a deleted
+parent and a live child. Declare the cascaded associations **above** `soft_deletable_by`; the macro
+resolves them at class load. Restore matches on the parent's timestamp, so independently
 deleted dependents keep their own. `cascade:` accepts `has_many` / `has_one` (no `belongs_to`, HABTM or
 `:through`) whose models include SoftDeletable; with a cascade configured `soft_delete_all` / `restore_all`
 take the per-record path (a bulk `UPDATE` cannot follow associations).

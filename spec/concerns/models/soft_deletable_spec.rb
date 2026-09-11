@@ -758,12 +758,22 @@ describe ConcernsOnRails::SoftDeletable do
 
         attr_accessor :log
 
+        # Class-level, because the cascade fires the hooks on instances IT
+        # loaded — a per-instance @log can only ever see direct calls, so an
+        # assertion against it would pass even if the cascade skipped hooks.
+        # stub_const builds a fresh class per example, so this resets itself.
+        def self.hook_log
+          @hook_log ||= []
+        end
+
         def before_soft_delete
           (@log ||= []) << :before_soft_delete
+          self.class.hook_log << :before_soft_delete
         end
 
         def after_soft_delete
           (@log ||= []) << :after_soft_delete
+          self.class.hook_log << :after_soft_delete
         end
       end)
       stub_const("CascCover", Class.new(ActiveRecord::Base) do
@@ -813,11 +823,25 @@ describe ConcernsOnRails::SoftDeletable do
       post.soft_delete!
       reloaded = CascComment.unscoped.find(comment.id)
       expect(reloaded.deleted_at).to be_present
-      # hooks fire on the instances the cascade loaded; assert through a probe
-      probe = CascComment.unscoped.find(comment.id)
-      probe.restore!
-      probe.soft_delete!
-      expect(probe.log).to eq(%i[before_soft_delete after_soft_delete])
+      # The hooks fired on the instance the CASCADE loaded, which the example
+      # never sees — so assert through the class-level log, not a fresh probe.
+      expect(CascComment.hook_log).to eq(%i[before_soft_delete after_soft_delete])
+    end
+
+    it "raises RecordNotSaved and rolls back when a dependent fails validation" do
+      # The common non-raising failure: with the default touch: true the
+      # dependent's write goes through `update`, which returns false rather
+      # than raising. It must not be skipped silently.
+      invalid = Class.new(CascComment) do
+        validate { errors.add(:base, "nope") if deleted_at.present? }
+      end
+      stub_const("CascComment", invalid)
+      CascPost.has_many :casc_comments, class_name: "CascComment"
+
+      expect { post.soft_delete! }
+        .to raise_error(ActiveRecord::RecordNotSaved, /failed to cascade soft-delete to/)
+      expect(deleted_at(CascPost, post)).to be_nil
+      expect(deleted_at(CascCover, cover)).to be_nil
     end
 
     it "restore! restores the cascaded dependents but not one that was deleted independently earlier" do

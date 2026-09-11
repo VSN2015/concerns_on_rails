@@ -315,13 +315,31 @@ module ConcernsOnRails
       # Goes through each record's own soft_delete! so its hooks and its own
       # cascade run; a dependent deleted earlier keeps its own timestamp.
       def soft_delete_cascade_dependents!(at)
-        soft_delete_each_dependent(deleted: false) { |dependent| dependent.soft_delete!(at: at) }
+        soft_delete_each_dependent(deleted: false) do |dependent|
+          soft_delete_cascade_check!(dependent, dependent.soft_delete!(at: at), "soft-delete")
+        end
       end
 
       # Restore only the dependents that carry the parent's timestamp — the
       # ones this cascade deleted — and let them restore their own dependents.
       def restore_cascaded_dependents!(stamp)
-        soft_delete_each_dependent(deleted: stamp, &:restore!)
+        soft_delete_each_dependent(deleted: stamp) do |dependent|
+          soft_delete_cascade_check!(dependent, dependent.restore!, "restore")
+        end
+      end
+
+      # A dependent that fails to save must not be skipped silently: with the
+      # default `touch: true` the write goes through `update`, which returns
+      # false on a validation failure instead of raising. Mirror the batch
+      # contract (Support::BatchOps) and raise RecordNotSaved, which rolls the
+      # whole cascade — and the parent's own change — back.
+      def soft_delete_cascade_check!(dependent, result, verb)
+        return if result
+
+        raise ActiveRecord::RecordNotSaved.new(
+          "#{self.class.send(:soft_delete_label)}: failed to cascade #{verb} to " \
+          "#{dependent.class.name}(id: #{dependent.id.inspect})", dependent
+        )
       end
 
       # Yields the records of every cascade association matching `deleted:`
