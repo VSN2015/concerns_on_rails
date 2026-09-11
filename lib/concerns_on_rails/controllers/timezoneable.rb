@@ -135,7 +135,10 @@ module ConcernsOnRails
       def persist_time_zone(zone)
         opts = self.class.timezoneable_options
         return unless opts[:persist] && zone && time_zone_source == :param
-        return unless respond_to?(:cookies) && cookies
+        # ActionController declares #cookies PRIVATE, so a bare respond_to? is
+        # false on Base and this guard silently disabled the whole feature.
+        # (ActionController::API has no cookies at all, and still skips.)
+        return unless respond_to?(:cookies, true) && cookies
 
         cookies[opts[:cookie]] = opts[:persist].merge(value: zone.name)
       end
@@ -195,7 +198,7 @@ module ConcernsOnRails
 
       def zone_from_cookie(opts, allowed)
         key = opts[:cookie]
-        return nil unless key && respond_to?(:cookies) && cookies
+        return nil unless key && respond_to?(:cookies, true) && cookies
 
         match_zone(cookies[key], allowed)
       end
