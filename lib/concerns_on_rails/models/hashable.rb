@@ -118,9 +118,23 @@ module ConcernsOnRails
           if hashable_prefix && hashable_type == :integer
             raise ArgumentError, "#{LABEL}: prefix: is not supported for type :integer (use :custom with a digit alphabet)"
           end
-          return if [true, false].include?(hashable_to_param)
+          unless [true, false].include?(hashable_to_param)
+            raise ArgumentError, "#{LABEL}: to_param: must be true or false (got #{hashable_to_param.inspect})"
+          end
 
-          raise ArgumentError, "#{LABEL}: to_param: must be true or false (got #{hashable_to_param.inspect})"
+          validate_hashable_to_param_conflict!
+        end
+
+        # Sluggable pulls in friendly_id, which also overrides to_param. Which
+        # one wins is decided purely by the order the two concerns are included
+        # — so one of `to_param: true` and friendly URLs silently loses. Refuse
+        # the ambiguity instead of letting include order decide it.
+        def validate_hashable_to_param_conflict!
+          return unless hashable_to_param && respond_to?(:friendly_id_config)
+
+          raise ArgumentError,
+                "#{LABEL}: to_param: true conflicts with Sluggable/friendly_id, which also overrides to_param " \
+                "(the winner would depend on include order). Drop one, or override to_param on the model yourself."
         end
 
         # :uuid ignores length; the others derive their size from it.

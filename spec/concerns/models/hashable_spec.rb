@@ -242,6 +242,30 @@ describe ConcernsOnRails::Hashable do
       expect(Order.create!.to_param).to match(/\A\d+\z/) # default unchanged
     end
 
+    it "refuses to_param: true on a model that also uses Sluggable/friendly_id" do
+      # friendly_id overrides to_param too, and which override wins depends
+      # purely on the order the two concerns were included — so one of the two
+      # features would silently stop working.
+      ActiveRecord::Schema.define do
+        create_table :slugged_orders, force: true do |t|
+          t.string :name
+          t.string :slug
+          t.string :token
+        end
+      end
+
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "slugged_orders"
+          include ConcernsOnRails::Sluggable
+          include ConcernsOnRails::Hashable
+
+          sluggable_by :name
+          hashable_by :token, to_param: true
+        end
+      end.to raise_error(ArgumentError, %r{conflicts with Sluggable/friendly_id})
+    end
+
     it "validates prefix: and to_param: at class load" do
       build = lambda do |**opts|
         Class.new(TestModel) do
