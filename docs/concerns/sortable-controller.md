@@ -50,7 +50,7 @@ sortable_by(*allowed_fields, default: nil, direction: :asc, **rules)
 | `column:` | `Symbol` or `"table.column"` `String` | the key | A Symbol names a column on the relation's own table; a qualified String names a column on a joined table. The String must match `identifier.identifier` — anything else (spaces, punctuation, raw SQL) raises `ArgumentError` at class load. Both parts are quoted with the connection's identifier quoting. |
 | `joins:` | anything `left_outer_joins` / `joins` accepts | `nil` | Association(s) to join **only when this key is requested**: `:author`, `[:author, :category]`, `{ author: :profile }`. |
 | `join:` | `:left` or `:inner` | `:left` | `:left` uses `left_outer_joins` (rows without the association are kept and sort as `NULL`); `:inner` uses `joins` (those rows are dropped). |
-| `nulls:` | `:first` or `:last` | `nil` | Appends `NULLS FIRST` / `NULLS LAST` to the `ORDER BY` term through Arel (Rails 6.1+). PostgreSQL and SQLite honour it; MySQL/MariaDB have no such syntax. |
+| `nulls:` | `:first` or `:last` | `nil` | Appends `NULLS FIRST` / `NULLS LAST` to the `ORDER BY` term through Arel (Rails 6.1+) on PostgreSQL and SQLite. MySQL/MariaDB have no such syntax, so an equivalent leading `CASE WHEN col IS NULL` term is emitted there instead — the ordering is the same on every adapter. |
 
 ## Request parameters
 
@@ -167,7 +167,7 @@ end
 - **`params[:direction]` is case-insensitive** and only affects un-prefixed keys; a `-`/`+` prefix always wins for its own key.
 - **Non-whitelisted `params[:sort]` values fall back silently.** SQL injection payloads such as `"-title; DROP TABLE articles;--"` are dropped as a whole token (the key `title; DROP TABLE articles;--` is not allow-listed); the default key is used instead. No error or warning is raised.
 - **Joins are lazy.** An association join is added to the relation only when its key appears in the request, so the common no-sort path stays a single-table query. A LEFT OUTER JOIN can duplicate rows when the association is `has_many`; use `belongs_to`/`has_one` targets or `distinct` the relation yourself.
-- **`nulls:` needs Rails 6.1+ and an adapter that supports it.** The macro raises at class load on older Rails (Arel ordering nodes lack `nulls_first`/`nulls_last`). On MySQL/MariaDB the generated `NULLS LAST` is a syntax error — emulate it with a `column: "ISNULL(price), price"`-style expression in a scope instead, or leave `nulls:` off (MySQL sorts NULLs first on ASC, last on DESC).
+- **`nulls:` needs Rails 6.1+.** The macro raises at class load on older Rails (Arel ordering nodes lack `nulls_first`/`nulls_last`). MySQL/MariaDB have no `NULLS FIRST`/`NULLS LAST` syntax, so the concern emits a leading `CASE WHEN col IS NULL THEN 1 ELSE 0 END` term there and the column ordering follows it — you get the same row order without writing adapter-specific SQL yourself.
 - **The allow-list is stored as `class_attribute`.** Subclassing a controller and calling `sortable_by` again on the subclass creates an independent allow-list without affecting the parent.
 - **`sorted` wraps `ActiveRecord::Relation#reorder`.** It replaces any `ORDER BY` already on the relation, including a model `default_scope` order. Append a tiebreaker (`sorted(scope).order(:id)`) after it if you need deterministic pagination.
 - **No database columns or migrations are required.** The concern reads only `params`; column names in the allow-list must exist, but the concern does not check the schema at load time.

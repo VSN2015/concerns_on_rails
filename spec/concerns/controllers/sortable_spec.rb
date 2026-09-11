@@ -73,6 +73,33 @@ describe ConcernsOnRails::Controllers::Sortable do
     expect(controller.sorted(Article.all).pluck(:title)).to eq(%w[Alice Bob Charlie])
   end
 
+  it "accepts a default: that clients cannot select, without making it selectable" do
+    klass = Class.new(FakeController) do
+      include ConcernsOnRails::Controllers::Sortable
+
+      sortable_by :title, default: :created_at, direction: :desc
+    end
+
+    # The default orders the relation...
+    expect(klass.new.sorted(Article.all).pluck(:title)).to eq(%w[Alice Bob Charlie])
+    # ...but it is not in the allow-list, so a client still cannot ask for it.
+    expect(klass.sortable_allowed_fields).to eq([:title])
+    expect(klass.new(params: { sort: "created_at" }).sorted(Article.all).pluck(:title))
+      .to eq(%w[Alice Bob Charlie])
+  end
+
+  it "keeps a dotted plain field a qualified column instead of one quoted identifier" do
+    klass = Class.new(FakeController) do
+      include ConcernsOnRails::Controllers::Sortable
+
+      sortable_by "articles.title"
+    end
+
+    sql = klass.new(params: { sort: "articles.title" }).sorted(Article.all).to_sql
+    expect(sql).to include('"articles"."title"')
+    expect(sql).not_to include('"articles.title"')
+  end
+
   it "raises when no fields are given" do
     expect do
       Class.new(FakeController) do
@@ -198,7 +225,6 @@ describe ConcernsOnRails::Controllers::Sortable do
       expect { build.call(author: { column: "sort_authors.name", join: :cross }) }
         .to raise_error(ArgumentError, /join: must be :left or :inner/)
       expect { build.call(author: { colum: "sort_authors.name" }) }.to raise_error(ArgumentError, /unknown option\(s\) for author: colum/)
-      expect { build.call(default: :nope) }.to raise_error(ArgumentError, /default: :nope is not a declared sort key/)
     end
   end
 end

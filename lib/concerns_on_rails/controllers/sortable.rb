@@ -57,16 +57,37 @@ module ConcernsOnRails
         def sortable_by(*allowed_fields, default: nil, direction: :asc, **rules)
           raise ArgumentError, "#{LABEL}: at least one field is required" if allowed_fields.empty? && rules.empty?
 
-          declared = allowed_fields.flatten.to_h { |field| [field.to_sym, { column: field.to_sym }] }
+          declared = allowed_fields.flatten.to_h { |field| [field.to_sym, sortable_plain_rule(field)] }
           rules.each { |key, options| declared[key.to_sym] = sortable_normalize_rule!(key, options) }
 
-          self.sortable_rules = declared
           self.sortable_allowed_fields = declared.keys
-          self.sortable_default_field = sortable_normalize_default!(default, declared)
+          self.sortable_default_field = sortable_register_default!(default, declared)
+          self.sortable_rules = declared
           self.sortable_default_direction = VALID_DIRECTIONS.include?(direction.to_sym) ? direction.to_sym : :asc
         end
 
         private
+
+        # A default: that clients cannot select is legitimate and worked before
+        # this concern grew rules (`sortable_by :title, default: :created_at`).
+        # Register a rule so the ordering resolves, but leave it OUT of the
+        # allow-list so ?sort=created_at is still refused.
+        def sortable_register_default!(default, declared)
+          key = sortable_normalize_default!(default, declared)
+          return nil unless key
+
+          declared[key] ||= sortable_plain_rule(key)
+          key
+        end
+
+        # A plain field may be a dotted "authors.name" String, which worked on
+        # master because Rails' own arel_column resolved it. Keep it a qualified
+        # column instead of turning it into the Symbol :"authors.name", which
+        # arel_table quotes as ONE identifier and fails at request time.
+        def sortable_plain_rule(field)
+          column = field.is_a?(String) && field.match?(QUALIFIED_COLUMN) ? field : field.to_sym
+          { column: column, joins: nil, join: :left, nulls: nil }
+        end
 
         def sortable_normalize_rule!(key, options)
           raise ArgumentError, "#{LABEL}: rule for #{key} must be a Hash" unless options.is_a?(Hash)
@@ -113,10 +134,11 @@ module ConcernsOnRails
         end
 
         def sortable_normalize_default!(default, declared)
-          key = (default || declared.keys.first).to_sym
-          raise ArgumentError, "#{LABEL}: default: #{key.inspect} is not a declared sort key" unless declared.key?(key)
+          key = default || declared.keys.first
+          return nil unless key
+          raise ArgumentError, "#{LABEL}: default: must be a Symbol or String" unless key.respond_to?(:to_sym)
 
-          key
+          key.to_sym
         end
       end
 
@@ -129,7 +151,7 @@ module ConcernsOnRails
         # reorder (not order) so the requested columns REPLACE any prior
         # ORDER BY — including a model default_scope order.
         joined = requested.reduce(relation) { |rel, (key, _)| sort_apply_join(rel, self.class.sortable_rules[key]) }
-        joined.reorder(*requested.map { |key, direction| sort_ordering(joined, key, direction) })
+        joined.reorder(*requested.flat_map { |key, direction| sort_ordering(joined, key, direction) })
       end
 
       private
@@ -185,11 +207,23 @@ module ConcernsOnRails
         rule = self.class.sortable_rules[key]
         node = sort_column_node(relation, rule[:column])
         ordering = direction == :desc ? node.desc : node.asc
-        case rule[:nulls]
-        when :first then ordering.nulls_first
-        when :last then ordering.nulls_last
-        else ordering
-        end
+        return ordering unless rule[:nulls]
+        # MySQL: an extra leading term, so the column ordering itself survives.
+        return [sort_mysql_nulls(node, rule[:nulls]), ordering] if sort_mysql?(relation)
+
+        rule[:nulls] == :first ? ordering.nulls_first : ordering.nulls_last
+      end
+
+      def sort_mysql?(relation)
+        relation.model.connection.adapter_name.to_s.downcase.include?("mysql")
+      end
+
+      # MySQL has no NULLS FIRST/LAST: Arel silently DROPS nulls_first there and
+      # emits invalid SQL for nulls_last. Sort on an IS NULL flag instead, which
+      # is the portable equivalent and what the docs used to hand-roll.
+      def sort_mysql_nulls(node, nulls)
+        flag = Arel::Nodes::Case.new.when(node.eq(nil)).then(1).else(0)
+        nulls == :first ? flag.desc : flag.asc
       end
 
       def sort_column_node(relation, column)
