@@ -105,6 +105,7 @@ end
 ## Notes & gotchas
 
 - **`Content-Language` and `Vary` are on by default.** A localized JSON body is a different representation per locale; without `Vary: Accept-Language` a shared cache (CDN, `Rack::Cache`) would serve one client's French to another's English. The headers are written before the action, so they ride a rescued error too. If you localize only via a URL param, pass `header: false` and `Vary` is skipped (the URL already differs); `response_headers: false` disables both.
+
 **Resolution order.** The concern resolves locale in this priority sequence: `params[param]` → first matching language in `Accept-Language` → `default:` option → `I18n.default_locale`. Each step is attempted only if the previous one produced no match within the allow-list.
 
 **Final validation against `I18n.available_locales`.** Even if a locale passes the `available:` allow-list, `resolved_locale` performs a final check against `I18n.available_locales` before returning. If the two lists fall out of sync (e.g. the `available:` option is set to `[:en, :fr]` but I18n is later reconfigured to only `[:en]`), the resolved `:fr` candidate is discarded and `I18n.default_locale` is returned instead. This means locale resolution is always safe to hand to `I18n.with_locale` without risk of `I18n::InvalidLocale`.
