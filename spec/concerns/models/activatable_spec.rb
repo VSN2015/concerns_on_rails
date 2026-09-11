@@ -246,4 +246,130 @@ describe ConcernsOnRails::Activatable do
       expect(invalid.reload.active).to be false
     end
   end
+
+  describe "lifecycle hooks and timestamps:" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :stamped_subscriptions, force: true do |t|
+          t.string :name
+          t.boolean :active
+          t.datetime :activated_at
+          t.datetime :deactivated_at
+          t.datetime :enabled_at
+          t.datetime :updated_at
+        end
+      end
+    end
+
+    def stamped_class(&declaration)
+      Class.new(TestModel) do
+        self.table_name = "stamped_subscriptions"
+        include ConcernsOnRails::Activatable
+
+        class_eval(&declaration)
+      end
+    end
+
+    it "runs before_/after_ hooks around activate! and deactivate!" do
+      klass = stamped_class do
+        activatable_by
+        attr_reader :log
+
+        def before_activate = (@log ||= []) << :before_activate
+        def after_activate = (@log ||= []) << :after_activate
+        def before_deactivate = (@log ||= []) << :before_deactivate
+        def after_deactivate = (@log ||= []) << :after_deactivate
+      end
+      record = klass.create!(active: false)
+      expect(record.activate!).to be(true)
+      expect(record.log).to eq(%i[before_activate after_activate])
+      expect(record.deactivate!).to be(true)
+      expect(record.log).to eq(%i[before_activate after_activate before_deactivate after_deactivate])
+    end
+
+    it "shares one transaction with the write: a raising after hook rolls it back, a failed update skips the after hook" do
+      boom = stamped_class do
+        activatable_by
+        def after_activate = raise("boom")
+      end
+      record = boom.create!(active: false)
+      expect { record.activate! }.to raise_error("boom")
+      expect(record.reload.active).to be(false)
+
+      invalid = stamped_class do
+        activatable_by
+        validates :name, presence: true
+        attr_reader :after_ran
+
+        def after_deactivate = @after_ran = true
+      end
+      record = invalid.new(active: true)
+      record.save(validate: false)
+      expect(record.deactivate!).to be(false)
+      expect(record.after_ran).to be_nil
+      expect(record.reload.active).to be(true)
+    end
+
+    it "timestamps: true stamps activated_at / deactivated_at on each transition (toggle included)" do
+      klass = stamped_class { activatable_by timestamps: true }
+      record = klass.create!(name: "x", active: false)
+      expect(record.activated_at).to be_nil
+
+      record.activate!
+      expect(record.activated_at).to be_within(2.seconds).of(Time.current)
+      expect(record.deactivated_at).to be_nil
+      first_activation = record.activated_at
+
+      record.deactivate!
+      expect(record.deactivated_at).to be_within(2.seconds).of(Time.current)
+      expect(record.activated_at).to eq(first_activation) # history of the last activation is kept
+
+      record.update_columns(activated_at: 1.day.ago)
+      record.toggle_active!
+      expect(record.active?).to be(true)
+      expect(record.reload.activated_at).to be_within(2.seconds).of(Time.current)
+    end
+
+    it "timestamps: accepts a Hash to rename or drop a side, and validates it" do
+      klass = stamped_class { activatable_by timestamps: { activated_at: :enabled_at, deactivated_at: nil } }
+      record = klass.create!(active: false)
+      record.activate!
+      expect(record.enabled_at).to be_within(2.seconds).of(Time.current)
+      expect(record.activated_at).to be_nil
+      expect(record.deactivate!).to be(true)
+      expect(record.deactivated_at).to be_nil
+
+      expect { stamped_class { activatable_by timestamps: { activated_at: :nope } } }
+        .to raise_error(ArgumentError, /'nope' does not exist/)
+      expect { stamped_class { activatable_by timestamps: :yes } }
+        .to raise_error(ArgumentError, /timestamps: must be true, false or a Hash/)
+      expect { stamped_class { activatable_by timestamps: { bogus: :enabled_at } } }
+        .to raise_error(ArgumentError, /unknown timestamps: key\(s\): bogus/)
+      # A truthy non-column value used to raise NoMethodError on to_sym.
+      expect { stamped_class { activatable_by timestamps: { activated_at: true } } }
+        .to raise_error(ArgumentError, /timestamps: activated_at must be a column name/)
+    end
+
+    it "batch verbs stamp on the single-UPDATE fast path and run the hooks on the per-record path" do
+      fast = stamped_class { activatable_by timestamps: true }
+      fast.create!(active: false)
+      fast.create!(active: nil)
+      expect(fast.activate_all).to eq(2)
+      expect(fast.pluck(:activated_at).compact.size).to eq(2)
+      expect(fast.deactivate_all).to eq(2)
+      expect(fast.pluck(:deactivated_at).compact.size).to eq(2)
+
+      hooked = stamped_class do
+        activatable_by timestamps: true
+        def self.log = (@log ||= [])
+        def after_activate = self.class.log << id
+      end
+      hooked.delete_all
+      hooked.create!(active: false)
+      hooked.create!(active: false)
+      expect(hooked.activate_all).to eq(2)
+      expect(hooked.log.size).to eq(2)
+      expect(hooked.pluck(:activated_at).compact.size).to eq(2)
+    end
+  end
 end
