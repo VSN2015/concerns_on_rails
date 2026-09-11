@@ -308,6 +308,10 @@ end
 Task.create!(name: "A")
 Task.create!(name: "B")
 Task.last.move_higher
+
+# Save a drag-and-drop order in ONE UPDATE (CASE id WHEN …): the ids' order becomes their positions
+Task.reposition!(params[:ids])                    # => 12 — rows not listed are pushed after, in their current order
+Task.where(list_id: 1).reposition!(ids, missing: :raise)   # scoped; a partial list is an error
 ```
 
 **Configuration**
@@ -321,8 +325,8 @@ sortable_by :position, add_new_at: :top          # new rows insert at the top (a
 ```
 
 **Notes**
-- The configured field must exist as a column.
-- Direction values other than `:asc` / `:desc` silently fall back to `:asc`.
+- The configured field must exist as a column; a direction other than `:asc` / `:desc` raises at declaration.
+- `reposition!` runs inside the current relation (`Task.where(list_id: 1)` — the same set acts_as_list's `scope:` would use), rejects ids outside it and duplicates before writing anything, coerces String ids from params, and on a descending list gives the first id the highest value. It bypasses acts_as_list callbacks by design (one `update_all`, no per-row shifting).
 
 ---
 
