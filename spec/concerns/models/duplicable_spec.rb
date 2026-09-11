@@ -14,6 +14,7 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
         t.text :audit_log
         t.integer :failed_attempts
         t.datetime :locked_at
+        t.string :unlock_token
         t.timestamps null: true
       end
       create_table :dup_line_items, force: true do |t|
@@ -240,7 +241,7 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
         sequenceable_by :sequence, into: :number, prefix: "INV-"
         auditable_by :title, into: :audit_log
         soft_deletable_by :deleted_at, default_scope: false
-        lockable_by attempts: :failed_attempts, locked_at: :locked_at
+        lockable_by attempts: :failed_attempts, locked_at: :locked_at, unlock_token: :unlock_token
       end
     end
 
@@ -275,11 +276,15 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
 
     it "resets the lockout state on the copy" do
       original = klass.create!(title: "Q1")
-      original.update_columns(failed_attempts: 3, locked_at: Time.zone.now)
+      original.lock_access!
 
       copy = original.reload.duplicate!
       expect(copy.failed_attempts).to eq(0)
       expect(copy.locked_at).to be_nil
+      # A copy is born unlocked, so it must not inherit a live unlock link —
+      # and two rows must never carry the same token.
+      expect(original.reload.unlock_token).to be_present
+      expect(copy.unlock_token).to be_nil
     end
 
     it "gives the copy fresh timestamps" do

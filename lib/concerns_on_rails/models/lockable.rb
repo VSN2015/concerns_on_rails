@@ -118,7 +118,24 @@ module ConcernsOnRails
           stored = record[field].to_s
           return nil unless stored.bytesize == given.bytesize && ActiveSupport::SecurityUtils.secure_compare(stored, given)
 
-          record.unlock_access! ? record : nil
+          unlock_by_claimed_token(record, field, given)
+        end
+
+        # Claim the token with a conditional UPDATE before unlocking, the way
+        # Tokenizable's consume_<field> does. Read-then-write would let two
+        # concurrent clicks on the same link both unlock and both fire
+        # after_unlock; here they serialize on the row and only the one that
+        # still matched the token gets a row back. Inside a transaction, so a
+        # raising hook puts the token back instead of burning the link.
+        def unlock_by_claimed_token(record, field, given)
+          unlocked = nil
+          transaction do
+            next if unscoped.where(primary_key => record.id, field => given).update_all(field => nil).zero?
+
+            record[field] = nil
+            unlocked = record if record.unlock_access!
+          end
+          unlocked
         end
 
         # {} or { unlock_token_field => value } — merged into every write that

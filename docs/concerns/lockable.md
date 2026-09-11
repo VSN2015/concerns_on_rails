@@ -79,7 +79,7 @@ Both columns must exist (and `attempts:` must be an integer column) or the macro
 | `lock_expired? → Boolean` | Was locked and the `unlock_in` window has fully elapsed. Always `false` when `unlock_in` is `nil`. |
 | `lock_expires_at → Time \| nil` | `locked_at + unlock_in`; `nil` when not locked or manual-unlock-only. |
 | `attempts_remaining → Integer \| nil` | Failures left before auto-lock (never negative); `nil` when `max_attempts: nil`. |
-| `User.unlock_by_token(token) → record \| nil` | _(class method, needs `unlock_token:`)_ Finds the row holding `token` (constant-time compare on the fetched value), runs `unlock_access!` — hooks fire, counter zeroed, token cleared — and returns the record. `nil` for a blank, unknown or already-used token; works even after the lock lapsed on its own (clears the stale lock). Raises `ArgumentError` when `unlock_token:` is not configured. |
+| `User.unlock_by_token(token) → record \| nil` | _(class method, needs `unlock_token:`)_ Finds the row holding `token` (constant-time compare on the fetched value), claims the token with a conditional `UPDATE` so concurrent clicks on the same link cannot both win, then runs `unlock_access!` — hooks fire, counter zeroed, token cleared — and returns the record. `nil` for a blank, unknown or already-used token; works even after the lock lapsed on its own (clears the stale lock). Raises `ArgumentError` when `unlock_token:` is not configured. |
 
 ### Scopes
 

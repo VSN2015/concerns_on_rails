@@ -805,6 +805,24 @@ describe ConcernsOnRails::Lockable do
       expect(klass.unlock_by_token(token)).to be_nil # single use
     end
 
+    it "lets only one of two concurrent clicks on the same link win" do
+      user.lock_access!
+      token = user.unlock_token
+
+      # Two requests that both read the row before either wrote it. The claim
+      # is a conditional UPDATE, so the second finds nothing left to clear and
+      # must not unlock again or fire a second after_unlock.
+      first = klass.unscoped.find(user.id)
+      second = klass.unscoped.find(user.id)
+      expect(second.unlock_token).to eq(token)
+
+      results = [klass.unlock_by_token(token), klass.unlock_by_token(token)]
+      expect(results.compact.size).to eq(1)
+      expect(user.reload.access_locked?).to be(false)
+      expect(user.reload.unlock_token).to be_nil
+      expect(first.id).to eq(second.id)
+    end
+
     it "still honours a token after the lock lapsed on its own (clears the stale lock cleanly)" do
       user.lock_access!
       token = user.unlock_token

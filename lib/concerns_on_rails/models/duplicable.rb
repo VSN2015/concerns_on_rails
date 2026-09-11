@@ -152,7 +152,7 @@ module ConcernsOnRails
         columns.concat(duplicable_generator_columns)
         columns << self.class.auditable_into if duplicable_concern?(Auditable)
         columns << self.class.soft_delete_field if duplicable_concern?(SoftDeletable)
-        columns << self.class.lockable_locked_at_field if duplicable_concern?(Lockable)
+        columns.concat(duplicable_lockable_columns) if duplicable_concern?(Lockable)
         columns
       end
 
@@ -165,6 +165,14 @@ module ConcernsOnRails
         columns << self.class.hashable_field if duplicable_concern?(Hashable) && self.class.hashable_field
         columns.concat(duplicable_sequence_columns) if duplicable_concern?(Sequenceable)
         columns
+      end
+
+      # The lock stamp AND the unlock token: a copy is born unlocked, so it must
+      # not inherit a live unlock link. Leaving the token would also put the
+      # same secret on two rows, and unlock_by_token's lookup would then pick
+      # an arbitrary one.
+      def duplicable_lockable_columns
+        [self.class.lockable_locked_at_field, self.class.lockable_unlock_token_field].compact
       end
 
       def duplicable_sequence_columns
