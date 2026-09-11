@@ -24,7 +24,7 @@ end
 
 ## Configuration
 
-### `idempotent_actions(*actions, ttl: 86_400, lock_ttl: 60, header: "Idempotency-Key", required: false)`
+### `idempotent_actions(*actions, ttl: 86_400, lock_ttl: 60, header: "Idempotency-Key", required: false, headers: DEFAULT_REPLAY_HEADERS)`
 
 May be called multiple times to register rules with independent options; the first rule listing the current action wins. All arguments are validated at class-load time (`ArgumentError`).
 
@@ -35,6 +35,7 @@ May be called multiple times to register rules with independent options; the fir
 | `lock_ttl:` | `Duration` or `Integer` | `1.minute` | Lifetime of the in-flight claim. Kept short so a crashed worker cannot wedge a key until `ttl` expires. |
 | `header:` | `String` | `"Idempotency-Key"` | The request header carrying the key. |
 | `required:` | `true`/`false` | `false` | When `true`, a missing key is rejected with 400; when `false`, keyless requests pass through untouched. |
+| `headers:` | `Array<String>` | `%w[Location Content-Location ETag Last-Modified Link]` (`DEFAULT_REPLAY_HEADERS`) | Response headers captured with the cached response and set again on replay, so a replayed `201` still carries its `Location`. Only headers the action actually set are stored (under `record["headers"]`). An allow-list on purpose — `Set-Cookie`, `Date`, request ids and rate-limit headers describe the original exchange and are never replayed. `[]` disables capture; a non-Array or blank name raises `ArgumentError`. |
 
 ### `idempotency_store`
 
@@ -71,6 +72,7 @@ Cache keys are scoped as `idempotentable:<controller>#<action>:<SHA256(key)>`, s
 | `X-Idempotency-Key` | every keyed request | the raw key, echoed back |
 | `X-Idempotency-Replayed` | original run / replay | `"false"` on the original execution, `"true"` on a replay |
 | `Retry-After` | 409 conflict | the rule's `lock_ttl` in seconds |
+| captured headers | replay | the `headers:` allow-list entries the original response set (default `Location`, `Content-Location`, `ETag`, `Last-Modified`, `Link`), replayed verbatim before the body |
 
 ## Methods
 
@@ -81,7 +83,7 @@ Cache keys are scoped as `idempotentable:<controller>#<action>:<SHA256(key)>`, s
 | `enforce_idempotency(&block)` | The `around_action` entry point. Public so subclasses can override it. |
 | `idempotency_key` | The raw key sent for the matched rule (`nil` when absent). Handy for logging. |
 | `idempotency_fingerprint` | SHA256 digest of the request params (deep-sorted, minus `controller`/`action`/`format`), used to detect key reuse with a different payload. Override for raw-body APIs: `Digest::SHA256.hexdigest(request.raw_post)`. |
-| `replay_idempotent_response(record)` | Renders the cached response. Override to customize replay. |
+| `replay_idempotent_response(record)` | Sets the captured headers (`record["headers"]`, absent on records written before this feature) and renders the cached response. Override to customize replay. |
 | `idempotency_error_response(message:, status:, code:)` | Single funnel for the 400/409/422 outcomes. Delegates to `render_error` when `Respondable` is included, otherwise renders `{ success: false, error: { message:, code: } }` inline. |
 
 ## Examples
@@ -134,6 +136,7 @@ end
 
 ## Notes & gotchas
 
+- **Replayed headers are an allow-list.** Only `headers:` entries (default `Location`, `Content-Location`, `ETag`, `Last-Modified`, `Link`) are captured — a header the action never set is simply not stored, and records written before this feature (no `"headers"` key) replay exactly as before. Add app-specific headers (`headers: DEFAULT_REPLAY_HEADERS + %w[X-Resource-Version]`) rather than widening to everything: cookies, `Date`, request ids and `X-RateLimit-*` describe the *original* exchange.
 - **No default store.** `idempotency_store` is `nil` by default on purpose; the first keyed request raises `ArgumentError` with "no store configured" rather than silently caching per-process. A gem-wide fallback can be set once via `ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } }`.
 - **Atomic `unless_exist` is required for correctness.** With a store whose `unless_exist:` write is not atomic (file store, plain memory store across processes), two concurrent firsts can both claim and both execute — the behavior degrades to best-effort. `ActiveSupport::Cache::NullStore` silently disables idempotency entirely (claims always "succeed", reads return `nil`).
 - **5xx responses and exceptions are retryable by design.** They release the claim and are never cached, so the client's retry re-executes the action. Only 2xx–4xx responses are replayed.

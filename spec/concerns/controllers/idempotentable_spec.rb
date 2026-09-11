@@ -352,4 +352,77 @@ describe ConcernsOnRails::Controllers::Idempotentable do
       expect { declare { idempotent_actions :create, required: "yes" } }.to raise_error(ArgumentError, /:required/)
     end
   end
+  describe "response header capture" do
+    def perform_with_headers(controller, headers, status: 201, body: '{"id":1}')
+      controller.enforce_idempotency do
+        controller.response.status = status
+        controller.response.body = body
+        controller.response.content_type = "application/json"
+        headers.each { |name, value| controller.response.set_header(name, value) }
+      end
+    end
+
+    it "stores the default allow-list (Location, Content-Location, ETag, Last-Modified, Link) and replays it" do
+      klass = idempotent_class(store) { idempotent_actions :create }
+      first = instance(klass, key: "loc-1")
+      perform_with_headers(first, { "Location" => "/payments/42", "ETag" => 'W/"abc"',
+                                    "X-Request-Id" => "req-1", "Set-Cookie" => "session=1" })
+      expect(store.data.values.first["headers"]).to eq("Location" => "/payments/42", "ETag" => 'W/"abc"')
+
+      replay = instance(klass, key: "loc-1")
+      expect(perform(replay, status: 500)).to eq(0)
+      expect(replay.rendered[:status]).to eq(201)
+      expect(replay.response.headers["Location"]).to eq("/payments/42")
+      expect(replay.response.headers["ETag"]).to eq('W/"abc"')
+      expect(replay.response.headers).not_to have_key("X-Request-Id")
+      expect(replay.response.headers).not_to have_key("Set-Cookie")
+      expect(replay.response.headers["X-Idempotency-Replayed"]).to eq("true")
+    end
+
+    it "headers: replaces the allow-list" do
+      klass = idempotent_class(store) { idempotent_actions :create, headers: %w[X-Resource-Version] }
+      perform_with_headers(instance(klass, key: "v-1"), { "Location" => "/x/1", "X-Resource-Version" => "7" })
+      expect(store.data.values.first["headers"]).to eq("X-Resource-Version" => "7")
+
+      replay = instance(klass, key: "v-1")
+      perform(replay)
+      expect(replay.response.headers["X-Resource-Version"]).to eq("7")
+      expect(replay.response.headers).not_to have_key("Location")
+    end
+
+    it "headers: [] disables capture entirely" do
+      klass = idempotent_class(store) { idempotent_actions :create, headers: [] }
+      perform_with_headers(instance(klass, key: "n-1"), { "Location" => "/x/1" })
+      expect(store.data.values.first).not_to have_key("headers")
+
+      replay = instance(klass, key: "n-1")
+      perform(replay)
+      expect(replay.response.headers).not_to have_key("Location")
+    end
+
+    it "omits the headers key when no allow-listed header was set, and replays a pre-upgrade record without it" do
+      klass = idempotent_class(store) { idempotent_actions :create }
+      perform(instance(klass, key: "old-1"))
+      expect(store.data.values.first).not_to have_key("headers")
+
+      store.data.each_value { |record| record.delete("headers") } # a record written before this feature
+      replay = instance(klass, key: "old-1")
+      expect { perform(replay) }.not_to raise_error
+      expect(replay.rendered[:status]).to eq(201)
+    end
+
+    it "normalizes header names to strings and records them on the rule" do
+      klass = idempotent_class(store) { idempotent_actions :create, headers: [:Location, "ETag"] }
+      expect(klass.idempotency_rules.first[:headers]).to eq(%w[Location ETag])
+      expect(idempotent_class(store) { idempotent_actions :create }.idempotency_rules.first[:headers])
+        .to eq(described_class::DEFAULT_REPLAY_HEADERS)
+    end
+
+    it "rejects a non-Array or a blank header name" do
+      expect { idempotent_class(store) { idempotent_actions :create, headers: "Location" } }
+        .to raise_error(ArgumentError, /:headers must be an Array of non-blank header names/)
+      expect { idempotent_class(store) { idempotent_actions :create, headers: ["Location", " "] } }
+        .to raise_error(ArgumentError, /:headers must be an Array of non-blank header names/)
+    end
+  end
 end
