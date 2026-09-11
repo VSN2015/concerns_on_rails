@@ -1,4 +1,9 @@
 require "active_support/concern"
+# The presets call String#squish / #titleize / #parameterize, which are
+# core_ext, not part of active_support/concern. Each concern file requires
+# what it uses so a direct require of this file still works.
+require "active_support/core_ext/string/filters"
+require "active_support/core_ext/string/inflections"
 require "uri"
 require "concerns_on_rails/support/column_guard"
 
