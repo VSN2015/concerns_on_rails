@@ -33,7 +33,7 @@ end
 
 ## Configuration
 
-### `filter_by(*fields, scope: nil, with: nil)`
+### `filter_by(*fields, scope: nil, with: nil, type: nil, operators: nil)`
 
 Declares one or more filterable URL params. Multiple fields can be batched in a single call when they share the same mode (direct `where` only — `scope:` and `with:` apply to all fields in the call).
 
@@ -42,6 +42,8 @@ Declares one or more filterable URL params. Multiple fields can be batched in a 
 | `*fields` | One or more `Symbol` | — (required) | The param key(s) to watch. Each becomes a key in `filterable_rules`. At least one field is required or `ArgumentError` is raised. |
 | `scope:` | `Symbol` | `nil` | Name of a model scope to call (`public_send`) when the param is present and non-blank. Mutually exclusive with `with:`. |
 | `with:` | `Proc` / `lambda` | `nil` | A callable with signature `(relation, value)` invoked when the param is present and non-blank. Mutually exclusive with `scope:`. |
+| `type:` | `Symbol` | `nil` | An ActiveModel type name (`:integer`, `:decimal`, `:boolean`, `:date`, `:datetime`, …). Casts comparison-operator values (instead of the column's own type) and pre-casts the value handed to a `with:` lambda. An unknown name raises `ArgumentError` at class load. |
+| `operators:` | `true` or `Array<Symbol>` | `nil` (none) | Direct-where mode only. Enables comparison operators for the field, as a suffix (`?price_gte=10`) or bracket form (`?price[gte]=10`): `not`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `null`, `contains`, `starts_with`. `true` enables all; a list enables a subset; unknown names raise `ArgumentError`. Combining with `scope:`/`with:` raises. |
 
 Passing neither `scope:` nor `with:` activates **direct where mode**: `relation.where(field => value)`.
 
@@ -65,11 +67,36 @@ The method composes all active filters sequentially — each filter receives the
 
 ### Class methods
 
-#### `filter_by(*fields, scope: nil, with: nil)`
+#### `filter_by(*fields, scope: nil, with: nil, type: nil, operators: nil)`
 
 Class-level DSL method that registers filtering rules. Stores rules in the `filterable_rules` class attribute (a `Hash` keyed by `Symbol`). Calling `filter_by` multiple times is additive; each call merges new rules into the existing hash.
 
 ## Examples
+
+**Range, list and text operators on a product catalogue**
+
+```ruby
+class ProductsController < ApplicationController
+  include ConcernsOnRails::Controllers::Filterable
+
+  filter_by :price, :stock, :status, :name, :discontinued_at, operators: true
+  filter_by :created_at, operators: %i[gte lte]                 # only a date window
+  filter_by :min_stock, type: :integer, with: ->(rel, v) { rel.where(rel.model.arel_table[:stock].gteq(v)) }
+
+  def index
+    render json: filtered(Product.all)
+  end
+end
+
+# GET /products?price_gte=20&price_lte=100        → price BETWEEN, cast to the decimal column type
+# GET /products?price[gte]=20&price[lte]=100      → same, bracket form
+# GET /products?status_in=active,draft            → status IN ('active','draft')
+# GET /products?status_not=archived               → status != 'archived'
+# GET /products?discontinued_at_null=true         → discontinued_at IS NULL
+# GET /products?name_contains=100%                → name LIKE '%100\%%' ESCAPE '\'  (wildcards escaped)
+# GET /products?min_stock=5                       → the lambda receives Integer 5, not "5"
+```
+
 
 **Combining direct and scope filters in one controller**
 
@@ -122,6 +149,9 @@ end
 
 ## Notes & gotchas
 
+- **Operators are opt-in and per filter.** Without `operators:`, `?price_gte=10` is just an unknown param and is ignored, exactly as before. With it, both the suffix and the bracket form are read; a bracket key that is not an enabled operator is ignored. `in`/`not_in` accept a comma list or an array; blank items are dropped.
+- **Casting follows ActiveRecord.** `gt`/`gte`/`lt`/`lte` values are cast through the column's attribute type (so `"10"` compares as a decimal against a decimal column, and SQLite's type affinity cannot bite), or through `type:` when given. Equality, `not`, `in` and `null` go through `where`, which casts on its own. A value AR would cast to `nil`/`0` behaves as it would in `where` — nothing raises; use Permittable for validated params.
+- **`contains`/`starts_with` escape LIKE wildcards** (`%`, `_`, `\`) and emit an explicit `ESCAPE '\'` clause; matching is ILIKE on PostgreSQL and the adapter's LIKE elsewhere, exactly like Searchable.
 - **Blank values are always skipped.** Both missing params and params set to an empty string (`""`) are treated identically — the filter is not applied and the relation is not narrowed. This means omitting a query parameter never unintentionally restricts results.
 - **Scope mode ignores the param value.** When `scope:` is used, only the *presence* (and non-blankness) of the param matters; the actual value is discarded. Any truthy string (`"1"`, `"true"`, `"yes"`) triggers the scope equally.
 - **`scope:` and `with:` are mutually exclusive per `filter_by` call.** Declaring both raises `ArgumentError` at class-load time (not at request time), so the misconfiguration is caught immediately during development or test suite startup.
