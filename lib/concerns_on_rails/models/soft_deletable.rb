@@ -22,6 +22,9 @@ module ConcernsOnRails
         class_attribute :soft_delete_scope_names, instance_accessor: false,
                                                   default: SCOPE_BASES.to_h { |b| [b, b] }.freeze
         class_attribute :soft_delete_captured_scopes, instance_accessor: false, default: {}.freeze
+        # has_many / has_one association names soft-deleted and restored along
+        # with this record (their models must include SoftDeletable too).
+        class_attribute :soft_delete_cascade, instance_accessor: false, default: [].freeze
 
         define_soft_delete_scopes(nil, nil)
         self.soft_delete_captured_scopes =
@@ -45,11 +48,23 @@ module ConcernsOnRails
         # Example:
         #   soft_deletable_by :deleted_at, touch: false
         #   soft_deletable_by :deleted_at, default_scope: false  # don't hide deleted rows from .all
-        def soft_deletable_by(field = nil, touch: true, default_scope: true, prefix: nil, suffix: nil)
+        #   soft_deletable_by :deleted_at, cascade: %i[comments attachments]
+        #
+        # `cascade:` names has_many / has_one associations whose records are
+        # soft-deleted with the parent (inside its transaction, with the
+        # parent's exact timestamp, through their own soft_delete! — hooks and
+        # nested cascades included) and restored with it. Restore only touches
+        # dependents carrying the parent's timestamp, so a comment someone
+        # deleted independently last week stays deleted when the post comes
+        # back. Every target model must include SoftDeletable. With a cascade
+        # configured the single-UPDATE batch fast paths are disabled, since a
+        # bulk UPDATE could not follow the associations.
+        def soft_deletable_by(field = nil, touch: true, default_scope: true, prefix: nil, suffix: nil, cascade: nil)
           self.soft_delete_field = field || :deleted_at
           self.soft_delete_touch = touch
           self.soft_delete_default_scope = default_scope
           ensure_columns!("ConcernsOnRails::Models::SoftDeletable", soft_delete_field, types: :datetime)
+          self.soft_delete_cascade = soft_delete_validate_cascade!(cascade)
           return unless prefix || suffix
 
           define_soft_delete_scopes(prefix, suffix)
@@ -178,7 +193,7 @@ module ConcernsOnRails
         # reason: under `touch: false` both paths skip validations already, so
         # only the ownership half (`unoverridden?`) applies.
         def soft_delete_batch_fast_path?(kind)
-          return false if soft_delete_touch
+          return false if soft_delete_touch || soft_delete_cascade.any?
 
           methods = if kind == :restore
                       %i[before_restore after_restore restore!]
@@ -186,6 +201,47 @@ module ConcernsOnRails
                       %i[before_soft_delete after_soft_delete soft_delete!]
                     end
           ConcernsOnRails::Support::BatchOps.unoverridden?(self, ConcernsOnRails::Models::SoftDeletable, *methods)
+        end
+
+        # Each cascade target must be a has_many / has_one (not through) whose
+        # model includes SoftDeletable. The association shape is checked at
+        # class load; the target model is checked here when it already
+        # resolves, and otherwise on first cascade (a not-yet-loaded or
+        # anonymous class cannot be resolved from inside a class body).
+        def soft_delete_validate_cascade!(cascade)
+          names = Array(cascade).map(&:to_sym)
+          names.each do |name|
+            reflection = reflect_on_association(name)
+            raise ArgumentError, "#{soft_delete_label}: cascade: '#{name}' is not an association of #{self.name}" unless reflection
+            unless %i[has_many has_one].include?(reflection.macro)
+              raise ArgumentError,
+                    "#{soft_delete_label}: cascade: '#{name}' must be a has_many or has_one (got #{reflection.macro})"
+            end
+            if reflection.is_a?(ActiveRecord::Reflection::ThroughReflection)
+              raise ArgumentError, "#{soft_delete_label}: cascade: '#{name}' is a :through association; cascade to the source instead"
+            end
+
+            soft_delete_check_cascade_target!(name, reflection) if soft_delete_cascade_resolvable?(reflection)
+          end
+          names.freeze
+        end
+
+        def soft_delete_cascade_resolvable?(reflection)
+          reflection.klass
+          true
+        rescue NameError # NoMethodError (anonymous class: nil name) is a NameError
+          false
+        end
+
+        def soft_delete_check_cascade_target!(name, reflection)
+          return if reflection.klass.respond_to?(:soft_delete_field)
+
+          raise ArgumentError,
+                "#{soft_delete_label}: cascade: '#{name}' targets #{reflection.klass.name}, which does not include SoftDeletable"
+        end
+
+        def soft_delete_label
+          "ConcernsOnRails::Models::SoftDeletable"
         end
       end
 
@@ -195,7 +251,9 @@ module ConcernsOnRails
       def before_restore; end
       def after_restore; end
 
-      def soft_delete!
+      # `at:` sets the timestamp (default now) — it is what the cascade uses to
+      # hand the parent's exact timestamp down, and lets callers backdate.
+      def soft_delete!(at: Time.zone.now)
         return true if deleted?
 
         result = false
@@ -204,10 +262,11 @@ module ConcernsOnRails
         transaction do
           before_soft_delete
           result = if self.class.soft_delete_touch
-                     update(self.class.soft_delete_field => Time.zone.now)
+                     update(self.class.soft_delete_field => at)
                    else
-                     update_column(self.class.soft_delete_field, Time.zone.now)
+                     update_column(self.class.soft_delete_field, at)
                    end
+          soft_delete_cascade_dependents!(at) if result
           after_soft_delete if result
         end
         result
@@ -216,6 +275,7 @@ module ConcernsOnRails
       def restore!
         return true unless deleted?
 
+        stamp = self[self.class.soft_delete_field]
         result = false
         transaction do
           before_restore
@@ -224,6 +284,7 @@ module ConcernsOnRails
                    else
                      update_column(self.class.soft_delete_field, nil)
                    end
+          restore_cascaded_dependents!(stamp) if result
           after_restore if result
         end
         result
@@ -246,6 +307,54 @@ module ConcernsOnRails
 
       def is_really_deleted?
         !self.class.unscoped.exists?(id)
+      end
+
+      private
+
+      # Soft-delete every not-yet-deleted dependent with the parent's timestamp.
+      # Goes through each record's own soft_delete! so its hooks and its own
+      # cascade run; a dependent deleted earlier keeps its own timestamp.
+      def soft_delete_cascade_dependents!(at)
+        soft_delete_each_dependent(deleted: false) do |dependent|
+          soft_delete_cascade_check!(dependent, dependent.soft_delete!(at: at), "soft-delete")
+        end
+      end
+
+      # Restore only the dependents that carry the parent's timestamp — the
+      # ones this cascade deleted — and let them restore their own dependents.
+      def restore_cascaded_dependents!(stamp)
+        soft_delete_each_dependent(deleted: stamp) do |dependent|
+          soft_delete_cascade_check!(dependent, dependent.restore!, "restore")
+        end
+      end
+
+      # A dependent that fails to save must not be skipped silently: with the
+      # default `touch: true` the write goes through `update`, which returns
+      # false on a validation failure instead of raising. Mirror the batch
+      # contract (Support::BatchOps) and raise RecordNotSaved, which rolls the
+      # whole cascade — and the parent's own change — back.
+      def soft_delete_cascade_check!(dependent, result, verb)
+        return if result
+
+        raise ActiveRecord::RecordNotSaved.new(
+          "#{self.class.send(:soft_delete_label)}: failed to cascade #{verb} to " \
+          "#{dependent.class.name}(id: #{dependent.id.inspect})", dependent
+        )
+      end
+
+      # Yields the records of every cascade association matching `deleted:`
+      # (false → not deleted, a timestamp → deleted at exactly that time).
+      # The association's default scope is peeled off so deleted rows are
+      # reachable; has_one is handled through the same relation.
+      def soft_delete_each_dependent(deleted:, &block)
+        self.class.soft_delete_cascade.each do |name|
+          reflection = self.class.reflect_on_association(name)
+          self.class.send(:soft_delete_check_cascade_target!, name, reflection)
+          field = reflection.klass.soft_delete_field
+          relation = association(name).scope.unscope(where: field)
+          relation = deleted ? relation.where(field => deleted) : relation.where(field => nil)
+          relation.find_each(&block)
+        end
       end
     end
   end

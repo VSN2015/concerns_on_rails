@@ -50,6 +50,7 @@ soft_deletable_by(field = nil, touch: true, default_scope: true)
 | `field` | Symbol (positional) | `nil` (falls back to `:deleted_at`) | The database column that stores the deletion timestamp. When omitted/`nil`, defaults to `:deleted_at`. Must already exist in the schema; raises `ArgumentError` if not. |
 | `touch:` | Boolean | `true` | When `true`, uses `update` so `updated_at` is bumped on soft-delete and restore. When `false`, uses `update_column`, bypassing callbacks and skipping the `updated_at` update. |
 | `default_scope:` | Boolean | `true` | When `true`, a `default_scope` hides soft-deleted rows from `.all`. When `false`, deleted rows appear in all queries and you opt in to filtering with `.without_deleted`. New models are encouraged to use `false` to avoid the join and uniqueness-validation footguns that come with `default_scope`. |
+| `cascade:` | `Symbol` or `Array<Symbol>` | `nil` | `has_many` / `has_one` associations soft-deleted with the record — inside its transaction, with its exact timestamp, through each dependent's own `soft_delete!` (hooks and nested cascades run) — and restored with it. Only dependents carrying the parent's timestamp are restored, so one deleted independently earlier stays deleted. Targets must include SoftDeletable; `belongs_to`, HABTM and `:through` raise `ArgumentError`. Disables the single-`UPDATE` batch fast paths. |
 
 ### Validation on configuration
 
@@ -81,8 +82,8 @@ Article.deleted_within(30.days)    # => deleted in the last 30 days
 
 | Signature | Description |
 |---|---|
-| `soft_delete!` | Sets the soft-delete column to `Time.zone.now`. Returns `true` on success, `false` if the update fails. Idempotent — returns `true` immediately if the record is already deleted. Runs `before_soft_delete` / `after_soft_delete` hooks inside a transaction. |
-| `restore!` | Clears the soft-delete column (sets it to `nil`). Returns `true` on success, `false` if the update fails. Idempotent — returns `true` immediately if the record is not deleted. Runs `before_restore` / `after_restore` hooks inside a transaction. |
+| `soft_delete!(at: Time.zone.now)` | Sets the soft-delete column to `at` (default now — pass a time to backdate). Returns `true` on success, `false` if the update fails. Idempotent — returns `true` immediately if the record is already deleted. Runs `before_soft_delete`, the write, the `cascade:` dependents' own `soft_delete!(at:)`, then `after_soft_delete`, all inside one transaction. A dependent that fails to save raises `ActiveRecord::RecordNotSaved` and rolls the transaction back. |
+| `restore!` | Clears the soft-delete column (sets it to `nil`). Returns `true` on success, `false` if the update fails. Idempotent — returns `true` immediately if the record is not deleted. Runs `before_restore`, the write, `restore!` on the `cascade:` dependents whose timestamp equals this record's, then `after_restore`, inside one transaction. A dependent that fails to save raises `ActiveRecord::RecordNotSaved` and rolls the transaction back. |
 | `really_delete!` | Hard-deletes the record via `self.class.unscoped.where(primary_key => id).delete_all` (deletes only this row, bypassing the default scope and all ActiveRecord callbacks/validations), then calls `freeze` on the instance. |
 | `deleted?` | Returns `true` if the soft-delete column is present (non-nil). |
 | `soft_deleted?` | Alias for `deleted?`. |
@@ -97,7 +98,7 @@ Article.deleted_within(30.days)    # => deleted in the last 30 days
 
 | Signature | Description |
 |---|---|
-| `soft_deletable_by(field = nil, touch: true, default_scope: true)` | Configuration macro. Sets the soft-delete column (defaulting to `:deleted_at` when `field` is `nil`) and options; validates the column exists. |
+| `soft_deletable_by(field = nil, touch: true, default_scope: true, prefix: nil, suffix: nil, cascade: nil)` | Configuration macro. Sets the soft-delete column (defaulting to `:deleted_at` when `field` is `nil`) and options; validates the column exists. |
 | `soft_delete_all` | Soft-deletes every record in the current scope and returns the Integer count. A failing record raises `ActiveRecord::RecordNotSaved` and rolls the whole batch back. With `touch: false` and no overridden hooks it collapses to a single `UPDATE`. Preferred over `destroy_all`. |
 | `destroy_all` | Overrides ActiveRecord's `destroy_all` to call `soft_delete_all` instead of issuing `DELETE`. Kept for backwards compatibility — note it returns a count, not the records. |
 | `really_destroy_all` | Hard-deletes the records matching the **current relation**, soft-deleted included — only the default scope's own `deleted_at IS NULL` is peeled off, so `only_deleted.really_destroy_all` purges the trash and nothing else and `deleted_within(30.days).really_destroy_all` purges recent trash. Bypasses callbacks via `delete_all`. |
@@ -178,6 +179,10 @@ order.restore!       # raises if fulfilled?, deleted_at stays set
 
 ## Notes & gotchas
 
+- **Cascade restore matches on the exact timestamp.** The cascade hands the parent's timestamp down (`soft_delete!(at:)`), so `restore!` can tell "deleted with the post" from "deleted on its own last week" without extra columns. Give the columns sub-second precision (`t.datetime :deleted_at, precision: 6`, the Rails 7 default) if two parents may be deleted within the same second. `travel_to` in tests truncates to whole seconds — pass `at:` explicitly when asserting sub-second values.
+- **Declare the `cascade:` associations before the macro.** `soft_deletable_by` resolves each name with `reflect_on_association` at class load, so a `has_many` written *below* the macro does not exist yet and you get `cascade: 'comments' is not an association of Post`. Same rule as CounterCacheable's `belongs_to`.
+- **A dependent that fails to save aborts the whole cascade.** With the default `touch: true` a dependent's write runs validations; if one fails, the cascade raises `ActiveRecord::RecordNotSaved` and the transaction rolls back the parent too, rather than leaving the parent deleted and the dependent live.
+- **Cascade targets resolve lazily when they must.** The association shape is validated at class load; the target model's SoftDeletable check runs at class load when the class already resolves and otherwise on the first cascade (a not-yet-loaded model cannot be resolved from inside a class body).
 - **`default_scope` is sticky.** When `default_scope: true` (the default), every query — including joins, `includes`, and uniqueness validations — silently excludes soft-deleted rows. Uniqueness validators on other columns will not see deleted records, potentially allowing duplicates. For new models, prefer `default_scope: false` and chain `.without_deleted` explicitly.
 
 - **`destroy_all` is silently overridden.** Calling `Article.destroy_all` soft-deletes records instead of hard-deleting them. This can surprise code that expects standard ActiveRecord behavior. Prefer the explicit `.soft_delete_all` to make the intent clear.
