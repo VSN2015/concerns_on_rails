@@ -161,10 +161,22 @@ module ConcernsOnRails
       def duplicable_generator_columns
         columns = []
         columns << self.class.friendly_id_config.slug_column if duplicable_concern?(Sluggable)
-        columns.concat(self.class.tokenizable_fields.keys) if duplicable_concern?(Tokenizable)
+        columns.concat(duplicable_token_columns) if duplicable_concern?(Tokenizable)
         columns << self.class.hashable_field if duplicable_concern?(Hashable) && self.class.hashable_field
         columns.concat(duplicable_sequence_columns) if duplicable_concern?(Sequenceable)
         columns
+      end
+
+      # A token and its `expires_in:` stamp must be cleared together. Blanking
+      # only the token leaves the copy with a fresh secret carrying the
+      # original's expiry — often already in the past, so the copy's token is
+      # born dead.
+      def duplicable_token_columns
+        self.class.tokenizable_fields.flat_map do |field, config|
+          next field unless config[:expires_in]
+
+          [field, self.class.tokenizable_expiry_column(field)]
+        end
       end
 
       def duplicable_sequence_columns

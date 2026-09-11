@@ -9,6 +9,7 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
         t.integer :sequence
         t.string :number
         t.string :token
+        t.datetime :token_expires_at
         t.datetime :issued_at
         t.datetime :deleted_at
         t.text :audit_log
@@ -236,7 +237,7 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
         include ConcernsOnRails::Models::SoftDeletable
         include ConcernsOnRails::Models::Lockable
 
-        tokenizable_by :token, type: :hex, length: 12
+        tokenizable_by :token, type: :hex, length: 12, expires_in: 1.hour
         sequenceable_by :sequence, into: :number, prefix: "INV-"
         auditable_by :title, into: :audit_log
         soft_deletable_by :deleted_at, default_scope: false
@@ -252,6 +253,19 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
       expect(copy.token).not_to eq(original.token)
       expect(copy.sequence).to eq(original.sequence + 1)
       expect(copy.number).to eq("INV-#{copy.sequence}")
+    end
+
+    it "gives the copy's token a fresh expiry instead of inheriting the original's" do
+      original = travel_to(Time.utc(2026, 1, 1, 10)) { klass.create!(title: "Q1") }
+      expect(original.token_expires_at).to eq(Time.utc(2026, 1, 1, 11))
+
+      # Without clearing the stamp alongside the token, the copy would carry a
+      # brand-new secret that expired five months ago.
+      travel_to(Time.utc(2026, 6, 1, 10)) do
+        copy = original.duplicate!
+        expect(copy.token_expires_at).to eq(Time.utc(2026, 6, 1, 11))
+        expect(copy.token_expired?).to be(false)
+      end
     end
 
     it "does not inherit the original's audit history (only the copy's own creation entry)" do

@@ -51,7 +51,7 @@ end
 Call `tokenizable_by` once per token field. Multiple calls on the same model are additive and do not interfere with one another.
 
 ```ruby
-tokenizable_by(field, type: :urlsafe, length: 32)
+tokenizable_by(field, type: :urlsafe, length: 32, expires_in: nil)
 ```
 
 | Option | Type | Default | Description |
