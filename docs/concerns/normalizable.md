@@ -1,4 +1,4 @@
-`Normalizable` automatically cleans and transforms model attribute values in a `before_validation` callback, so downstream validations, uniqueness checks, and database writes always operate on canonical data. It ships six built-in presets for the most common string transformations (whitespace stripping, email lowercasing, phone digit extraction, and case conversion) and accepts any custom `Proc` or lambda for domain-specific rules, eliminating the repetitive `before_validation` boilerplate that accumulates across large Rails codebases.
+`Normalizable` automatically cleans and transforms model attribute values in a `before_validation` callback, so downstream validations, uniqueness checks, and database writes always operate on canonical data. It ships a dozen built-in presets for the most common string transformations (whitespace, email, phone digits, case conversion, slugs, blank-to-nil, URL canonicalisation), lets you chain them (`with: %i[squish titleize]`), accepts any custom `Proc` or lambda for domain-specific rules, and exposes the same rule outside a record via `Model.normalize(field, value)` — eliminating the repetitive `before_validation` boilerplate that accumulates across large Rails codebases.
 
 ## When to use it
 
@@ -7,6 +7,8 @@
 - Stripping accidental leading/trailing whitespace from free-text fields (names, slugs, codes) so uniqueness validations and display are consistent.
 - Collapsing internal whitespace in bio or description fields where users may paste text with irregular spacing.
 - Applying a URL slug or identifier transformation (e.g., `parameterize`, `tr`, `gsub`) through a custom lambda without subclassing the model.
+- Turning optional free-text fields that arrive as `""` from forms into `NULL` (`:nullify_blank`) so `presence`/uniqueness semantics and `WHERE bio IS NULL` behave.
+- Looking a record up by a normalized value (`User.find_by(email: User.normalize(:email, params[:email]))`) so a mixed-case login form finds the lowercase row.
 
 ## Installation
 
@@ -18,6 +20,9 @@ class User < ApplicationRecord
   normalizable :phone,                   with: :phone
   normalizable :first_name, :last_name,  with: :whitespace
   normalizable :code,                    with: :upcase
+  normalizable :display_name,            with: %i[squish titleize]
+  normalizable :bio,                     with: %i[squish nullify_blank]
+  normalizable :website,                 with: :url
   normalizable :slug,                    with: ->(v) { v.to_s.parameterize }
 end
 ```
@@ -37,7 +42,7 @@ Declares one or more fields to normalize and the transformation to apply. Call t
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `*fields` | One or more `Symbol` (positional) | — | The model attribute(s) to normalize. At least one is required; passing none raises `ArgumentError`. Each field is verified to exist as a database column at class-load time. |
-| `with:` | `Symbol` or `Proc`/lambda | — | **Required.** Either a built-in preset symbol (see table below) or any callable that accepts the raw value and returns the transformed value. Passing any other type (e.g., a `String`) raises `ArgumentError`. |
+| `with:` | `Symbol`, `Proc`/lambda, or an `Array` of them | — | **Required.** A built-in preset symbol (see table below), any callable that accepts the raw value and returns the transformed value, or an Array of those applied left to right (`%i[squish titleize]`, `[:strip, ->(v) { v.reverse }]`). Every entry is validated at class load; an empty Array or any other type (e.g., a `String`) raises `ArgumentError`. |
 
 **Built-in presets for `with:`**
 
@@ -45,10 +50,15 @@ Declares one or more fields to normalize and the transformation to apply. Call t
 |--------|-----------|
 | `:email` | `strip` + `downcase` |
 | `:phone` | Remove all non-digit characters (`gsub(/\D/, "")`) |
-| `:whitespace` | `strip` (leading/trailing whitespace only) |
+| `:whitespace` / `:strip` | `strip` (leading/trailing whitespace only) |
 | `:squish` | `squish` (strip and collapse internal whitespace to single spaces) |
 | `:downcase` | `downcase` |
 | `:upcase` | `upcase` |
+| `:capitalize` | `capitalize` (first character up, the rest down) |
+| `:titleize` | `titleize` (each word capitalised) |
+| `:parameterize` | `parameterize` (URL-safe slug: `"Hello World!"` → `"hello-world"`) |
+| `:nullify_blank` | `""` or whitespace-only → `nil`; anything with content passes through untouched. Chain it last: `%i[squish nullify_blank]` |
+| `:url` | `strip`, prepend `https://` when no scheme is present (`localhost:3000` is host:port, not a scheme; `mailto:` is left alone), lowercase the scheme and host, keep path/query/fragment as typed (`"  Example.COM/Some/Path "` → `"https://example.com/Some/Path"`). Input that does not parse as a URI is returned stripped but otherwise unchanged so a format validator can reject it |
 
 All built-in presets are string-safe: they apply their transform only when the value is a `String`; non-string values pass through unchanged.
 
@@ -75,10 +85,20 @@ Iterates over all rules declared with `normalizable` and applies each normalizer
 ```ruby
 normalizable :email, with: :email
 normalizable :first_name, :last_name, with: :whitespace
+normalizable :display_name, with: %i[squish titleize]
 normalizable :code, with: ->(v) { v.to_s.parameterize }
 ```
 
-Registers normalization rules on the class. Rules accumulate across multiple calls; later calls for the same field overwrite the previous rule for that field only. Raises `ArgumentError` on configuration errors (missing fields, unknown preset, invalid `with:` type, or non-existent database column).
+Registers normalization rules on the class. Rules accumulate across multiple calls; later calls for the same field overwrite the previous rule for that field only. Raises `ArgumentError` on configuration errors (missing fields, unknown preset, invalid `with:` type or Array entry, or non-existent database column).
+
+#### `normalize(field, value)`
+
+```ruby
+User.normalize(:email, "  ALICE@Example.com ")   # => "alice@example.com"
+User.find_by(email: User.normalize(:email, params[:email]))
+```
+
+Applies the declared rule for `field` to a bare value — the exact transform a record would apply in `before_validation` — so lookups, params and background jobs canonicalise input the same way the database does. `nil` returns `nil` (records skip `nil` too). Raises `ArgumentError` naming the declared fields when `field` has no rule.
 
 ## Examples
 
@@ -146,7 +166,10 @@ account.email   # => "alice@example.com"
 - **Non-string values pass through preset normalizers unchanged.** Every built-in preset guards with `v.is_a?(String)`, so applying `:downcase` to an integer column returns the integer unmodified rather than raising a `NoMethodError`.
 - **Column existence is validated at class-load time.** If a field passed to `normalizable` does not exist in the database table, an `ArgumentError` is raised immediately when the class is evaluated (not at runtime), with the message `"does not exist in the database (table: <table_name>)"` followed by a ready-to-paste `bin/rails generate migration` command. This is enforced by `ConcernsOnRails::Support::ColumnGuard`.
 - **Multiple calls accumulate.** Each `normalizable` call merges its fields into the class-level `normalizable_rules` hash. Rules for distinct fields stack; if the same field appears in two separate calls, the later call's normalizer wins for that field.
-- **`with:` accepts only `Symbol` or `Proc`.** Passing a `String` (e.g., `with: "downcase"`) raises `ArgumentError: :with must be a preset symbol or a Proc/lambda`. This catches the common mistake of quoting a preset name.
+- **`normalize` is a class method on your model.** If your model already defines its own `normalize` class method, the concern's definition (added via `ClassMethods` on include) will be shadowed by yours when declared after the include.
+- **`with:` accepts a `Symbol`, a `Proc`, or an `Array` of them.** Passing a `String` (e.g., `with: "downcase"`) — at the top level or inside an Array — raises `ArgumentError: :with must be a preset symbol or a Proc/lambda`. This catches the common mistake of quoting a preset name. `with: []` raises too.
+- **Chains run left to right and short-circuit on type.** Each step receives the previous step's output; because presets pass non-Strings through, a `:nullify_blank` in the middle of a chain simply hands `nil` to the remaining steps. Put it last.
+- **`:url` is deliberately conservative.** It only touches the case-insensitive parts (scheme, host) and adds a missing `https://`; it never strips `www.`, trailing slashes or query strings, and never raises — pair it with `validates :website, format:` (or `URI::DEFAULT_PARSER.make_regexp`) to reject garbage.
 - **Unknown preset symbols raise immediately.** Passing an unrecognized symbol such as `with: :flarbgnarb` raises `ArgumentError: unknown preset '...'` and lists the valid preset names.
 - **`normalizable_rules` is a `class_attribute`.** It is inherited by subclasses. Rules defined on a parent class apply to all subclasses via normal Ruby inheritance; subclasses can add their own rules without affecting the parent.
 - **Works on Rails 5+.** The concern intentionally does not depend on Rails 7.1's built-in `normalizes` API, making it usable in projects that cannot upgrade to a recent Rails version.

@@ -669,7 +669,7 @@ expirable_by :valid_until
 
 ## ✨ Normalizable
 
-Auto-normalize attribute values in `before_validation` — strip whitespace, downcase emails, dedupe spaces, run any custom transform.
+Auto-normalize attribute values in `before_validation` — strip whitespace, downcase emails, dedupe spaces, chain transforms, run any custom lambda.
 
 ```ruby
 class User < ApplicationRecord
@@ -678,27 +678,36 @@ class User < ApplicationRecord
   normalizable :email,                  with: :email                       # strip + downcase
   normalizable :phone,                  with: :phone                       # digits only
   normalizable :first_name, :last_name, with: :whitespace                  # strip — same rule, multiple fields
-  normalizable :slug,                   with: ->(v) { v.to_s.parameterize } # custom lambda
+  normalizable :display_name,           with: %i[squish titleize]          # a chain, applied left to right
+  normalizable :bio,                    with: %i[squish nullify_blank]     # "" / "   " → nil
+  normalizable :website,                with: :url                         # "Example.COM/x" → "https://example.com/x"
+  normalizable :slug,                   with: ->(v) { v.to_s.parameterize } # custom lambda (chains with presets too)
 end
 
 User.create(email: "  ALICE@Example.com  ").email   # => "alice@example.com"
 User.create(phone: "+1 (415) 555-1234").phone       # => "14155551234"
+
+# The same rule outside a record — lookups and params see what the DB sees:
+User.find_by(email: User.normalize(:email, params[:email]))
 ```
 
 **Built-in presets**
 
-| Preset       | Transform                                |
-|--------------|------------------------------------------|
-| `:email`     | `strip` + `downcase`                     |
-| `:phone`     | digits only (`gsub(/\D/, "")`)           |
-| `:whitespace`| `strip`                                  |
-| `:squish`    | `squish` (collapse inner whitespace)     |
-| `:downcase`  | `downcase`                               |
-| `:upcase`    | `upcase`                                 |
+| Preset          | Transform                                                            |
+|-----------------|----------------------------------------------------------------------|
+| `:email`        | `strip` + `downcase`                                                 |
+| `:phone`        | digits only (`gsub(/\D/, "")`)                                       |
+| `:whitespace` / `:strip` | `strip`                                                     |
+| `:squish`       | `squish` (collapse inner whitespace)                                 |
+| `:downcase` / `:upcase` / `:capitalize` / `:titleize` | the String method of the same name |
+| `:parameterize` | `parameterize` (URL slug)                                            |
+| `:nullify_blank`| `""` or whitespace-only → `nil` (content untouched)                  |
+| `:url`          | strip, default scheme to `https://` (`host:port` counts as schemeless), lowercase scheme + host, keep path/query; unparseable input comes back stripped for your format validator to reject |
 
 **Notes**
 - Runs in `before_validation`, so DB constraints and AR validations see the normalized value.
-- `nil` values are skipped — no `nil → ""` coercion.
+- `with:` takes a preset, a Proc, or an Array of them (applied in order); every entry is validated at class load.
+- `nil` values are skipped — no `nil → ""` coercion (use `:nullify_blank` for the opposite direction).
 - Preset normalizers pass non-string values through unchanged.
 - Works on Rails 5+ (no dependency on Rails 7.1's built-in `normalizes`).
 

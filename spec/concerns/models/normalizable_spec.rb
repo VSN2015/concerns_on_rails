@@ -251,4 +251,84 @@ describe ConcernsOnRails::Models::Normalizable do
       expect(user.last_name).to eq("Smith")
     end
   end
+
+  describe "chained normalizers, extra presets and Model.normalize" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :normalizable_extras, force: true do |t|
+          t.string :name
+          t.text :bio
+          t.string :slug
+          t.string :website
+          t.string :title
+          t.string :note
+        end
+      end
+      stub_const("NormalizableExtra", Class.new(TestModel) do
+        self.table_name = "normalizable_extras"
+        include ConcernsOnRails::Models::Normalizable
+
+        normalizable :name,    with: %i[squish titleize]
+        normalizable :bio,     with: %i[squish nullify_blank]
+        normalizable :slug,    with: :parameterize
+        normalizable :website, with: :url
+        normalizable :title,   with: :capitalize
+        normalizable :note,    with: [:strip, ->(v) { "#{v}!" }]
+      end)
+    end
+
+    def normalized(attrs)
+      record = NormalizableExtra.new(attrs)
+      record.valid?
+      record
+    end
+
+    it "applies an Array of presets and callables left to right" do
+      expect(normalized(name: "  alice   SMITH ").name).to eq("Alice Smith")
+      expect(normalized(note: "  abc ").note).to eq("abc!")
+    end
+
+    it ":nullify_blank turns blank strings into nil and leaves content alone" do
+      expect(normalized(bio: "   ").bio).to be_nil
+      expect(normalized(bio: "").bio).to be_nil
+      expect(normalized(bio: "  hi   there ").bio).to eq("hi there")
+    end
+
+    it ":parameterize, :capitalize and :titleize" do
+      expect(normalized(slug: "Hello World!").slug).to eq("hello-world")
+      expect(normalized(title: "hELLO").title).to eq("Hello")
+      expect(NormalizableExtra.normalize(:name, "jane doe")).to eq("Jane Doe")
+    end
+
+    it ":url defaults the scheme to https, lowercases scheme + host, keeps the path and rejects nothing" do
+      expect(normalized(website: "  Example.COM/Some/Path ").website).to eq("https://example.com/Some/Path")
+      expect(normalized(website: "HTTP://Foo.Bar:8080/X?q=Y").website).to eq("http://foo.bar:8080/X?q=Y")
+      expect(normalized(website: "mailto:Someone@Example.com").website).to eq("mailto:Someone@Example.com")
+      expect(normalized(website: "localhost:3000/admin").website).to eq("https://localhost:3000/admin")
+      expect(normalized(website: "not a url ").website).to eq("not a url") # left for a format validator to reject
+      expect(normalized(website: "   ").website).to eq("")
+    end
+
+    it "Model.normalize(field, value) applies a field's rule outside a record (lookups, params)" do
+      expect(NormalizableExtra.normalize(:name, " bob   jones ")).to eq("Bob Jones")
+      expect(NormalizableExtra.normalize("website", "Example.com")).to eq("https://example.com")
+      expect(NormalizableExtra.normalize(:bio, nil)).to be_nil
+      expect { NormalizableExtra.normalize(:zzz, "x") }
+        .to raise_error(ArgumentError, /no normalization rule for :zzz \(declared: name, bio, slug, website, title, note\)/)
+    end
+
+    it "validates every entry of an Array at class load" do
+      build = lambda do |with|
+        Class.new(TestModel) do
+          self.table_name = "normalizable_extras"
+          include ConcernsOnRails::Models::Normalizable
+
+          normalizable :name, with: with
+        end
+      end
+      expect { build.call(%i[squish bogus]) }.to raise_error(ArgumentError, /unknown preset 'bogus'/)
+      expect { build.call([]) }.to raise_error(ArgumentError, /with: \[\] needs at least one normalizer/)
+      expect { build.call([:squish, "downcase"]) }.to raise_error(ArgumentError, /must be a preset symbol or a Proc/)
+    end
+  end
 end
