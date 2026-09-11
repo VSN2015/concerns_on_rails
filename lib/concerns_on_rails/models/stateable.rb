@@ -31,8 +31,20 @@ module ConcernsOnRails
     #
     # Plus a generic `transition_to!(state)`.
     #
-    # Options for stateable_by: default:, transitions:, prefix:, suffix:, lock:
-    # (prefix:/suffix: take `true` to use the field name, or a literal string/symbol).
+    # Per-event hooks: define `before_<event>` / `after_<event>` (affixed like the
+    # event method — `before_status_publish` with prefix: true) and they fire
+    # around that guarded transition, inside the generic before_transition /
+    # after_transition pair and the same transaction.
+    #
+    # `timestamps: true` (or a list of states) stamps `<state>_at = Time.current`
+    # in the same write as the state change — guarded events, direct setters
+    # and transition_to! alike — so "when was it published / archived?" needs no
+    # callback. The columns are checked at macro time (typed :datetime in the
+    # migration hint); the default state is not stamped on create.
+    #
+    # Options for stateable_by: default:, transitions:, prefix:, suffix:, lock:,
+    # timestamps: (prefix:/suffix: take `true` to use the field name, or a
+    # literal string/symbol).
     #
     # Notes:
     #   * String columns only (store the state name) — not integer-backed like Rails enum.
@@ -53,7 +65,7 @@ module ConcernsOnRails
       class InvalidTransition < StandardError; end
 
       # Valid stateable_by keyword options (everything besides field/states:).
-      OPTIONS = %i[default transitions prefix suffix lock].freeze
+      OPTIONS = %i[default transitions prefix suffix lock timestamps].freeze
 
       included do
         class_attribute :stateable_field, instance_accessor: false
@@ -63,6 +75,8 @@ module ConcernsOnRails
         class_attribute :stateable_prefix, instance_accessor: false
         class_attribute :stateable_suffix, instance_accessor: false
         class_attribute :stateable_lock, instance_accessor: false, default: false
+        # States whose `<state>_at` column is stamped on every explicit write.
+        class_attribute :stateable_timestamps, instance_accessor: false, default: []
       end
 
       # Move to any declared state by name, bypassing transition guards.
@@ -70,11 +84,12 @@ module ConcernsOnRails
         state = state.to_sym
         raise InvalidTransition, "#{LABEL}: '#{state}' is not a declared state" unless self.class.stateable_states.include?(state)
 
-        update!(self.class.stateable_field => state.to_s)
+        update!(stateable_write_attributes(state.to_s))
       end
 
       # Transition lifecycle hooks — override in the model. Fired by guarded
       # <event>! transitions (not by direct <state>! setters or transition_to!).
+      # Per-event `before_<event>` / `after_<event>` methods fire inside them.
       def before_transition(_event, _from, _to); end
       def after_transition(_event, _from, _to); end
 
@@ -137,7 +152,19 @@ module ConcernsOnRails
           self.stateable_prefix = stateable_affix(options[:prefix])
           self.stateable_suffix = stateable_affix(options[:suffix])
           self.stateable_lock = options[:lock] ? true : false
+          self.stateable_timestamps = stateable_timestamp_states(options[:timestamps])
           ensure_columns!(LABEL, stateable_field, types: :string)
+        end
+
+        # timestamps: true => every state; an Array => those states (validated
+        # against states: in stateable_validate!); nil/false => none.
+        def stateable_timestamp_states(option)
+          case option
+          when nil, false then []
+          when true then stateable_states
+          when Array then option.map(&:to_sym)
+          else raise ArgumentError, "#{LABEL}: timestamps: must be true or an Array of states"
+          end
         end
 
         def stateable_affix(option)
@@ -155,7 +182,18 @@ module ConcernsOnRails
             raise ArgumentError, "#{LABEL}: default '#{stateable_default}' is not a declared state"
           end
 
+          stateable_validate_timestamps!
           stateable_transitions.each { |event, config| stateable_validate_transition!(event, config) }
+        end
+
+        # Unknown states first (a config typo), then the `<state>_at` columns —
+        # all missing ones in one typed migration hint.
+        def stateable_validate_timestamps!
+          unknown = stateable_timestamps - stateable_states
+          raise ArgumentError, "#{LABEL}: timestamps: references unknown states: #{unknown.join(', ')}" if unknown.any?
+          return if stateable_timestamps.empty?
+
+          ensure_columns!(LABEL, stateable_timestamps.map { |state| :"#{state}_at" }, types: :datetime)
         end
 
         def stateable_validate_transition!(event, config)
@@ -176,7 +214,7 @@ module ConcernsOnRails
             name = stateable_method_name(state)
             scope name, -> { where(field => value) }
             define_method("#{name}?") { self[field].to_s == value }
-            define_method("#{name}!") { update!(field => value) }
+            define_method("#{name}!") { update!(stateable_write_attributes(value)) }
           end
         end
 
@@ -187,7 +225,7 @@ module ConcernsOnRails
             to = config.fetch(:to).to_s
             name = stateable_method_name(event)
             define_method("may_#{name}?") { from.empty? || from.include?(self[field].to_s) }
-            define_method("#{name}!") { stateable_perform_transition!(field, to, from, event) }
+            define_method("#{name}!") { stateable_perform_transition!(field, to, from, event, name) }
           end
         end
 
@@ -209,28 +247,43 @@ module ConcernsOnRails
       # With `lock: true` the guard is re-checked under a row lock (with_lock
       # reloads, so the state read is the committed one) — closing the
       # check-then-write race between two concurrent transitions.
-      def stateable_perform_transition!(field, to, from, event)
+      def stateable_perform_transition!(field, to, from, event, name)
         if self.class.stateable_lock && persisted?
-          with_lock { stateable_execute_transition!(field, to, from, event) }
+          with_lock { stateable_execute_transition!(field, to, from, event, name) }
         else
-          stateable_execute_transition!(field, to, from, event)
+          stateable_execute_transition!(field, to, from, event, name)
         end
       end
 
       # Hooks and the state write share ONE transaction, so a raising
-      # after_transition rolls the state change back instead of leaving it
-      # committed with the side effect half-done (SoftDeletable's pattern).
-      def stateable_execute_transition!(field, to, from, event)
+      # after_transition (or after_<event>) rolls the state change back instead
+      # of leaving it committed with the side effect half-done (SoftDeletable's
+      # pattern). Order: before_transition → before_<event> → write →
+      # after_<event> → after_transition.
+      def stateable_execute_transition!(field, to, from, event, name)
         current = self[field].to_s
         raise InvalidTransition, "#{self.class.name}: cannot #{event} from '#{self[field]}'" unless from.empty? || from.include?(current)
 
         result = false
         transaction do
           before_transition(event, current, to)
-          result = update!(field => to)
+          stateable_event_hook(:"before_#{name}")
+          result = update!(stateable_write_attributes(to))
+          stateable_event_hook(:"after_#{name}")
           after_transition(event, current, to)
         end
         result
+      end
+
+      def stateable_event_hook(method_name)
+        send(method_name) if respond_to?(method_name, true)
+      end
+
+      # The state column plus, when the state is stamped, its `<state>_at`.
+      def stateable_write_attributes(state)
+        attributes = { self.class.stateable_field => state }
+        attributes[:"#{state}_at"] = Time.current if self.class.stateable_timestamps.include?(state.to_sym)
+        attributes
       end
     end
   end

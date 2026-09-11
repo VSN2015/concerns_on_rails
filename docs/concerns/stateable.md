@@ -32,6 +32,7 @@ end
 | Column | Type | Required | Notes |
 |---|---|---|---|
 | _(configured field)_ | `string` | Yes | Stores the current state name as a plain string. |
+| `<state>_at` | `datetime` | With `timestamps:` | One per stamped state (`published_at`, `archived_at`, …). Written with `Time.current` in the same `update!` as the state change. |
 
 ```ruby
 # db/migrate/YYYYMMDDHHMMSS_add_status_to_articles.rb
@@ -61,6 +62,8 @@ stateable_by(field, states:, **options)
 | `transitions:` | `Hash` | `{}` | Named events. Each key is the event name (Symbol); each value is a hash with `:to` (required, Symbol) and optional `:from` (Symbol or Array of Symbols). Omitting `:from` means the transition is allowed from any state. |
 | `prefix:` | `true`, `String`, or `Symbol` | `nil` | Prepended to all generated method/scope names separated by `_`. Pass `true` to use the field name; pass a string/symbol to use a literal prefix. |
 | `suffix:` | `true`, `String`, or `Symbol` | `nil` | Appended to all generated method/scope names separated by `_`. Same coercion rules as `prefix:`. |
+| `timestamps:` | `true` or `Array<Symbol>` | `nil` | Stamp `<state>_at = Time.current` whenever the record is written into that state — guarded `<event>!`, direct `<state>!` and `transition_to!` alike (the default state on create is not stamped; re-entering a state re-stamps it). `true` stamps every state; an Array stamps those states. The columns must exist (`ArgumentError` at class load with a typed migration hint); an undeclared state raises. `Model.stateable_timestamps` lists the stamped states. |
+| `lock:` | `true`/`false` | `false` | Take a row lock and re-check the guard against the fresh row before each guarded transition (closes the check-then-write race). |
 
 **Transition config keys** (values inside the `transitions:` hash):
 
@@ -93,7 +96,7 @@ Shipment.state_open  # => WHERE state = 'open'
 |---|---|
 | `<state>?` (e.g. `draft?`, `published?`) | Predicate — returns `true` if the state column equals this state's string value. |
 | `<state>!` (e.g. `draft!`, `published!`) | Direct setter — calls `update!` with the target state, bypassing all transition guards. |
-| `<event>!` (e.g. `publish!`, `archive!`) | Guarded transition — raises `InvalidTransition` if the current state is not in the transition's `:from` list. Calls `update!` on success. |
+| `<event>!` (e.g. `publish!`, `archive!`) | Guarded transition — raises `InvalidTransition` if the current state is not in the transition's `:from` list. Calls `update!` on success, inside one transaction with the hooks: `before_transition(event, from, to)` → `before_<event>` → write → `after_<event>` → `after_transition(event, from, to)`. Per-event hooks are plain instance methods, looked up by the affixed event name (`before_status_publish` with `prefix: true`) and skipped when undefined; a raising hook rolls the state change back. |
 | `may_<event>?` (e.g. `may_publish?`, `may_archive?`) | Guard predicate — returns `true` if the guarded transition is currently allowed, without mutating state. |
 | `transition_to!(state)` | Moves to any declared state by name (Symbol or String), bypassing transition guards. Raises `InvalidTransition` for undeclared states. |
 
@@ -167,6 +170,8 @@ ticket.transition_to!(:nope)
 
 ## Notes & gotchas
 
+- **Stamping is per write, not per create.** `timestamps:` writes `<state>_at` only when a state method runs (`publish!`, `published!`, `transition_to!`, `transition_all`); a record created in the default state has a `nil` stamp until it is explicitly moved. Re-entering a state re-stamps it and leaves the other stamps alone — `published_at` answers "when was it last published".
+- **Per-event hooks fire only for guarded transitions**, exactly like `before_transition`/`after_transition`; direct setters and `transition_to!` bypass both. `transition_all` fires them once per record.
 - **`ArgumentError` at class load time** — `stateable_by` validates eagerly. Errors are raised when the class is loaded, not at runtime. The following all raise `ArgumentError`:
   - The configured column does not exist in the schema (message: `does not exist in the database`).
   - `states:` is empty.

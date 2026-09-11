@@ -368,4 +368,220 @@ describe ConcernsOnRails::Stateable do
       expect(ArchivableOrder.transition_all(:archive)).to eq(0)
     end
   end
+  describe "timestamps: (<state>_at stamping)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :stamped_posts, force: true do |t|
+          t.string :status
+          t.datetime :draft_at
+          t.datetime :review_at
+          t.datetime :published_at
+          t.datetime :archived_at
+        end
+        create_table :partially_stamped_posts, force: true do |t|
+          t.string :status
+          t.datetime :published_at
+        end
+      end
+    end
+
+    let(:stamped) do
+      Class.new(TestModel) do
+        self.table_name = "stamped_posts"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft review published archived], default: :draft, timestamps: true,
+                              transitions: { submit: { from: :draft, to: :review },
+                                             publish: { from: %i[draft review], to: :published },
+                                             archive: { to: :archived } }
+      end
+    end
+
+    it "stamps <state>_at in the same write as a guarded transition" do
+      post = stamped.create!
+      travel_to(Time.utc(2026, 3, 1, 12)) { post.publish! }
+      post.reload
+      expect(post.published_at).to eq(Time.utc(2026, 3, 1, 12))
+      expect(post.review_at).to be_nil
+    end
+
+    it "stamps for direct setters and transition_to! too" do
+      post = stamped.create!
+      travel_to(Time.utc(2026, 3, 2, 9)) { post.archived! }
+      expect(post.reload.archived_at).to eq(Time.utc(2026, 3, 2, 9))
+      travel_to(Time.utc(2026, 3, 3, 9)) { post.transition_to!(:review) }
+      expect(post.reload.review_at).to eq(Time.utc(2026, 3, 3, 9))
+    end
+
+    it "does not stamp the default state on create — only explicit state writes stamp" do
+      expect(stamped.create!.draft_at).to be_nil
+    end
+
+    it "re-stamps on re-entry and leaves the other stamps alone" do
+      post = stamped.create!
+      travel_to(Time.utc(2026, 3, 1, 12)) { post.publish! }
+      travel_to(Time.utc(2026, 3, 5, 12)) { post.archive! }
+      travel_to(Time.utc(2026, 3, 9, 12)) { post.transition_to!(:published) }
+      post.reload
+      expect(post.published_at).to eq(Time.utc(2026, 3, 9, 12))
+      expect(post.archived_at).to eq(Time.utc(2026, 3, 5, 12))
+    end
+
+    it "stamps through transition_all" do
+      eligible = stamped.create!
+      skipped = stamped.create!(status: "archived")
+      travel_to(Time.utc(2026, 4, 1)) { expect(stamped.transition_all(:publish)).to eq(1) }
+      expect(eligible.reload.published_at).to eq(Time.utc(2026, 4, 1))
+      expect(skipped.reload.published_at).to be_nil
+    end
+
+    it "timestamps: with a list stamps only those states" do
+      partial = Class.new(TestModel) do
+        self.table_name = "partially_stamped_posts"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft published archived], default: :draft, timestamps: %i[published],
+                              transitions: { publish: { from: :draft, to: :published }, archive: { to: :archived } }
+      end
+      post = partial.create!
+      travel_to(Time.utc(2026, 3, 1)) { post.publish! }
+      expect(post.reload.published_at).to eq(Time.utc(2026, 3, 1))
+      expect { post.archive! }.not_to raise_error # no archived_at column and not listed
+      expect(post.reload.archived?).to be(true)
+      expect(partial.stateable_timestamps).to eq(%i[published])
+    end
+
+    it "exposes the stamped states (every state with timestamps: true)" do
+      expect(stamped.stateable_timestamps).to eq(%i[draft review published archived])
+      expect(Ticket.stateable_timestamps).to eq([])
+    end
+
+    it "requires the <state>_at columns with a typed migration hint" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "partially_stamped_posts"
+          include ConcernsOnRails::Stateable
+
+          stateable_by :status, states: %i[draft published], timestamps: true
+        end
+      end.to raise_error(ArgumentError, /draft_at.*does not exist.*draft_at:datetime/)
+    end
+
+    it "rejects timestamps: naming an undeclared state, or a value that is neither true nor an Array" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "partially_stamped_posts"
+          include ConcernsOnRails::Stateable
+
+          stateable_by :status, states: %i[draft published], timestamps: %i[published nope]
+        end
+      end.to raise_error(ArgumentError, /timestamps: references unknown states: nope/)
+
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "partially_stamped_posts"
+          include ConcernsOnRails::Stateable
+
+          stateable_by :status, states: %i[draft published], timestamps: "yes"
+        end
+      end.to raise_error(ArgumentError, /timestamps: must be true or an Array of states/)
+    end
+  end
+
+  describe "per-event hooks (before_<event> / after_<event>)" do
+    let(:klass) do
+      Class.new(TestModel) do
+        self.table_name = "tickets"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft published archived], default: :draft,
+                              transitions: { publish: { from: :draft, to: :published }, archive: { to: :archived } }
+
+        attr_reader :log
+
+        def before_transition(event, from, to)
+          (@log ||= []) << [:before_transition, event, from, to]
+        end
+
+        def after_transition(event, from, to)
+          (@log ||= []) << [:after_transition, event, from, to]
+        end
+
+        def before_publish
+          (@log ||= []) << :before_publish
+        end
+
+        def after_publish
+          (@log ||= []) << :after_publish
+        end
+      end
+    end
+
+    it "fires generic → specific before the write and specific → generic after, only for the matching event" do
+      ticket = klass.create!
+      ticket.publish!
+      expect(ticket.log).to eq(
+        [[:before_transition, :publish, "draft", "published"], :before_publish,
+         :after_publish, [:after_transition, :publish, "draft", "published"]]
+      )
+
+      ticket.instance_variable_set(:@log, nil)
+      ticket.archive!
+      expect(ticket.log).to eq(
+        [[:before_transition, :archive, "published", "archived"], [:after_transition, :archive, "published", "archived"]]
+      )
+    end
+
+    it "shares the transaction — a raising after_<event> rolls the state change back" do
+      failing = Class.new(klass) do
+        def after_publish
+          raise "boom"
+        end
+      end
+      ticket = failing.create!
+      expect { ticket.publish! }.to raise_error("boom")
+      expect(ticket.reload.draft?).to be(true)
+    end
+
+    it "uses the affixed event name for the hook (prefix: true → before_status_publish)" do
+      affixed = Class.new(TestModel) do
+        self.table_name = "tickets"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft published], default: :draft, prefix: true,
+                              transitions: { publish: { from: :draft, to: :published } }
+
+        attr_reader :log
+
+        def before_status_publish
+          (@log ||= []) << :before_status_publish
+        end
+
+        def before_publish
+          (@log ||= []) << :wrong_hook
+        end
+      end
+      ticket = affixed.create!
+      ticket.status_publish!
+      expect(ticket.log).to eq([:before_status_publish])
+    end
+
+    it "does not fire for direct setters or transition_to!" do
+      ticket = klass.create!
+      ticket.published!
+      ticket.transition_to!(:archived)
+      expect(ticket.log).to be_nil
+    end
+
+    it "fires once per record through transition_all" do
+      klass.create!
+      klass.create!
+      calls = 0
+      counting = Class.new(klass) do
+        define_method(:after_publish) { calls += 1 }
+      end
+      expect(counting.transition_all(:publish)).to eq(2)
+      expect(calls).to eq(2)
+    end
+  end
 end
