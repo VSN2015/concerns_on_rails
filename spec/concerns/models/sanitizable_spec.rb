@@ -340,17 +340,28 @@ describe ConcernsOnRails::Models::Sanitizable do
         .to raise_error(ArgumentError, /code is not a sanitizable field \(declared: body, summary, title\)/)
     end
 
-    it "sanitize_all! rewrites legacy rows in place (skipping clean and nil values) and returns the count" do
+    it "sanitize_all! repairs the on: :write rows and leaves the on: :read columns raw" do
       clean = klass.create!(title: "clean", body: "<p>ok</p>", summary: "plain")
       dirty = klass.create!(title: "x", body: "<script>bad</script><em>e</em>", summary: "<b>s</b>")
       dirty.update_columns(title: "<u>legacy</u>") # a write that bypassed the on: :write callback
       klass.create!(title: nil, body: nil, summary: nil)
 
       expect(klass.sanitize_all!).to eq(1)
+      # title is on: :write, so it is repaired. body and summary are on: :read —
+      # the mode whose whole contract is that the stored column stays raw — so a
+      # bare call must not touch them.
       expect(dirty.reload.attributes.slice("title", "body", "summary"))
-        .to eq("title" => "legacy", "body" => "bad<em>e</em>", "summary" => "s")
+        .to eq("title" => "legacy", "body" => "<script>bad</script><em>e</em>", "summary" => "<b>s</b>")
       expect(clean.reload.body).to eq("<p>ok</p>")
       expect(klass.sanitize_all!).to eq(0) # idempotent
+    end
+
+    it "sanitize_all! still overwrites an on: :read column when you name it explicitly" do
+      dirty = klass.create!(title: "x", body: "<script>bad</script><em>e</em>", summary: "<b>s</b>")
+
+      expect(klass.sanitize_all!(:body)).to eq(1)
+      expect(dirty.reload.body).to eq("bad<em>e</em>")
+      expect(dirty.summary).to eq("<b>s</b>") # not named, still raw
     end
 
     it "sanitize_all! follows the current scope and accepts a subset of fields" do

@@ -1106,7 +1106,8 @@ article.sanitized_attributes                 # => { "body" => "<b>Hi</b>alert(1)
 article.as_json(sanitized: true)             # declared fields swapped for their sanitized form, the rest raw
 render json: article.as_json(sanitized: [:body], only: %i[id body])   # subset; composes with only:/except:/methods:
 
-Article.sanitize_all!                        # rewrite legacy rows in place with each field's sanitizer → count changed
+Article.sanitize_all!                        # repair on: :write rows in place → count changed (on: :read columns stay raw)
+Article.sanitize_all!(:body)                 # name an on: :read field to overwrite it — destroys the raw value
 Article.where(legacy: true).sanitize_all!(:body)   # scope-aware, subset of fields
 ```
 

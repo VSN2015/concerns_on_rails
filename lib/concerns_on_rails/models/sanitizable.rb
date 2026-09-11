@@ -96,7 +96,11 @@ module ConcernsOnRails
         # validations, callbacks or updated_at bump (Anonymizable's contract).
         # Returns the Integer count of rows rewritten.
         def sanitize_all!(*fields)
-          fields = sanitizable_fields_for(fields.empty? || fields)
+          # Bare call = the `on: :write` fields only. Those are the rows this
+          # tool exists to repair. Sweeping in `on: :read` fields would destroy
+          # the raw column that mode exists to preserve — naming one explicitly
+          # is still allowed, but it has to be a deliberate act.
+          fields = sanitizable_fields_for(fields.empty? ? sanitizable_write_fields : fields)
           transaction do
             count = 0
             all.find_each do |record|
@@ -108,6 +112,11 @@ module ConcernsOnRails
             end
             count
           end
+        end
+
+        # The destructively-sanitized fields — what a bare sanitize_all! repairs.
+        def sanitizable_write_fields
+          sanitizable_rules.select { |_field, rule| rule[:on] == :write }.keys
         end
 
         # true → every declared field; otherwise the given names, which must be
