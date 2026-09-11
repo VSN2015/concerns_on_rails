@@ -29,6 +29,7 @@ Each field passed to `tokenizable_by` must already exist as a string column. Add
 | Column | Type | Required |
 |---|---|---|
 | _(field name, e.g. `api_token`)_ | `string` | Yes |
+| `<field>_expires_at` (e.g. `reset_password_token_expires_at`) | `datetime` | With `expires_in:` | Stamped on every generation, cleared on revoke; checked at class load with a typed migration hint. |
 
 ```ruby
 class AddTokensToUsers < ActiveRecord::Migration[7.1]
@@ -50,7 +51,7 @@ end
 Call `tokenizable_by` once per token field. Multiple calls on the same model are additive and do not interfere with one another.
 
 ```ruby
-tokenizable_by(field, type: :urlsafe, length: 32)
+tokenizable_by(field, type: :urlsafe, length: 32, expires_in: nil)
 ```
 
 | Option | Type | Default | Description |
@@ -58,6 +59,7 @@ tokenizable_by(field, type: :urlsafe, length: 32)
 | `field` | `Symbol` / `String` | — (required) | The model column that stores the token. Converted to a symbol internally. Must exist in the database schema at class-load time or `ArgumentError` is raised. |
 | `type:` | `Symbol` | `:urlsafe` | Token character set. Valid values: `:urlsafe`, `:hex`, `:alphanumeric`, `:numeric`. Any other value raises `ArgumentError`. |
 | `length:` | `Integer` | `32` | Exact character length of the generated token. Must be a positive integer; `0` or negative raises `ArgumentError`. Converted via `to_i`, so string digits are accepted. |
+| `expires_in:` | `ActiveSupport::Duration` or `Integer` (seconds) | `nil` | Gives the field a lifetime. `<field>_expires_at` is stamped with `Time.current + expires_in` on create, on `regenerate_<field>!`, and for a caller-supplied token that arrives without its own expiry; `revoke_<field>!` clears it. `authenticate_by_<field>` and `consume_<field>` refuse an expired token; `<field>_expired?` and the `<field>_expired` scope report it. Must be positive. |
 
 **Type reference**
 
@@ -70,7 +72,7 @@ tokenizable_by(field, type: :urlsafe, length: 32)
 
 ## Scopes
 
-`Tokenizable` does not add any ActiveRecord scopes. Use Rails' built-in `find_by_<field>` or the concern's `authenticate_by_<field>` class method for lookups.
+One scope per field declared with `expires_in:` — `<field>_expired` (e.g. `User.reset_password_token_expired`): rows whose `<field>_expires_at` is set and has passed, for cleanup jobs (`User.reset_password_token_expired.update_all(reset_password_token: nil, reset_password_token_expires_at: nil)`). Fields without `expires_in:` add no scopes; use Rails' `find_by_<field>` or the concern's `authenticate_by_<field>` for lookups.
 
 ## Methods
 
@@ -83,14 +85,17 @@ For each field declared with `tokenizable_by`, the following instance methods ar
 | `regenerate_api_token!` | Generates a new token value and immediately persists it with `update!`. Overwrites the existing value unconditionally. |
 | `revoke_api_token!` | Sets the column to `nil` and immediately persists the change with `update!`. |
 | `api_token?` | Returns `true` if the column value is present (non-nil, non-blank), `false` otherwise. |
+| `api_token_expired?` | `true` once `api_token_expires_at` has been reached. Always `false` for a field without `expires_in:`, or when the expiry is `nil`. |
 
 ### Class methods
 
 | Method | Description |
 |---|---|
-| `tokenizable_by(field, type:, length:)` | Configuration macro. Registers the field, validates options, installs a `before_create` callback, and defines all helper methods for that field. |
+| `tokenizable_by(field, type:, length:, expires_in:)` | Configuration macro. Registers the field, validates options, installs a `before_create` callback, and defines all helper methods for that field. |
 | `generate_tokenizable_value(field)` | Generates and returns a new random value for the given field using its registered type and length. Raises `ArgumentError` if `field` is not a registered tokenizable field. |
-| `authenticate_by_api_token(value)` | _(one per field)_ Looks up a record by the token column and performs a constant-time comparison using `ActiveSupport::SecurityUtils.secure_compare`. Returns the matching record or `nil`. Returns `nil` immediately for blank input. |
+| `authenticate_by_api_token(value)` | _(one per field)_ Looks up a record by the token column and performs a constant-time comparison using `ActiveSupport::SecurityUtils.secure_compare`. Returns the matching record or `nil`. Returns `nil` immediately for blank input, and for an expired token on an `expires_in:` field. |
+| `consume_api_token(value)` | _(one per field)_ Single use: `authenticate_by_api_token`, then revoke the token (and its expiry) with a conditional `UPDATE … WHERE id = ? AND api_token = ?`. Returns the reloaded record when exactly one row was revoked, otherwise `nil` — so two concurrent consumers cannot both win, and an expired or wrong token is refused and left untouched. |
+| `tokenizable_expiry_column(field)` | `:<field>_expires_at`. |
 
 ## Examples
 
@@ -158,6 +163,8 @@ device2.pin  # => "847203" (random 6-digit string)
 
 ## Notes & gotchas
 
+- **Expiry is checked in Ruby, revocation in SQL.** `authenticate_by_<field>` compares `<field>_expires_at` against `Time.current` on the fetched row (so time travel in tests works); `consume_<field>` then revokes with a single conditional `UPDATE`, which is what makes it safe under concurrency — the second consumer's `UPDATE` matches 0 rows and returns `nil`. Wrap nothing in a transaction yourself.
+- **A `nil` expiry never expires.** Only rows whose `<field>_expires_at` is set are ever considered expired; a token you created before adding `expires_in:` keeps working until regenerated (which stamps it) or revoked.
 - **Column must exist at class load time.** `tokenizable_by` calls `ensure_columns!` immediately when the macro is evaluated. If the migration has not been run, Rails will raise `ArgumentError: '...' does not exist in the database (table: ...)` as soon as the class is loaded, not at runtime.
 - **Caller-supplied values are preserved.** The `before_create` callback calls `assign_tokenizable_value` only when the column is blank. `User.create!(api_token: "preset")` will store `"preset"` unchanged.
 - **Tokens are generated on `create` only.** There is no `before_save` or `before_update` callback. Tokens do not rotate automatically on update; call `regenerate_<field>!` explicitly when rotation is needed.

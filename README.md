@@ -797,19 +797,22 @@ class User < ApplicationRecord
   include ConcernsOnRails::Tokenizable
 
   tokenizable_by :api_token                                  # 32-char URL-safe
-  tokenizable_by :reset_password_token, length: 24
+  tokenizable_by :reset_password_token, length: 24, expires_in: 2.hours   # needs reset_password_token_expires_at
   tokenizable_by :invite_code, type: :alphanumeric, length: 8
 end
 
-user = User.create!                       # all three tokens auto-generated
+user = User.create!                       # all three tokens auto-generated (+ the reset token's expiry stamped)
 user.api_token                            # => "k3Jf...g2" (32 URL-safe chars)
 user.api_token?                           # => true
+user.reset_password_token_expired?        # => false, until reset_password_token_expires_at passes
 
-user.regenerate_api_token!                # rotates and persists
-user.revoke_api_token!                    # nils the column
+user.regenerate_api_token!                # rotates and persists (an expiring field gets a fresh expiry too)
+user.revoke_api_token!                    # nils the column (and the expiry)
 
 User.find_by_api_token(token)             # Rails default
-User.authenticate_by_api_token(token)     # timing-safe; returns user or nil
+User.authenticate_by_api_token(token)     # timing-safe; returns user or nil — nil for an EXPIRED token
+User.consume_reset_password_token(token)  # single use: authenticate AND revoke atomically; nil the second time
+User.reset_password_token_expired         # scope: rows whose expiry has passed (cleanup jobs)
 ```
 
 **Options**
@@ -818,12 +821,15 @@ User.authenticate_by_api_token(token)     # timing-safe; returns user or nil
 | -------- | ----------- | ------------------------------------------------------------- |
 | `type:`  | `:urlsafe`  | One of `:urlsafe`, `:hex`, `:alphanumeric`, `:numeric`        |
 | `length:`| `32`        | Character length of the generated token                       |
+| `expires_in:` | `nil`  | A `Duration`/seconds. Stamps `<field>_expires_at` (a `datetime` column you add) on every generation; `authenticate_by_`/`consume_` refuse a stale token; adds `<field>_expired?` and the `<field>_expired` scope |
 
 **Notes**
 - URL-safe by default (`A–Z`, `a–z`, `0–9`, `-`, `_`) — drop straight into URLs and headers.
 - Caller-supplied values are respected: `User.create!(api_token: "preset")` won't be overwritten.
 - Generation does a best-effort uniqueness check before insert and retries up to 10 times. Pair with a `unique` DB index for real safety, especially for short alphanumeric/numeric codes.
-- `.authenticate_by_<field>` uses `ActiveSupport::SecurityUtils.secure_compare` to avoid leaking partial matches via response timing.
+- `.authenticate_by_<field>` uses `ActiveSupport::SecurityUtils.secure_compare` to avoid leaking partial matches via response timing, and returns `nil` once an `expires_in:` token has expired.
+- `.consume_<field>(value)` (every field) is the single-use verb — password resets, invite codes, magic links: it authenticates, then revokes with a **conditional `UPDATE`** keyed on the token still being present, so two concurrent consumers cannot both succeed; the loser gets `nil`. An expired token is refused and left in place.
+- A caller-supplied token on an `expires_in:` field gets the configured lifetime unless the caller also sets `<field>_expires_at`; a row whose expiry is `nil` never expires.
 - Distinct from `Hashable`: Hashable handles a single random field; Tokenizable focuses on security tokens (multi-field, URL-safe default, timing-safe lookup, revocation).
 
 ---
