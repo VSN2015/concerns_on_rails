@@ -1,5 +1,61 @@
 <!-- CHANGELOG.md -->
 
+## 1.28.2 (2026-09-11)
+
+Six merged enhancement PRs from the September loop (#42, #84, #59 via #90, #80,
+#81, #82), all additive and column-free: ErrorHandleable rescues 14 exceptions
+instead of 3 and instruments every handled error, CursorPaginatable cursors can
+be HMAC-signed, Sortable applies a drag-and-drop order in one UPDATE, Sluggable
+gains slug candidates / word-boundary truncation / forced regeneration, and
+Sequenceable can defer numbering until an invoice is finalized. No new
+migrations or runtime dependencies. 1360 examples, 0 failures.
+
+### Added
+- **Controllers::ErrorHandleable**: the exception map grows from 3 to 14 —
+  `ActiveModel::ValidationError`, `RecordNotSaved`, `RecordNotDestroyed` (422),
+  `StaleObjectError`, `RecordNotUnique`, `InvalidForeignKey` (409),
+  `UnpermittedParameters`, `BadRequest`, `ParseError` (400),
+  `InvalidAuthenticityToken` (422) and `UnknownFormat` (406). Statuses follow
+  Rails' `rescue_responses`; database/parser-level errors render generic
+  messages so SQL, schema names and request input never leak. New
+  `handle_errors only:/except:` macro trims the map without touching a host
+  `rescue_from`; `error_handleable_keys` lists the active keys. (#42)
+- **Controllers::ErrorHandleable**: every handled error instruments
+  `handled_error.concerns_on_rails` (controller, action, code, status, message,
+  exception) via the public `on_handled_error(key, error, status:, message:)`
+  override point — report some codes to the error tracker, let the rest stay
+  quiet. (#84)
+- **Controllers::CursorPaginatable**: `cursor_paginate_by … signed: true` (or a
+  String key / callable) appends a URL-safe HMAC-SHA256 to every cursor and
+  rejects tampered, mis-signed or unsigned tokens with the usual 400, so
+  clients can no longer hand-craft page positions. Unsigned stays the default.
+  (#59, merged via #90)
+- **Sortable (model)**: `Model.reposition!(ids, missing: :append | :raise)`
+  applies a drag-and-drop id order as positions in one `UPDATE … CASE` inside
+  the current relation (unlisted rows appended or raised, foreign/duplicate ids
+  rejected, String ids cast, `:desc` lists inverted). Returns the count. (#80)
+- **Sluggable**: `candidates:` (friendly_id slug candidates tried in order
+  before the uuid fallback; regeneration still keyed to the primary field),
+  `max_length:` (word-boundary truncation, suffix appended after) and
+  `regenerate_slug!` (rebuild from the current source even over a
+  hand-assigned slug). (#81)
+- **Sequenceable**: `assign: :manual` defers numbering until `assign_<field>!`
+  (idempotent — `true` when assigned, `false` when already numbered; `save!`s
+  persisted records, leaves new ones for the caller's save), plus
+  `<field>_assigned?` and a `pending_<field>` scope. Numbering then follows
+  finalization order; `reset:` periods still come from `created_at`. (#82)
+
+### Notes
+Apps that include ErrorHandleable now get 11 more exceptions rescued into JSON
+4xx responses. One that relied on, say, `StaleObjectError` propagating to its
+error tracker should add `handle_errors except: :stale_object` (or `only:` the
+original trio) — or override `on_handled_error` to report the codes it cares
+about. Exceptions are registered by name, so a class a given Rails version
+lacks is simply never matched. Turning on `signed:` invalidates in-flight
+unsigned cursors (there is no mixed mode by design), so clients restart from
+the first page. `reposition!` writes positions with `update_all` and therefore
+bypasses acts_as_list's per-row callbacks by design.
+
 ## 1.28.1 (2026-09-07)
 
 One additive Paginatable option (#89): `pagination_meta` can now publish the
