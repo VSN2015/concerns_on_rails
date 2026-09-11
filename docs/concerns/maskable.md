@@ -1,4 +1,4 @@
-Non-destructive display masking for sensitive model attributes. `Maskable` adds a `masked_<field>` reader for each declared field and **never writes to the database column** — the raw value is preserved exactly as stored, making masking a pure presentation concern. It ships five built-in masking presets (email, phone, credit card, last-four, and full mask) and accepts a custom `Proc` for arbitrary strategies. There are no runtime gem dependencies beyond `ActiveSupport`.
+Non-destructive display masking for sensitive model attributes. `Maskable` adds a `masked_<field>` reader for each declared field and **never writes to the database column** — the raw value is preserved exactly as stored, making masking a pure presentation concern. It ships five built-in masking presets (email, phone, credit card, last-four, and full mask) and accepts a custom `Proc` for arbitrary strategies. `masked_attributes` and `as_json(masked: true)` carry the masks into serialized output. There are no runtime gem dependencies beyond `ActiveSupport`.
 
 ## When to use it
 
@@ -7,6 +7,7 @@ Non-destructive display masking for sensitive model attributes. `Maskable` adds 
 - Logging or serializing phone numbers with PII regulations (GDPR, CCPA) that prohibit full exposure.
 - Showing SSNs or national ID numbers in read-only views where a partial hint is sufficient for identity confirmation.
 - Building API responses that include a "safe" representation of a secret token or API key without exposing the full value.
+- Rendering the same record to two audiences — full values for the owner, `record.as_json(masked: true)` for support staff or a public profile — without maintaining a serializer per audience.
 
 ## Installation
 
@@ -63,6 +64,8 @@ For each field declared with `maskable`, the concern defines one reader on the m
 | Signature | Description |
 |-----------|-------------|
 | `masked_<field>` | Returns the masked representation of the attribute. Returns `nil` when the column value is `nil`. Returns non-`String` values unchanged (for preset strategies). |
+| `masked_attributes` | Every declared field masked, as a `Hash` with `String` keys (like `attributes`): `{ "email" => "j***@x.com", "card" => "**** **** **** 4242" }`. Undeclared columns are not included. |
+| `serializable_hash(masked: true \| [:field, ...])` | The standard Rails serialization entry point (so `as_json` and `to_json` accept the same option). `masked: true` swaps every declared field for its masked form; an Array/Symbol limits it to those fields. Fields removed by `only:`/`except:` stay removed; a field in `masked:` that was never declared `maskable` raises `ArgumentError`. Without `masked:` the output is unchanged. |
 
 ### Class methods
 
@@ -119,6 +122,35 @@ key.masked_token  # => "sk_l…[REDACTED]"
 key.token         # => "sk_live_abc123xyz"
 ```
 
+### Masked serialization
+
+```ruby
+class User < ApplicationRecord
+  include ConcernsOnRails::Maskable
+
+  maskable :email, with: :email
+  maskable :card,  with: :credit_card
+end
+
+user = User.create!(email: "john.doe@example.com", card: "4242424242424242", name: "John")
+
+user.masked_attributes
+# => { "email" => "j*******@example.com", "card" => "**** **** **** 4242" }
+
+user.as_json(masked: true)
+# => { "id" => 1, "email" => "j*******@example.com", "card" => "**** **** **** 4242", "name" => "John", ... }
+
+user.as_json(masked: [:email], only: %i[id email card])
+# => { "id" => 1, "email" => "j*******@example.com", "card" => "4242424242424242" }
+
+user.to_json(masked: true, methods: :masked_email)   # composes with the usual options
+user.as_json                                          # unchanged — masking is opt-in per call
+
+# In a controller:
+render json: current_user.as_json                     # the owner sees everything
+render json: other_user.as_json(masked: true)         # everyone else sees the masked view
+```
+
 ## Notes & gotchas
 
 - **Read-only by design.** `masked_<field>` is a reader-only method. There is no corresponding writer, and the concern never calls `write_attribute` or `update_column`. The raw value in the database is never modified.
@@ -132,5 +164,6 @@ key.token         # => "sk_live_abc123xyz"
 - **Phone preset edge case.** If the column value contains no digit characters, the `:phone` preset returns the value unchanged.
 - **Credit card with four or fewer digits.** When a card value has four or fewer digit characters, `:credit_card` falls back to `:all` and masks every character rather than using the grouped format.
 - **`maskable_rules` is a `class_attribute`.** Because `maskable_rules` is defined with `class_attribute`, subclasses inherit a reference to the parent's hash. Calling `maskable` in a subclass merges into a new hash (`self.maskable_rules = maskable_rules.merge(...)`) rather than mutating the parent, so subclass declarations do not bleed up.
+- **`masked:` rides `serializable_hash`.** The concern overrides `serializable_hash(options)` and calls `super` first, so `only:`/`except:`/`methods:`/`include:` behave exactly as in Rails; only the values of declared fields still present in the hash are replaced. Nested `include:` records are serialized with their own options — pass `masked:` inside the include hash (`include: { profile: { masked: true } }`) if the association is Maskable too.
 - **No ActiveRecord callbacks or hooks.** The concern does not register `before_save`, `after_initialize`, or any other callback. There is no performance impact at persistence time.
 - **No runtime gem dependencies.** `Maskable` requires only `active_support/concern`, the bundled `ConcernsOnRails::Support::Masker` helper, and the shared `ConcernsOnRails::Support::ColumnGuard` (used for the column-existence check). It does not depend on `friendly_id`, `acts_as_list`, or any other third-party gem.
