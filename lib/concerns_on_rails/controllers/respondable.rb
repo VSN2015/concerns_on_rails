@@ -18,12 +18,19 @@ module ConcernsOnRails
     #     def create
     #       article = Article.new(article_params)
     #       if article.save
-    #         render_success(data: article, status: :created)
+    #         render_created(data: article, location: article_url(article))   # 201 + Location
     #       else
-    #         render_error(message: "Invalid", errors: article.errors.full_messages)
+    #         render_invalid(article)             # 422 record_invalid + errors.full_messages
     #       end
     #     end
     #   end
+    #
+    # `render_success` takes `location:` (the Location header — a String, or
+    # anything `url_for` resolves) and `headers:` (extra response headers);
+    # `render_created` is the 201 shorthand; `render_invalid(record)` renders a
+    # record's (or an ActiveModel::Errors') full_messages the way
+    # ErrorHandleable does for a rescued RecordInvalid, so `save` and `save!`
+    # actions look identical to clients.
     #
     # Error format: the classic `{ success: false, error: { message, code, details } }`
     # envelope by default, or RFC 9457 Problem Details —
@@ -84,10 +91,26 @@ module ConcernsOnRails
       # Success envelope:
       #   { success: true, data: <data>, meta: <meta> }
       # `meta:` is omitted from the JSON when empty so simple responses stay clean.
-      def render_success(data: nil, status: :ok, meta: {})
+      # `location:` sets the Location header (String as-is, anything else through
+      # `url_for` when the controller has it); `headers:` adds arbitrary ones.
+      def render_success(data: nil, status: :ok, meta: {}, location: nil, headers: {})
+        respondable_set_headers(location, headers)
         body = { success: true, data: data }
         body[:meta] = meta if meta.is_a?(Hash) && meta.any?
         render json: body, status: status
+      end
+
+      # 201 Created with an optional Location — the create-action one-liner.
+      def render_created(data: nil, location: nil, meta: {}, headers: {})
+        render_success(data: data, status: :created, meta: meta, location: location, headers: headers)
+      end
+
+      # A validation failure as an error envelope (or problem document):
+      # `details` is the object's errors.full_messages, omitted when empty —
+      # the exact shape ErrorHandleable renders for a rescued RecordInvalid.
+      def render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")
+        messages = respondable_error_messages(record_or_errors)
+        render_error(message: message, status: status, code: code, errors: messages.empty? ? nil : messages)
       end
 
       # Error envelope:
@@ -107,6 +130,40 @@ module ConcernsOnRails
       end
 
       private
+
+      def respondable_set_headers(location, headers)
+        return unless respond_to?(:response) && response.respond_to?(:set_header)
+
+        response.set_header("Location", respondable_header_value(respondable_location(location))) if location
+        headers.each { |name, value| response.set_header(name.to_s, respondable_header_value(value)) }
+      end
+
+      # These are the gem's first response headers built from CALLER-supplied
+      # values, so coerce to String (an Integer fails Rack::Lint and breaks any
+      # middleware calling String methods on it) and strip CR/LF, which would
+      # otherwise let `location: params[:next]` split the response.
+      def respondable_header_value(value)
+        value.to_s.gsub(/[\r\n]/, "")
+      end
+
+      # A String is a URL already; a record / route Hash goes through the
+      # controller's url_for when there is one (the fake harness has none).
+      def respondable_location(location)
+        return location if location.is_a?(String)
+
+        respond_to?(:url_for, true) ? url_for(location) : location.to_s
+      end
+
+      def respondable_error_messages(record_or_errors)
+        errors = record_or_errors.respond_to?(:full_messages) ? record_or_errors : nil
+        errors ||= record_or_errors.errors if record_or_errors.respond_to?(:errors)
+        unless errors.respond_to?(:full_messages)
+          raise ArgumentError, "#{LABEL}: render_invalid expects a record (responding to #errors) or an ActiveModel::Errors, " \
+                               "got #{record_or_errors.class}"
+        end
+
+        errors.full_messages
+      end
 
       # RFC 9457: type (URI or about:blank), title (the status reason phrase),
       # status (integer), detail (the message), instance (request path when
