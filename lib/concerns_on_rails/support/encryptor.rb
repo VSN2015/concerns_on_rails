@@ -85,6 +85,29 @@ module ConcernsOnRails
               "could not decrypt value (wrong key or tampered ciphertext)"
       end
 
+      # True when `value` really is an envelope produced by #encrypt: strict
+      # Base64 decoding to at least header + IV + tag, carrying a version byte
+      # we recognize. Deliberately does NOT check the algorithm byte, so a
+      # future alg (0x11, deterministic) still reads as an envelope.
+      #
+      # Backs Encryptable#<field>_encrypted?, which used a bare `.present?` —
+      # true for plaintext too. Cheap: no key material, no crypto, no KDF.
+      def envelope?(value)
+        return false unless value.is_a?(String)
+
+        # "" for non-Base64 input, which then fails the length check below.
+        raw =
+          begin
+            value.unpack1("m0").to_s
+          rescue ArgumentError
+            ""
+          end
+        return false if raw.bytesize < MIN_ENVELOPE_BYTES
+
+        version, = raw.byteslice(0, HEADER_LEN).unpack(HEADER_FORMAT)
+        version == VERSION_BYTE
+      end
+
       # Deterministic keyed fingerprint (lowercase hex) for equality lookups — a
       # "blind index". The HMAC key is domain-separated from the AES key via
       # BLIND_INDEX_INFO, so the two are cryptographically independent. The same
