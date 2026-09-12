@@ -124,4 +124,50 @@ describe ConcernsOnRails::Controllers::Filterable do
       end.to raise_error(ArgumentError, /pass either :scope or :with, not both/)
     end
   end
+
+  describe "boolean false is a value, not an absent filter" do
+    before do
+      ActiveRecord::Schema.define { add_column :articles, :featured, :boolean }
+      Article.reset_column_information
+      Article.where(title: %w[A B]).update_all(featured: true)
+      Article.where(title: %w[C D]).update_all(featured: false)
+    end
+
+    let(:controller_class) do
+      Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :featured
+      end
+    end
+
+    # `false.blank?` is true, so the rule was skipped entirely and the caller
+    # got the UNFILTERED relation — every featured article included. Only JSON
+    # bodies hit this; `?featured=false` carries the String "false".
+    it "filters on a JSON-body boolean false" do
+      titles = controller_class.new(params: { featured: false }).filtered(Article.all).pluck(:title)
+
+      expect(titles).to contain_exactly("C", "D")
+    end
+
+    it "still filters on a boolean true" do
+      titles = controller_class.new(params: { featured: true }).filtered(Article.all).pluck(:title)
+
+      expect(titles).to contain_exactly("A", "B")
+    end
+
+    it "still skips nil, empty strings and empty collections" do
+      [nil, "", "   ", [], {}].each do |unset|
+        titles = controller_class.new(params: { featured: unset }).filtered(Article.all).pluck(:title)
+
+        expect(titles).to contain_exactly("A", "B", "C", "D"), "expected #{unset.inspect} to be skipped"
+      end
+    end
+
+    it "leaves a filter absent from params alone" do
+      titles = controller_class.new(params: {}).filtered(Article.all).pluck(:title)
+
+      expect(titles).to contain_exactly("A", "B", "C", "D")
+    end
+  end
 end

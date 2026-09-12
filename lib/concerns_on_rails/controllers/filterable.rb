@@ -42,12 +42,12 @@ module ConcernsOnRails
         end
       end
 
-      # Apply all declared filters to a relation based on params. Blank values
-      # are skipped so unset filters don't narrow the relation.
+      # Apply all declared filters to a relation based on params. Unset values
+      # are skipped so absent filters don't narrow the relation.
       def filtered(relation)
         self.class.filterable_rules.each do |field, options|
           value = params[field]
-          next if value.blank?
+          next if filterable_unset?(value)
 
           relation = apply_filter(relation, field, value, options)
         end
@@ -55,6 +55,19 @@ module ConcernsOnRails
       end
 
       private
+
+      # NOT `value.blank?`: `false.blank?` is true, so a genuine boolean false
+      # read as "filter not supplied" and the relation came back UNFILTERED —
+      # `filter_by :active` could never select the inactive rows. Query strings
+      # were unaffected (they carry the String "false", which is not blank), so
+      # this only bit JSON request bodies, where the value really is `false`.
+      # Everything actually empty — nil, "", "   ", [], {} — is still skipped.
+      def filterable_unset?(value)
+        return false if value == false
+        return true if value.nil?
+
+        value.respond_to?(:blank?) ? value.blank? : false
+      end
 
       def apply_filter(relation, field, value, options)
         if options[:with]
