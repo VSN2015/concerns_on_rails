@@ -141,8 +141,15 @@ module ConcernsOnRails
           # Module#=== checks the real ancestry, so `when Time` alone would
           # miss it — and Time.current / 1.month.from_now are exactly the
           # values Rails hosts pass.
-          when ActiveSupport::TimeWithZone, Time then value.utc
-          when DateTime then value.to_time.utc
+          # getutc, NOT utc: Time#utc is an alias of #gmtime, which converts the
+          # receiver IN PLACE and returns self. A host passing a frozen
+          # constant (SUNSET = Time.new(...).freeze) got a FrozenError while
+          # the controller class body was still loading — the app would not
+          # boot — and an unfrozen Time was silently rewritten to UTC behind
+          # the caller's back. TimeWithZone#utc is a harmless reader, but
+          # getutc is correct for both, so the branch stays single.
+          when ActiveSupport::TimeWithZone, Time then value.getutc
+          when DateTime then value.to_time.getutc
           when Date then Time.utc(value.year, value.month, value.day)
           when String then parse_deprecation_string(value)
           end
