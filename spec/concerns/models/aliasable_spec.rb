@@ -785,4 +785,58 @@ describe ConcernsOnRails::Aliasable do
       end.to raise_error(ArgumentError, /'penman_id' is already a column/)
     end
   end
+
+  describe "counter_cache: on an aliased belongs_to" do
+    before do
+      ActiveRecord::Schema.define do
+        add_column :authors, :books_count, :integer, default: 0
+      end
+      # Author was defined (and its columns cached) by the outer before(:each).
+      Author.reset_column_information
+
+      class TrackedBook < TestModel
+        include ConcernsOnRails::Aliasable
+
+        self.table_name = "books"
+
+        belongs_to :author, counter_cache: :books_count
+        alias_association :writer, :author
+      end
+    end
+
+    # The renamed reflection copy used to keep :counter_cache, and because
+    # #association maps both names to the SAME BelongsToAssociation,
+    # each_counter_cached_associations incremented the parent twice per row.
+    it "increments the parent counter exactly once per create" do
+      author = Author.create!(name: "A")
+
+      TrackedBook.create!(title: "one", author: author)
+
+      expect(author.reload.books_count).to eq(1)
+    end
+
+    it "decrements exactly once per destroy" do
+      author = Author.create!(name: "A")
+      book = TrackedBook.create!(title: "one", author: author)
+
+      book.destroy
+
+      expect(author.reload.books_count).to eq(0)
+    end
+
+    it "keeps the counter correct across several rows" do
+      author = Author.create!(name: "A")
+      3.times { |i| TrackedBook.create!(title: "b#{i}", author: author) }
+
+      expect(author.reload.books_count).to eq(3)
+    end
+
+    it "still reads and writes through the alias" do
+      author = Author.create!(name: "A")
+      book = TrackedBook.create!(title: "one", writer: author)
+
+      expect(book.writer).to eq(author)
+      expect(author.reload.books_count).to eq(1)
+    end
+  end
 end
