@@ -367,5 +367,40 @@ describe ConcernsOnRails::Stateable do
       expect(ArchivableOrder.transition_all(:archive)).to eq(2)
       expect(ArchivableOrder.transition_all(:archive)).to eq(0)
     end
+
+    # `where.not(status: "archived")` compiles to NOT (status = 'archived'),
+    # which is NULL — never TRUE — for a NULL state, so those rows were
+    # silently skipped and left out of the count, even though may_archive? is
+    # true for them and record.archive! on the same row works.
+    context "with NULL-state rows and a transition declared without :from" do
+      before do
+        stub_const("NullableOrder", Class.new(TestModel) do
+          self.table_name = "batch_orders"
+          include ConcernsOnRails::Stateable
+
+          stateable_by :status, states: %i[draft archived],
+                                transitions: { archive: { to: :archived } }
+        end)
+        NullableOrder.create!(status: "draft")
+        NullableOrder.insert_all([{ status: nil }]) # legacy / imported row
+      end
+
+      it "includes them in the batch" do
+        expect(NullableOrder.transition_all(:archive)).to eq(2)
+        expect(NullableOrder.where(status: "archived").count).to eq(2)
+      end
+
+      it "agrees with the per-record path, which already accepted them" do
+        null_row = NullableOrder.find_by(status: nil)
+
+        expect(null_row.may_archive?).to be(true)
+      end
+
+      it "is still idempotent afterwards" do
+        NullableOrder.transition_all(:archive)
+
+        expect(NullableOrder.transition_all(:archive)).to eq(0)
+      end
+    end
   end
 end
