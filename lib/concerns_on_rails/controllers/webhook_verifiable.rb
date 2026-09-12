@@ -178,19 +178,51 @@ module ConcernsOnRails
       # Single funnel for all failure outcomes (override point). Uses
       # Respondable's render_error when available, otherwise the same inline
       # envelope as Throttleable / Idempotentable.
+      #
+      # Fails CLOSED, matching Authorizable#authorization_denied: when there is
+      # nothing to render the rejection into, raise. Returning nil here (the
+      # pre-1.29 behavior) left the before_action chain unhalted, so the action
+      # ran on an unverified — possibly forged — payload.
       def webhook_verification_failed(message:, status:, code:)
-        return unless respond_to?(:response) && response
+        unless webhook_can_render?
+          raise "ConcernsOnRails::Controllers::WebhookVerifiable: rejection for " \
+                "'#{webhook_action_name || '(unknown action)'}' could not be rendered " \
+                "(no response object) — refusing to fail open"
+        end
 
         ConcernsOnRails::Support::ErrorEnvelope.render(self, message: message, status: status, code: code)
       end
 
       private
 
-      def webhook_rule_for_action
-        action = respond_to?(:action_name) ? action_name.to_s : nil
-        return nil unless action
+      # Mirrors the render path in Support::ErrorEnvelope: a render_error
+      # override is enough on its own, so a controller that supplies one but no
+      # response object still rejects properly instead of raising.
+      def webhook_can_render?
+        respond_to?(:render_error, true) || (respond_to?(:response) && response)
+      end
 
-        self.class.webhook_rules.find { |rule| rule[:actions].empty? || rule[:actions].include?(action) }
+      # nil when the action cannot be determined. `action_name` can also be ""
+      # (truthy), which a bare `unless action` guard would let through.
+      def webhook_action_name
+        return nil unless respond_to?(:action_name)
+
+        name = action_name.to_s
+        name.empty? ? nil : name
+      end
+
+      def webhook_rule_for_action
+        rules = self.class.webhook_rules
+        return nil if rules.empty?
+
+        action = webhook_action_name
+        # Fail closed: rules ARE declared but we cannot tell which action this
+        # is, so "no rule applies" is not a conclusion we may draw. Previously
+        # an unresolvable action_name skipped verification entirely and every
+        # webhook was accepted without a signature check.
+        return rules.find { |rule| rule[:actions].empty? } || rules.first if action.nil?
+
+        rules.find { |rule| rule[:actions].empty? || rule[:actions].include?(action) }
       end
 
       def webhook_render_outcome(rule, outcome)
