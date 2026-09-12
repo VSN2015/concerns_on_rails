@@ -1,0 +1,18 @@
+# MySQL on the default Rails line. SQLite is the most permissive of the three
+# engines, so these two jobs are what actually exercise adapter-specific SQL:
+# DISTINCT + ORDER BY, NULLS ordering, LIKE case-folding, JSON operators.
+source "https://rubygems.org"
+
+# Pinned to the same Rails line as the default Gemfile.lock ON PURPOSE: these
+# two jobs exist to isolate the ADAPTER. Left unpinned they floated to the
+# newest Rails, and a failure would not say whether the database or the
+# framework caused it. The Rails-version axis is covered by rails_*.gemfile.
+gem "actionpack", "~> 7.1.6"
+gem "activerecord", "~> 7.1.6"
+gem "activesupport", "~> 7.1.6"
+gem "mysql2", "~> 0.5"
+gem "railties", "~> 7.1.6"
+
+eval_gemfile File.expand_path("shared.rb", __dir__)
+
+gemspec path: ".."

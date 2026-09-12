@@ -1,0 +1,15 @@
+# Rails 7.1 on SQLite. Generated half of the CI matrix — see
+# .github/workflows/ci.yml and gemfiles/shared.rb.
+source "https://rubygems.org"
+
+gem "actionpack", "~> 7.1.6"
+gem "activerecord", "~> 7.1.6"
+gem "activesupport", "~> 7.1.6"
+# Dev/test only: the gem does not depend on railties, but the suite exercises
+# ConcernsOnRails::Railtie directly.
+gem "railties", "~> 7.1.6"
+gem "sqlite3", "~> 2.9"
+
+eval_gemfile File.expand_path("shared.rb", __dir__)
+
+gemspec path: ".."
