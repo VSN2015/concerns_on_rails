@@ -36,6 +36,15 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Controllers::Paginatable".freeze
       DEFAULT_PER_PAGE = 25
       DEFAULT_MAX_PER_PAGE = 200
+      # Upper bound on the requested page. `page` is untrusted input and its
+      # only job is to become `(page - 1) * per_page`, so an unbounded value
+      # produced an offset no backend can take: the relation branch raised
+      # StatementInvalid and Array#[] raised RangeError ("bignum too big to
+      # convert into `long'") — a 500 from `?page=99999999999999999999`.
+      # Clamping keeps the request in range; the page is far past any real
+      # dataset, so it simply comes back empty. Deep pagination at this depth
+      # wants Controllers::CursorPaginatable instead.
+      MAX_PAGE = 1_000_000
 
       included do
         class_attribute :paginatable_per_page, default: DEFAULT_PER_PAGE
@@ -59,8 +68,8 @@ module ConcernsOnRails
         #   paginate_by per_page: 50, max_per_page: 500, link_header: false
         def paginate_by(per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE, link_header: true,
                         page_param: nil, per_page_param: nil, style: :flat, window: nil)
-          self.paginatable_per_page = per_page.to_i
-          self.paginatable_max_per_page = max_per_page.to_i
+          self.paginatable_per_page = paginatable_page_size!(:per_page, per_page, minimum: 1)
+          self.paginatable_max_per_page = paginatable_page_size!(:max_per_page, max_per_page, minimum: 0)
           self.paginatable_link_header = link_header ? true : false
           self.paginatable_window = paginatable_window!(window)
           defaults = paginatable_style_params!(style)
@@ -77,6 +86,19 @@ module ConcernsOnRails
           when :jsonapi then [%w[page number], %w[page size]]
           else raise ArgumentError, "#{LABEL}: style: must be :flat or :jsonapi (got #{style.inspect})"
           end
+        end
+
+        # per_page must be positive; max_per_page may be 0, which the docs
+        # define as "no cap". A bare `.to_i` let a negative through, and
+        # `LIMIT -1` means NO LIMIT on SQLite and MySQL — so `per_page: -1`
+        # silently serialized the entire table on every request, while
+        # `per_page: 0` made every page permanently empty.
+        def paginatable_page_size!(option, value, minimum:)
+          size = value.to_i
+          return size if size >= minimum
+
+          wording = minimum.positive? ? "a positive integer" : "a non-negative integer"
+          raise ArgumentError, "#{LABEL}: #{option}: must be #{wording} (got #{value.inspect})"
         end
 
         # nil / false disable the window (no `pages:` key). `0` is meaningful:
@@ -206,7 +228,8 @@ module ConcernsOnRails
       # Both readers route through ScalarParam: `?page[]=1` / `?page[x]=1`
       # arrive as Array/Parameters, and calling .to_i on those was a 500.
       def pagination_page
-        [ConcernsOnRails::Support::ScalarParam.to_i(pagination_param(self.class.paginatable_page_param), default: 0), 1].max
+        requested = ConcernsOnRails::Support::ScalarParam.to_i(pagination_param(self.class.paginatable_page_param), default: 0)
+        requested.clamp(1, MAX_PAGE)
       end
 
       def pagination_per_page
