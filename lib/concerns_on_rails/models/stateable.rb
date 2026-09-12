@@ -225,7 +225,12 @@ module ConcernsOnRails
         raise InvalidTransition, "#{self.class.name}: cannot #{event} from '#{self[field]}'" unless from.empty? || from.include?(current)
 
         result = false
-        transaction do
+        # requires_new: a bare `transaction` JOINS an enclosing one instead of
+        # opening a savepoint, so under a caller's transaction Rails swallowed
+        # an ActiveRecord::Rollback from after_transition and rolled nothing
+        # back — the state change committed and this returned true, exactly
+        # opposite to the documented contract above.
+        transaction(requires_new: true) do
           before_transition(event, current, to)
           result = update!(field => to)
           after_transition(event, current, to)

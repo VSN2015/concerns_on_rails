@@ -368,4 +368,55 @@ describe ConcernsOnRails::Stateable do
       expect(ArchivableOrder.transition_all(:archive)).to eq(0)
     end
   end
+
+  describe "ActiveRecord::Rollback from after_transition" do
+    before do
+      class RollbackTicket < TestModel
+        include ConcernsOnRails::Stateable
+
+        self.table_name = "tickets"
+
+        stateable_by :status, states: %i[draft archived], default: :draft,
+                              transitions: { archive: { to: :archived } }
+
+        def after_transition(*)
+          raise ActiveRecord::Rollback
+        end
+      end
+    end
+
+    after { Object.send(:remove_const, :RollbackTicket) if defined?(RollbackTicket) }
+
+    it "rolls the state change back when called standalone" do
+      t = RollbackTicket.create!(title: "t")
+
+      t.archive!
+
+      expect(t.reload.status).to eq("draft")
+    end
+
+    # A bare `transaction` JOINS the caller's, and Rails then swallows
+    # ActiveRecord::Rollback without rolling anything back — the state change
+    # committed, exactly opposite to the documented contract.
+    it "rolls the state change back inside an enclosing transaction" do
+      t = RollbackTicket.create!(title: "t")
+
+      ActiveRecord::Base.transaction { t.archive! }
+
+      expect(t.reload.status).to eq("draft")
+    end
+
+    it "leaves the caller's own writes in the enclosing transaction intact" do
+      t = RollbackTicket.create!(title: "t")
+      other = RollbackTicket.create!(title: "other")
+
+      ActiveRecord::Base.transaction do
+        other.update!(title: "renamed")
+        t.archive!
+      end
+
+      expect(other.reload.title).to eq("renamed")
+      expect(t.reload.status).to eq("draft")
+    end
+  end
 end
