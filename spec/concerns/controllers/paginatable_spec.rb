@@ -530,4 +530,80 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(build.call(0).paginatable_window).to eq(0)
     end
   end
+
+  describe "an out-of-range page (untrusted input)" do
+    # `?page=99999999999999999999` produced offset 2499999999999999999950,
+    # which raised StatementInvalid on a relation and RangeError ("bignum too
+    # big to convert into `long'") on an Array — an unauthenticated 500 on
+    # every index action. per_page was capped; page was not.
+    let(:huge) { "99999999999999999999" }
+
+    it "does not blow up on a relation" do
+      controller = controller_class.new(params: { page: huge })
+
+      expect { controller.paginated(Widget.all).to_a }.not_to raise_error
+    end
+
+    it "does not blow up on an in-memory collection" do
+      controller = controller_class.new(params: { page: huge })
+
+      expect { controller.paginated((1..50).to_a) }.not_to raise_error
+    end
+
+    it "clamps to the maximum page and reports it in the meta and headers" do
+      controller = controller_class.new(params: { page: huge })
+      controller.paginated(Widget.all).to_a
+
+      max = ConcernsOnRails::Controllers::Paginatable::MAX_PAGE
+      expect(controller.pagination_meta[:page]).to eq(max)
+      expect(controller.response.headers["X-Page"]).to eq(max.to_s)
+    end
+
+    it "returns an empty page past the end rather than wrapping to page 1" do
+      controller = controller_class.new(params: { page: huge })
+
+      expect(controller.paginated(Widget.all).to_a).to be_empty
+    end
+
+    it "leaves ordinary pages untouched" do
+      controller = controller_class.new(params: { page: 2 })
+
+      expect(controller.paginated(Widget.all).to_a.size).to eq(25)
+      expect(controller.pagination_meta[:page]).to eq(2)
+    end
+  end
+
+  describe "paginate_by validation" do
+    def declare(**opts)
+      expect do
+        Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Paginatable
+
+          paginate_by(**opts)
+        end
+      end
+    end
+
+    # `LIMIT -1` means NO LIMIT on SQLite/MySQL, so a negative per_page
+    # silently serialized the whole table on every request.
+    it "rejects a negative per_page" do
+      declare(per_page: -1).to raise_error(ArgumentError, /per_page: must be a positive integer/)
+    end
+
+    it "rejects a zero per_page" do
+      declare(per_page: 0).to raise_error(ArgumentError, /per_page: must be a positive integer/)
+    end
+
+    it "rejects a negative max_per_page" do
+      declare(max_per_page: -5).to raise_error(ArgumentError, /max_per_page: must be a non-negative integer/)
+    end
+
+    it "allows max_per_page: 0 (documented as 'no cap')" do
+      declare(max_per_page: 0).not_to raise_error
+    end
+
+    it "allows ordinary values" do
+      declare(per_page: 10, max_per_page: 100).not_to raise_error
+    end
+  end
 end
