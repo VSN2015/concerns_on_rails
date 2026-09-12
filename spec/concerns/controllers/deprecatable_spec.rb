@@ -524,4 +524,48 @@ describe ConcernsOnRails::Controllers::Deprecatable do
       )
     end
   end
+
+  describe "caller-supplied Time objects are not mutated" do
+    # Time#utc is an alias of #gmtime: it converts the receiver IN PLACE and
+    # returns self. The macro runs while the controller class body loads, so a
+    # frozen constant took the whole app down at boot.
+    let(:tokyo) { Time.new(2026, 12, 31, 0, 0, 0, "+09:00") }
+    let(:announced) { Time.new(2026, 6, 1, 0, 0, 0, "+09:00") }
+
+    it "accepts frozen Times without raising" do
+      sunset = tokyo.freeze
+      from = announced.freeze
+
+      expect do
+        deprecatable_class { deprecate_actions :index, deprecated_at: from, sunset_at: sunset }
+      end.not_to raise_error
+    end
+
+    it "leaves an unfrozen Time's zone alone" do
+      sunset = tokyo
+      from = announced
+      deprecatable_class { deprecate_actions :index, deprecated_at: from, sunset_at: sunset }
+
+      expect(sunset.utc_offset).to eq(9 * 3600)
+      expect(from.utc_offset).to eq(9 * 3600)
+    end
+
+    it "still emits the correct Sunset instant" do
+      sunset = tokyo
+      from = announced
+      c = instance(deprecatable_class { deprecate_actions :index, deprecated_at: from, sunset_at: sunset })
+      c.apply_api_deprecations
+
+      expect(c.response.headers["Sunset"]).to eq(tokyo.getutc.httpdate)
+    end
+
+    it "accepts a frozen DateTime too" do
+      sunset = DateTime.new(2026, 12, 31, 0, 0, 0, "+09:00").freeze
+      from = announced.freeze
+
+      expect do
+        deprecatable_class { deprecate_actions :index, deprecated_at: from, sunset_at: sunset }
+      end.not_to raise_error
+    end
+  end
 end
