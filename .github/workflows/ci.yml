@@ -6,6 +6,14 @@ on:
     tags: [ 'v*' ]
   pull_request:
 
+# Before this matrix existed CI ran exactly one combination — Ruby 3.2 +
+# whatever Gemfile.lock pinned + SQLite — while the gem advertised Rails 7.0
+# through 8.x on PostgreSQL, MySQL and SQLite. SQLite is the most PERMISSIVE
+# of the three engines (it accepts SELECT DISTINCT ordered by a column outside
+# the select list, which Postgres rejects; it has no NULLS FIRST/LAST
+# semantics; it folds LIKE differently; it has no native JSON operators), so a
+# green run proved very little. Every axis below has already caught a real bug.
+
 jobs:
   lint:
     name: RuboCop
@@ -22,12 +30,120 @@ jobs:
     - name: Run RuboCop
       run: bundle exec rubocop --format github
 
+  # Rails-version axis, on SQLite. gemfiles/rails_*.gemfile pins the Rails
+  # component gems and the sqlite3 version each line accepts (7.0 wants
+  # sqlite3 ~> 1.4; 7.2+ needs >= 2.1).
   test:
-    name: RSpec
+    name: RSpec (Rails ${{ matrix.rails }}, Ruby ${{ matrix.ruby }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ['3.2']
+        rails: ['7.0', '7.1', '7.2', '8.0']
+        include:
+          # Newer Rubies against the current Rails line. required_ruby_version
+          # is ">= 3.2.0" with no ceiling, so these are claimed as supported.
+          - ruby: '3.3'
+            rails: '8.0'
+          - ruby: '3.4'
+            rails: '8.0'
+    env:
+      BUNDLE_GEMFILE: gemfiles/rails_${{ matrix.rails }}.gemfile
 
     steps:
     - uses: actions/checkout@v7
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ matrix.ruby }}
+        bundler: latest
+        bundler-cache: true
+    - name: Run specs
+      run: bundle exec rspec
+
+  # Adapter axis. Both jobs pin the SAME Rails line as the default lockfile on
+  # purpose, so a failure here means the database, not the framework.
+  postgresql:
+    name: RSpec (PostgreSQL)
+    runs-on: ubuntu-latest
+    # NON-BLOCKING FOR NOW. The first run of this job found 3 real bugs and the
+    # MySQL job found 16; they are being fixed one PR at a time (see the
+    # adapter findings in the PR that introduced this matrix). Flip both
+    # continue-on-error flags to false once the count reaches zero — they are
+    # already listed in `publish.needs`, so that single edit makes them gate
+    # releases. Leaving the axis out entirely until then is what let these bugs
+    # accumulate in the first place.
+    continue-on-error: true
+    env:
+      BUNDLE_GEMFILE: gemfiles/postgresql.gemfile
+      DB: postgresql
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: ''
+      PGDATABASE: concerns_on_rails_test
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          # trust auth: the container is ephemeral and reachable only from this
+          # job, so a literal password buys nothing and trips secret scanners.
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: concerns_on_rails_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install libpq headers
+      run: sudo apt-get update && sudo apt-get install -y libpq-dev
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.2'
+        bundler: latest
+        bundler-cache: true
+    - name: Run specs
+      run: bundle exec rspec
+
+  mysql:
+    name: RSpec (MySQL)
+    runs-on: ubuntu-latest
+    # NON-BLOCKING FOR NOW — see the note on the postgresql job above.
+    continue-on-error: true
+    env:
+      BUNDLE_GEMFILE: gemfiles/mysql2.gemfile
+      DB: mysql2
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: '3306'
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ''
+      MYSQL_DATABASE: concerns_on_rails_test
+
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: concerns_on_rails_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install libmysqlclient headers
+      run: sudo apt-get update && sudo apt-get install -y default-libmysqlclient-dev
     - name: Set up Ruby
       uses: ruby/setup-ruby@v1
       with:
@@ -39,7 +155,7 @@ jobs:
 
   publish:
     name: Build + Publish
-    needs: [lint, test]
+    needs: [lint, test, postgresql, mysql]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

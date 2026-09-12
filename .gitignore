@@ -12,6 +12,11 @@
 .byebug_history
 *.gem
 
+# Per-matrix lockfiles: resolved fresh by CI (setup-ruby bundler-cache), so
+# committing six of them is churn. The ROOT Gemfile.lock is still committed —
+# its PATH pin tracks lib/concerns_on_rails/version.rb.
+/gemfiles/*.lock
+
 # gem-docs-review skill: rebuildable local doc cache
 /.gem-docs-cache/
 
