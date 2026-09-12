@@ -75,8 +75,17 @@ module ConcernsOnRails
         # All distinct tags currently stored across the table, sorted.
         # distinct + NULL filter dedupe DB-side, so identical tag strings ship
         # over the wire once instead of once per row.
+        #
+        # reorder(nil) drops any inherited ORDER BY: PostgreSQL rejects
+        # SELECT DISTINCT ordered by a column outside the select list ("for
+        # SELECT DISTINCT, ORDER BY expressions must appear in select list"),
+        # and Models::Sortable installs exactly such a default_scope — so
+        # Taggable + Sortable raised on Postgres while passing on SQLite,
+        # which permits it. The ordering is meaningless here anyway: the
+        # result is sorted in Ruby below.
         def all_tags
           where.not(taggable_field => nil)
+               .reorder(nil)
                .distinct
                .pluck(taggable_field)
                .flat_map { |raw| taggable_split(raw) }
