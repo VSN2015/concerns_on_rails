@@ -113,7 +113,15 @@ module ConcernsOnRails
           method_base = stateable_method_name(name)
 
           eligible = from.empty? ? all : all.where(field => from)
-          eligible = eligible.where.not(field => to)
+          # NULL-safe: `where.not(field => to)` compiles to `NOT (state = 'x')`,
+          # which SQL three-valued logic evaluates to NULL — never TRUE — for a
+          # NULL state, so those rows were silently dropped from the batch and
+          # from the returned count. They ARE eligible: a transition with no
+          # `from:` is documented as allowed from any state, `may_<event>?`
+          # returns true for them, and `record.<event>!` on the same row
+          # succeeds. A NULL state is reachable through an imported row,
+          # insert_all, or the documented `create!(status: nil)`.
+          eligible = eligible.where(arel_table[field].not_eq(to).or(arel_table[field].eq(nil)))
 
           ConcernsOnRails::Support::BatchOps.run(
             eligible,
