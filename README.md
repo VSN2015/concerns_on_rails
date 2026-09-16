@@ -467,13 +467,21 @@ User.soft_delete_all      # soft-deletes all matching records; returns the count
 User.destroy_all          # alias of soft_delete_all (kept for backwards compatibility; returns a count, not records)
 User.really_destroy_all   # hard-deletes the records matching the CURRENT relation (soft-deleted included)
 User.restore_all          # restores the matching soft-deleted records; returns the count
+
+User.deleted_within(1.hour).restore_all        # undo a bulk delete — only the last hour's trash
+User.deleted_within(30.days).really_destroy_all # purge recent trash; older rows untouched
+User.only_deleted.really_destroy_all           # empty the trash can, nothing else
 ```
 
 A record that fails to transition raises `ActiveRecord::RecordNotSaved` and rolls the whole
 batch back. With `touch: false` and no overridden hooks, `soft_delete_all` / `restore_all`
-collapse to a single `UPDATE`. Note that `really_destroy_all` peels the soft-delete
-predicate off the relation, so `only_deleted.really_destroy_all` widens to the whole
-relation — purge trash with `User.soft_deleted.delete_all` instead.
+collapse to a single `UPDATE`. Both `restore_all` and `really_destroy_all` peel off **only the
+default scope's own** `deleted_at IS NULL`: a predicate *you* put on the column — `deleted_within`,
+`where(deleted_at: range)`, `only_deleted` — survives, as does any other default scope the model
+declares. (Previously they unscoped the column outright, so `deleted_within(1.hour).restore_all`
+restored the whole trash can and `only_deleted.really_destroy_all` widened to the whole relation.)
+The *scopes* still unscope the column, so chain them first: `soft_deleted.where(...)`, not
+`where(...).soft_deleted`.
 
 **Scope-name collisions**
 
@@ -489,6 +497,30 @@ model can combine SoftDeletable with another concern that also defines `.active`
 Expirable) without a collision. `prefix: true` uses the configured field name. With no affix
 passed, scope names, the default scope, and the emitted SQL are unchanged. See the
 Publishable section above for how `prefix:`/`suffix:` differ across the gem.
+
+**Cascading to dependents**
+
+```ruby
+class Post < ApplicationRecord
+  include ConcernsOnRails::SoftDeletable
+  has_many :comments
+  has_one  :cover
+  soft_deletable_by :deleted_at, cascade: %i[comments cover]   # Comment and Cover include SoftDeletable too
+end
+
+post.soft_delete!        # comments + cover soft-deleted in the same transaction, with the post's exact timestamp
+post.restore!            # brings back the comments/cover the cascade deleted — NOT a comment someone trashed last week
+post.soft_delete!(at: 1.day.ago)   # new at: keyword — backdate, or hand a timestamp down a cascade
+```
+
+Dependents go through their own `soft_delete!` / `restore!` (hooks and nested cascades run). A dependent
+that fails — whether it raises or just fails validation — aborts the cascade with
+`ActiveRecord::RecordNotSaved` and rolls the parent back with it, so you never end up with a deleted
+parent and a live child. Declare the cascaded associations **above** `soft_deletable_by`; the macro
+resolves them at class load. Restore matches on the parent's timestamp, so independently
+deleted dependents keep their own. `cascade:` accepts `has_many` / `has_one` (no `belongs_to`, HABTM or
+`:through`) whose models include SoftDeletable; with a cascade configured `soft_delete_all` / `restore_all`
+take the per-record path (a bulk `UPDATE` cannot follow associations).
 
 **Lifecycle hooks** — override these methods on the model:
 

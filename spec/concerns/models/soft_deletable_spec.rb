@@ -540,4 +540,388 @@ describe ConcernsOnRails::SoftDeletable do
       expect(gone.reload).not_to be_deleted
     end
   end
+  # `restore_all` and `really_destroy_all` used to route through the
+  # `soft_deleted` scope / a bare `unscope(where: deleted_at)`, which peels the
+  # default scope's `deleted_at IS NULL` off — and, with it, every predicate the
+  # CALLER put on that column. `deleted_within(1.hour).restore_all` therefore
+  # restored the whole trash can. Same defect `publish_all` fixed in 1.27.
+  describe 'restore_all / really_destroy_all keep a caller predicate on the soft-delete column' do
+    before(:all) do
+      ActiveRecord::Schema.define do
+        create_table :trash_restorables, force: true do |t|
+          t.string :name
+          t.string :kind
+          t.datetime :deleted_at
+          t.timestamps null: false
+        end
+      end
+    end
+
+    # touch: false + no overridden hooks => single-UPDATE fast path
+    let(:fast_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'trash_restorables'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, touch: false
+      end
+    end
+
+    # touch: true (default) => streaming per-record path through restore!
+    let(:per_record_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'trash_restorables'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at
+      end
+    end
+
+    let(:visible_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'trash_restorables'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, touch: false, default_scope: false
+      end
+    end
+
+    # A host model with its OWN default scope on top of the soft-delete one.
+    let(:tenant_class) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'trash_restorables'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, touch: false
+        default_scope { where(kind: 'a') }
+      end
+    end
+
+    def seed(klass)
+      klass.unscoped.delete_all
+      old = nil
+      travel_to(3.days.ago) { old = klass.create!(name: 'old', kind: 'a').tap(&:soft_delete!) }
+      recent = klass.create!(name: 'recent', kind: 'a').tap(&:soft_delete!)
+      live = klass.create!(name: 'live', kind: 'a')
+      other = klass.create!(name: 'other-kind', kind: 'b').tap(&:soft_delete!)
+      [old, recent, live, other]
+    end
+
+    def deleted?(klass, record)
+      klass.unscoped.find(record.id).deleted_at.present?
+    end
+
+    %i[fast_class per_record_class].each do |variant|
+      context "on the #{variant.to_s.tr('_', ' ')} path" do
+        let(:klass) { send(variant) }
+
+        it 'deleted_within(...).restore_all restores only the recent trash' do
+          old, recent, _live, other = seed(klass)
+          expect(klass.deleted_within(1.day).restore_all).to eq(2)
+          expect(deleted?(klass, recent)).to be(false)
+          expect(deleted?(klass, other)).to be(false)
+          expect(deleted?(klass, old)).to be(true)
+        end
+
+        it 'where(deleted_at: range).restore_all honours the range' do
+          old, recent, _live, other = seed(klass)
+          expect(klass.where(deleted_at: 1.day.ago..Time.zone.now).restore_all).to eq(2)
+          expect(deleted?(klass, recent)).to be(false)
+          expect(deleted?(klass, other)).to be(false)
+          expect(deleted?(klass, old)).to be(true)
+        end
+
+        it 'soft_deleted.where(...).restore_all honours a predicate added after the scope' do
+          old, recent, _live, other = seed(klass)
+          expect(klass.soft_deleted.where(klass.arel_table[:deleted_at].gteq(1.day.ago)).restore_all).to eq(2)
+          expect(deleted?(klass, recent)).to be(false)
+          expect(deleted?(klass, other)).to be(false)
+          expect(deleted?(klass, old)).to be(true)
+        end
+
+        it 'keeps a caller predicate on another column' do
+          old, recent, = seed(klass)
+          expect(klass.where(name: 'old').restore_all).to eq(1)
+          expect(deleted?(klass, old)).to be(false)
+          expect(deleted?(klass, recent)).to be(true)
+        end
+
+        it 'a bare restore_all on a default-scoped model still restores the whole trash can' do
+          old, recent, live, other = seed(klass)
+          expect(klass.restore_all).to eq(3)
+          [old, recent, live, other].each { |r| expect(deleted?(klass, r)).to be(false) }
+        end
+
+        it 'returns 0 and touches nothing when the narrowed relation is empty' do
+          seed(klass)
+          expect(klass.where(name: 'nope').restore_all).to eq(0)
+          expect(klass.soft_deleted.count).to eq(3)
+        end
+      end
+    end
+
+    it 'the fast path still collapses to a single UPDATE' do
+      seed(fast_class)
+      sql = []
+      callback = ->(*, payload) { sql << payload[:sql] if payload[:sql] =~ /\AUPDATE/i }
+      ActiveSupport::Notifications.subscribed(callback, 'sql.active_record') do
+        fast_class.deleted_within(1.day).restore_all
+      end
+      expect(sql.size).to eq(1)
+      expect(sql.first).to match(/deleted_at.*>=/m)
+    end
+
+    it 'with default_scope: false a caller predicate on the column is honoured too' do
+      old, recent, _live, other = seed(visible_class)
+      expect(visible_class.where(deleted_at: 1.day.ago..Time.zone.now).restore_all).to eq(2)
+      expect(deleted?(visible_class, recent)).to be(false)
+      expect(deleted?(visible_class, other)).to be(false)
+      expect(deleted?(visible_class, old)).to be(true)
+    end
+
+    it "preserves the host model's own default scope while peeling only the soft-delete one" do
+      old, recent, _live, other = seed(tenant_class)
+      expect(tenant_class.restore_all).to eq(2)
+      expect(deleted?(tenant_class, old)).to be(false)
+      expect(deleted?(tenant_class, recent)).to be(false)
+      expect(deleted?(tenant_class, other)).to be(true) # kind 'b' is outside the tenant default scope
+    end
+
+    describe 'really_destroy_all' do
+      it 'only_deleted.really_destroy_all purges the trash and nothing else' do
+        _old, _recent, live, other = seed(fast_class)
+        expect { fast_class.only_deleted.really_destroy_all }
+          .to change { fast_class.unscoped.count }.from(4).to(1)
+        expect(fast_class.unscoped.pluck(:name)).to eq(['live'])
+        expect(fast_class.unscoped.where(id: [live.id, other.id]).count).to eq(1)
+      end
+
+      it 'a predicate on another column still hard-deletes soft-deleted rows too' do
+        seed(fast_class)
+        expect { fast_class.where(name: %w[old live]).really_destroy_all }
+          .to change { fast_class.unscoped.count }.from(4).to(2)
+        expect(fast_class.unscoped.pluck(:name)).to match_array(%w[recent other-kind])
+      end
+
+      it 'deleted_within(...).really_destroy_all purges only the recent trash' do
+        seed(fast_class)
+        fast_class.deleted_within(1.day).really_destroy_all
+        expect(fast_class.unscoped.pluck(:name)).to match_array(%w[old live])
+      end
+    end
+  end
+
+  describe "cascade: (soft-deleting and restoring dependents)" do
+    before(:all) do
+      ActiveRecord::Schema.define do
+        create_table :casc_posts, force: true do |t|
+          t.string :title
+          t.datetime :deleted_at, precision: 6
+          t.timestamps null: false
+        end
+        create_table :casc_comments, force: true do |t|
+          t.integer :casc_post_id
+          t.string :body
+          t.datetime :deleted_at, precision: 6
+          t.timestamps null: false
+        end
+        create_table :casc_likes, force: true do |t|
+          t.integer :casc_comment_id
+          t.datetime :deleted_at, precision: 6
+        end
+        create_table :casc_covers, force: true do |t|
+          t.integer :casc_post_id
+          t.datetime :deleted_at, precision: 6
+        end
+        create_table :casc_tags, force: true do |t|
+          t.integer :casc_post_id
+          t.string :name
+        end
+      end
+    end
+
+    before do
+      stub_const("CascLike", Class.new(ActiveRecord::Base) do
+        self.table_name = "casc_likes"
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, touch: false
+        belongs_to :casc_comment
+      end)
+      stub_const("CascComment", Class.new(ActiveRecord::Base) do
+        self.table_name = "casc_comments"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :casc_likes, dependent: :destroy
+        soft_deletable_by :deleted_at, cascade: :casc_likes
+        belongs_to :casc_post
+
+        attr_accessor :log
+
+        # Class-level, because the cascade fires the hooks on instances IT
+        # loaded — a per-instance @log can only ever see direct calls, so an
+        # assertion against it would pass even if the cascade skipped hooks.
+        # stub_const builds a fresh class per example, so this resets itself.
+        def self.hook_log
+          @hook_log ||= []
+        end
+
+        def before_soft_delete
+          (@log ||= []) << :before_soft_delete
+          self.class.hook_log << :before_soft_delete
+        end
+
+        def after_soft_delete
+          (@log ||= []) << :after_soft_delete
+          self.class.hook_log << :after_soft_delete
+        end
+      end)
+      stub_const("CascCover", Class.new(ActiveRecord::Base) do
+        self.table_name = "casc_covers"
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at
+        belongs_to :casc_post
+      end)
+      stub_const("CascTag", Class.new(ActiveRecord::Base) do
+        self.table_name = "casc_tags"
+        belongs_to :casc_post
+      end)
+      stub_const("CascPost", Class.new(ActiveRecord::Base) do
+        self.table_name = "casc_posts"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :casc_comments
+        has_one :casc_cover
+        has_many :casc_tags
+        soft_deletable_by :deleted_at, cascade: %i[casc_comments casc_cover]
+      end)
+      %w[casc_posts casc_comments casc_likes casc_covers casc_tags].each do |table|
+        ActiveRecord::Base.connection.execute("DELETE FROM #{table}")
+      end
+    end
+
+    let!(:post) { CascPost.create!(title: "p") }
+    let!(:comment) { CascComment.create!(casc_post: post, body: "c1") }
+    let!(:like) { CascLike.create!(casc_comment: comment) }
+    let!(:cover) { CascCover.create!(casc_post: post) }
+
+    def deleted_at(klass, record)
+      klass.unscoped.find(record.id).deleted_at
+    end
+
+    it "soft-deletes has_many and has_one dependents with the parent's exact timestamp, recursively" do
+      post.soft_delete!(at: Time.utc(2026, 6, 1, 12, 0, 0.5r)) # travel_to truncates usec; at: carries it
+      stamp = deleted_at(CascPost, post)
+      expect(stamp).to eq(Time.utc(2026, 6, 1, 12, 0, 0.5r))
+      expect(deleted_at(CascComment, comment)).to eq(stamp)
+      expect(deleted_at(CascCover, cover)).to eq(stamp)
+      expect(deleted_at(CascLike, like)).to eq(stamp) # through the comment's own cascade
+    end
+
+    it "runs the dependents' own hooks" do
+      post.soft_delete!
+      reloaded = CascComment.unscoped.find(comment.id)
+      expect(reloaded.deleted_at).to be_present
+      # The hooks fired on the instance the CASCADE loaded, which the example
+      # never sees — so assert through the class-level log, not a fresh probe.
+      expect(CascComment.hook_log).to eq(%i[before_soft_delete after_soft_delete])
+    end
+
+    it "raises RecordNotSaved and rolls back when a dependent fails validation" do
+      # The common non-raising failure: with the default touch: true the
+      # dependent's write goes through `update`, which returns false rather
+      # than raising. It must not be skipped silently.
+      invalid = Class.new(CascComment) do
+        validate { errors.add(:base, "nope") if deleted_at.present? }
+      end
+      stub_const("CascComment", invalid)
+      CascPost.has_many :casc_comments, class_name: "CascComment"
+
+      expect { post.soft_delete! }
+        .to raise_error(ActiveRecord::RecordNotSaved, /failed to cascade soft-delete to/)
+      expect(deleted_at(CascPost, post)).to be_nil
+      expect(deleted_at(CascCover, cover)).to be_nil
+    end
+
+    it "restore! restores the cascaded dependents but not one that was deleted independently earlier" do
+      earlier = CascComment.create!(casc_post: post, body: "old")
+      travel_to(Time.utc(2026, 5, 1)) { earlier.soft_delete! }
+      travel_to(Time.utc(2026, 6, 1)) { post.soft_delete! }
+
+      post.restore!
+      expect(deleted_at(CascPost, post)).to be_nil
+      expect(deleted_at(CascComment, comment)).to be_nil
+      expect(deleted_at(CascCover, cover)).to be_nil
+      expect(deleted_at(CascLike, like)).to be_nil
+      expect(deleted_at(CascComment, earlier)).to eq(Time.utc(2026, 5, 1))
+    end
+
+    it "leaves already-deleted dependents' own timestamps alone when the parent is deleted" do
+      earlier = CascComment.create!(casc_post: post, body: "old")
+      travel_to(Time.utc(2026, 5, 1)) { earlier.soft_delete! }
+      travel_to(Time.utc(2026, 6, 1)) { post.soft_delete! }
+      expect(deleted_at(CascComment, earlier)).to eq(Time.utc(2026, 5, 1))
+    end
+
+    it "soft_delete!(at:) backdates, standalone and through the cascade" do
+      post.soft_delete!(at: Time.utc(2020, 1, 1))
+      expect(deleted_at(CascPost, post)).to eq(Time.utc(2020, 1, 1))
+      expect(deleted_at(CascComment, comment)).to eq(Time.utc(2020, 1, 1))
+    end
+
+    it "shares the parent's transaction — a failing dependent rolls everything back" do
+      failing = Class.new(CascComment) do
+        def after_soft_delete
+          raise "child boom"
+        end
+      end
+      stub_const("CascComment", failing)
+      CascPost.has_many :casc_comments, class_name: "CascComment"
+      expect { post.soft_delete! }.to raise_error("child boom")
+      expect(deleted_at(CascPost, post)).to be_nil
+      expect(deleted_at(CascCover, cover)).to be_nil
+    end
+
+    it "disables the single-UPDATE fast paths so soft_delete_all / restore_all cascade too" do
+      other = CascPost.create!(title: "q")
+      other_comment = CascComment.create!(casc_post: other, body: "c2")
+      expect(CascPost.soft_delete_all).to eq(2)
+      expect(deleted_at(CascComment, comment)).to be_present
+      expect(deleted_at(CascComment, other_comment)).to be_present
+      expect(CascPost.restore_all).to eq(2)
+      expect(deleted_at(CascComment, other_comment)).to be_nil
+    end
+
+    it "exposes the configured cascade" do
+      expect(CascPost.soft_delete_cascade).to eq(%i[casc_comments casc_cover])
+      expect(CascCover.soft_delete_cascade).to eq([])
+    end
+
+    it "rejects an unknown association, a belongs_to, a :through, and a non-SoftDeletable target at class load" do
+      # A NAMED class: from inside an anonymous class body Rails cannot resolve
+      # association targets (compute_type needs `name`), so the target check
+      # would be deferred to cascade time instead of firing at class load.
+      build = lambda do |cascade|
+        klass = Class.new(ActiveRecord::Base)
+        stub_const("CascValidation", klass)
+        klass.class_eval do
+          self.table_name = "casc_posts"
+          include ConcernsOnRails::SoftDeletable
+
+          has_many :casc_comments
+          has_many :casc_tags
+          has_many :casc_likes, through: :casc_comments
+          belongs_to :owner, class_name: "CascPost", optional: true
+          soft_deletable_by :deleted_at, cascade: cascade
+        end
+      end
+      expect { build.call(:nope) }.to raise_error(ArgumentError, /cascade: 'nope' is not an association/)
+      expect { build.call(:owner) }.to raise_error(ArgumentError, /cascade: 'owner' must be a has_many or has_one/)
+      expect { build.call(:casc_likes) }.to raise_error(ArgumentError, /cascade: 'casc_likes'.*through/)
+      expect do
+        build.call(:casc_tags)
+      end.to raise_error(ArgumentError, /cascade: 'casc_tags' targets CascTag, which does not include SoftDeletable/)
+    end
+  end
 end
