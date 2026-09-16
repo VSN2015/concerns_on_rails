@@ -73,7 +73,12 @@ module ConcernsOnRails
         if options[:with]
           options[:with].call(relation, value)
         elsif options[:scope]
-          relation.public_send(options[:scope])
+          # Scope mode discards the value, so an explicit `false` can only mean
+          # "do not apply this scope" — applying it would hand the client the
+          # exact opposite of what it asked for. (A query string still carries
+          # the String "false", which has always triggered the scope; only a
+          # real boolean is read as a negation.)
+          value == false ? relation : relation.public_send(options[:scope])
         elsif filterable_scalar?(value)
           relation.where(field => value)
         else

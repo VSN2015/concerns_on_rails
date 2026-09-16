@@ -164,6 +164,48 @@ describe ConcernsOnRails::Controllers::Filterable do
       end
     end
 
+    # Scope mode discards the value entirely, so letting `false` through would
+    # have APPLIED the scope to a client that sent `{"published": false}` —
+    # the exact opposite of what it asked for, and a change in behaviour from
+    # 1.28.3 rather than a fix. `false` still means "not filtered" there.
+    it "does not apply a scope: filter for an explicit false" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :published, scope: :published
+      end
+
+      titles = klass.new(params: { published: false }).filtered(Article.all).pluck(:title)
+
+      expect(titles).to contain_exactly("A", "B", "C", "D")
+    end
+
+    it "still applies a scope: filter for a truthy value" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :published, scope: :published
+      end
+
+      titles = klass.new(params: { published: true }).filtered(Article.all).pluck(:title)
+
+      expect(titles).to contain_exactly("B", "C")
+    end
+
+    # A with: lambda is handed the value and decides for itself — that is the
+    # whole point of receiving a real false instead of never being called.
+    it "passes an explicit false through to a with: lambda" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :flagged, with: ->(rel, value) { value ? rel.where(status: "published") : rel.where(status: "draft") }
+      end
+
+      titles = klass.new(params: { flagged: false }).filtered(Article.all).pluck(:title)
+
+      expect(titles).to contain_exactly("A", "D")
+    end
+
     it "leaves a filter absent from params alone" do
       titles = controller_class.new(params: {}).filtered(Article.all).pluck(:title)
 
