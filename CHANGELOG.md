@@ -1,5 +1,113 @@
 <!-- CHANGELOG.md -->
 
+## 1.28.4 (2026-09-16)
+
+Eleven bug-fix PRs (#91–#101) from the audit of the shipped gem, released as a
+patch: no new concerns, no new options, no migrations, no dependency changes.
+Two close fail-open holes (WebhookVerifiable, Encryptable); the rest are
+correctness fixes for behaviour the docs already promised. Every fix ships with
+a regression spec that fails on 1.28.3. 1460 examples, 0 failures.
+
+### Security
+- **Controllers::WebhookVerifiable**: verification could be skipped entirely,
+  leaving the action to run on an unverified — possibly forged — payload. Two
+  paths: `webhook_verification_failed` returned `nil` when there was no response
+  object to render into, which left the `before_action` chain unhalted; and
+  `webhook_rule_for_action` returned `nil` (read as "no rule applies, carry on")
+  when `action_name` was unresolvable or `""`. Both fail closed now — the first
+  raises, the second falls back to the catch-all rule, or to a lone declared
+  rule, and verifies. With several action-specific rules and no catch-all it
+  raises rather than verifying against an arbitrary provider's secret, which
+  would reject a valid delivery as "signature invalid". The render guard also
+  honours a `render_error` override on its own, so a controller supplying one
+  but no response object renders its rejection instead of raising. Mirrors the
+  fix Authorizable got in 1.22. A resolvable action simply not covered by any
+  rule still passes through untouched. (#92)
+- **Models::Encryptable**: `<field>_ciphertext` — documented for "asserting no
+  plaintext is at rest" — returned the caller's **plaintext** whenever the value
+  had not round-tripped through the database (a new record, or any pending
+  assignment: exactly the state inside a `before_save`, a validator, or an
+  error-reporting path), so `log.info(user.ssn_ciphertext)` wrote the SSN
+  straight to the log. It returns `nil` in that state now. `<field>_encrypted?`
+  used a bare `.present?`, true for plaintext too; it now checks that what is
+  stored really is an encryption envelope, via the new
+  `Support::Encryptor.envelope?`. (#97)
+
+### Fixed
+- **Models::Aliasable**: an aliased `belongs_to` carrying `counter_cache:`
+  double-counted. The alias copy kept the `:counter_cache` option, and because
+  the `#association` override maps the alias back to the same association
+  object, ActiveRecord's counter-cache pass fired once per name — the parent's
+  count came out doubled on create and doubled on destroy, drifting permanently
+  negative once rows predating the alias were removed. The copy no longer
+  carries the option; the source reflection still owns the counter. (#93)
+- **Controllers::Paginatable**: `?page=99999999999999999999` was an
+  unauthenticated 500 — `(page - 1) * per_page` produced an offset no backend
+  accepts (`StatementInvalid` on a relation, `RangeError` on an Array). `page`
+  is now clamped to `MAX_PAGE` (1,000,000) and comes back as an empty page past
+  the end; `per_page` is held under the matching `MAX_PER_PAGE`, since with
+  `max_per_page: 0` ("no cap") the identical value overflowed `LIMIT` instead.
+  `paginate_by` also validates `per_page` now: 0 and negatives raise
+  `ArgumentError` at class-load time instead of misbehaving on every request
+  (`per_page: -1` means `LIMIT -1`, i.e. NO LIMIT on SQLite and MySQL —
+  serialising the whole table; `per_page: 0` made every page permanently empty).
+  A negative `max_per_page` still means "no cap", as documented. (#94)
+- **Models::Taggable**: `all_tags` raised on PostgreSQL for any model that also
+  includes `Models::Sortable` — `SELECT DISTINCT` cannot be ordered by a column
+  outside the select list, and Sortable installs exactly such a `default_scope`.
+  The inherited `ORDER BY` is dropped with `reorder(nil)`; the result is sorted
+  in Ruby anyway. Passed on SQLite, which permits it. (#95)
+- **Models::Lockable, Models::Stateable**: `ActiveRecord::Rollback` raised from
+  an `after_lock` / `after_transition` hook did nothing when the call was nested
+  inside a caller's own transaction — a bare `transaction` joins the enclosing
+  one and Rails swallows `Rollback` without rolling anything back. Both open a
+  savepoint now (`requires_new: true`), so the documented abort works: Lockable
+  no longer leaves a row locked in the database while reporting `false` in
+  memory (with `lock_access!`'s idempotency guard then making every retry a
+  no-op), and Stateable no longer commits a state change its hook asked to
+  abort. Stateable's `<event>!` also took its return value from `update!`, which
+  runs *before* the hook, so an aborted transition reported success —
+  `raise unless ticket.archive!` never fired and `transition_all` counted a row
+  it had rolled back. It reports `false` now, which `transition_all` treats as
+  the documented failed-record signal. Note `transition_all` opens one savepoint
+  per record. (#96)
+- **Support::ErrorEnvelope**: the `render_error` lookup was public-only, but
+  `render_error` is very often declared under `private` — the idiomatic way to
+  keep a controller helper from becoming a routable action. Those overrides were
+  silently ignored and the gem's inline envelope rendered instead, so an app
+  rendering RFC 9457 problem+json got the wrong shape for every Authorizable
+  403, WebhookVerifiable 401, Throttleable 429 and CursorPaginatable 400, with
+  no error or warning. Now `respond_to?(:render_error, true)`, the spelling
+  Authorizable already used for `current_user`. Controllers::Deprecatable keeps
+  its own copy of that check before rendering a sunset 410, and it had the same
+  blind spot — a private `render_error` with no response object skipped the 410
+  and served the sunset action. (#98)
+- **Controllers::Deprecatable**: `deprecate_actions` mutated the caller's own
+  `Time`. `Time#utc` is an alias of `#gmtime` and converts the receiver IN
+  PLACE, so a host passing a frozen constant (`SUNSET = Time.new(...).freeze`)
+  got a `FrozenError` while the controller class body was still loading — the
+  app would not boot — and an unfrozen `Time` was silently rewritten to UTC
+  behind the caller's back. Now `getutc`. (#99)
+- **Controllers::Filterable**: a boolean `false` read as "filter not supplied",
+  so `filter_by :active` could never select the inactive rows — `false.blank?`
+  is true, the rule was skipped and the UNFILTERED relation came back. Only JSON
+  request bodies were affected; a query string carries the String `"false"`,
+  which is not blank. Everything genuinely empty — `nil`, `""`, `"   "`, `[]`,
+  `{}` — is still skipped, and in `scope:` mode (which discards the value) an
+  explicit `false` still means "do not apply this scope". (#100)
+- **Models::Stateable**: `transition_all` silently skipped rows whose state is
+  NULL. `where.not(state: to)` compiles to `NOT (state = 'x')`, which SQL
+  three-valued logic evaluates to NULL — never TRUE — for a NULL state, so those
+  rows were dropped from the batch and from the returned count even though they
+  ARE eligible (`may_<event>?` returns true for them and the per-record
+  `<event>!` succeeds). The predicate is NULL-safe now. (#101)
+
+### Internal
+- **Specs**: the Aliasable join-alias SQL assertion accepts both the Rails 8.1
+  `AS`-qualified table alias and the older unqualified form, so the suite passes
+  on Rails 8.1 — unblocking the pending Rails 8.1 dependency bumps. No library
+  change. (#91)
+
 ## 1.28.3 (2026-09-16)
 
 Three merged PRs from the September loop (#41, #43, #52), shipped as a patch at
