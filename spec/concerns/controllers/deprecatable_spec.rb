@@ -231,6 +231,35 @@ describe ConcernsOnRails::Controllers::Deprecatable do
     end
   end
 
+  # Same public-only respond_to? blind spot Support::ErrorEnvelope had: a
+  # controller declaring `private def render_error` (the idiomatic way to keep
+  # a helper from becoming a routable action) plus no response object skipped
+  # the 410 entirely and ran the sunset action — a fail-open on the one branch
+  # whose whole job is to stop serving the endpoint.
+  describe "410 enforcement with a private render_error and no response" do
+    it "still renders the 410 instead of letting the action run" do
+      klass = deprecatable_class do
+        deprecate_actions :index, deprecated_at: "2025-01-01", sunset_at: "2026-01-15", after_sunset: :gone
+
+        private
+
+        def render_error(**kwargs)
+          @delegated = kwargs
+        end
+      end
+      klass.send(:attr_reader, :delegated)
+
+      travel_to Time.utc(2026, 6, 1) do
+        c = instance(klass, action: "index")
+        c.response = nil
+        c.apply_api_deprecations
+
+        expect(c.delegated[:status]).to eq(:gone)
+        expect(c.delegated[:code]).to eq("endpoint_sunset")
+      end
+    end
+  end
+
   describe "410 Gone enforcement (after_sunset: :gone)" do
     def gone_class
       deprecatable_class do
