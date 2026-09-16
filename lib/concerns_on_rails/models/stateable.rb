@@ -225,10 +225,23 @@ module ConcernsOnRails
         raise InvalidTransition, "#{self.class.name}: cannot #{event} from '#{self[field]}'" unless from.empty? || from.include?(current)
 
         result = false
-        transaction do
+        # requires_new: a bare `transaction` JOINS an enclosing one instead of
+        # opening a savepoint, so under a caller's transaction Rails swallowed
+        # an ActiveRecord::Rollback from after_transition and rolled nothing
+        # back — the state change committed and this returned true, exactly
+        # opposite to the documented contract above.
+        # Set AFTER after_transition, never from update! — the same reason
+        # Lockable's lockable_write_with_hooks flips `completed` only once the
+        # block has run to the end. Rails swallows ActiveRecord::Rollback at
+        # the savepoint boundary, so taking the return value from update!
+        # reported a fake success for a transition the hook had just aborted:
+        # `raise unless ticket.archive!` never fired, and transition_all
+        # counted a row it had rolled back.
+        transaction(requires_new: true) do
           before_transition(event, current, to)
-          result = update!(field => to)
+          update!(field => to)
           after_transition(event, current, to)
+          result = true
         end
         result
       end

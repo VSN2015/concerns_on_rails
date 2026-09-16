@@ -737,4 +737,55 @@ describe ConcernsOnRails::Lockable do
       expect(HookedAccount.unlocked_ids).to eq([a.id])
     end
   end
+
+  describe "ActiveRecord::Rollback from after_lock" do
+    before do
+      class RollbackAccount < TestModel
+        include ConcernsOnRails::Lockable
+
+        self.table_name = "lock_users"
+
+        lockable_by max_attempts: 3
+
+        def after_lock
+          raise ActiveRecord::Rollback
+        end
+      end
+    end
+
+    after { Object.send(:remove_const, :RollbackAccount) if defined?(RollbackAccount) }
+
+    it "rolls the lock back when called standalone" do
+      u = RollbackAccount.create!(email: "a@b.com")
+
+      expect(u.lock_access!).to be(false)
+      expect(u.reload.locked_at).to be_nil
+    end
+
+    # A bare `transaction` JOINS the caller's, so Rails swallowed the Rollback
+    # and committed the lock — while the ensure restored locked_at = nil in
+    # memory and lock_access! returned false. The DB said locked, the model
+    # said unlocked, and the idempotency guard made every retry a no-op.
+    it "rolls the lock back inside an enclosing transaction" do
+      u = RollbackAccount.create!(email: "a@b.com")
+
+      ActiveRecord::Base.transaction { u.lock_access! }
+
+      expect(u.reload.locked_at).to be_nil
+      expect(u.access_locked?).to be(false)
+    end
+
+    it "leaves the caller's own writes in the enclosing transaction intact" do
+      u = RollbackAccount.create!(email: "a@b.com")
+      other = RollbackAccount.create!(email: "c@d.com")
+
+      ActiveRecord::Base.transaction do
+        other.update!(email: "renamed@b.com")
+        u.lock_access!
+      end
+
+      expect(other.reload.email).to eq("renamed@b.com")
+      expect(u.reload.locked_at).to be_nil
+    end
+  end
 end
