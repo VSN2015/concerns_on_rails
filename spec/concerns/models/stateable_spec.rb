@@ -406,6 +406,30 @@ describe ConcernsOnRails::Stateable do
       expect(t.reload.status).to eq("draft")
     end
 
+    # Lockable's half of this same fix uses a `completed` flag for exactly this
+    # reason ("the caller must see false — not a fake success"). Stateable took
+    # its return value from update!, which runs BEFORE after_transition, so an
+    # aborted transition still reported success: `raise unless ticket.archive!`
+    # never fired and the caller carried on as though the state had changed.
+    it "returns false when the hook aborts the transition" do
+      t = RollbackTicket.create!(title: "t")
+
+      expect(t.archive!).to be(false)
+      expect(t.reload.status).to eq("draft")
+    end
+
+    # BatchOps tallies the block's return value, so the fake success also
+    # inflated the count — transition_all reported rows whose transition it had
+    # just rolled back. A falsey return is the documented "failed record"
+    # signal, so the batch now aborts loudly instead of lying about the count.
+    it "does not report a rolled-back record as transitioned by transition_all" do
+      RollbackTicket.create!(title: "t")
+
+      expect { RollbackTicket.transition_all(:archive) }
+        .to raise_error(ActiveRecord::RecordNotSaved, /failed to transition record/)
+      expect(RollbackTicket.pluck(:status)).to eq(["draft"])
+    end
+
     it "leaves the caller's own writes in the enclosing transaction intact" do
       t = RollbackTicket.create!(title: "t")
       other = RollbackTicket.create!(title: "other")

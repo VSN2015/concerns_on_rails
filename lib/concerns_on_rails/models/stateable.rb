@@ -230,10 +230,18 @@ module ConcernsOnRails
         # an ActiveRecord::Rollback from after_transition and rolled nothing
         # back — the state change committed and this returned true, exactly
         # opposite to the documented contract above.
+        # Set AFTER after_transition, never from update! — the same reason
+        # Lockable's lockable_write_with_hooks flips `completed` only once the
+        # block has run to the end. Rails swallows ActiveRecord::Rollback at
+        # the savepoint boundary, so taking the return value from update!
+        # reported a fake success for a transition the hook had just aborted:
+        # `raise unless ticket.archive!` never fired, and transition_all
+        # counted a row it had rolled back.
         transaction(requires_new: true) do
           before_transition(event, current, to)
-          result = update!(field => to)
+          update!(field => to)
           after_transition(event, current, to)
+          result = true
         end
         result
       end
