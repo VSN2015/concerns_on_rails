@@ -171,6 +171,51 @@ describe ConcernsOnRails::Taggable do
       TagArticle.create!(title: "b", tag_list: "ruby, go")
       expect(TagArticle.all_tags).to eq(%w[go rails ruby])
     end
+
+    context "when the model carries an ordering default_scope" do
+      # SELECT DISTINCT with an ORDER BY on a column that is not in the select
+      # list is a hard error on PostgreSQL ("for SELECT DISTINCT, ORDER BY
+      # expressions must appear in select list"). SQLite permits it, which is
+      # why CI never caught this — and Models::Sortable installs exactly such
+      # a default_scope, so Taggable + Sortable was broken on Postgres.
+      before do
+        class OrderedTagArticle < TestModel
+          include ConcernsOnRails::Taggable
+
+          self.table_name = "tag_articles"
+
+          taggable_by :tags
+          default_scope { order(:title) }
+        end
+      end
+
+      after { Object.send(:remove_const, :OrderedTagArticle) if defined?(OrderedTagArticle) }
+
+      def captured_sql
+        queries = []
+        sub = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+          queries << payload[:sql]
+        end
+        yield
+        queries
+      ensure
+        ActiveSupport::Notifications.unsubscribe(sub)
+      end
+
+      it "does not carry the ORDER BY into the DISTINCT query" do
+        distinct = captured_sql { OrderedTagArticle.all_tags }.grep(/DISTINCT/)
+
+        expect(distinct).not_to be_empty
+        expect(distinct.first).not_to include("ORDER BY")
+      end
+
+      it "still returns the sorted unique tags" do
+        OrderedTagArticle.create!(title: "a", tag_list: "ruby, rails")
+        OrderedTagArticle.create!(title: "b", tag_list: "ruby, go")
+
+        expect(OrderedTagArticle.all_tags).to eq(%w[go rails ruby])
+      end
+    end
   end
 
   context "with downcase: true" do
