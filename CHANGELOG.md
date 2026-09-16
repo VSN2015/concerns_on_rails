@@ -1,5 +1,59 @@
 <!-- CHANGELOG.md -->
 
+## 1.28.3 (2026-09-16)
+
+Three merged PRs from the September loop (#41, #43, #52), shipped as a patch at
+the maintainer's request: a SoftDeletable bug fix (`restore_all` /
+`really_destroy_all` dropped the caller's own predicate on the soft-delete
+column), a ColumnGuard change (every missing column reported in one error with
+one migration command) and an additive SoftDeletable `cascade:` option for
+has_many / has_one dependents. No new migrations or runtime dependencies.
+1396 examples, 0 failures.
+
+### Fixed
+- **Models::SoftDeletable**: `restore_all` and `really_destroy_all` now honour a
+  caller's predicate on the soft-delete column. Both used to `unscope` the
+  column outright to peel off the default scope's `deleted_at IS NULL`, which
+  also dropped `deleted_within(1.hour)` / `where(deleted_at: range)` /
+  `only_deleted` — so `User.deleted_within(1.hour).restore_all` restored the
+  whole trash can and `only_deleted.really_destroy_all` widened to the whole
+  relation. Only the default scope's own predicate is peeled now; predicates on
+  other columns (a host model's own `default_scope` included) are untouched. The
+  scopes themselves still unscope the column: chain `soft_deleted.where(...)`,
+  not `where(...).soft_deleted`. (#41)
+- **Models::Anonymizable**: the stamp column's migration hint now carries its
+  type (`anonymized_at:datetime`). (#43)
+
+### Changed
+- **Support::ColumnGuard**: a macro that finds several missing columns now
+  reports them all in one `ArgumentError` — `'street', 'city' and 'zip' do not
+  exist …` — with a single combined migration command
+  (`bin/rails generate migration AddAddressableColumnsToUsers street:string
+  city:string zip:string`) instead of failing boot once per column. Single-
+  column wording and generator name are unchanged. (#43)
+
+### Added
+- **Models::SoftDeletable**: `soft_deletable_by … cascade: %i[comments cover]`
+  soft-deletes has_many / has_one dependents with the record (same
+  transaction, same timestamp, through their own `soft_delete!` so hooks and
+  nested cascades run) and restores exactly those on `restore!` — a dependent
+  deleted independently earlier stays deleted. New `soft_delete!(at:)` keyword.
+  With a cascade configured, `soft_delete_all` / `restore_all` take the
+  per-record path. `belongs_to`, HABTM and `:through` are rejected at class
+  load; the target model must include SoftDeletable (checked at class load when
+  it already resolves, otherwise on the first cascade). (#52)
+
+### Notes
+`cascade:` is off by default — models without it behave exactly as before.
+`restore!` matches cascaded dependents by the parent's exact `deleted_at`, so
+give the columns `precision: 6` (the Rails 7 default) if two parents may be
+deleted within one second. With a cascade configured the single-`UPDATE` fast
+paths of `soft_delete_all` / `restore_all` are disabled (a bulk `UPDATE` cannot
+follow associations). Anything matching `/does not exist/` on a one-column
+ColumnGuard failure still matches — only the several-columns wording and
+generator name changed. The README's "use instead" table no longer lists
+association-cascade soft delete as a reason to reach for paranoia / discard.
+
 ## 1.28.2 (2026-09-11)
 
 Six merged enhancement PRs from the September loop (#42, #84, #59 via #90, #80,

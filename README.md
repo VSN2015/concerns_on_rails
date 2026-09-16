@@ -148,7 +148,7 @@ across all 43 concerns — press <kbd>/</kbd> and type.
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured columns exist and raises `ArgumentError` early — listing *every* missing column at once, with one ready-to-paste `rails generate migration` command that adds them all
 - **Composable** — concerns are independent; mix and match per model
-- **Tested like an app, not a snippet** — **1,360 RSpec examples** run against a real database on every CI build
+- **Tested like an app, not a snippet** — **1,396 RSpec examples** run against a real database on every CI build
 - **Documented twice** — everything in this README also lives as a per-concern page on the [docs site](https://vsn2015.github.io/concerns_on_rails), searchable and deep-linkable
 
 ---
@@ -2215,7 +2215,7 @@ Both forms reference the same module, so you can freely mix them.
 | Need | Use instead |
 |------|-------------|
 | Complex state machines (callbacks, transition logging) | [`aasm`](https://github.com/aasm/aasm) |
-| Association-cascade soft delete / sentinel-aware unique indexes | [`paranoia`](https://github.com/rubysherpas/paranoia) or [`discard`](https://github.com/jhawthorn/discard) |
+| Sentinel-aware unique indexes on soft-deleted rows (`deleted_at` in the index) | [`paranoia`](https://github.com/rubysherpas/paranoia) or [`discard`](https://github.com/jhawthorn/discard) |
 | Tagging with contexts, ownership, or tag clouds | [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) |
 | Full-text search with ranking / stemming | [`pg_search`](https://github.com/Casecommons/pg_search) / Elasticsearch |
 | Versioned audit trails with undo/reify, who-dunnit queries, or association tracking | [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) |
@@ -2249,9 +2249,9 @@ Point your agent at `llms.txt` for an overview, or paste a single concern's `.md
 
 ```sh
 bundle install                                  # install dev dependencies
-bundle exec rspec                               # run the test suite (1,360 examples)
+bundle exec rspec                               # run the test suite (1,396 examples)
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.28.2.gem      # install locally
+gem install ./concerns_on_rails-1.28.3.gem      # install locally
 
 # Preview the docs site locally (GitHub Pages serves docs/ as-is):
 cd docs && python3 -m http.server 8000          # → http://localhost:8000
