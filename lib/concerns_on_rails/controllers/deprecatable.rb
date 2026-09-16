@@ -247,7 +247,12 @@ module ConcernsOnRails
         return unless deprecation_sunset_reached?(rule)
 
         message = "This endpoint was sunset on #{rule[:sunset_at].httpdate}."
-        return unless respond_to?(:render_error) || (respond_to?(:response) && response)
+        # respond_to?(..., true) for the same reason Support::ErrorEnvelope
+        # uses it: render_error is very often declared under `private`. The
+        # public-only check skipped the 410 for exactly those controllers and
+        # let the sunset action run — a fail-open on the branch whose job is to
+        # stop serving the endpoint.
+        return unless respond_to?(:render_error, true) || (respond_to?(:response) && response)
 
         ConcernsOnRails::Support::ErrorEnvelope.render(self, message: message, status: :gone, code: "endpoint_sunset")
       end
