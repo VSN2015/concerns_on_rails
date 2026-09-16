@@ -45,6 +45,12 @@ module ConcernsOnRails
       # dataset, so it simply comes back empty. Deep pagination at this depth
       # wants Controllers::CursorPaginatable instead.
       MAX_PAGE = 1_000_000
+      # The same guard for per_page. `max_per_page: 0` is documented as "no
+      # cap", and with no cap the identical untrusted value overflowed LIMIT
+      # instead of OFFSET — the same unauthenticated 500, one option away. "No
+      # cap" means no CONFIGURED cap, not an unbounded LIMIT; a page of a
+      # million records is already far past what any client can render.
+      MAX_PER_PAGE = 1_000_000
 
       included do
         class_attribute :paginatable_per_page, default: DEFAULT_PER_PAGE
@@ -68,8 +74,8 @@ module ConcernsOnRails
         #   paginate_by per_page: 50, max_per_page: 500, link_header: false
         def paginate_by(per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE, link_header: true,
                         page_param: nil, per_page_param: nil, style: :flat, window: nil)
-          self.paginatable_per_page = paginatable_page_size!(:per_page, per_page, minimum: 1)
-          self.paginatable_max_per_page = paginatable_page_size!(:max_per_page, max_per_page, minimum: 0)
+          self.paginatable_per_page = paginatable_per_page!(per_page)
+          self.paginatable_max_per_page = paginatable_max_per_page!(max_per_page)
           self.paginatable_link_header = link_header ? true : false
           self.paginatable_window = paginatable_window!(window)
           defaults = paginatable_style_params!(style)
@@ -88,17 +94,27 @@ module ConcernsOnRails
           end
         end
 
-        # per_page must be positive; max_per_page may be 0, which the docs
-        # define as "no cap". A bare `.to_i` let a negative through, and
+        # per_page must be positive. A bare `.to_i` let a negative through, and
         # `LIMIT -1` means NO LIMIT on SQLite and MySQL — so `per_page: -1`
         # silently serialized the entire table on every request, while
-        # `per_page: 0` made every page permanently empty.
-        def paginatable_page_size!(option, value, minimum:)
+        # `per_page: 0` made every page permanently empty. Both are broken
+        # configuration with no sane reading, so they raise at class-load time
+        # rather than misbehaving on every request.
+        def paginatable_per_page!(value)
           size = value.to_i
-          return size if size >= minimum
+          return size if size.positive?
 
-          wording = minimum.positive? ? "a positive integer" : "a non-negative integer"
-          raise ArgumentError, "#{LABEL}: #{option}: must be #{wording} (got #{value.inspect})"
+          raise ArgumentError, "#{LABEL}: per_page: must be a positive integer (got #{value.inspect})"
+        end
+
+        # max_per_page does NOT raise: "0 or a negative integer disables the
+        # cap" is this option's documented contract, so rejecting a negative
+        # would fail the boot of an app that is configured exactly as written —
+        # and on a patch upgrade at that. Normalize to 0 instead; the reader's
+        # guard only asks whether the cap is positive.
+        def paginatable_max_per_page!(value)
+          size = value.to_i
+          size.negative? ? 0 : size
         end
 
         # nil / false disable the window (no `pages:` key). `0` is meaningful:
@@ -236,7 +252,10 @@ module ConcernsOnRails
         requested = ConcernsOnRails::Support::ScalarParam.to_i(pagination_param(self.class.paginatable_per_page_param), default: 0)
         requested = self.class.paginatable_per_page if requested < 1
         cap = self.class.paginatable_max_per_page
-        cap.positive? ? [requested, cap].min : requested
+        requested = [requested, cap].min if cap.positive?
+        # Applied even when a cap IS configured: `max_per_page: 10**30` is its
+        # own way of asking for the overflow back.
+        [requested, MAX_PER_PAGE].min
       end
 
       # Dig the configured path out of params: `["page"]` → params[:page];

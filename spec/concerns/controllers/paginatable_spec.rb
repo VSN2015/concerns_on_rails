@@ -565,6 +565,39 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(controller.paginated(Widget.all).to_a).to be_empty
     end
 
+    # per_page got the cap treatment and page did not, which is what this PR
+    # fixed — but with `max_per_page: 0` ("no cap") per_page has no cap either,
+    # so the very same untrusted value overflowed LIMIT/OFFSET instead. Same
+    # unauthenticated 500, one option away.
+    context "when max_per_page is 0 (no cap)" do
+      let(:uncapped_class) do
+        Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Paginatable
+
+          paginate_by per_page: 25, max_per_page: 0
+        end
+      end
+
+      it "does not blow up on a relation" do
+        controller = uncapped_class.new(params: { per_page: huge, page: 2 })
+
+        expect { controller.paginated(Widget.all).to_a }.not_to raise_error
+      end
+
+      it "does not blow up on an in-memory collection" do
+        controller = uncapped_class.new(params: { per_page: huge, page: 2 })
+
+        expect { controller.paginated((1..50).to_a) }.not_to raise_error
+      end
+
+      it "still honors an ordinary per_page far above the default cap" do
+        controller = uncapped_class.new(params: { per_page: 500 })
+        controller.paginated(Widget.all).to_a
+
+        expect(controller.pagination_meta[:per_page]).to eq(500)
+      end
+    end
+
     it "leaves ordinary pages untouched" do
       controller = controller_class.new(params: { page: 2 })
 
@@ -594,8 +627,11 @@ describe ConcernsOnRails::Controllers::Paginatable do
       declare(per_page: 0).to raise_error(ArgumentError, /per_page: must be a positive integer/)
     end
 
-    it "rejects a negative max_per_page" do
-      declare(max_per_page: -5).to raise_error(ArgumentError, /max_per_page: must be a non-negative integer/)
+    # NOT rejected: "0 or a negative integer disables the cap" is the
+    # documented contract for this option, so raising would fail the boot of an
+    # app configured that way — on a patch upgrade, for a value that works.
+    it "treats a negative max_per_page as 'no cap', like 0" do
+      declare(max_per_page: -5).not_to raise_error
     end
 
     it "allows max_per_page: 0 (documented as 'no cap')" do
