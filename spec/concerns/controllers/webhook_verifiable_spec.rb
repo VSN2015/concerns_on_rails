@@ -580,6 +580,35 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       expect_failure(c, :unauthorized, "webhook_signature_missing")
     end
 
+    # With several per-provider rules and no catch-all there is no honest way
+    # to pick one: verifying a GitHub delivery against Stripe's secret rejects
+    # a perfectly valid payload with "signature invalid", sending the provider
+    # chasing a signing bug that does not exist. Still fails closed — the
+    # action does not run — but says what actually went wrong.
+    it "raises rather than verifying against an arbitrary provider's secret" do
+      klass = verifiable_class do
+        verify_webhook :stripe_hook, secret: WH_SECRET, scheme: :stripe
+        verify_webhook :github_hook, secret: "other-secret", scheme: :github
+      end
+      c = instance(klass, action: "")
+
+      expect { c.verify_webhook_signature! }
+        .to raise_error(/cannot tell which action/)
+    end
+
+    it "uses the catch-all rule when one is declared" do
+      klass = verifiable_class do
+        verify_webhook :github_hook, secret: "other-secret", scheme: :github
+        verify_webhook secret: WH_SECRET, scheme: :github
+      end
+      c = instance(klass, action: "")
+
+      c.verify_webhook_signature!
+
+      expect(c.webhook_verified?).to be false
+      expect_failure(c, :unauthorized, "webhook_signature_missing")
+    end
+
     it "still verifies normally when the action IS resolvable and uncovered" do
       klass = verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :github }
       c = instance(klass, action: "index")

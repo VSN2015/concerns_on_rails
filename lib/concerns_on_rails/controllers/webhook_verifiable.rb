@@ -220,9 +220,26 @@ module ConcernsOnRails
         # is, so "no rule applies" is not a conclusion we may draw. Previously
         # an unresolvable action_name skipped verification entirely and every
         # webhook was accepted without a signature check.
-        return rules.find { |rule| rule[:actions].empty? } || rules.first if action.nil?
+        return webhook_unresolvable_action_rule(rules) if action.nil?
 
         rules.find { |rule| rule[:actions].empty? || rule[:actions].include?(action) }
+      end
+
+      # Which rule to verify against when the action cannot be resolved. A
+      # catch-all is well defined, and so is a lone rule. Several
+      # action-specific rules are NOT: each carries its own provider secret and
+      # scheme, so picking the first would reject a perfectly valid delivery
+      # with "signature invalid" — sending that provider chasing a signing bug
+      # that does not exist. Raise instead. Still fails closed either way; this
+      # one just says what actually went wrong.
+      def webhook_unresolvable_action_rule(rules)
+        catch_all = rules.find { |rule| rule[:actions].empty? }
+        return catch_all if catch_all
+        return rules.first if rules.one?
+
+        raise "ConcernsOnRails::Controllers::WebhookVerifiable: cannot tell which action this request is " \
+              "(no action_name) and #{rules.size} action-specific rules are declared with no catch-all — " \
+              "refusing to verify against an arbitrary rule's secret"
       end
 
       def webhook_render_outcome(rule, outcome)
