@@ -36,6 +36,21 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Controllers::Paginatable".freeze
       DEFAULT_PER_PAGE = 25
       DEFAULT_MAX_PER_PAGE = 200
+      # Upper bound on the requested page. `page` is untrusted input and its
+      # only job is to become `(page - 1) * per_page`, so an unbounded value
+      # produced an offset no backend can take: the relation branch raised
+      # StatementInvalid and Array#[] raised RangeError ("bignum too big to
+      # convert into `long'") — a 500 from `?page=99999999999999999999`.
+      # Clamping keeps the request in range; the page is far past any real
+      # dataset, so it simply comes back empty. Deep pagination at this depth
+      # wants Controllers::CursorPaginatable instead.
+      MAX_PAGE = 1_000_000
+      # The same guard for per_page. `max_per_page: 0` is documented as "no
+      # cap", and with no cap the identical untrusted value overflowed LIMIT
+      # instead of OFFSET — the same unauthenticated 500, one option away. "No
+      # cap" means no CONFIGURED cap, not an unbounded LIMIT; a page of a
+      # million records is already far past what any client can render.
+      MAX_PER_PAGE = 1_000_000
 
       included do
         class_attribute :paginatable_per_page, default: DEFAULT_PER_PAGE
@@ -59,8 +74,8 @@ module ConcernsOnRails
         #   paginate_by per_page: 50, max_per_page: 500, link_header: false
         def paginate_by(per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE, link_header: true,
                         page_param: nil, per_page_param: nil, style: :flat, window: nil)
-          self.paginatable_per_page = per_page.to_i
-          self.paginatable_max_per_page = max_per_page.to_i
+          self.paginatable_per_page = paginatable_per_page!(per_page)
+          self.paginatable_max_per_page = paginatable_max_per_page!(max_per_page)
           self.paginatable_link_header = link_header ? true : false
           self.paginatable_window = paginatable_window!(window)
           defaults = paginatable_style_params!(style)
@@ -77,6 +92,29 @@ module ConcernsOnRails
           when :jsonapi then [%w[page number], %w[page size]]
           else raise ArgumentError, "#{LABEL}: style: must be :flat or :jsonapi (got #{style.inspect})"
           end
+        end
+
+        # per_page must be positive. A bare `.to_i` let a negative through, and
+        # `LIMIT -1` means NO LIMIT on SQLite and MySQL — so `per_page: -1`
+        # silently serialized the entire table on every request, while
+        # `per_page: 0` made every page permanently empty. Both are broken
+        # configuration with no sane reading, so they raise at class-load time
+        # rather than misbehaving on every request.
+        def paginatable_per_page!(value)
+          size = value.to_i
+          return size if size.positive?
+
+          raise ArgumentError, "#{LABEL}: per_page: must be a positive integer (got #{value.inspect})"
+        end
+
+        # max_per_page does NOT raise: "0 or a negative integer disables the
+        # cap" is this option's documented contract, so rejecting a negative
+        # would fail the boot of an app that is configured exactly as written —
+        # and on a patch upgrade at that. Normalize to 0 instead; the reader's
+        # guard only asks whether the cap is positive.
+        def paginatable_max_per_page!(value)
+          size = value.to_i
+          size.negative? ? 0 : size
         end
 
         # nil / false disable the window (no `pages:` key). `0` is meaningful:
@@ -206,14 +244,18 @@ module ConcernsOnRails
       # Both readers route through ScalarParam: `?page[]=1` / `?page[x]=1`
       # arrive as Array/Parameters, and calling .to_i on those was a 500.
       def pagination_page
-        [ConcernsOnRails::Support::ScalarParam.to_i(pagination_param(self.class.paginatable_page_param), default: 0), 1].max
+        requested = ConcernsOnRails::Support::ScalarParam.to_i(pagination_param(self.class.paginatable_page_param), default: 0)
+        requested.clamp(1, MAX_PAGE)
       end
 
       def pagination_per_page
         requested = ConcernsOnRails::Support::ScalarParam.to_i(pagination_param(self.class.paginatable_per_page_param), default: 0)
         requested = self.class.paginatable_per_page if requested < 1
         cap = self.class.paginatable_max_per_page
-        cap.positive? ? [requested, cap].min : requested
+        requested = [requested, cap].min if cap.positive?
+        # Applied even when a cap IS configured: `max_per_page: 10**30` is its
+        # own way of asking for the overflow back.
+        [requested, MAX_PER_PAGE].min
       end
 
       # Dig the configured path out of params: `["page"]` → params[:page];
