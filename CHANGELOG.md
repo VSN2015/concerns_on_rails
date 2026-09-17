@@ -1,5 +1,65 @@
 <!-- CHANGELOG.md -->
 
+## 1.28.5 (2026-09-17)
+
+Eight feature PRs deepening existing concerns, released as a patch by request:
+no new concerns and no dependency changes, though several add an optional
+column or option. Every PR was reviewed before merge and carries the review's
+fixes; the notes below call out the ones that change a documented behaviour.
+1522 examples, 0 failures.
+
+### Added
+- **Models::Schedulable**: `overlapping(from, to)` scope and `overlaps?`
+  predicate for booking-clash checks. Open-ended windows (a `NULL` start or
+  end), touching intervals, reversed arguments and Range forms behave
+  identically in SQL and in Ruby. Affixable like the other scopes. (#58)
+- **Models::Duplicable**: per-call `only:` / `except:` association selection —
+  `invoice.duplicate!(except: :line_items)`. The macro's list stays the
+  ceiling, so a controller param cannot smuggle in an undeclared association.
+  An explicit `nil` counts as passed, not absent, so an empty checkbox list
+  copies nothing rather than everything. (#73)
+- **Models::Monetizable**: scope-aware `sum_`, `average_`, `minimum_` and
+  `maximum_<name>` aggregates plus their `formatted_` twins, with per-call
+  formatting overrides. BigDecimal throughout; a grouped relation returns a
+  Hash of converted values instead of raising. (#67)
+- **Models::Taggable**: `tag_counts` — tag to record count in one `GROUP BY`
+  query, relation-aware, with `limit:` for the top N. A `select`, `group` or
+  `order` on the relation is stripped; a `limit`/`offset` window is honoured by
+  resolving it to ids first. (#56)
+- **Models::Expirable**: `before_expire` / `after_expire` lifecycle hooks,
+  `expire_in!(duration)` and `clear_expiry!`. The hooks fire when a write
+  actually expires the record; a future time only schedules expiry and fires
+  nothing, so `after_expire { account.downgrade! }` is safe next to
+  `trial.expire_in!(14.days)`. Overriding either hook moves `expire_all` to the
+  per-record path. (#54)
+- **Controllers::SecureHeadable**: HSTS, cross-origin (COOP/COEP/CORP) and
+  Permissions-Policy presets, plus the `:recommended` and
+  `:cross_origin_isolation` bundles. `:recommended` uses `(self)`-scoped
+  permission values, so it denies third-party frames without disabling the
+  app's own camera, microphone, geolocation or Payment Request. HSTS is skipped
+  on a plaintext request (RFC 6797 §7.2) and never overwrites a stricter value
+  already on the response. (#55)
+- **Models::Addressable**: `address_fingerprint` (SHA-256 of the normalized
+  address), `same_address_as?`, `address_parts_changed?` and a `fingerprint:`
+  column option with a `with_address` finder for deduplication reports. The
+  column is stamped in `before_save`, after every `before_validation`, so a
+  sibling concern rewriting a mapped column cannot desync it. (#79)
+- **Controllers::Localizable**: `Content-Language` response header and
+  `Vary: Accept-Language`, both written before the action so a
+  `rescue_from`-rendered error carries them. Rails' own `Vary: Accept` is
+  preserved rather than suppressed, and `Vary` is advertised only when
+  `Accept-Language` can actually change the resolved locale. (#53)
+
+### Notes
+- **Addressable** defines `address_changed?` only when the model has no
+  `address` column of its own, so it never shadows ActiveModel's dirty
+  predicate; `address_parts_changed?` is always available.
+- Existing rows keep a `NULL` address fingerprint until they are re-saved.
+  Backfill with `Model.find_each(&:save)`; `update_columns`, `insert_all` and
+  `upsert_all` bypass callbacks and leave it stale.
+- The address digest is unkeyed, so treat the column as revealing the address.
+  Do not pair it with an `encryptable` address column.
+
 ## 1.28.4 (2026-09-16)
 
 Eleven bug-fix PRs (#91–#101) from the audit of the shipped gem, released as a
