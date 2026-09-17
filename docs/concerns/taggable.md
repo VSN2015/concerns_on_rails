@@ -215,4 +215,8 @@ Post.tagged_with("rails")        # => [p]
 - **`tagged_with` with no arguments returns `all`.** An empty tag array short-circuits to `all`, so the result is safely chainable without a conditional guard.
 - **No external gem dependencies.** Unlike `acts-as-taggable-on`, this concern requires no additional gems. The trade-off is that it has no support for tag contexts, ownership, or polymorphic tags shared across multiple model types (`tag_counts` covers clouds). Reach for `acts-as-taggable-on` when those features are needed.
 - **Delimiter must not appear inside a tag value.** Tags containing the configured delimiter character produce incorrect split behavior. Choose a delimiter that cannot appear in your tag vocabulary, or sanitize tag input before assigning.
+- **`tag_counts` normalizes the relation it is called on.** A `select`, `group` or `order` on the relation is stripped before the aggregate runs, because none of them survives a `GROUP BY` on the tag column. A `limit` or `offset` genuinely picks rows, so it is honoured: the window is resolved to ids first (one extra bounded query), then tallied.
+
+- **MySQL case-folds the GROUP BY.** On a case-insensitive collation, rows stored as `"Ruby"` and `"ruby"` collapse into one group, so the totals stay right but the label is whichever value the server picks. Use `downcase: true` if you need stable labels there.
+
 - **`all_tags` and `tag_counts` read every distinct tag string.** `all_tags` plucks the distinct column values, `tag_counts` groups them with a row count; both then split in Ruby. Cheap while the set of distinct tag strings is small, a candidate for caching on very large tables. Add a database-level index on the column only if needed for `tagged_with` queries; neither aggregate can use it.

@@ -278,6 +278,23 @@ describe ConcernsOnRails::Taggable do
       expect(TagArticle.tag_counts(limit: 0)).to eq({})
     end
 
+    it "tallies a select/group-carrying relation instead of raising" do
+      # COUNT(id, tags) is invalid SQL and an array GROUP BY key is meaningless,
+      # so both clauses are stripped before the aggregate runs.
+      expect(TagArticle.select(:id, :tags).tag_counts).to eq("ruby" => 3, "go" => 2, "api" => 1, "rails" => 1)
+      expect(TagArticle.group(:title).tag_counts).to eq("ruby" => 3, "go" => 2, "api" => 1, "rails" => 1)
+    end
+
+    it "honours limit/offset on the relation instead of counting the whole table" do
+      window = TagArticle.order(:title).limit(2)
+      expect(window.tag_counts).to eq("ruby" => 2, "rails" => 1, "go" => 1) # rows a and b only
+      expect(TagArticle.order(:title).offset(3).tag_counts).to eq("api" => 1, "go" => 1) # row d (and untagged e)
+    end
+
+    it "clamps a negative limit: instead of raising" do
+      expect(TagArticle.tag_counts(limit: -1)).to eq({})
+    end
+
     it "returns {} when nothing is tagged" do
       TagArticle.delete_all
       expect(TagArticle.tag_counts).to eq({})

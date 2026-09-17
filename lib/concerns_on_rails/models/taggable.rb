@@ -92,12 +92,28 @@ module ConcernsOnRails
         # strings, not rows. `limit:` keeps the top N.
         def tag_counts(limit: nil)
           counts = Hash.new(0)
-          all.where.not(taggable_field => nil).unscope(:order).group(taggable_field).count.each do |raw, rows|
+          taggable_count_scope.where.not(taggable_field => nil)
+                              .group(taggable_field).count.each do |raw, rows|
             taggable_split(raw).each { |tag| counts[tag] += rows }
           end
           ordered = counts.sort_by { |tag, count| [-count, tag] }
-          ordered = ordered.first(limit.to_i) if limit
+          ordered = ordered.first([limit.to_i, 0].max) if limit
           ordered.to_h
+        end
+
+        # The rows to tally. A caller's select/group/order cannot survive the
+        # GROUP BY (COUNT(a, b) is invalid SQL, an array group key is
+        # meaningless, and a trailing ORDER BY breaks Postgres), so they are
+        # stripped. limit/offset genuinely pick rows, so they are honoured by
+        # resolving the window to ids first -- MySQL rejects LIMIT inside an
+        # IN subquery, so the ids come back through Ruby. The window is
+        # bounded by definition, so that stays cheap.
+        def taggable_count_scope
+          relation = all
+          base = relation.except(:select, :group)
+          return base.except(:order) unless (relation.limit_value || relation.offset_value) && primary_key
+
+          unscoped.where(primary_key => base.pluck(primary_key))
         end
 
         # Split a raw stored column value into a normalized tag array.
