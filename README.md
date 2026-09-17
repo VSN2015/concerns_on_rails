@@ -670,12 +670,20 @@ ApiToken.expiring_within(1.day)  # future expiry within the next 1 day
 ```ruby
 token.expire!                       # expires_at = now
 token.expire!(2.hours.from_now)     # explicit time
+token.expire_in!(15.minutes)        # absolute lifetime from now, whatever the current expiry
 token.extend_expiry!(by: 1.day)     # pushes expiry forward
+token.clear_expiry!                 # never expires (nil)
 ```
 
 `extend_expiry!` is smart about the base:
 - If `expires_at` is `nil` or in the past → new value is `now + by`
 - If `expires_at` is still in the future → `by` is added to the existing value
+
+**Lifecycle hooks** — override `before_expire` / `after_expire` on the model; they fire around a write that
+actually expires the record (`expire!` with a past-or-now time, and `expire_all`) inside one transaction, so
+a raising `after_expire` rolls the expiry back. A future time only *schedules* expiry, so `expire_in!(14.days)`
+fires nothing — as with renewals (`extend_expiry!`) and `clear_expiry!`. Overriding either hook moves
+`expire_all` from its single `UPDATE` to the per-record path so the hooks run for every row.
 
 **Bulk operations**
 
@@ -684,7 +692,7 @@ ApiToken.expiring_within(1.day).expire_all   # => 12
 ```
 
 `expire_all(time = Time.zone.now)` expires every currently-active record in the relation and
-returns the Integer count, in a transaction. With `expire!` unoverridden and no validations on
+returns the Integer count, in a transaction. With `expire!` and both hooks unoverridden and no validations on
 the model — neither `validates`/`validates_with`, a custom `validate :method`, nor an
 association's autosave validation (a bare `has_many` registers one, so most models with
 associations take the streaming path) — it collapses
