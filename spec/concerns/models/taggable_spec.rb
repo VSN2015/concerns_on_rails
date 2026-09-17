@@ -292,4 +292,79 @@ describe ConcernsOnRails::Taggable do
       expect(TagDoc.tagged_with("ruby")).to contain_exactly(hit)
     end
   end
+  describe ".tag_counts" do
+    before do
+      TagArticle.create!(title: "a", tag_list: "ruby, rails")
+      TagArticle.create!(title: "b", tag_list: "ruby, go")
+      TagArticle.create!(title: "c", tag_list: "ruby")
+      TagArticle.create!(title: "d", tag_list: "go, api")
+      TagArticle.create!(title: "e")
+    end
+
+    it "returns tag => record count, ordered by count desc then tag asc" do
+      expect(TagArticle.tag_counts).to eq("ruby" => 3, "go" => 2, "api" => 1, "rails" => 1)
+      expect(TagArticle.tag_counts.keys).to eq(%w[ruby go api rails])
+    end
+
+    it "counts a record once per tag even when the stored string repeats it" do
+      TagArticle.create!(title: "f").update_column(:tags, "ruby,ruby, Ruby ")
+      expect(TagArticle.tag_counts["ruby"]).to eq(4)
+      expect(TagArticle.tag_counts["Ruby"]).to eq(1) # case-sensitive without downcase:
+    end
+
+    it "is relation-aware" do
+      expect(TagArticle.where(title: %w[a b]).tag_counts).to eq("ruby" => 2, "go" => 1, "rails" => 1)
+      expect(TagArticle.tagged_with("go").tag_counts).to eq("go" => 2, "api" => 1, "ruby" => 1)
+      expect(TagArticle.order(:title).tag_counts.keys.first).to eq("ruby") # an ORDER BY on the relation is harmless
+    end
+
+    it "supports limit: for tag clouds" do
+      expect(TagArticle.tag_counts(limit: 2)).to eq("ruby" => 3, "go" => 2)
+      expect(TagArticle.tag_counts(limit: 0)).to eq({})
+    end
+
+    it "tallies a select/group-carrying relation instead of raising" do
+      # COUNT(id, tags) is invalid SQL and an array GROUP BY key is meaningless,
+      # so both clauses are stripped before the aggregate runs.
+      expect(TagArticle.select(:id, :tags).tag_counts).to eq("ruby" => 3, "go" => 2, "api" => 1, "rails" => 1)
+      expect(TagArticle.group(:title).tag_counts).to eq("ruby" => 3, "go" => 2, "api" => 1, "rails" => 1)
+    end
+
+    it "honours limit/offset on the relation instead of counting the whole table" do
+      window = TagArticle.order(:title).limit(2)
+      expect(window.tag_counts).to eq("ruby" => 2, "rails" => 1, "go" => 1) # rows a and b only
+      expect(TagArticle.order(:title).offset(3).tag_counts).to eq("api" => 1, "go" => 1) # row d (and untagged e)
+    end
+
+    it "clamps a negative limit: instead of raising" do
+      expect(TagArticle.tag_counts(limit: -1)).to eq({})
+    end
+
+    it "returns {} when nothing is tagged" do
+      TagArticle.delete_all
+      expect(TagArticle.tag_counts).to eq({})
+    end
+
+    it "groups identical tag strings in SQL rather than plucking every row" do
+      sql = []
+      callback = ->(*, payload) { sql << payload[:sql] if payload[:sql] =~ /\ASELECT/i }
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+        TagArticle.tag_counts
+      end
+      expect(sql.size).to eq(1)
+      expect(sql.first).to match(/GROUP BY/i)
+      expect(sql.first).to match(/COUNT\(/i)
+    end
+
+    it "case-folds with downcase: true so Ruby and ruby are one tag" do
+      folded = Class.new(TestModel) do
+        self.table_name = "tag_articles"
+        include ConcernsOnRails::Taggable
+
+        taggable_by :tags, downcase: true
+      end
+      folded.create!(title: "g", tag_list: "Ruby, RAILS")
+      expect(folded.tag_counts).to include("ruby" => 4, "rails" => 2)
+    end
+  end
 end
