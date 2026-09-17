@@ -344,6 +344,20 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
       expect(shallow.title).to eq("Q1 (copy)")
     end
 
+    it "treats an explicit nil as passed, not as absent" do
+      # A UI checkbox list sends nil when nothing is ticked; that must copy no
+      # associations, never fall through to a full deep copy.
+      shallow = original.duplicate!(only: nil)
+      expect(shallow.dup_line_items.count).to eq(0)
+      expect(shallow.dup_note).to be_nil
+      expect(shallow.dup_tags).to be_empty
+
+      full = original.duplicate!(except: nil)
+      expect(full.dup_line_items.count).to eq(2)
+      expect(full.dup_note.body).to eq("attached")
+      expect(full.dup_tags.pluck(:name)).to eq(["urgent"])
+    end
+
     it "mixes with braceless overrides and validates the selection" do
       copy = original.duplicate!(title: "Q3", except: :dup_note)
       expect(copy.title).to eq("Q3")

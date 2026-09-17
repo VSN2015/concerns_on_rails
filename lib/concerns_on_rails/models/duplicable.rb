@@ -116,12 +116,14 @@ module ConcernsOnRails
       #
       # `only:` / `except:` pick which of the macro's associations THIS copy
       # carries (`duplicate!(except: :line_items)`; `only: []` is a shallow
-      # copy). Braceless overrides arrive through **options too (Ruby 3
+      # copy). An explicit nil counts as passed, not as absent, so
+      # `only: params[:associations]` with nothing checked copies NO
+      # associations rather than silently deep-copying every one. Braceless overrides arrive through **options too (Ruby 3
       # keyword rules), so `only`/`except` are reserved keys — an attribute
       # literally named that goes in a braced Hash.
       def duplicate(overrides = {}, **options)
         overrides = overrides.merge(options.except(:only, :except))
-        associations = duplicable_selected_associations(options.slice(:only, :except).compact)
+        associations = duplicable_selected_associations(options.slice(:only, :except))
 
         copy = dup
         duplicable_reset_attributes(copy)
