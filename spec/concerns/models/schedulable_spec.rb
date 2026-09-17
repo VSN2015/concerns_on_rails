@@ -274,4 +274,90 @@ describe ConcernsOnRails::Schedulable do
       expect(klass.expired_window.pluck(:id)).to eq([over.id])
     end
   end
+  describe ".overlapping / #overlaps? (window intersection)" do
+    let(:t0) { Time.utc(2026, 6, 1, 10) }
+    let!(:before) { Promotion.create!(name: "before", starts_at: t0 - 3.hours, ends_at: t0 - 1.hour) }
+    let!(:touching_start) { Promotion.create!(name: "touching-start", starts_at: t0 - 2.hours, ends_at: t0) }
+    let!(:inside) { Promotion.create!(name: "inside", starts_at: t0 + 30.minutes, ends_at: t0 + 1.hour) }
+    let!(:spanning) { Promotion.create!(name: "spanning", starts_at: t0 - 1.day, ends_at: t0 + 1.day) }
+    let!(:open_ended) { Promotion.create!(name: "open-ended", starts_at: t0 - 1.hour) }
+    let!(:touching_end) { Promotion.create!(name: "touching-end", starts_at: t0 + 2.hours, ends_at: t0 + 3.hours) }
+    let!(:after) { Promotion.create!(name: "after", starts_at: t0 + 5.hours) }
+    let!(:unstarted) { Promotion.create!(name: "unstarted") }
+
+    def names(relation)
+      relation.order(:id).map(&:name)
+    end
+
+    it "returns records whose window intersects [from, to) — inclusive start, exclusive end" do
+      expect(names(Promotion.overlapping(t0, t0 + 2.hours))).to eq(%w[inside spanning open-ended])
+    end
+
+    it "excludes windows that only touch the boundaries" do
+      result = names(Promotion.overlapping(t0, t0 + 2.hours))
+      expect(result).not_to include("touching-start", "touching-end")
+    end
+
+    it "accepts a Range, honouring an inclusive end (..) vs an exclusive one (...)" do
+      expect(names(Promotion.overlapping(t0...(t0 + 2.hours)))).to eq(%w[inside spanning open-ended])
+      expect(names(Promotion.overlapping(t0..(t0 + 2.hours)))).to eq(%w[inside spanning open-ended touching-end])
+    end
+
+    it "treats a nil side as unbounded" do
+      expect(names(Promotion.overlapping(t0 + 4.hours, nil))).to eq(%w[spanning open-ended after])
+      expect(names(Promotion.overlapping(nil, t0 - 90.minutes))).to eq(%w[before touching-start spanning])
+      expect(Promotion.overlapping(nil, nil).count).to eq(Promotion.where.not(starts_at: nil).count) # unstarted never overlap
+    end
+
+    it "never returns unstarted records (nil starts_at), matching active_at" do
+      expect(names(Promotion.overlapping(t0 - 10.years, t0 + 10.years))).not_to include("unstarted")
+    end
+
+    it "is chainable and rejects an inverted window" do
+      expect(names(Promotion.where(name: "inside").overlapping(t0, t0 + 2.hours))).to eq(%w[inside])
+      expect { Promotion.overlapping(t0 + 1.hour, t0) }.to raise_error(ArgumentError, /from must not be after to/)
+    end
+
+    it "#overlaps? mirrors the scope, including boundaries and nil sides" do
+      expect(inside.overlaps?(t0, t0 + 2.hours)).to be(true)
+      expect(spanning.overlaps?(t0, t0 + 2.hours)).to be(true)
+      expect(open_ended.overlaps?(t0, t0 + 2.hours)).to be(true)
+      expect(touching_start.overlaps?(t0, t0 + 2.hours)).to be(false)
+      expect(touching_end.overlaps?(t0, t0 + 2.hours)).to be(false)
+      expect(touching_end.overlaps?(t0..(t0 + 2.hours))).to be(true)
+      expect(unstarted.overlaps?(t0 - 10.years, t0 + 10.years)).to be(false)
+      expect(after.overlaps?(t0 + 4.hours, nil)).to be(true)
+      expect(before.overlaps?(nil, t0 - 90.minutes)).to be(true)
+    end
+
+    it "is affixable like the other scopes" do
+      klass = Class.new(TestModel) do
+        self.table_name = "promotions"
+        include ConcernsOnRails::Schedulable
+
+        schedulable_by prefix: :promo
+      end
+      expect(klass).to respond_to(:promo_overlapping)
+      expect(klass).not_to respond_to(:overlapping)
+      expect(klass.promo_overlapping(t0, t0 + 2.hours).count).to eq(3)
+    end
+
+    it "works with an ends_at-only configuration (open-ended start)" do
+      ActiveRecord::Schema.define do
+        create_table :ending_promos, force: true do |t|
+          t.datetime :expires_at
+        end
+      end
+      klass = Class.new(TestModel) do
+        self.table_name = "ending_promos"
+        include ConcernsOnRails::Schedulable
+
+        schedulable_by starts_at: nil, ends_at: :expires_at
+      end
+      live = klass.create!(expires_at: t0 + 1.hour)
+      klass.create!(expires_at: t0 - 1.hour)
+      expect(klass.overlapping(t0, t0 + 2.hours).to_a).to eq([live])
+      expect(live.overlaps?(t0, t0 + 2.hours)).to be(true)
+    end
+  end
 end
