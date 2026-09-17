@@ -78,7 +78,10 @@ module ConcernsOnRails
         return unless locale_response_headers?
 
         response.set_header("Content-Language", locale.to_s.tr("_", "-"))
-        append_vary_accept_language if self.class.localizable_options.fetch(:header, true)
+        # Only advertise the dimension the resolver actually consults: with
+        # `header: false` (or no `localizable` call at all) Accept-Language
+        # cannot change the answer.
+        append_vary_accept_language if self.class.localizable_options[:header]
       end
 
       def locale_response_headers?
@@ -90,7 +93,24 @@ module ConcernsOnRails
 
       def append_vary_accept_language
         existing = response.headers["Vary"].to_s.split(",").map(&:strip).reject(&:empty?)
-        response.set_header("Vary", (existing + ["Accept-Language"]).uniq.join(", "))
+        return if existing.include?("*")
+
+        # Rails adds its own `Vary: Accept` during render, but ONLY while the
+        # header is still blank (ActionController::Rendering#_set_vary_header).
+        # Writing ours before the action would therefore SUPPRESS it and cost a
+        # cache dimension, so seed Accept ourselves whenever Rails would have.
+        merged = existing + vary_accept_dimension + ["Accept-Language"]
+        deduped = merged.each_with_object([]) do |value, list|
+          list << value unless list.any? { |seen| seen.casecmp?(value) }
+        end
+        response.set_header("Vary", deduped.join(", "))
+      end
+
+      def vary_accept_dimension
+        return [] unless respond_to?(:request, true) && (req = request)
+        return [] unless req.respond_to?(:should_apply_vary_header?) && req.should_apply_vary_header?
+
+        ["Accept"]
       end
 
       def locale_from_param(opts, allowed)

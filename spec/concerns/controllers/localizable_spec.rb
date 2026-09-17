@@ -1,4 +1,5 @@
 require "spec_helper"
+require "support/integration_harness"
 
 describe ConcernsOnRails::Controllers::Localizable do
   # A minimal stand-in for ActionDispatch::Request (only #headers is used).
@@ -140,6 +141,43 @@ describe ConcernsOnRails::Controllers::Localizable do
       expect { c.switch_locale { raise "boom" } }.to raise_error("boom")
       expect(c.response.headers["Content-Language"]).to eq("de")
       expect(c.response.headers["Vary"]).to eq("Accept-Language")
+    end
+
+    it "keeps Rails' own Vary: Accept on a real content-negotiated response" do
+      # Rails adds Vary: Accept during render, but only while the header is
+      # blank, so a pre-action write of ours would silently drop that cache
+      # dimension. Only a real dispatch can catch it.
+      klass = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Localizable
+
+        localizable available: %i[en fr de], default: :en
+
+        def show
+          render json: { ok: true }
+        end
+      end
+
+      result = IntegrationHarness.dispatch(klass, :show,
+                                           headers: { "Accept" => "application/json", "Accept-Language" => "fr" })
+      vary = result.header("Vary").to_s.split(",").map(&:strip)
+      expect(vary).to include("Accept", "Accept-Language")
+      expect(result.header("Content-Language")).to eq("fr")
+    end
+
+    it "advertises no Vary when the resolver ignores the Accept-Language header" do
+      klass = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Localizable
+
+        localizable available: %i[en fr], default: :en, header: false, param: :locale
+
+        def show
+          render json: { ok: true }
+        end
+      end
+
+      result = IntegrationHarness.dispatch(klass, :show, query: "locale=fr", headers: { "Accept-Language" => "de" })
+      expect(result.header("Vary").to_s).not_to include("Accept-Language")
+      expect(result.header("Content-Language")).to eq("fr")
     end
 
     it "is a no-op on a controller without a response object" do
