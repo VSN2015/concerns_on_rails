@@ -40,6 +40,8 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       LABEL = "ConcernsOnRails::Models::Maskable".freeze
+      # What `masked:` accepts besides `true` — a field or a list of them.
+      MASKED_OPTION_TYPES = [Symbol, String, Array].freeze
       PRESETS = %i[email phone credit_card last4 all].freeze
 
       included do
@@ -95,21 +97,58 @@ module ConcernsOnRails
       # `as_json` / `to_json` too. Fields dropped by `only:`/`except:` stay
       # dropped; undeclared fields in `masked:` raise.
       def serializable_hash(options = nil)
-        hash = super
         masked = options && options[:masked]
-        return hash unless masked
+        return super unless masked
+
+        # Rails hands a nested `include:` an empty options Hash, so a child
+        # would serialize unmasked while the caller believes the whole
+        # document is masked. Carry the request down; a child that is not
+        # Maskable ignores the unknown option. Children mask all of their own
+        # declared fields -- a parent's field list names the PARENT's columns.
+        hash = super(maskable_masked_options(options))
 
         maskable_fields_for(masked).each do |field|
           next unless hash.key?(field.to_s)
 
-          hash[field.to_s] = self.class.maskable_rules.fetch(field).call(self[field])
+          # Mask what was serialized, not the raw column: an overridden reader
+          # or a Sanitizable(on: :read) field must not slip its unfiltered
+          # value into the response through the masker.
+          hash[field.to_s] = self.class.maskable_rules.fetch(field).call(hash[field.to_s])
         end
         hash
+      end
+
+      # Propagate `masked: true` into every `include:` entry that does not
+      # already say otherwise, leaving the caller's Hash untouched.
+      def maskable_masked_options(options)
+        included = options[:include]
+        return options if included.blank?
+
+        options.merge(include: maskable_masked_includes(included))
+      end
+
+      def maskable_masked_includes(included)
+        case included
+        when Symbol, String then { included.to_sym => { masked: true } }
+        when Array then included.map { |entry| maskable_masked_includes(entry) }.reduce({}, :merge)
+        when Hash then included.to_h { |name, nested| [name, maskable_masked_child(nested)] }
+        else included
+        end
+      end
+
+      def maskable_masked_child(nested)
+        return { masked: true } unless nested.is_a?(Hash)
+
+        nested.key?(:masked) ? nested : nested.merge(masked: true)
       end
 
       def maskable_fields_for(masked)
         declared = self.class.maskable_rules.keys
         return declared if masked == true
+
+        unless MASKED_OPTION_TYPES.any? { |type| masked.is_a?(type) }
+          raise ArgumentError, "#{LABEL}: masked: takes true or a list of declared fields, got #{masked.class}"
+        end
 
         Array(masked).map(&:to_sym).each do |field|
           next if declared.include?(field)
@@ -117,7 +156,7 @@ module ConcernsOnRails
           raise ArgumentError, "#{LABEL}: #{field} is not a maskable field (declared: #{declared.join(', ')})"
         end
       end
-      private :maskable_fields_for
+      private :maskable_fields_for, :maskable_masked_options, :maskable_masked_includes, :maskable_masked_child
     end
   end
 end

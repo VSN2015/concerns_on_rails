@@ -10,6 +10,11 @@ describe ConcernsOnRails::Models::Maskable do
         t.string :ssn
         t.integer :age
       end
+
+      create_table :maskable_profiles, force: true do |t|
+        t.integer :maskable_user_id
+        t.string :email
+      end
     end
   end
 
@@ -20,7 +25,9 @@ describe ConcernsOnRails::Models::Maskable do
       ActiveRecord::Base.connection.drop_table(table)
     end
 
-    Object.send(:remove_const, :MaskableUser) if Object.const_defined?(:MaskableUser)
+    %i[MaskableUser MaskableProfile].each do |const|
+      Object.send(:remove_const, const) if Object.const_defined?(const)
+    end
   end
 
   describe "presets (non-destructive readers)" do
@@ -213,6 +220,46 @@ describe ConcernsOnRails::Models::Maskable do
       expect(user.as_json(except: [:email], masked: true)).not_to have_key("email")
       parsed = JSON.parse(user.to_json(masked: true, methods: :masked_email))
       expect(parsed.values_at("email", "masked_email")).to eq(["j*******@example.com", "j*******@example.com"])
+    end
+
+    it "carries masked: into a nested include: instead of serializing the child raw" do
+      parent = user # defines MaskableUser before the association is declared
+
+      class MaskableProfile < TestModel
+        self.table_name = "maskable_profiles"
+        include ConcernsOnRails::Models::Maskable
+
+        maskable :email, with: :email
+      end
+      MaskableUser.has_many :maskable_profiles, class_name: "MaskableProfile", foreign_key: :maskable_user_id
+      MaskableProfile.create!(maskable_user_id: parent.id, email: "secret.person@example.com")
+
+      json = parent.as_json(masked: true, include: :maskable_profiles)
+      expect(json["maskable_profiles"].first["email"]).to eq("s************@example.com")
+
+      # an explicit per-child setting still wins
+      raw = parent.as_json(masked: true, include: { maskable_profiles: { masked: false } })
+      expect(raw["maskable_profiles"].first["email"]).to eq("secret.person@example.com")
+    end
+
+    it "masks the serialized value, not the raw column" do
+      klass = Class.new(TestModel) do
+        self.table_name = "maskable_users"
+        include ConcernsOnRails::Models::Maskable
+
+        maskable :email, with: ->(value) { "[#{value}]" }
+
+        def email
+          super.to_s.upcase # an overridden reader is what as_json serializes
+        end
+      end
+      record = klass.create!(email: "john.doe@example.com")
+      expect(record.as_json(masked: true)["email"]).to eq("[JOHN.DOE@EXAMPLE.COM]")
+    end
+
+    it "rejects a masked: shape that is neither true nor a field list" do
+      expect { user.as_json(masked: { email: true }) }
+        .to raise_error(ArgumentError, /masked: takes true or a list of declared fields, got Hash/)
     end
 
     it "raises for an undeclared field in masked:" do
