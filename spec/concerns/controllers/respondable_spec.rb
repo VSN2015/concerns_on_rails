@@ -1,4 +1,5 @@
 require "spec_helper"
+require "support/integration_harness"
 
 describe ConcernsOnRails::Controllers::Respondable do
   let(:controller_class) do
@@ -78,7 +79,7 @@ describe ConcernsOnRails::Controllers::Respondable do
       c.render_error(message: "Validation failed", status: :unprocessable_entity, code: "record_invalid",
                      errors: ["Name can't be blank"])
       expect(c.rendered[:content_type]).to eq("application/problem+json")
-      expect(c.rendered[:status]).to eq(:unprocessable_entity)
+      expect(c.rendered[:status]).to eq(422) # the Integer: see the deprecation example below
       expect(c.rendered[:json]).to eq(
         type: "https://api.example.com/problems/record_invalid",
         title: Rack::Utils::HTTP_STATUS_CODES[422],
@@ -94,18 +95,50 @@ describe ConcernsOnRails::Controllers::Respondable do
       # Rack::Utils.status_code call for the old name. 422 is render_error's
       # default and the status of several ErrorHandleable handlers, so falling
       # through would log a deprecation line on every validation failure.
-      c = problem_class.new
-      output = Kernel.instance_method(:warn)
-      captured = []
-      Kernel.send(:define_method, :warn) { |*args| captured.concat(args) }
-      begin
-        c.render_error(message: "nope", status: :unprocessable_entity, code: "record_invalid")
-      ensure
-        Kernel.send(:define_method, :warn, output)
+      # This has to run through the REAL stack: ActionDispatch::Response#status=
+      # is what re-converts the symbol, and FakeController never renders.
+      real = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Respondable
+
+        respondable_by error_format: :problem_details
+
+        def show
+          render_error(message: "nope", status: :unprocessable_entity, code: "record_invalid")
+        end
       end
 
-      expect(c.rendered[:json][:status]).to eq(422)
-      expect(captured.join).not_to include("deprecated")
+      captured = StringIO.new
+      original = $stderr
+      begin
+        $stderr = captured
+        result = IntegrationHarness.dispatch(real, :show)
+      ensure
+        $stderr = original
+      end
+
+      expect(result.status).to eq(422)
+      expect(result.header("Content-Type")).to include("application/problem+json")
+      expect(JSON.parse(result.body)["status"]).to eq(422)
+      expect(captured.string).not_to include("deprecated")
+    end
+
+    it "keeps each respondable_by option independent of the other" do
+      # A nil default meaning "not passed" silently reset the option the call
+      # did not name: problem details turned off, or the type base wiped.
+      base = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Respondable
+
+        respondable_by error_format: :problem_details, problem_type_base: "https://api.example.com/problems"
+      end
+      base.respondable_by problem_type_base: "https://api.example.com/v2"
+      expect(base.respondable_error_format).to eq(:problem_details)
+
+      child = Class.new(base)
+      child.respondable_by error_format: :problem_details
+      expect(child.respondable_problem_type_base).to eq("https://api.example.com/v2")
+
+      child.respondable_by problem_type_base: nil # an explicit nil still clears it
+      expect(child.respondable_problem_type_base).to be_nil
     end
 
     it "uses about:blank as the type without a code, and without a type base; omits absent members" do

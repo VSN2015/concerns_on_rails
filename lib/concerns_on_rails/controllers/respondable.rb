@@ -68,6 +68,8 @@ module ConcernsOnRails
 
       ERROR_FORMATS = %i[envelope problem_details].freeze
       PROBLEM_JSON = "application/problem+json".freeze
+      # Distinguishes "not passed" from an explicit nil in respondable_by.
+      UNSET = Object.new.freeze
 
       included do
         class_attribute :respondable_error_format, instance_accessor: false, default: :envelope
@@ -78,14 +80,22 @@ module ConcernsOnRails
         # `error_format:` :envelope (default) or :problem_details (RFC 9457).
         # `problem_type_base:` is prefixed to `code` to form the `type` URI
         # (without it, or without a code, `type` is "about:blank").
-        def respondable_by(error_format: :envelope, problem_type_base: nil)
-          format = error_format.to_sym
-          unless ERROR_FORMATS.include?(format)
-            raise ArgumentError, "#{LABEL}: error_format must be one of #{ERROR_FORMATS.map(&:inspect).join(', ')}"
+        def respondable_by(error_format: UNSET, problem_type_base: UNSET)
+          unless error_format == UNSET
+            format = error_format.to_sym
+            unless ERROR_FORMATS.include?(format)
+              raise ArgumentError, "#{LABEL}: error_format must be one of #{ERROR_FORMATS.map(&:inspect).join(', ')}"
+            end
+
+            self.respondable_error_format = format
           end
 
-          self.respondable_error_format = format
-          self.respondable_problem_type_base = problem_type_base&.to_s
+          # A nil default would mean "not passed" here, so a subclass declaring
+          # only error_format: would wipe an inherited problem_type_base (every
+          # type back to about:blank), and a call passing only
+          # problem_type_base: would silently switch the format back to
+          # :envelope -- turning problem details off.
+          self.respondable_problem_type_base = problem_type_base&.to_s unless problem_type_base == UNSET
         end
       end
 
@@ -196,11 +206,15 @@ module ConcernsOnRails
           status: status_code,
           detail: message
         }
-        body[:instance] = request.path if respond_to?(:request) && request.respond_to?(:path) && request.path
+        body[:instance] = request.path if respond_to?(:request, true) && request.respond_to?(:path) && request.path
         body[:code] = code if code
         body[:errors] = errors if errors
 
-        render json: body, status: status, content_type: PROBLEM_JSON
+        # The Integer, not the original symbol: ActionDispatch::Response#status=
+        # runs it through Rack::Utils.status_code, which deprecation-warns for
+        # :unprocessable_entity -- render_error's own default, so every
+        # validation failure printed one.
+        render json: body, status: status_code, content_type: PROBLEM_JSON
       end
 
       def problem_type_for(code)

@@ -48,12 +48,16 @@ No generator, initializer, or configuration macro is required. Including the mod
 
 ### `respondable_by(error_format: :envelope, problem_type_base: nil)`
 
+Both options are independent: a call naming only one leaves the other as it was, and a subclass inherits whatever it does not restate. Pass `problem_type_base: nil` explicitly to clear it.
+
 Optional. Without it `render_error` emits the classic envelope below.
 
 | Option | Values | Default | Description |
 |---|---|---|---|
 | `error_format:` | `:envelope`, `:problem_details` | `:envelope` | `:problem_details` makes `render_error` emit an RFC 9457 document with `Content-Type: application/problem+json`: `type`, `title` (the HTTP reason phrase), `status` (integer), `detail` (the message), `instance` (the request path when a request is available), plus `code` and `errors` as extension members when given. Anything else raises `ArgumentError`. |
 | `problem_type_base:` | String URI | `nil` | Prefix joined with `code` (one slash) to form `type`, e.g. `https://api.example.com/problems/record_invalid`. Without a base, or without a code, `type` is `about:blank`. |
+
+**An app-defined `render_error` bypasses this setting.** The sibling concerns render through `Support::ErrorEnvelope`, which calls the host controller's `render_error` when it has one. Overriding that method with the documented `(message:, status:, code:)` contract replaces the gem's implementation, so `respondable_by` no longer has anything to act on and your override decides the format.
 
 Every concern in this gem that renders an error delegates to `render_error` when Respondable is included, so this one declaration changes the shape of every 4xx they produce. `render_success` is unaffected.
 
