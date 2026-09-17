@@ -190,7 +190,7 @@ describe ConcernsOnRails::Schedulable do
 
           schedulable_by
         end
-      end.to raise_error(ArgumentError, /does not exist/)
+      end.to raise_error(ArgumentError, /'starts_at' and 'ends_at' do not exist/)
     end
 
     it "raises ArgumentError when both starts_at and ends_at are nil" do
