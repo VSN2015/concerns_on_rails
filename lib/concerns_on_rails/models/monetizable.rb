@@ -39,7 +39,6 @@ module ConcernsOnRails
 
       LABEL = "ConcernsOnRails::Models::Monetizable".freeze
       AGGREGATES = %i[sum average minimum maximum].freeze
-      FORMAT_OPTIONS = %i[unit precision delimiter separator subunit_to_unit].freeze
 
       included do
         class_attribute :monetizable_rules, instance_accessor: false, default: {}
@@ -69,17 +68,6 @@ module ConcernsOnRails
             define_money_accessors(cents_field.to_sym, name, config)
             define_money_aggregates(cents_field.to_sym, name, config)
           end
-        end
-
-        # Merge per-call display overrides into a field's formatting config,
-        # rejecting typos (`units:`) instead of silently ignoring them.
-        def money_format_options(config, overrides)
-          return config if overrides.empty?
-
-          unknown = overrides.keys - FORMAT_OPTIONS
-          raise ArgumentError, "#{LABEL}: unknown formatting option(s): #{unknown.join(', ')}" if unknown.any?
-
-          config.merge(overrides)
         end
       end
 
@@ -112,8 +100,8 @@ module ConcernsOnRails
           end
 
           define_method("formatted_#{name}") do |**overrides|
-            cents = self[cents_field]
-            cents.nil? ? nil : ConcernsOnRails::Support::Money.format(cents, self.class.money_format_options(config, overrides))
+            options = ConcernsOnRails::Support::Money.format_options(config, overrides, LABEL)
+            ConcernsOnRails::Support::Money.format_each(self[cents_field], options)
           end
         end
 
@@ -125,13 +113,12 @@ module ConcernsOnRails
           subunit = config[:subunit_to_unit]
           AGGREGATES.each do |aggregate|
             define_singleton_method("#{aggregate}_#{name}") do
-              cents = public_send(aggregate, cents_field)
-              cents.nil? ? nil : BigDecimal(cents.to_s) / subunit
+              ConcernsOnRails::Support::Money.decimal(public_send(aggregate, cents_field), subunit)
             end
 
             define_singleton_method("formatted_#{aggregate}_#{name}") do |**overrides|
-              cents = public_send(aggregate, cents_field)
-              cents.nil? ? nil : ConcernsOnRails::Support::Money.format(cents, money_format_options(config, overrides))
+              options = ConcernsOnRails::Support::Money.format_options(config, overrides, LABEL)
+              ConcernsOnRails::Support::Money.format_each(public_send(aggregate, cents_field), options)
             end
           end
         end

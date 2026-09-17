@@ -161,6 +161,18 @@ describe ConcernsOnRails::Models::Monetizable do
       expect(klass.none.maximum_price).to be_nil
     end
 
+    it "maps a grouped relation's aggregate instead of feeding the Hash to BigDecimal" do
+      grouped = klass.group(:total_cents).sum_price
+      expect(grouped[100_000]).to eq(BigDecimal("19.99"))
+      expect(grouped[250_050]).to eq(BigDecimal("5.01"))
+      expect(grouped[0]).to eq(0) # SUM over that group's single NULL row, as AR reports it
+
+      formatted = klass.group(:total_cents).formatted_sum_price
+      expect(formatted[100_000]).to eq("$19.99")
+      expect(formatted[250_050]).to eq("$5.01")
+      expect(formatted[0]).to eq("$0.00")
+    end
+
     it "formatted_<aggregate>_<name> uses the field's formatting options" do
       expect(klass.formatted_sum_price).to eq("$25.00")
       expect(klass.formatted_average_price).to eq("$12.50")

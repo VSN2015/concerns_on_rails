@@ -167,7 +167,11 @@ Order.paid.formatted_sum_total(unit: "EUR ")   # => "EUR 3.500,50"
 
 - **No ActiveRecord validations are added.** The concern defines no presence, numericality, or format validations. Add those to your model manually if required.
 
-- **Aggregates are class methods, not scopes.** `sum_price` and friends call `sum`/`average`/`minimum`/`maximum` on the current scope, so they work at the end of any relation chain but return a value, not a relation. `average` follows SQL semantics and skips `NULL` rows. On PostgreSQL the raw `AVG` is already a `BigDecimal`; on SQLite/MySQL it is cast through `BigDecimal(value.to_s)` before the division, so there is no float drift.
+- **Aggregates are class methods, not scopes.** `sum_price` and friends call `sum`/`average`/`minimum`/`maximum` on the current scope, so they work at the end of any relation chain but return a value, not a relation. `average` follows SQL semantics and skips `NULL` rows. The raw aggregate is re-wrapped through `BigDecimal(value.to_s)` before the division on every adapter, so there is no float drift.
+
+- **Grouped relations return a Hash.** `Order.group(:state).sum_total` gives `{"paid" => BigDecimal("2,000.00"), ...}` — each value converted to major units, and `formatted_sum_total` formats each value the same way. A group whose rows are all `NULL` reports whatever ActiveRecord reports for it (`0` for `SUM`).
+
+- **`average_` is not rounded.** It returns the raw quotient, so an average of three prices can carry a long decimal tail. `precision:` rounds only the `formatted_` twin (half-up). Round `average_` yourself if you are storing or comparing it.
 - **No scope or callback hooks are defined.** This concern is purely about accessor and formatting methods; it does not touch `default_scope`, `before_save`, or any other ActiveRecord callback.
 
 ## Changed in 1.22.0
