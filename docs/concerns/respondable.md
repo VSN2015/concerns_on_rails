@@ -71,7 +71,7 @@ Renders a JSON success envelope and halts the action. Returns the result of `ren
 | `status` | Symbol or Integer | `:ok` | HTTP status code passed directly to `render`. Any status symbol or integer accepted by Rails is valid (e.g. `:created`, `:ok`, `200`). |
 | `meta` | Hash | `{}` | Optional metadata (pagination counts, cursors, etc.). Included in the body only when the hash is non-empty; omitted entirely otherwise. |
 | `location` | String, or anything `url_for` accepts | `nil` | Sets the `Location` response header — the REST convention for `201 Created` (and `202`/`303`). A String is used verbatim; any other value (a record, a Hash of route options) is passed through the controller's `url_for` when it has one. Nothing is set when `nil`. |
-| `headers` | Hash | `{}` | Extra response headers to set alongside the body (`"X-Request-Id" => request.request_id`, `"Deprecation"`, …). Values are coerced with `to_s` and stripped of CR/LF, so an Integer cannot break `Rack::Lint` and caller data cannot split the response. |
+| `headers` | Hash | `{}` | Extra response headers to set alongside the body (`"X-Request-Id" => request.request_id`, `"Deprecation"`, …). Values are coerced with `to_s` and stripped of CR/LF, so an Integer cannot break `Rack::Lint` and caller data cannot split the response. `Link` is appended to any existing value (RFC 8288 is additive, and Paginatable / Deprecatable may already have written entries); every other name is set outright. `nil` is treated as no headers. |
 
 Output envelope:
 
@@ -85,13 +85,13 @@ The `meta` key is absent when `meta` is empty (the default), keeping simple resp
 
 #### `render_created(data: nil, location: nil, meta: {}, headers: {})`
 
-`render_success` with `status: :created` — the create-action one-liner: `render_created(data: article, location: article_url(article))`. Same envelope, same `Location`/`headers` handling.
+`render_success` with `status: :created` — the create-action one-liner: `render_created(data: article, location: article_url(article))`. Same envelope, same `Location`/`headers` handling. The headers are written before `render_success` is called rather than forwarded to it, so an app that overrode `render_success` with the older `(data:, status:, meta:)` signature keeps working and still gets its `Location`.
 
 ---
 
 #### `render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")`
 
-Renders a validation failure as an error envelope (or problem document) with the object's `errors.full_messages` as `details` — omitted when there are none, exactly the shape `ErrorHandleable` produces for a rescued `ActiveRecord::RecordInvalid`, so an `if record.save … else render_invalid(record)` action and a `save!` action look identical to clients.
+Renders a validation failure through `Support::ErrorEnvelope`, with the object's `errors.full_messages` as `details` — omitted when there are none, so an app-defined `render_error(message:, status:, code:)` override never receives an unknown `errors:` keyword. The result is an error envelope (or problem document) exactly the shape `ErrorHandleable` produces for a rescued `ActiveRecord::RecordInvalid`, so an `if record.save … else render_invalid(record)` action and a `save!` action look identical to clients.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

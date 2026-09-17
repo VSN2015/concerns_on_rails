@@ -261,6 +261,46 @@ describe ConcernsOnRails::Controllers::Respondable do
         .to raise_error(ArgumentError, /render_invalid expects a record \(responding to #errors\) or an ActiveModel::Errors/)
     end
 
+    it "keeps working against an app override with the older documented signature" do
+      # Several concerns document the contract as render_error(message:,
+      # status:, code:) and render_success(data:, status:, meta:). Passing the
+      # new keywords unconditionally raised ArgumentError on those.
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Respondable
+
+        def render_success(data: nil, status: :ok, meta: {})
+          @rendered = { json: { legacy_success: data, meta: meta }, status: status }
+        end
+
+        def render_error(message:, status: :unprocessable_entity, code: nil)
+          @rendered = { json: { legacy_error: message, code: code }, status: status }
+        end
+      end
+
+      created = klass.new
+      expect { created.render_created(data: { id: 1 }, location: "/articles/1") }.not_to raise_error
+      expect(created.rendered[:status]).to eq(:created)
+      expect(created.response.headers["Location"]).to eq("/articles/1") # still set, just not forwarded
+
+      invalid = klass.new
+      expect { invalid.render_invalid(RespondableInvalidModel.new("ok")) }.not_to raise_error
+      expect(invalid.rendered[:json][:legacy_error]).to eq("Validation failed")
+    end
+
+    it "appends to an existing Link header instead of clobbering it" do
+      klass = Class.new(FakeController) { include ConcernsOnRails::Controllers::Respondable }
+      c = klass.new
+      c.response.set_header("Link", %(</articles?page=2>; rel="next"))
+      c.render_success(data: [], headers: { "Link" => %(</docs>; rel="help") })
+
+      expect(c.response.headers["Link"]).to eq(%(</articles?page=2>; rel="next", </docs>; rel="help"))
+    end
+
+    it "tolerates headers: nil" do
+      klass = Class.new(FakeController) { include ConcernsOnRails::Controllers::Respondable }
+      expect { klass.new.render_success(data: 1, headers: nil) }.not_to raise_error
+    end
+
     it "render_invalid follows the problem-details format when configured" do
       klass = Class.new(FakeController) do
         include ConcernsOnRails::Controllers::Respondable

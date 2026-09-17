@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "rack/utils"
+require "concerns_on_rails/support/error_envelope"
 
 module ConcernsOnRails
   module Controllers
@@ -101,8 +102,13 @@ module ConcernsOnRails
       end
 
       # 201 Created with an optional Location — the create-action one-liner.
+      # The headers are written here rather than forwarded, so an app that
+      # overrode render_success with the older `(data:, status:, meta:)`
+      # signature still gets its Location set and never sees an unknown
+      # keyword.
       def render_created(data: nil, location: nil, meta: {}, headers: {})
-        render_success(data: data, status: :created, meta: meta, location: location, headers: headers)
+        respondable_set_headers(location, headers)
+        render_success(data: data, status: :created, meta: meta)
       end
 
       # A validation failure as an error envelope (or problem document):
@@ -110,7 +116,12 @@ module ConcernsOnRails
       # the exact shape ErrorHandleable renders for a rescued RecordInvalid.
       def render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")
         messages = respondable_error_messages(record_or_errors)
-        render_error(message: message, status: status, code: code, errors: messages.empty? ? nil : messages)
+        # Through the shared envelope: it omits the errors: keyword when there
+        # is nothing to report, which is what keeps an app-defined
+        # `render_error(message:, status:, code:)` override working.
+        ConcernsOnRails::Support::ErrorEnvelope.render(
+          self, message: message, status: status, code: code, details: messages.presence
+        )
       end
 
       # Error envelope:
@@ -135,7 +146,16 @@ module ConcernsOnRails
         return unless respond_to?(:response) && response.respond_to?(:set_header)
 
         response.set_header("Location", respondable_header_value(respondable_location(location))) if location
-        headers.each { |name, value| response.set_header(name.to_s, respondable_header_value(value)) }
+        (headers || {}).each { |name, value| respondable_write_header(name.to_s, respondable_header_value(value)) }
+      end
+
+      # Link is additive by definition (RFC 8288) and Paginatable /
+      # Deprecatable may already have written entries, so append to it rather
+      # than dropping theirs. Everything else is a plain set.
+      def respondable_write_header(name, value)
+        existing = response.headers[name] if name.casecmp("Link").zero?
+        value = [existing, value].reject { |part| part.nil? || part.empty? }.join(", ") if existing.present?
+        response.set_header(name, value)
       end
 
       # These are the gem's first response headers built from CALLER-supplied
