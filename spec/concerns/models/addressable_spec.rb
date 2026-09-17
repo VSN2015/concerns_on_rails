@@ -715,6 +715,54 @@ describe ConcernsOnRails::Models::Addressable do
       expect(klass.new(country: "US").address_fingerprint).to be_nil # a country alone is not an address
     end
 
+    it "stamps after every before_validation, so a sibling concern cannot desync the column" do
+      # Normalizable registers its own before_validation AFTER Addressable's,
+      # so a fingerprint computed inside normalize_address would be taken from
+      # a city that is about to change -- and with_address would then miss the
+      # record itself.
+      klass = Class.new(TestModel) do
+        self.table_name = "fingerprinted_locations"
+        include ConcernsOnRails::Models::Addressable
+        include ConcernsOnRails::Models::Normalizable
+
+        addressable_by fingerprint: :address_fingerprint
+        normalizable :city, with: ->(value) { value.to_s.sub(/\s*\(.*\)\z/, "") }
+      end
+
+      record = klass.create!(line1: "1 Infinite Loop", city: "Cupertino (HQ)", state: "CA",
+                             postal_code: "95014", country: "US")
+      expect(record.city).to eq("Cupertino")
+      expect(record.reload.address_fingerprint).to eq(record.address_fingerprint)
+      expect(klass.with_address(record).count).to eq(1)
+    end
+
+    it "stamps on save(validate: false) too" do
+      record = klass.new(apple)
+      record.save(validate: false)
+      expect(record.reload.address_fingerprint).to eq(record.address_fingerprint)
+    end
+
+    it "keeps ActiveModel's address_changed? when the model has its own address column" do
+      ActiveRecord::Schema.define do
+        create_table :blob_locations, force: true do |t|
+          t.string :address
+          t.string :line1
+          t.string :city
+        end
+      end
+      legacy = Class.new(TestModel) do
+        self.table_name = "blob_locations"
+        include ConcernsOnRails::Models::Addressable
+
+        addressable_by required: %i[line1 city]
+      end
+
+      record = legacy.create!(address: "1 Infinite Loop, Cupertino", line1: "1 Infinite Loop", city: "Cupertino")
+      record.address = "2 Infinite Loop, Cupertino"
+      expect(record.address_changed?).to be(true) # Rails' dirty predicate, not the concern's
+      expect(record.address_parts_changed?).to be(false)
+    end
+
     it "same_address_as? compares fingerprints and address_changed? tracks the mapped columns" do
       a = klass.new(apple)
       expect(a.same_address_as?(klass.new(apple_shouty))).to be(true)

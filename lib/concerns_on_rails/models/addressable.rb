@@ -55,6 +55,13 @@ module ConcernsOnRails
         # `validate :validate_address` is registered by `addressable_by` (not here) so it can
         # carry the optional if:/unless: condition. Normalization always runs.
         before_validation :normalize_address
+        # Stamping is its OWN callback, not a tail call inside normalize_address:
+        # a sibling concern's later before_validation (Normalizable, say) can
+        # still rewrite a mapped column, and a fingerprint computed before that
+        # would disagree with `address_fingerprint` -- leaving `with_address`
+        # unable to find the record itself. before_save also covers
+        # `save(validate: false)`.
+        before_save :stamp_address_fingerprint
       end
 
       # Defined as a real module (not `class_methods do`) so the public macro and
@@ -80,6 +87,7 @@ module ConcernsOnRails
           self.addressable_fingerprint_column = resolve_fingerprint_column(fingerprint)
           ensure_required_columns!
           register_address_validation(condition)
+          define_address_changed_alias
         end
 
         # Records stored with the same address fingerprint as `value` (a record,
@@ -98,6 +106,22 @@ module ConcernsOnRails
         end
 
         private
+
+        # `address_changed?` would override ActiveModel's generated predicate on
+        # a model that also carries a plain `address` column -- the legacy-blob
+        # shape apps arrive with -- silently reporting false for a real change.
+        # Define it only when the name is free; `address_parts_changed?` is
+        # always available.
+        def define_address_changed_alias
+          has_address_column = begin
+            column_names.include?("address")
+          rescue StandardError
+            false # schema unreachable (db:create, assets:precompile) -- as ColumnGuard does
+          end
+          return if has_address_column
+
+          alias_method :address_changed?, :address_parts_changed?
+        end
 
         def resolve_fingerprint_column(fingerprint)
           return nil if fingerprint.nil?
@@ -218,7 +242,6 @@ module ConcernsOnRails
           normalized = normalize_part(part, country, value)
           self[column] = normalized unless normalized == value
         end
-        stamp_address_fingerprint
       end
 
       # --- Validation -----------------------------------------------------------
@@ -287,8 +310,11 @@ module ConcernsOnRails
         !fingerprint.nil? && fingerprint == other.address_fingerprint
       end
 
-      # Any mapped address column has an unsaved change.
-      def address_changed?
+      # Any mapped address column has an unsaved change. `address_changed?` is
+      # the documented spelling, but a model with its own `address` column
+      # already has that method from ActiveModel dirty tracking, so the macro
+      # only aliases it where nothing would be shadowed.
+      def address_parts_changed?
         self.class.addressable_fields.values.any? { |column| attribute_changed?(column) }
       end
 

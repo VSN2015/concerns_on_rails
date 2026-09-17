@@ -109,7 +109,7 @@ The macro `addressable_by` accepts any combination of column-override keyword pa
 | `lengths:` | Hash | `{}` | Per-part length constraints keyed by canonical part name. An `Integer` value (e.g. `line1: 100`) sets a positive maximum with no minimum. A `Range` value (e.g. `city: 3..50`) sets both bounds; endless (`3..`) and beginless (`..50`) ranges are supported. Bounds must be non-negative integers; inverted, empty, or float ranges raise `ArgumentError` at load time. Length is measured on the normalized value. |
 | `allow_blank:` | Boolean or Array of Symbols | `false` | Parts whose length check is skipped when the value is blank. `true` exempts all parts; an Array (e.g. `%i[state line2]`) exempts specific parts. Independent of `required:` — a required part that is blank still fails presence validation regardless of this setting. |
 | `normalize_country:` | Boolean | `false` | When `true`, canonicalizes the country value to its ISO 3166-1 alpha-2 code during normalization: recognized English names (`"Canada"`, `"United States"`) and ISO alpha-3 codes (`"CAN"`, `"USA"`) are mapped to their alpha-2 equivalents. Unrecognized values are left unchanged. Also enables postal-code and state validation to recognize named countries. |
-| `fingerprint:` | `Symbol` | `nil` | A `string` column that receives `address_fingerprint` in `before_validation`, after normalization, whenever the value differs. Add a (non-unique) index on it; it is what `with_address` queries. Validated at declaration. |
+| `fingerprint:` | `Symbol` | `nil` | A `string` column that receives `address_fingerprint` in `before_save`, after every `before_validation` has run, whenever the value differs. Add a (non-unique) index on it; it is what `with_address` queries. Validated at declaration. |
 | `verify_with:` | Callable | `nil` | An optional callable (lambda or proc) that receives the record and performs real-world deliverability verification. Runs only after all structural validations pass. Return values are interpreted as described in the Examples section. |
 | `if:` | Symbol, Proc, or Array | `nil` | Standard Rails validation condition. When present, address validations are skipped unless the condition holds. Normalization (`before_validation`) always runs unconditionally. |
 | `unless:` | Symbol, Proc, or Array | `nil` | Standard Rails validation condition. When present, address validations are skipped when the condition holds. Normalization still runs unconditionally. |
@@ -127,7 +127,8 @@ The macro `addressable_by` accepts any combination of column-override keyword pa
 | `address_attributes` | Returns a Hash of `{ canonical_part => value }` for every present part. Useful for passing to serializers or external verifiers. |
 | `address_fingerprint` | SHA-256 hex digest of the normalized address: every canonical part downcased and squished, the postal code with its spaces removed, the country resolved the way validation resolves it (a blank country becomes `default_country`, a name/alpha-3 becomes alpha-2 under `normalize_country: true`). Two rows that differ only in case, whitespace, postal formatting or an omitted default country hash the same; a change to any part (including `line2`) changes it. `nil` when no address part is present (a country alone does not count). |
 | `same_address_as?(other)` | `true` when both records have a fingerprint and they are equal. Two blank addresses are never "the same". |
-| `address_changed?` | `true` when any mapped address column has an unsaved change. |
+| `address_parts_changed?` | `true` when any mapped address column has an unsaved change. |
+| `address_changed?` | The same predicate under its documented name. Defined only when the model has no `address` column of its own, so it never shadows ActiveModel's dirty predicate for such a column; use `address_parts_changed?` when it does. |
 
 ### Class methods
 
@@ -242,6 +243,8 @@ b = Location.create!(line1: "1 INFINITE LOOP", city: "cupertino", state: "CA", p
 a.same_address_as?(b)                      # => true
 Location.with_address(a).where.not(id: a.id)   # => [b]
 Location.where.not(address_fingerprint: nil).group(:address_fingerprint).having("COUNT(*) > 1").count   # every duplicated address, one query
+
+Location.find_each(&:save)   # backfill: existing rows keep a NULL fingerprint until they are re-saved
 ```
 
 ## Notes & gotchas
@@ -271,6 +274,10 @@ Location.where.not(address_fingerprint: nil).group(:address_fingerprint).having(
 - **State validation covers only US and CA.** When `validate_state: true`, the check is a no-op for any country other than `"US"` or `"CA"`. The USPS set includes DC, territories (AS, GU, MP, PR, VI); the Canadian set covers all 10 provinces and 3 territories.
 
 - **Error messages are plain English strings without i18n lookup.** The concern does not use Rails' `I18n.t` for its messages, so no locale files are required. Messages mirror Rails' own length-error phrasing, including singular/plural: `"is too long (maximum is 1 character)"` vs `"is too long (maximum is 5 characters)"`.
+
+- **The stored fingerprint is only as fresh as the last `save`.** Existing rows keep `NULL` until re-saved, so backfill with `Model.find_each(&:save)` after adding the column; `update_columns`, `insert_all` and `upsert_all` bypass callbacks and leave it stale. `address_fingerprint` itself is always computed from the record in memory, so it stays correct either way -- it is `with_address` that reads the column.
+
+- **The digest is unkeyed.** An address space is small enough to enumerate, so treat the fingerprint column as revealing the address. If a mapped column is also `encryptable`, storing this alongside it defeats that encryption; Encryptable's own blind index uses a keyed HMAC for exactly that reason.
 
 - **The concern has no runtime gem dependencies beyond ActiveSupport.** `friendly_id` and `acts_as_list` are not used here. The only requirement is Rails 5.0+ (for `class_attribute` and `before_validation`).
 
