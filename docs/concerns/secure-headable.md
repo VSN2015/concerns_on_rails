@@ -51,13 +51,14 @@ Registers one or more header preset symbols and/or arbitrary custom headers. Can
 | `:same_origin_opener_allow_popups` | `Cross-Origin-Opener-Policy` | `same-origin-allow-popups` — the popup-friendly variant used by `:recommended` |
 | `:require_corp_embedder` | `Cross-Origin-Embedder-Policy` | `require-corp` — every cross-origin subresource must opt in via CORS/CORP |
 | `:same_origin_resource` | `Cross-Origin-Resource-Policy` | `same-origin` — other origins cannot embed your responses via `<img>`/`<script>` (CORS fetches are unaffected) |
-| `:no_sensitive_permissions` | `Permissions-Policy` | `accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()` |
+| `:no_sensitive_permissions` | `Permissions-Policy` | `accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()` — an empty allowlist denies **your own pages** too, so opt in only when the app uses none of these |
+| `:self_sensitive_permissions` | `Permissions-Policy` | The same list scoped to `(self)`: third-party frames are denied, your own pages keep working. Used by `:recommended` |
 
 **Bundles** — a bundle name expands to its presets *in declaration position*, so `secure_headers :recommended, :sameorigin_frame` (or a later `secure_headers` call) relaxes a bundled header.
 
 | Bundle | Presets | Why this set |
 |---|---|---|
-| `:recommended` | `nosniff`, `deny_frame`, `no_referrer_leak`, `no_cross_domain`, `disable_legacy_xss`, `same_origin_opener_allow_popups`, `no_sensitive_permissions` | The baseline that breaks nothing: no COEP/CORP (they block cross-origin embeds of your resources and CDN assets without CORP headers) and no HSTS (belongs with `force_ssl`). Relax `deny_frame` → `:sameorigin_frame` if the app frames itself. |
+| `:recommended` | `nosniff`, `deny_frame`, `no_referrer_leak`, `no_cross_domain`, `disable_legacy_xss`, `same_origin_opener_allow_popups`, `self_sensitive_permissions` | The conservative baseline: no COEP/CORP (they block cross-origin embeds of your resources and CDN assets without CORP headers) and no HSTS (belongs with `force_ssl`). Relax `deny_frame` → `:sameorigin_frame` if the app frames itself. |
 | `:cross_origin_isolation` | `same_origin_opener`, `require_corp_embedder`, `same_origin_resource` | What `SharedArrayBuffer` and high-resolution timers require — expect to add CORS/CORP headers to every cross-origin asset first. |
 
 **Custom headers** (`**custom`): any `"Header-Name" => "value"` keyword pairs. Keys are coerced to strings via `to_s`.
@@ -136,6 +137,8 @@ end
 ```
 
 ## Notes & gotchas
+
+- **HSTS is conditional.** The `:hsts` preset is skipped on a plaintext request (RFC 6797 section 7.2 forbids it there) and never overwrites a `Strict-Transport-Security` value already on the response. It does take precedence over `ActionDispatch::SSL`, which only sets its own value when none is present, so an app using `force_ssl` with a longer `max-age` or `preload` should configure one or the other, not both.
 
 - **`:recommended` is conservative on purpose.** It picks `same-origin-allow-popups` over `same-origin` for COOP and leaves COEP/CORP out because those three are the headers that break real apps (popup logins, CDN images, embedded widgets). Opt into `:cross_origin_isolation` deliberately, after your cross-origin assets carry CORP/CORS headers.
 - **`after_action`, not `before_action`:** Headers are written after the response is rendered. This means they can reinforce or override headers that Rails middleware or the render process set earlier. It also means the `response` object is available and populated when `apply_secure_headers` runs.

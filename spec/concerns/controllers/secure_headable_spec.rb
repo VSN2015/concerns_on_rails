@@ -172,11 +172,38 @@ describe ConcernsOnRails::Controllers::SecureHeadable do
         "X-XSS-Protection" => "0",
         "Cross-Origin-Opener-Policy" => "same-origin-allow-popups"
       )
-      expect(headers).to have_key("Permissions-Policy")
+      # (self), not () -- the bundle must not deny the app its own camera,
+      # microphone, geolocation or Payment Request.
+      expect(headers["Permissions-Policy"]).to include("camera=(self)", "geolocation=(self)")
+      expect(headers["Permissions-Policy"]).not_to include("camera=()")
       expect(headers).not_to have_key("Cross-Origin-Embedder-Policy")
       expect(headers).not_to have_key("Cross-Origin-Resource-Policy")
       expect(headers).not_to have_key("Strict-Transport-Security")
       expect(headers.size).to eq(7)
+    end
+
+    it "opts into the deny-everything permissions preset explicitly" do
+      expect(headers_for(:no_sensitive_permissions)["Permissions-Policy"]).to include("camera=()", "payment=()")
+    end
+
+    it "skips HSTS over plaintext and never downgrades one already set" do
+      klass = controller_class(base_class) { secure_headers :hsts }
+
+      plain = klass.new
+      def plain.request = Struct.new(:ssl?).new(false)
+      plain.apply_secure_headers
+      expect(plain.response.headers).not_to have_key("Strict-Transport-Security")
+
+      secure = klass.new
+      def secure.request = Struct.new(:ssl?).new(true)
+      secure.apply_secure_headers
+      expect(secure.response.headers["Strict-Transport-Security"]).to eq("max-age=31536000; includeSubDomains")
+
+      preset = klass.new
+      def preset.request = Struct.new(:ssl?).new(true)
+      preset.response.set_header("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+      preset.apply_secure_headers
+      expect(preset.response.headers["Strict-Transport-Security"]).to eq("max-age=63072000; includeSubDomains; preload")
     end
 
     it ":cross_origin_isolation bundles COOP same-origin + COEP require-corp + CORP same-origin" do

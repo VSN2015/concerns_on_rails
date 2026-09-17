@@ -1731,9 +1731,10 @@ end
 | `:same_origin_opener` / `:same_origin_opener_allow_popups` | `Cross-Origin-Opener-Policy: same-origin` / `same-origin-allow-popups` |
 | `:require_corp_embedder` | `Cross-Origin-Embedder-Policy: require-corp`        |
 | `:same_origin_resource` | `Cross-Origin-Resource-Policy: same-origin`          |
-| `:no_sensitive_permissions` | `Permissions-Policy` denying camera, microphone, geolocation, payment, usb and motion sensors |
+| `:no_sensitive_permissions` | `Permissions-Policy` denying camera, microphone, geolocation, payment, usb and motion sensors to everyone, your own pages included |
+| `:self_sensitive_permissions` | The same list scoped to `(self)` — denies third-party frames, keeps first-party use |
 
-**Bundles** (expand to presets in place, so a later preset or custom pair still wins): `:recommended` = nosniff, deny_frame, no_referrer_leak, no_cross_domain, disable_legacy_xss, same_origin_opener_allow_popups, no_sensitive_permissions — deliberately *without* COEP/CORP (they block cross-origin embeds of your resources and CDN assets lacking CORP headers) and HSTS (belongs with `force_ssl`), so it breaks nothing; `:cross_origin_isolation` = same_origin_opener + require_corp_embedder + same_origin_resource (what SharedArrayBuffer / high-resolution timers require).
+**Bundles** (expand to presets in place, so a later preset or custom pair still wins): `:recommended` = nosniff, deny_frame, no_referrer_leak, no_cross_domain, disable_legacy_xss, same_origin_opener_allow_popups, self_sensitive_permissions — deliberately *without* COEP/CORP (they block cross-origin embeds of your resources and CDN assets lacking CORP headers) and HSTS (belongs with `force_ssl`); relax `deny_frame` with `:sameorigin_frame` if the app frames itself; `:cross_origin_isolation` = same_origin_opener + require_corp_embedder + same_origin_resource (what SharedArrayBuffer / high-resolution timers require).
 
 **Notes**
 - Headers are applied in an `after_action`, so they reinforce Rails' middleware defaults; later `secure_headers` declarations win on a colliding name.

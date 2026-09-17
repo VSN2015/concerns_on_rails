@@ -63,6 +63,8 @@ module ConcernsOnRails
     module SecureHeadable
       extend ActiveSupport::Concern
 
+      HSTS_HEADER = "Strict-Transport-Security".freeze
+
       # Frozen, string-only header presets, each "Header-Name" => "value".
       # :disable_legacy_xss emits "0" deliberately — the legacy browser XSS
       # auditor was itself exploitable and is gone from modern browsers
@@ -83,16 +85,24 @@ module ConcernsOnRails
         same_origin_resource: %w[Cross-Origin-Resource-Policy same-origin],
         no_sensitive_permissions: ["Permissions-Policy",
                                    "accelerometer=(), camera=(), geolocation=(), gyroscope=(), " \
-                                   "magnetometer=(), microphone=(), payment=(), usb=()"]
-      }.freeze
+                                   "magnetometer=(), microphone=(), payment=(), usb=()"],
+        # The same list scoped to `(self)`: third-party frames are denied, the
+        # app's own pages keep getting/asking for permission. This is the one
+        # that belongs in a general-purpose bundle -- an empty allowlist denies
+        # the app itself, which silently breaks getUserMedia, geolocation and
+        # Payment Request with only a console warning.
+        self_sensitive_permissions: ["Permissions-Policy",
+                                     "accelerometer=(self), camera=(self), geolocation=(self), gyroscope=(self), " \
+                                     "magnetometer=(self), microphone=(self), payment=(self), usb=(self)"]
+      }.each_value { |pair| pair.each(&:freeze).freeze }.freeze
 
       # Named sets of presets. Expanded in declaration position, so
       # `secure_headers :recommended, :sameorigin_frame` relaxes the frame rule.
       BUNDLES = {
         cross_origin_isolation: %i[same_origin_opener require_corp_embedder same_origin_resource],
         recommended: %i[nosniff deny_frame no_referrer_leak no_cross_domain disable_legacy_xss
-                        same_origin_opener_allow_popups no_sensitive_permissions]
-      }.freeze
+                        same_origin_opener_allow_popups self_sensitive_permissions]
+      }.each_value(&:freeze).freeze
 
       included do
         class_attribute :secure_headable_headers, instance_accessor: false, default: {}
@@ -151,7 +161,32 @@ module ConcernsOnRails
       def apply_secure_headers
         return unless respond_to?(:response) && response
 
-        self.class.secure_headable_headers.each { |name, value| response.set_header(name, value) }
+        self.class.secure_headable_headers.each do |name, value|
+          next if secure_headable_skip?(name)
+
+          response.set_header(name, value)
+        end
+      end
+
+      # HSTS is the one preset that is wrong to send unconditionally: RFC 6797
+      # section 7.2 forbids it over plaintext, and overwriting a value the app
+      # already set would silently shorten a longer max-age or drop `preload`.
+      def secure_headable_skip?(name)
+        return false unless name == HSTS_HEADER
+
+        secure_headable_plain_http? || secure_headable_existing_hsts.present?
+      end
+
+      def secure_headable_plain_http?
+        return false unless respond_to?(:request, true) && (req = request)
+
+        req.respond_to?(:ssl?) && !req.ssl?
+      end
+
+      def secure_headable_existing_hsts
+        return response.get_header(HSTS_HEADER) if response.respond_to?(:get_header)
+
+        response.headers[HSTS_HEADER] if response.respond_to?(:headers)
       end
     end
   end
