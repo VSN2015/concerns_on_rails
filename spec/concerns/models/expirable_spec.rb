@@ -345,19 +345,32 @@ describe ConcernsOnRails::Expirable do
       end
     end
 
-    it "fires around expire! (and expire_in!), not around extend_expiry! or clear_expiry!" do
+    it "fires when a write actually expires the record, not when one schedules it" do
       token = hooked.create!
       token.expire!
       expect(token.log).to eq(%i[before_expire after_expire])
 
       token.instance_variable_set(:@log, nil)
-      token.expire_in!(1.hour)
+      token.expire!(1.hour.ago) # a past time expires it too
       expect(token.log).to eq(%i[before_expire after_expire])
+
+      # Scheduling is not expiring: after_expire { account.downgrade! } must
+      # not run the moment a 14-day trial is set up.
+      token.instance_variable_set(:@log, nil)
+      token.expire_in!(1.hour)
+      expect(token.log).to be_nil
+      expect(token.expire!(1.day.from_now)).to be(true)
+      expect(token.log).to be_nil
 
       token.instance_variable_set(:@log, nil)
       token.extend_expiry!(by: 1.day)
       token.clear_expiry!
       expect(token.log).to be_nil
+    end
+
+    it "expire_in! rejects a non-duration instead of raising NoMethodError" do
+      expect { hooked.create!.expire_in!("soon") }
+        .to raise_error(ArgumentError, /expire_in! takes a duration/)
     end
 
     it "shares one transaction — a raising after_expire rolls the expiry back" do

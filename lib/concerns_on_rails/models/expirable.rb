@@ -97,10 +97,13 @@ module ConcernsOnRails
         value <= Time.zone.now
       end
 
-      # Lifecycle hooks — override in the model. Fired by `expire!` (and so by
-      # `expire_in!` and `expire_all`), not by `extend_expiry!` (a renewal) or
-      # `clear_expiry!`. Overriding either one moves `expire_all` to the
-      # per-record path.
+      # Lifecycle hooks — override in the model. Fired when a write actually
+      # expires the record, i.e. `expire!` with a past-or-now time (and so by
+      # `expire_all`). A FUTURE time only schedules expiry, so it fires
+      # nothing — same as `extend_expiry!` (a renewal) or `clear_expiry!`.
+      # Otherwise `after_expire { account.downgrade! }` paired with
+      # `trial.expire_in!(14.days)` would downgrade the account immediately.
+      # Overriding either hook moves `expire_all` to the per-record path.
       def before_expire; end
       def after_expire; end
 
@@ -109,18 +112,26 @@ module ConcernsOnRails
       # expiry back (SoftDeletable's pattern); a failed write (validation)
       # returns false and skips after_expire.
       def expire!(time = Time.zone.now)
+        hooks = !expirable_scheduled?(time)
         result = false
         transaction do
-          before_expire
+          before_expire if hooks
           result = update(self.class.expirable_field => time)
-          after_expire if result
+          after_expire if result && hooks
         end
         result
       end
 
       # Set an absolute lifetime from now — `token.expire_in!(15.minutes)` —
-      # whatever the current expiry. Sugar for `expire!(now + duration)`.
+      # whatever the current expiry. Sugar for `expire!(now + duration)`, so a
+      # positive duration schedules expiry and fires no hooks.
       def expire_in!(duration)
+        unless duration.respond_to?(:to_i) && !duration.is_a?(String)
+          raise ArgumentError,
+                "ConcernsOnRails::Models::Expirable: expire_in! takes a duration " \
+                "(e.g. 15.minutes), got #{duration.class}"
+        end
+
         expire!(Time.zone.now + duration)
       end
 
@@ -156,7 +167,17 @@ module ConcernsOnRails
         now = Time.zone.now
         value.nil? || value <= now ? now : value
       end
-      private :expiry_extension_base
+
+      # A write dated in the future schedules expiry rather than performing it.
+      def expirable_scheduled?(time)
+        return false if time.blank?
+
+        time.to_time > Time.zone.now
+      rescue StandardError
+        false # unparseable input: treat it as an immediate expiry, as before
+      end
+
+      private :expiry_extension_base, :expirable_scheduled?
     end
   end
 end
