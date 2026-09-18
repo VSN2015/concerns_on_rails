@@ -44,7 +44,7 @@ end
 
 ## Configuration
 
-### `auditable_by(*fields, into: :audit_log, actor: nil, max_entries: 200, max_value_length: nil)`
+### `auditable_by(*fields, into: :audit_log, actor: (unset), max_entries: 200, max_value_length: nil)`
 
 Configures the tracked fields and the audit column. Every column (tracked fields and `into:`) must exist or the macro raises `ArgumentError` at class-load time. Calling the macro a second time reconfigures the concern (last call wins).
 
@@ -52,7 +52,7 @@ Configures the tracked fields and the audit column. Every column (tracked fields
 |--------|------|---------|-------------|
 | `*fields` | one or more `Symbol`s | — (required) | The attributes to track. Tracking the audit column itself raises `ArgumentError`. |
 | `into:` | `Symbol` | `:audit_log` | The text column the JSON history is written to. |
-| `actor:` | callable or `nil` | `nil` | Evaluated with `instance_exec` on the record at save time; its return value is stamped as `"by"` on each entry. Must respond to `#call`. |
+| `actor:` | callable, `Symbol`, `false` or `nil` | unset (→ gem-wide `config.audit_actor`) | Who is stamped as `"by"`. A `Proc` is `instance_exec`'d on the record at save time, any other callable is `#call`ed, and a Symbol names a record method (`:updated_by_id`) — a Symbol naming no method raises `ArgumentError` at save time. **Omitting** the option falls back to `ConcernsOnRails.config.audit_actor`, resolved per save; passing an explicit `nil` or `false` records no `"by"` for this model, whatever is configured gem-wide. Anything else raises `ArgumentError`. |
 | `max_entries:` | positive `Integer` or `nil` | `200` | Keeps only the newest N entries (oldest are trimmed). `nil` disables trimming. |
 | `max_value_length:` | positive `Integer` or `nil` | `nil` | When set, `from`/`to` **String** values longer than the limit are stored as their first N characters plus a trailing `…` marker. Non-string values are never truncated. |
 
@@ -66,7 +66,7 @@ One entry is recorded **per changed tracked field per save**; all entries of one
 
 - Keys are strings; `audit_trail` returns exactly what `JSON.parse` produces.
 - `"at"` is ISO8601 UTC, second precision.
-- `"by"` is **omitted entirely** when no actor is configured or the actor returns `nil`.
+- `"by"` is **omitted entirely** when no actor resolves — none on the model, none gem-wide (or `actor: nil`/`actor: false`) — or the actor returns `nil`.
 - Values are JSON-coerced: `Time`/`DateTime`/`TimeWithZone` → ISO8601 UTC strings, `Date` → ISO8601, `BigDecimal` → plain numeric string (`"19.99"`, precision-safe), `Symbol` → `String`; everything else passes through `as_json`.
 - There is **no built-in length cap** on `from`/`to` — by default a change to a large text field stores both full values. Set `max_value_length:` to bound entry size explicitly (e.g. `max_value_length: 120` stores `"first 120 chars…"`); truncation runs after coercion and applies only to `String` values.
 
@@ -83,7 +83,18 @@ One entry is recorded **per changed tracked field per save**; all entries of one
 
 ### Class-level configuration readers
 
-`auditable_fields`, `auditable_into`, `auditable_actor`, `auditable_max_entries`.
+`auditable_fields`, `auditable_into`, `auditable_actor` (`nil` when relying on the gem-wide fallback, `false` when opted out), `auditable_max_entries`.
+
+### Gem-wide actor
+
+```ruby
+# config/initializers/concerns_on_rails.rb
+ConcernsOnRails.setup do |config|
+  config.audit_actor = -> { Current.user&.id }   # must respond to #call; a Proc is instance_exec'd on the record
+end
+```
+
+Every audited model that **omits** `actor:` stamps this value; a model-level `actor:` wins, and an explicit `actor: nil` or `actor: false` records no `"by"` for that model. The fallback is read per save, so an initializer that runs after the model loads still applies. Setting it to `nil` or `false` clears it; a lambda that demands arguments is rejected when set, since it is called with none.
 
 ## Examples
 
@@ -129,7 +140,7 @@ order.audited_changes_since(1.day.ago).map { |e| "#{e['field']}: #{e['from']} �
 - **Not concurrency-safe.** The read-modify-write of the JSON column means two simultaneous saves of the same row are last-writer-wins for the entries added in that race.
 - **Entries build on the persisted trail.** New entries are appended to the column's *database* value, so a save aborted by a later callback can't duplicate entries when retried. The flip side: assigning the audit column by hand in the same save as a tracked change is ignored — use `clear_audit_trail!` to reset the trail.
 - **Non-finite floats are stored as strings.** `NaN`/`Infinity` in a tracked float column serialize as `"NaN"`/`"Infinity"` instead of raising inside `before_save`.
-- **The actor proc runs on the record.** It is `instance_exec`'d, so both globals (`Current.user`) and the record's own attributes are in scope. Exceptions raised inside the proc propagate (fail-fast).
+- **The actor proc runs on the record.** A `Proc` is `instance_exec`'d — the gem-wide one too — so both globals (`Current.user`) and the record's own attributes are in scope; any other callable is `#call`ed with no arguments, and a Symbol actor is sent to the record. Exceptions raised inside propagate (fail-fast). The resolved value is JSON-coerced like any entry value, so a Hash such as `{ id:, type: }` works.
 - **Non-goals**: no reify/undo, no who-dunnit queries across models, no association tracking — reach for [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) or [`audited`](https://github.com/collectiveidea/audited) when you need a real audit store.
 
 ## Changed in 1.22.0
