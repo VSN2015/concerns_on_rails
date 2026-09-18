@@ -1338,7 +1338,7 @@ Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,
 **Notes**
 - The `belongs_to` must be declared **before** the macro (the reflection is validated at declaration). Polymorphic associations are not supported.
 - Don't also set native `counter_cache: true` on the same column — both would fire and double-count.
-- Counters track the **persisted** record; writes that skip callbacks (`update_column(s)`, `update_all`, `delete`) are not tracked — run `recount_counter_caches!` to reconcile. Bare, it rewrites every parent (portable across adapters, but O(n) for conditional counters) — a maintenance operation, run it offline. With `parents:` it zeroes and re-tallies only those parents (O(their children)), so repairing one imported post is safe on the request path.
+- Counters track the **persisted** record; writes that skip callbacks (`update_column(s)`, `update_all`, `delete`) are not tracked — run `recount_counter_caches!` to reconcile. Bare, it rewrites every parent (portable across adapters, but O(n) for conditional counters) — a maintenance operation, run it offline. With `parents:` it zeroes and re-tallies only those parents (O(their children)) in one transaction that locks those rows before tallying, so repairing one imported post is safe on the request path.
 - Reach for [`counter_culture`](https://github.com/magnusvk/counter_culture) when you need multi-level rollups, delta columns, or after-commit execution.
 
 ---

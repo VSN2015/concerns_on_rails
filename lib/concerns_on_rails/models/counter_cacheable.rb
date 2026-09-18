@@ -57,6 +57,10 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       LABEL = "ConcernsOnRails::Models::CounterCacheable".freeze
+      # Distinguishes "parents: not passed" (repair every parent) from an
+      # explicit nil, which would otherwise silently widen a scoped repair into
+      # a full-table zero-and-rewrite.
+      UNSET = Object.new
 
       included do
         class_attribute :counter_cacheable_rules, instance_accessor: false, default: []
@@ -96,9 +100,8 @@ module ConcernsOnRails
         # row untouched, so fixing one imported post is O(its children), not
         # O(the table). Needs the association when more than one is declared.
         # Returns { count_column => parents_with_a_nonzero_count }.
-        def recount_counter_caches!(only_association = nil, parents: nil)
-          rules = counter_cacheable_rules
-          rules = rules.select { |r| r[:association] == only_association.to_sym } if only_association
+        def recount_counter_caches!(only_association = nil, parents: UNSET)
+          rules = counter_cacheable_rules_for(only_association)
           parent_ids = counter_cacheable_parent_ids(parents, rules)
           return rules.to_h { |rule| [rule[:count_column], 0] } if parent_ids && parent_ids.empty?
 
@@ -109,18 +112,30 @@ module ConcernsOnRails
 
         private
 
-        # nil → every parent. Otherwise normalize records/relations to ids; the
-        # rules must all target one association or the ids are ambiguous.
+        # An association nobody declared a counter for would otherwise filter the
+        # rules down to nothing and report a silent success — or, with `parents:`,
+        # crash on the reflection that isn't there.
+        def counter_cacheable_rules_for(only_association)
+          return counter_cacheable_rules unless only_association
+
+          rules = counter_cacheable_rules.select { |rule| rule[:association] == only_association.to_sym }
+          return rules unless rules.empty?
+
+          declared = counter_cacheable_rules.map { |rule| rule[:association] }.uniq
+          raise ArgumentError,
+                "#{LABEL}: no counter declared for association `#{only_association}` " \
+                "(declared: #{declared.empty? ? 'none' : declared.join(', ')})"
+        end
+
+        # Not passed → every parent. Otherwise normalize records/relations to
+        # ids; the rules must all target one association or the ids are
+        # ambiguous. An explicit nil is a mistake, not "every parent": it would
+        # turn a scoped repair into a full-table rewrite.
         def counter_cacheable_parent_ids(parents, rules)
-          return nil if parents.nil?
+          return nil if parents.equal?(UNSET)
+          raise ArgumentError, "#{LABEL}: parents: cannot be nil — omit it to repair every parent" if parents.nil?
 
-          associations = rules.map { |rule| rule[:association] }.uniq
-          if associations.size > 1
-            raise ArgumentError,
-                  "#{LABEL}: parents: needs the association when more than one is declared (#{associations.join(', ')})"
-          end
-
-          parent_class = reflect_on_association(associations.first).klass
+          parent_class = counter_cacheable_sole_parent_class(rules)
           if parents.is_a?(ActiveRecord::Relation)
             counter_cacheable_check_parent_class!(parents.klass, parent_class)
             return parents.pluck(parents.primary_key)
@@ -132,6 +147,18 @@ module ConcernsOnRails
             counter_cacheable_check_parent_class!(parent.class, parent_class)
             parent.id
           end
+        end
+
+        # The ids address one parent table, so every rule in play must target the
+        # same association — otherwise there is no telling which table they mean.
+        def counter_cacheable_sole_parent_class(rules)
+          associations = rules.map { |rule| rule[:association] }.uniq
+          if associations.size > 1
+            raise ArgumentError,
+                  "#{LABEL}: parents: needs the association when more than one is declared (#{associations.join(', ')})"
+          end
+
+          reflect_on_association(associations.first).klass
         end
 
         # Ids from the wrong table would zero and rewrite whichever parent rows
@@ -190,17 +217,26 @@ module ConcernsOnRails
           column = rule[:count_column]
           condition = rule[:condition]
 
-          children = unscoped.where.not(fk => nil)
-          children = children.where(fk => parent_ids) if parent_ids
-          tally = condition ? counter_cacheable_recount_tally(children, fk, condition) : children.group(fk).count
-
           # One transaction so a crash mid-repair can't leave every counter at
-          # the zeroed intermediate state.
-          parent_class.transaction do
+          # the zeroed intermediate state. A scoped repair locks its (bounded)
+          # set of parent rows BEFORE tallying, so a child inserted concurrently
+          # either lands in the tally or waits for the rewrite instead of being
+          # dropped between the two. The bare call can't lock the whole table —
+          # which is why it stays an offline operation.
+          tally = parent_class.transaction do
             targets = parent_class.unscoped
-            targets = targets.where(parent_class.primary_key => parent_ids) if parent_ids
+            if parent_ids
+              targets = targets.where(parent_class.primary_key => parent_ids)
+              targets.lock.pluck(parent_class.primary_key)
+            end
+
+            children = unscoped.where.not(fk => nil)
+            children = children.where(fk => parent_ids) if parent_ids
+            counts = condition ? counter_cacheable_recount_tally(children, fk, condition) : children.group(fk).count
+
             targets.update_all(column => 0)
-            counter_cacheable_apply_tally(parent_class, column, tally)
+            counter_cacheable_apply_tally(parent_class, column, counts)
+            counts
           end
           tally.count { |_id, n| n.to_i.positive? }
         end

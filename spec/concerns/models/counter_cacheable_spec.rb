@@ -188,6 +188,18 @@ describe ConcernsOnRails::Models::CounterCacheable do
       Comment.recount_counter_caches!(:post)
       expect(post.reload.comments_count).to eq(0)
     end
+
+    it "raises on an association with no declared counter instead of reporting a silent success" do
+      Comment.create!(post: post)
+      post.update_columns(comments_count: 99)
+
+      expect { Comment.recount_counter_caches!(:psot) }
+        .to raise_error(ArgumentError, /no counter declared for association `psot` \(declared: post, author\)/)
+      expect { Comment.recount_counter_caches!(:psot, parents: post) }
+        .to raise_error(ArgumentError, /no counter declared for association `psot`/)
+
+      expect(post.reload.comments_count).to eq(99) # neither call touched a row
+    end
   end
 
   describe "argument validation" do
@@ -359,6 +371,38 @@ describe ConcernsOnRails::Models::CounterCacheable do
       # Still the drifted 99 the before block wrote: the refused calls neither
       # zeroed nor rewrote anything.
       expect(post.reload.comments_count).to eq(99)
+    end
+
+    it "refuses an explicit parents: nil rather than widening into a full-table rewrite" do
+      expect { Comment.recount_counter_caches!(:post, parents: nil) }
+        .to raise_error(ArgumentError, /parents: cannot be nil/)
+      expect { Comment.recount_counter_caches!(:post, parents: Post.find_by(id: -1)) }
+        .to raise_error(ArgumentError, /parents: cannot be nil/)
+
+      expect(third.reload.comments_count).to eq(99) # nothing zeroed, nothing rewritten
+      expect(Comment.recount_counter_caches!(:post)).to eq(comments_count: 3, approved_comments_count: 1)
+    end
+
+    it "locks the listed parents inside the transaction, before the children are tallied" do
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*args|
+        statements << args.last[:sql].to_s
+      end
+      begin
+        Comment.recount_counter_caches!(:post, parents: post)
+      ensure
+        ActiveSupport::Notifications.unsubscribe(subscriber)
+      end
+
+      opened  = statements.index { |sql| sql.start_with?("begin") }
+      locked  = statements.index { |sql| sql.start_with?('SELECT "posts"."id" FROM "posts"') }
+      tallied = statements.index { |sql| sql.include?('FROM "comments"') }
+      zeroed  = statements.index { |sql| sql.start_with?('UPDATE "posts"') }
+
+      expect([opened, locked, tallied, zeroed]).to all(be_a(Integer))
+      expect(opened).to be < locked  # the lock is taken inside the transaction
+      expect(locked).to be < tallied # ...and before the tally the rewrite depends on
+      expect(tallied).to be < zeroed
     end
   end
 end
