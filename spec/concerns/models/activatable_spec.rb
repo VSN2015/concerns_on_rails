@@ -371,5 +371,35 @@ describe ConcernsOnRails::Activatable do
       expect(hooked.log.size).to eq(2)
       expect(hooked.pluck(:activated_at).compact.size).to eq(2)
     end
+
+    # The hooks used to be dispatched with public_send: a private override
+    # raised NoMethodError, and the batch verb (which still reads a private
+    # override as overridden, so it leaves the fast path) rolled the batch back.
+    it "calls private hook overrides on the per-record and on the batch path" do
+      klass = stamped_class do
+        activatable_by
+        def self.log = (@log ||= [])
+
+        private
+
+        def before_activate = self.class.log << [:before_activate, id]
+        def after_deactivate = self.class.log << [:after_deactivate, id]
+      end
+      expect(klass.private_method_defined?(:before_activate)).to be(true)
+      expect(klass.private_method_defined?(:after_deactivate)).to be(true)
+
+      record = klass.create!(active: false)
+      expect(record.activate!).to be(true)
+      expect(record.reload.active).to be(true)
+      expect(record.deactivate!).to be(true)
+      expect(klass.log).to eq([[:before_activate, record.id], [:after_deactivate, record.id]])
+
+      other = klass.create!(active: false)
+      expect(klass.activate_all).to eq(2)
+      expect(klass.pluck(:active).uniq).to eq([true])
+      expect(klass.log.last(2)).to contain_exactly([:before_activate, record.id], [:before_activate, other.id])
+      expect(klass.deactivate_all).to eq(2)
+      expect(klass.log.last(2)).to contain_exactly([:after_deactivate, record.id], [:after_deactivate, other.id])
+    end
   end
 end

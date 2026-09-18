@@ -118,7 +118,8 @@ module ConcernsOnRails
         end
 
         # true -> both default columns; a Hash renames a side or drops it with
-        # nil; false/nil -> no stamps. Columns are validated as datetimes.
+        # nil; false/nil -> no stamps. The columns are checked for EXISTENCE
+        # (ColumnGuard); `types: :datetime` only types the migration hint.
         def activatable_normalize_timestamps!(option)
           mapping = activatable_timestamps_mapping(option)
           unknown = mapping.keys.map(&:to_sym) - TIMESTAMP_KEYS
@@ -187,9 +188,9 @@ module ConcernsOnRails
         before_hook, after_hook = HOOKS.fetch(kind)
         result = false
         transaction do
-          public_send(before_hook)
+          send(before_hook)
           result = update(self.class.activatable_attributes(value, kind))
-          public_send(after_hook) if result
+          send(after_hook) if result
         end
         result
       end

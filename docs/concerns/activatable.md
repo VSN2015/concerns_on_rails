@@ -35,6 +35,8 @@ end
 | Column | Type | Required | Notes |
 |--------|------|----------|-------|
 | `active` (or custom) | `boolean` | Yes | The default column name is `active`. Pass a different symbol to `activatable_by` to use any other boolean column. |
+| `activated_at` (or custom) | `datetime` | Only with `timestamps:` | Stamped on every activation. Required when `timestamps: true`; `timestamps: { activated_at: :enabled_at }` renames it, `{ activated_at: nil }` drops that side. |
+| `deactivated_at` (or custom) | `datetime` | Only with `timestamps:` | Stamped on every deactivation, under the same renaming/dropping rules. |
 
 Migration for the default column:
 
@@ -56,6 +58,17 @@ class AddEnabledToWidgets < ActiveRecord::Migration[7.1]
 end
 ```
 
+Migration for the stamp columns (only needed when you pass `timestamps:`):
+
+```ruby
+class AddActivationTimestampsToSubscriptions < ActiveRecord::Migration[7.1]
+  def change
+    add_column :subscriptions, :activated_at, :datetime
+    add_column :subscriptions, :deactivated_at, :datetime
+  end
+end
+```
+
 ## Configuration
 
 ### `activatable_by(field = :active, prefix: nil, suffix: nil, timestamps: false)`
@@ -66,7 +79,7 @@ Called once at the class level. Registers the backing column, validates its exis
 |--------|------|---------|-------------|
 | `field` | Symbol | `:active` | The name of the boolean column that stores the active/inactive state. Must already exist in the database when the macro is evaluated; raises `ArgumentError` otherwise. |
 | `prefix:` / `suffix:` | Symbol / `true` | `nil` | Affix the `.active` / `.inactive` scope names so they don't collide with a sibling concern's. |
-| `timestamps:` | `true`, `false` or `Hash` | `false` | `true` stamps `activated_at` when a record is activated and `deactivated_at` when it is deactivated (`activate!`, `deactivate!`, `toggle_active!`, `activate_all`, `deactivate_all`). A Hash renames either column (`{ activated_at: :enabled_at }`) or drops a side (`deactivated_at: nil`); unknown keys raise. Columns must exist as `datetime` (validated at declaration). The other column keeps its previous value, so the last activation and the last deactivation are both visible. |
+| `timestamps:` | `true`, `false` or `Hash` | `false` | `true` stamps `activated_at` when a record is activated and `deactivated_at` when it is deactivated (`activate!`, `deactivate!`, `toggle_active!`, `activate_all`, `deactivate_all`). A Hash renames either column (`{ activated_at: :enabled_at }`) or drops a side (`deactivated_at: nil`); unknown keys raise. The stamp columns must already exist: `activatable_by` checks that at declaration and raises `ArgumentError` otherwise; the declared `datetime` type is not enforced, it only types the `bin/rails generate migration` hint in that error. The other column keeps its previous value, so the last activation and the last deactivation are both visible. |
 
 Besides the positional `field`, the macro takes the `prefix:`, `suffix:` and `timestamps:` keywords documented in the table above.
 
@@ -101,7 +114,7 @@ Subscription.inactive  # WHERE active = FALSE OR active IS NULL
 
 | Signature | Description |
 |-----------|-------------|
-| `activatable_by(field = :active)` | Configuration macro. Validates the column, stores it in the `activatable_field` class attribute, and defines the `.active` / `.inactive` scopes. |
+| `activatable_by(field = :active, prefix: nil, suffix: nil, timestamps: false)` | Configuration macro. Validates that the boolean column and any configured stamp columns exist, stores them in the `activatable_field` / `activatable_timestamps` class attributes, and defines the `.active` / `.inactive` scopes (affixed by `prefix:` / `suffix:`). |
 
 ## Examples
 
