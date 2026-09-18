@@ -1,7 +1,10 @@
 require "spec_helper"
 
 RSpec.describe "ConcernsOnRails.setup / Configuration" do
-  after { ConcernsOnRails.config.cache_store = nil }
+  after do
+    ConcernsOnRails.config.cache_store = nil
+    ConcernsOnRails.config.audit_actor = nil
+  end
 
   it "yields and returns the memoized configuration" do
     returned = ConcernsOnRails.setup { |c| c.cache_store = :store }
@@ -26,8 +29,22 @@ RSpec.describe "ConcernsOnRails.setup / Configuration" do
     ConcernsOnRails.setup { |config| config.audit_actor = actor }
     expect(ConcernsOnRails.config.audit_actor).to equal(actor)
     expect { ConcernsOnRails.config.audit_actor = :not_a_proc }.to raise_error(ArgumentError, /audit_actor must be callable/)
-    ConcernsOnRails.config.audit_actor = nil
+  end
+
+  it "accepts false as a synonym for nil (no gem-wide actor)" do
+    ConcernsOnRails.setup { |config| config.audit_actor = false }
+    expect(ConcernsOnRails.config.audit_actor).to be(false)
+  end
+
+  it "rejects a lambda that demands arguments (it is instance_exec'd with none)" do
+    expect { ConcernsOnRails.config.audit_actor = ->(record) { "by #{record}" } }
+      .to raise_error(ArgumentError, /audit_actor lambda must take no arguments/)
     expect(ConcernsOnRails.config.audit_actor).to be_nil
+
+    # Splat/optional lambdas and arity-tolerant procs are still fine.
+    ConcernsOnRails.config.audit_actor = ->(*) { "splat" }
+    ConcernsOnRails.config.audit_actor = proc { |record| record }
+    expect(ConcernsOnRails.config.audit_actor).to be_a(Proc)
   end
 
   it "resolves to nil when nothing is configured" do

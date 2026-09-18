@@ -30,8 +30,9 @@ module ConcernsOnRails
     # Actor resolution ("by"): a model's `actor:` (a callable instance_exec'd
     # on the record, or a Symbol naming a record method) wins; otherwise the
     # gem-wide fallback `ConcernsOnRails.setup { |c| c.audit_actor = -> {
-    # Current.user&.id } }` applies to every audited model at once; `actor:
-    # false` opts one model out of that fallback.
+    # Current.user&.id } }` applies to every audited model at once. Only a
+    # model that passes no `actor:` at all takes that fallback — an explicit
+    # `actor: nil` (or `actor: false`) keeps meaning "never record who".
     #
     # Notes:
     #   * One entry per changed field per save; creates record `"from" => nil`.
@@ -57,11 +58,15 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Models::Auditable".freeze
       DEFAULT_INTO = :audit_log
       DEFAULT_MAX_ENTRIES = 200
+      # Distinguishes "actor: not passed" (take the gem-wide fallback) from an
+      # explicit `actor: nil` (never stamp "by"); never leaks to the reader.
+      UNSET = Object.new
 
       included do
         class_attribute :auditable_fields, instance_accessor: false, default: []
         class_attribute :auditable_into, instance_accessor: false, default: DEFAULT_INTO
         class_attribute :auditable_actor, instance_accessor: false, default: nil
+        class_attribute :auditable_actor_set, instance_accessor: false, default: false
         class_attribute :auditable_max_entries, instance_accessor: false, default: DEFAULT_MAX_ENTRIES
         class_attribute :auditable_max_value_length, instance_accessor: false, default: nil
       end
@@ -70,14 +75,17 @@ module ConcernsOnRails
         include ConcernsOnRails::Support::ColumnGuard
 
         # Configure the tracked fields and the audit column. See the module docs.
-        def auditable_by(*fields, into: DEFAULT_INTO, actor: nil, max_entries: DEFAULT_MAX_ENTRIES, max_value_length: nil)
+        def auditable_by(*fields, into: DEFAULT_INTO, actor: UNSET, max_entries: DEFAULT_MAX_ENTRIES, max_value_length: nil)
           fields = fields.flatten.map(&:to_sym).uniq
           into = into.to_sym
           validate_auditable!(fields, into: into, actor: actor, max_entries: max_entries, max_value_length: max_value_length)
 
           self.auditable_fields = fields
           self.auditable_into = into
-          self.auditable_actor = actor
+          # UNSET (option omitted) is normalised away here, so the public
+          # auditable_actor reader never hands out the sentinel.
+          self.auditable_actor_set = !actor.equal?(UNSET)
+          self.auditable_actor = actor.equal?(UNSET) ? nil : actor
           self.auditable_max_entries = max_entries
           self.auditable_max_value_length = max_value_length
           ensure_columns!(LABEL, into, *fields, types: { into => :text })
@@ -116,7 +124,7 @@ module ConcernsOnRails
         end
 
         def auditable_valid_actor?(actor)
-          actor.nil? || actor == false || actor.is_a?(Symbol) || actor.respond_to?(:call)
+          actor.equal?(UNSET) || actor.nil? || actor == false || actor.is_a?(Symbol) || actor.respond_to?(:call)
         end
 
         def positive_integer_or_nil?(value)
@@ -212,18 +220,34 @@ module ConcernsOnRails
         end
       end
 
-      # Model-level actor: first (false = explicitly none), then the gem-wide
-      # fallback, resolved per save so an initializer that runs later still
-      # applies. Symbols call the record's method; callables are instance_exec'd.
+      # The model's actor: wins whenever it was passed at all — including an
+      # explicit nil/false, which means "never record who". Only a model that
+      # declared none takes the gem-wide fallback, read per save so an
+      # initializer running after the class loads still applies.
       def auditable_resolve_actor
-        actor = self.class.auditable_actor
-        return nil if actor == false
+        actor = self.class.auditable_actor_set ? self.class.auditable_actor : ConcernsOnRails.config.audit_actor
+        return nil unless actor
 
-        actor = ConcernsOnRails.config.audit_actor if actor.nil?
-        return nil if actor.nil?
+        auditable_json_value(auditable_actor_value(actor))
+      end
 
-        value = actor.is_a?(Symbol) ? send(actor) : instance_exec(&actor)
-        auditable_json_value(value)
+      # A Symbol names a method on the record; a Proc is instance_exec'd on it
+      # (globals and the record's own attributes in scope); any other callable
+      # is #call'd as-is — instance_exec needs a to_proc only Procs have.
+      def auditable_actor_value(actor)
+        case actor
+        when Symbol then auditable_actor_send(actor)
+        when Proc then instance_exec(&actor)
+        else actor.call
+        end
+      end
+
+      # Resolve-time guard: a Symbol naming no method would otherwise raise a
+      # bare NoMethodError from inside before_save, aborting the transaction.
+      def auditable_actor_send(actor)
+        raise ArgumentError, "#{LABEL}: actor :#{actor} is not a method on #{self.class}" unless respond_to?(actor, true)
+
+        send(actor)
       end
 
       # from/to pipeline: JSON coercion, then opt-in truncation.

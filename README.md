@@ -1179,7 +1179,7 @@ class Product < ApplicationRecord
   #              max_entries: 50                     # keep the newest 50
 end
 
-# Or set the actor once for every audited model — models without actor: use it, actor: false opts out:
+# Or set the actor once for every audited model — models that omit actor: use it, actor: nil/false opts out:
 ConcernsOnRails.setup { |config| config.audit_actor = -> { Current.user&.id } }
 
 product.update!(price: 200)
@@ -1192,7 +1192,7 @@ product.clear_audit_trail!                 # wipe the column (skips callbacks)
 
 One entry is recorded **per changed field per save** (creates record `"from" => nil`), appended in the same `INSERT`/`UPDATE` via `before_save` — zero extra queries.
 
-**Options**: `into:` (`:audit_log`), `actor:` (a callable `instance_exec`'d on the record, or a Symbol naming a record method such as `:updated_by_id`; defaults to the gem-wide `config.audit_actor`, `false` opts out of it; `"by"` omitted when it resolves to nil), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited), `max_value_length:` (`nil`; truncates long String `from`/`to` values to the first N characters + `…`).
+**Options**: `into:` (`:audit_log`), `actor:` (a Proc `instance_exec`'d on the record, any other callable `#call`ed, or a Symbol naming a record method such as `:updated_by_id`; omit it to take the gem-wide `config.audit_actor`, an explicit `nil`/`false` opts out of that; `"by"` omitted when it resolves to nil), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited), `max_value_length:` (`nil`; truncates long String `from`/`to` values to the first N characters + `…`).
 
 **Notes**
 - Writes that skip callbacks (`update_column(s)`, `touch`, `increment!`) are **not** audited; `save(validate: false)` is.

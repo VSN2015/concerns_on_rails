@@ -441,6 +441,26 @@ describe ConcernsOnRails::Auditable do
       ConcernsOnRails.setup { |c| c.audit_actor = -> { "system@example.com" } }
       doc = doc_class.create!(title: "a")
       expect(doc.audit_trail.last["by"]).to eq("system@example.com")
+      expect(doc.class.auditable_actor).to be_nil # the unset sentinel never leaks to the reader
+    end
+
+    it "actor: nil explicitly still means 'never record who', even once a fallback is configured" do
+      ConcernsOnRails.setup { |c| c.audit_actor = -> { "global" } }
+      doc = doc_class(actor: nil).create!(title: "a")
+      expect(doc.audit_trail.last).not_to have_key("by")
+      expect(doc.class.auditable_actor).to be_nil
+    end
+
+    it "calls a non-Proc callable actor instead of instance_exec'ing it" do
+      callable = Class.new do
+        def call
+          "service@example.com"
+        end
+      end.new
+
+      ConcernsOnRails.setup { |c| c.audit_actor = callable }
+      expect(doc_class.create!(title: "a").audit_trail.last["by"]).to eq("service@example.com")
+      expect(doc_class(actor: callable).create!(title: "b").audit_trail.last["by"]).to eq("service@example.com")
     end
 
     it "instance_execs the gem-wide actor on the record (record attributes and globals in scope)" do
@@ -483,6 +503,12 @@ describe ConcernsOnRails::Auditable do
       ConcernsOnRails.setup { |c| c.audit_actor = -> { { id: 7, type: :User } } }
       doc = doc_class.create!(title: "a")
       expect(doc.audit_trail.last["by"]).to eq("id" => 7, "type" => "User")
+    end
+
+    it "raises a named ArgumentError when a Symbol actor names no method on the record" do
+      doc = doc_class(actor: :missing_editor).new(title: "a")
+      expect { doc.save! }
+        .to raise_error(ArgumentError, /Auditable: actor :missing_editor is not a method/)
     end
 
     it "rejects an actor: that is neither callable, a Symbol, nil nor false" do
