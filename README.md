@@ -795,6 +795,10 @@ class Subscription < ApplicationRecord
 
   activatable_by               # defaults to :active
   # activatable_by :enabled    # custom column name
+  # activatable_by timestamps: true                                    # stamps activated_at / deactivated_at
+  # activatable_by timestamps: { activated_at: :enabled_at, deactivated_at: nil }
+
+  def after_deactivate = Billing.pause!(self)   # before/after_activate, before/after_deactivate hooks
 end
 
 sub = Subscription.create!(active: true)
@@ -814,18 +818,23 @@ Subscription.inactive.activate_all     # => 12
 Subscription.active.deactivate_all     # => 3
 ```
 
-Both target the relation, return an Integer count, and run in a transaction. With
-`activate!`/`deactivate!` unoverridden and no validations on the model — neither
+Both target the relation, return an Integer count, and run in a transaction. Gating is per
+direction: with `activate!`, `before_activate` and `after_activate` unoverridden and no
+validations on the model — neither
 `validates`/`validates_with`, a custom `validate :method`, nor an association's autosave
 validation (a bare `has_many` registers one, so most models with associations take the
-streaming path) — they collapse to a single
-`UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise they stream
-per record so validations still run, and a record that fails to save raises
-`ActiveRecord::RecordNotSaved` and rolls the whole batch back. `toggle_active!`'s row lock has
+streaming path) — `activate_all` collapses to a single
+`UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise it streams
+per record so the hooks and validations still run, and a record that fails to save raises
+`ActiveRecord::RecordNotSaved` and rolls the whole batch back. `deactivate_all` is gated the
+same way by `deactivate!`/`before_deactivate`/`after_deactivate`, so overriding only
+`after_deactivate` leaves `activate_all` on the fast path. `toggle_active!`'s row lock has
 no batch analogue.
 
 **Notes**
 - `NULL` is treated as inactive (same convention as most apps' "unset = off").
+- Hooks (`before_activate` / `after_activate` / `before_deactivate` / `after_deactivate`) share one transaction with the write: a raising after-hook rolls the flip back, a failed `update` (validation) skips the after-hook and returns `false`. `toggle_active!` and the batch verbs go through the same path.
+- `timestamps: true` stamps `activated_at` on activate and `deactivated_at` on deactivate (the other column keeps its last value, so you can see both the last activation and the last deactivation); a Hash renames either column or drops a side with `nil`. The stamp columns must already exist — `activatable_by` checks that at declaration and raises `ArgumentError` otherwise; the `datetime` type itself is not enforced, it only types the migration hint in that error.
 - The configured column must exist; `activatable_by` raises `ArgumentError` otherwise.
 - `SoftDeletable` also defines a `.active` scope (alias of `.without_deleted`). If both concerns are included on the same model, the later one wins — include the one whose `.active` semantics you want last, or stick to one of them.
 
