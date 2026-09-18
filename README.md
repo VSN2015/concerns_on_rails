@@ -148,7 +148,7 @@ across all 43 concerns — press <kbd>/</kbd> and type.
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured columns exist and raises `ArgumentError` early — listing *every* missing column at once, with one ready-to-paste `rails generate migration` command that adds them all
 - **Composable** — concerns are independent; mix and match per model
-- **Tested like an app, not a snippet** — **1,522 RSpec examples** run against a real database on every CI build
+- **Tested like an app, not a snippet** — **1,624 RSpec examples** run against a real database on every CI build
 - **Documented twice** — everything in this README also lives as a per-concern page on the [docs site](https://vsn2015.github.io/concerns_on_rails), searchable and deep-linkable
 
 ---
@@ -2367,9 +2367,9 @@ Point your agent at `llms.txt` for an overview, or paste a single concern's `.md
 
 ```sh
 bundle install                                  # install dev dependencies
-bundle exec rspec                               # run the test suite (1,522 examples)
+bundle exec rspec                               # run the test suite (1,624 examples)
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.28.5.gem      # install locally
+gem install ./concerns_on_rails-1.28.6.gem      # install locally
 
 # Preview the docs site locally (GitHub Pages serves docs/ as-is):
 cd docs && python3 -m http.server 8000          # → http://localhost:8000

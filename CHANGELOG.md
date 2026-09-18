@@ -1,5 +1,114 @@
 <!-- CHANGELOG.md -->
 
+## 1.28.6 (2026-09-18)
+
+Ten feature PRs deepening existing concerns, released as a patch by request: no new
+concerns and no dependency changes, though several add an optional column or option.
+Every PR was reviewed before merge and carries the review's fixes; the `### Changed`
+and `### Fixed` sections below are those fixes, and they are the ones to read — a few
+tighten validation or start raising where the code used to accept bad input silently.
+Eight further PRs were reviewed in the same pass and held back: they carry defects
+that need more than a patch-sized change.
+
+### Added
+- **Models::Maskable**: `masked_attributes` (every declared field masked, keyed like
+  `attributes`) and a `masked:` serialization option — `as_json(masked: true)` /
+  `to_json(masked: true)` / `serializable_hash(masked: true)` swap the declared fields
+  for their masked forms (`masked: [:email]` for a subset; undeclared fields raise).
+  Composes with `only:`/`except:`/`methods:`/`include:`; plain serialization is
+  unchanged. (#65)
+- **Models::Activatable**: `before_activate` / `after_activate` / `before_deactivate` /
+  `after_deactivate` hooks (one transaction with the write; a raising after-hook rolls
+  back, a failed update skips it; overriding one moves that direction's batch verb to
+  the per-record path) and `activatable_by timestamps:` (`true` → `activated_at` /
+  `deactivated_at` stamped on each transition, or a Hash to rename/drop a side). The
+  batch fast path stamps too. (#78)
+- **Models::Hashable**: `prefix:` prepends a literal to generated values (Stripe-style
+  public IDs such as `ord_k7m3pq9a`; string types only), and `to_param: true` makes the
+  hashed field the URL parameter (falls back to the id while blank). Both validated at
+  class load. (#70)
+- **Models::Tokenizable**: `tokenizable_by … expires_in:` gives a token a lifetime —
+  `<field>_expires_at` is stamped on every generation, `authenticate_by_<field>` refuses
+  an expired token, `<field>_expired?` and the `<field>_expired` scope report it. New
+  `consume_<field>(value)` (every field) authenticates and revokes in one race-safe step
+  for single-use tokens. (#51)
+- **Models::Auditable**: `ConcernsOnRails.setup { |c| c.audit_actor = -> { Current.user&.id } }`
+  sets the `"by"` actor once for every audited model that passes no `actor:` (resolved
+  per save, `instance_exec`'d on the record); `actor: false` opts a model out, and
+  `actor: :method_name` stamps a record method's value. (#50)
+- **Models::CounterCacheable**: `recount_counter_caches!(association, parents:)` repairs
+  only the given parents (ids, records or a relation) — locked, zeroed and re-tallied in
+  one transaction, other rows untouched — so a post-import fix is O(their children).
+  Empty `parents:` is a no-op; the association is required when more than one is
+  declared. (#75)
+- **Controllers::Includable**: nested include allow-lists — `includable :author,
+  comments: :author` accepts `?include=comments.author` (a path must match every
+  segment). `requested_includes(as: :query | :paths | :json)` returns the sanitized
+  includes for `includes`/`preload`, JSON:API serializers, or `as_json(include:)`;
+  `requested_include_paths` exposes the dotted paths. `default:` loads named paths when
+  `?include` is absent (blank opts out); `strategy:` picks
+  `includes`/`preload`/`eager_load`. New `Support::IncludeTree`. (#69)
+- **Controllers::Idempotentable**: replays now carry the original response's `Location`,
+  `Content-Location`, `ETag`, `Last-Modified` and `Link` headers, so a retried `create`
+  still says where the resource lives. `idempotent_actions … headers:` tunes the
+  allow-list (`[]` to capture none). Records written before this release replay
+  unchanged. (#47)
+- **Controllers::Throttleable**: `throttle_by … if:/unless:` per-request skip conditions
+  (Symbol method or callable; both must pass), mirroring Rails 7.2's `rate_limit`. A
+  throttled request instruments `rate_limited.concerns_on_rails` (rule, discriminator,
+  count/limit/period, reset_at/retry_after, controller, action) through the new public
+  `on_rate_limited(rule, result)` hook. (#44)
+- **Controllers::Respondable**: `respondable_by error_format: :problem_details,
+  problem_type_base:` makes `render_error` emit RFC 9457 `application/problem+json`
+  documents (`type`, `title`, `status`, `detail`, `instance`, plus `code`/`errors`
+  extensions). Every concern that renders errors through Respondable follows, so the
+  switch is app-wide. The default stays `:envelope`. (#57)
+
+### Changed
+- **Controllers::Throttleable**: with several applicable rules the `X-RateLimit-*`
+  headers now describe the tightest passing rule (fewest remaining) instead of the last
+  one declared, and a tie on remaining is broken by the rule that resets *last* — so the
+  advertised `X-RateLimit-Reset` can no longer promise a 60-second wait when an hourly
+  rule is the real budget. `result[:discriminator]` is now available to
+  `throttled_response`. Note it is raw personal data (an IP or a user id) in the
+  instrumentation payload too; override `on_rate_limited` to hash or drop it. (#44)
+- **Controllers::Throttleable**: `if:`/`unless:` conditions are now arity-aware — a
+  one-argument callable receives the controller, a zero-arity Proc is still
+  `instance_exec`'d. Previously a `->(c) { … }` condition raised `ArgumentError` on
+  every request. (#44)
+- **Models::Auditable**: an explicit `actor: nil` now keeps meaning "never record who"
+  and no longer falls through to the gem-wide `config.audit_actor`; only omitting
+  `actor:` takes the fallback. `config.audit_actor` accepts a non-Proc callable and
+  `false` (a synonym for nil), and rejects a lambda that demands arguments at
+  configuration time rather than raising inside `before_save`. (#50)
+- **Models::CounterCacheable**: `recount_counter_caches!` now raises `ArgumentError`
+  for an association with no declared counter, instead of returning `{}` as a silent
+  success; and a scoped repair locks the named parent rows before tallying, so a
+  concurrent child write can no longer be lost. (#75)
+- **Controllers::Idempotentable**: response-header capture is case-insensitive, so an
+  app that sets `location` rather than `Location` (correct under Rack 3) is captured on
+  every supported Rails version, not only 7.1+. `idempotency_scope` is now a documented
+  public override point — the default namespace has no per-principal component, so two
+  users sharing a client-chosen key can be served each other's cached response. (#47)
+- **Controllers::Respondable**: the problem-details media type is emitted as bare
+  `application/problem+json`, with no `charset` parameter — RFC 9457 registers none, and
+  strict clients reject the parameterised form. (#57)
+
+### Fixed
+- **Models::Activatable**: lifecycle hooks are invoked with `send`, so a `private` hook
+  override runs instead of raising `NoMethodError` — which in a batch verb aborted and
+  rolled back the whole run. (#78)
+- **Models::Hashable**: the `to_param: true` / Sluggable conflict now raises in *either*
+  declaration order. With Hashable declared first, friendly_id's `to_param` used to land
+  above Hashable's and silently win, so `to_param: true` did nothing. (#70)
+- **Models::Tokenizable**: `expires_in:` now requires an `ActiveSupport::Duration` or a
+  `Numeric`. `expires_in: 2.hours.from_now` was accepted as ~1.8 billion seconds (tokens
+  effectively never expired) and `expires_in: "2 hours"` as 2 seconds. A model missing
+  both token columns now reports them in one error. (#51)
+- **Controllers::Includable**: `requested_includes(as: :paths)` returns a fresh array on
+  the `default:` path; it previously handed back the class attribute itself, so a caller
+  mutating the result corrupted every later request in the process. (#69)
+
 ## 1.28.5 (2026-09-17)
 
 Eight feature PRs deepening existing concerns, released as a patch by request:
