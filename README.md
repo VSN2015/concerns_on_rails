@@ -183,6 +183,7 @@ instead of per controller class:
 # config/initializers/concerns_on_rails.rb
 ConcernsOnRails.setup do |config|
   config.cache_store = -> { Rails.cache }   # fallback for Throttleable / Idempotentable
+  config.audit_actor = -> { Current.user&.id } # fallback "by" for every Auditable model
 end
 
 # Encryptable's key lives in its own config (see the Encryptable section):
@@ -541,7 +542,7 @@ end
 
 ## 🔐 Hashable
 
-Auto-generate random values on create — tokens, codes, UUIDs, or anything from a custom alphabet.
+Auto-generate random values on create — tokens, codes, UUIDs, or anything from a custom alphabet — and, optionally, use them as the public ID in your URLs.
 
 ```ruby
 class Order < ApplicationRecord
@@ -570,13 +571,24 @@ hashable_by :external_id, type: :uuid
 hashable_by :code,        type: :integer, length: 6
 hashable_by :code,        type: :custom,  length: 8,
             alphabet: "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # Crockford-style, no ambiguous chars
+
+# Public IDs: a Stripe-style prefix and the value as the URL parameter
+hashable_by :public_id, type: :custom, length: 14, prefix: "ord_", unique: true, to_param: true,
+            alphabet: "abcdefghijklmnopqrstuvwxyz0123456789"
+order.public_id          # => "ord_k7m3pq9a2x5n8v"
+order_path(order)        # => "/orders/ord_k7m3pq9a2x5n8v"
+Order.find_by!(public_id: params[:id])
+# while backfilling, accept both shapes — to_param falls back to the integer id when public_id is blank
+Order.find_by(public_id: params[:id]) || Order.find(params[:id])
 ```
 
 **Notes**
 - Auto-assigns in `before_create` only when the field is blank — callers can pass an explicit value.
 - A `regenerate_<field>!` instance method is defined dynamically.
+- `prefix:` is prepended to every generated value (string types only — not `:integer`); the uniqueness check sees the full prefixed value.
+- `to_param: true` overrides `to_param` to return the hashed field, falling back to the id while it is blank — pair it with `find_by!(field: params[:id])`, or with `find_by(field: params[:id]) || find(params[:id])` while a backfill is still in flight (a blank field puts an integer in the URL). Raises at class load alongside Sluggable, in either declaration order — friendly_id overrides `to_param` too.
+- `unique: true` prechecks for collisions and retries a bounded number of times (still add a unique index — that is the real guarantee).
 - For fixed-width numeric codes (e.g. `000042`), use a **string** column — integer columns drop leading zeros.
-- No uniqueness retry is built in. For collision-prone configs (short integer codes), add a unique index and rescue at the app level.
 - If your model has `validates :<field>, presence: true`, switch this concern's hook to `before_validation` in your model — it uses `before_create` by default.
 
 ---
@@ -795,6 +807,10 @@ class Subscription < ApplicationRecord
 
   activatable_by               # defaults to :active
   # activatable_by :enabled    # custom column name
+  # activatable_by timestamps: true                                    # stamps activated_at / deactivated_at
+  # activatable_by timestamps: { activated_at: :enabled_at, deactivated_at: nil }
+
+  def after_deactivate = Billing.pause!(self)   # before/after_activate, before/after_deactivate hooks
 end
 
 sub = Subscription.create!(active: true)
@@ -814,18 +830,23 @@ Subscription.inactive.activate_all     # => 12
 Subscription.active.deactivate_all     # => 3
 ```
 
-Both target the relation, return an Integer count, and run in a transaction. With
-`activate!`/`deactivate!` unoverridden and no validations on the model — neither
+Both target the relation, return an Integer count, and run in a transaction. Gating is per
+direction: with `activate!`, `before_activate` and `after_activate` unoverridden and no
+validations on the model — neither
 `validates`/`validates_with`, a custom `validate :method`, nor an association's autosave
 validation (a bare `has_many` registers one, so most models with associations take the
-streaming path) — they collapse to a single
-`UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise they stream
-per record so validations still run, and a record that fails to save raises
-`ActiveRecord::RecordNotSaved` and rolls the whole batch back. `toggle_active!`'s row lock has
+streaming path) — `activate_all` collapses to a single
+`UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise it streams
+per record so the hooks and validations still run, and a record that fails to save raises
+`ActiveRecord::RecordNotSaved` and rolls the whole batch back. `deactivate_all` is gated the
+same way by `deactivate!`/`before_deactivate`/`after_deactivate`, so overriding only
+`after_deactivate` leaves `activate_all` on the fast path. `toggle_active!`'s row lock has
 no batch analogue.
 
 **Notes**
 - `NULL` is treated as inactive (same convention as most apps' "unset = off").
+- Hooks (`before_activate` / `after_activate` / `before_deactivate` / `after_deactivate`) share one transaction with the write: a raising after-hook rolls the flip back, a failed `update` (validation) skips the after-hook and returns `false`. `toggle_active!` and the batch verbs go through the same path.
+- `timestamps: true` stamps `activated_at` on activate and `deactivated_at` on deactivate (the other column keeps its last value, so you can see both the last activation and the last deactivation); a Hash renames either column or drops a side with `nil`. The stamp columns must already exist — `activatable_by` checks that at declaration and raises `ArgumentError` otherwise; the `datetime` type itself is not enforced, it only types the migration hint in that error.
 - The configured column must exist; `activatable_by` raises `ArgumentError` otherwise.
 - `SoftDeletable` also defines a `.active` scope (alias of `.without_deleted`). If both concerns are included on the same model, the later one wins — include the one whose `.active` semantics you want last, or stick to one of them.
 
@@ -840,19 +861,22 @@ class User < ApplicationRecord
   include ConcernsOnRails::Tokenizable
 
   tokenizable_by :api_token                                  # 32-char URL-safe
-  tokenizable_by :reset_password_token, length: 24
+  tokenizable_by :reset_password_token, length: 24, expires_in: 2.hours   # needs reset_password_token_expires_at
   tokenizable_by :invite_code, type: :alphanumeric, length: 8
 end
 
-user = User.create!                       # all three tokens auto-generated
+user = User.create!                       # all three tokens auto-generated (+ the reset token's expiry stamped)
 user.api_token                            # => "k3Jf...g2" (32 URL-safe chars)
 user.api_token?                           # => true
+user.reset_password_token_expired?        # => false, until reset_password_token_expires_at passes
 
-user.regenerate_api_token!                # rotates and persists
-user.revoke_api_token!                    # nils the column
+user.regenerate_api_token!                # rotates and persists (an expiring field gets a fresh expiry too)
+user.revoke_api_token!                    # nils the column (and the expiry)
 
 User.find_by_api_token(token)             # Rails default
-User.authenticate_by_api_token(token)     # timing-safe; returns user or nil
+User.authenticate_by_api_token(token)     # timing-safe; returns user or nil — nil for an EXPIRED token
+User.consume_reset_password_token(token)  # single use: authenticate AND revoke atomically; nil the second time
+User.reset_password_token_expired         # scope: rows whose expiry has passed (cleanup jobs)
 ```
 
 **Options**
@@ -861,12 +885,15 @@ User.authenticate_by_api_token(token)     # timing-safe; returns user or nil
 | -------- | ----------- | ------------------------------------------------------------- |
 | `type:`  | `:urlsafe`  | One of `:urlsafe`, `:hex`, `:alphanumeric`, `:numeric`        |
 | `length:`| `32`        | Character length of the generated token                       |
+| `expires_in:` | `nil`  | A `Duration`/seconds. Stamps `<field>_expires_at` (a `datetime` column you add) on every generation; `authenticate_by_`/`consume_` refuse a stale token; adds `<field>_expired?` and the `<field>_expired` scope |
 
 **Notes**
 - URL-safe by default (`A–Z`, `a–z`, `0–9`, `-`, `_`) — drop straight into URLs and headers.
 - Caller-supplied values are respected: `User.create!(api_token: "preset")` won't be overwritten.
 - Generation does a best-effort uniqueness check before insert and retries up to 10 times. Pair with a `unique` DB index for real safety, especially for short alphanumeric/numeric codes.
-- `.authenticate_by_<field>` uses `ActiveSupport::SecurityUtils.secure_compare` to avoid leaking partial matches via response timing.
+- `.authenticate_by_<field>` uses `ActiveSupport::SecurityUtils.secure_compare` to avoid leaking partial matches via response timing, and returns `nil` once an `expires_in:` token has expired.
+- `.consume_<field>(value)` (every field) is the single-use verb — password resets, invite codes, magic links: it authenticates, then revokes with a **conditional `UPDATE`** keyed on the token still being present, so two concurrent consumers cannot both succeed; the loser gets `nil`. An expired token is refused and left in place.
+- A caller-supplied token on an `expires_in:` field gets the configured lifetime **on create** unless the caller also sets `<field>_expires_at`. Assigning one to an already-persisted row (`user.update!(reset_password_token: "preset")`) stamps nothing, and a row whose expiry is `nil` never expires — rotate with `regenerate_<field>!` (which stamps a fresh expiry) or set `<field>_expires_at` yourself.
 - Distinct from `Hashable`: Hashable handles a single random field; Tokenizable focuses on security tokens (multi-field, URL-safe default, timing-safe lookup, revocation).
 
 ---
@@ -1268,9 +1295,12 @@ class Product < ApplicationRecord
 
   auditable_by :price, :status                       # default column :audit_log
   # auditable_by :price, into: :history,
-  #              actor: -> { Current.user&.email },  # stamps "by" on each entry
+  #              actor: -> { Current.user&.email },  # stamps "by" on each entry (or actor: :updated_by_id)
   #              max_entries: 50                     # keep the newest 50
 end
+
+# Or set the actor once for every audited model — models that omit actor: use it, actor: nil/false opts out:
+ConcernsOnRails.setup { |config| config.audit_actor = -> { Current.user&.id } }
 
 product.update!(price: 200)
 product.audit_trail
@@ -1282,7 +1312,7 @@ product.clear_audit_trail!                 # wipe the column (skips callbacks)
 
 One entry is recorded **per changed field per save** (creates record `"from" => nil`), appended in the same `INSERT`/`UPDATE` via `before_save` — zero extra queries.
 
-**Options**: `into:` (`:audit_log`), `actor:` (callable, `instance_exec`'d on the record; `"by"` omitted when absent), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited), `max_value_length:` (`nil`; truncates long String `from`/`to` values to the first N characters + `…`).
+**Options**: `into:` (`:audit_log`), `actor:` (a Proc `instance_exec`'d on the record, any other callable `#call`ed, or a Symbol naming a record method such as `:updated_by_id`; omit it to take the gem-wide `config.audit_actor`, an explicit `nil`/`false` opts out of that; `"by"` omitted when it resolves to nil), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited), `max_value_length:` (`nil`; truncates long String `from`/`to` values to the first N characters + `…`).
 
 **Notes**
 - Writes that skip callbacks (`update_column(s)`, `touch`, `increment!`) are **not** audited; `save(validate: false)` is.
@@ -1422,6 +1452,7 @@ end
 
 post.comments_count                # maintained on create / destroy / update
 Comment.recount_counter_caches!    # repair drift / backfill every counter
+Comment.recount_counter_caches!(:post, parents: imported_posts)   # repair just these parents (ids, records or a relation)
 ```
 
 Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose.
@@ -1431,7 +1462,7 @@ Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,
 **Notes**
 - The `belongs_to` must be declared **before** the macro (the reflection is validated at declaration). Polymorphic associations are not supported.
 - Don't also set native `counter_cache: true` on the same column — both would fire and double-count.
-- Counters track the **persisted** record; writes that skip callbacks (`update_column(s)`, `update_all`, `delete`) are not tracked — run `recount_counter_caches!` to reconcile. It rewrites every parent (portable across adapters, but O(n) for conditional counters) — a maintenance operation, run it offline.
+- Counters track the **persisted** record; writes that skip callbacks (`update_column(s)`, `update_all`, `delete`) are not tracked — run `recount_counter_caches!` to reconcile. Bare, it rewrites every parent (portable across adapters, but O(n) for conditional counters) — a maintenance operation, run it offline. With `parents:` it zeroes and re-tallies only those parents (O(their children)) in one transaction that locks those rows before tallying, so repairing one imported post is safe on the request path.
 - Reach for [`counter_culture`](https://github.com/magnusvk/counter_culture) when you need multi-level rollups, delta columns, or after-commit execution.
 
 ---
@@ -1883,18 +1914,20 @@ end
 
 ## 🔗 Includable
 
-Whitelisted association sideloading + sparse fieldsets for JSON APIs — zero arbitrary `.includes` from user input.
+Whitelisted association sideloading + sparse fieldsets for JSON APIs — zero arbitrary `.includes` from user input, nested paths included.
 
 ```ruby
 class ArticlesController < ApplicationController
   include ConcernsOnRails::Controllers::Includable
 
-  includable :author, :comments,
-             fields: { articles: %i[id title published_at], authors: %i[id name] }
+  includable :author, comments: :author,                    # flat + nested, like `includes` arguments
+             fields: { articles: %i[id title published_at], authors: %i[id name] },
+             default: :author,                              # loaded when the client sends no ?include at all
+             strategy: :preload                             # :includes (default) | :preload | :eager_load
 
   def index
     render json: with_includes(Article.all),
-           include: requested_includes,
+           include: requested_includes(as: :json),
            fields:  requested_fields
   end
 end
@@ -1903,19 +1936,22 @@ end
 **URL params**
 
 ```
-GET /articles?include=author,comments&fields[articles]=id,title&fields[authors]=id,name
+GET /articles?include=author,comments.author&fields[articles]=id,title&fields[authors]=id,name
 ```
 
 **API**
 
-| Method               | What it does                                                                               |
-|----------------------|--------------------------------------------------------------------------------------------|
-| `with_includes(rel)` | Parses `params[:include]`, intersects with the allow-list, calls `relation.includes(...)`  |
-| `requested_includes` | Returns the sanitized `[:author, :comments]` array (pass to `render json:, include:`)     |
-| `requested_fields`   | Returns `{ articles: [:id, :title] }` sanitized map (pass to your serializer)             |
+| Method                        | What it does                                                                                     |
+|-------------------------------|--------------------------------------------------------------------------------------------------|
+| `with_includes(rel)`          | Parses `params[:include]`, keeps only allow-listed paths, applies them with the configured strategy |
+| `requested_includes(as:)`     | `:query` (default) → `[:author, { comments: :author }]` for `includes`/`preload`; `:paths` → `["author", "comments.author"]` for JSON:API serializers; `:json` → `[:author, { comments: { include: :author } }]` for `as_json`/`render json:` |
+| `requested_include_paths`     | The sanitized dotted paths in request order (what `as: :paths` returns)                            |
+| `requested_fields`            | Returns `{ articles: [:id, :title] }` sanitized map (pass to your serializer)                      |
 
 **Notes**
-- Non-whitelisted associations are **silently dropped** — no error, no arbitrary eager-loading.
+- A path is kept only if **every** segment follows the allow-list tree (`comments.author` needs `comments: :author`); anything else is **silently dropped** — no error, no arbitrary eager-loading.
+- `default:` applies only when `?include` is absent; `?include=` (blank) means "nothing" and is honoured. Defaults are validated against the allow-list at class load, stored frozen and `dup`ed per request.
+- **A typo in an option name becomes an association.** Inline nested Hashes arrive as `**nested`, so any keyword the macro does not name is registered as an allow-listed association instead of raising: `feilds:` silently leaves `includable_fields` empty — i.e. no sparse-fieldset allow-list at all.
 - Non-whitelisted tables in `params[:fields]` are dropped; non-whitelisted columns within an allowed table are dropped.
 - Pass `requested_fields` to your serializer (e.g. AMS / Blueprinter) — `Includable` itself does not alter the JSON output, only the query.
 
@@ -2037,12 +2073,15 @@ class Api::BaseController < ApplicationController
   throttle_by limit: 100, period: 1.minute                          # by IP (default)
   throttle_by limit: 5,   period: 1.minute, only: :create,
               by: -> { current_user&.id || request.remote_ip }
+  throttle_by limit: 1000, period: 1.hour, unless: :staff?          # skip conditions
 end
 ```
 
 Fixed-window counter: the key embeds a floored time bucket (`epoch / period`) so each window starts clean and `X-RateLimit-Reset` is exact.
 
-**Options**: `limit:` (positive integer), `period:` (a `Duration` or seconds), `by:` (discriminator lambda, default per-IP), `only:` / `except:` (mutually exclusive action scoping), `name:` (disambiguates the counter key).
+**Options**: `limit:` (positive integer), `period:` (a `Duration` or seconds), `by:` (discriminator lambda, default per-IP), `only:` / `except:` (mutually exclusive action scoping), `if:` / `unless:` (a Symbol naming a controller method or a callable, evaluated per request — staff accounts, internal IPs, feature flags; both must pass when both given), `name:` (disambiguates the counter key).
+
+When several rules apply to one request the `X-RateLimit-*` headers describe the **tightest** one (fewest requests remaining, ties going to the rule that resets last), so a client sees the budget that runs out first. A throttled request instruments `rate_limited.concerns_on_rails` (payload: `rule`, `discriminator`, `count`, `limit`, `period`, `reset_at`, `retry_after`, `controller`, `action`) via the public `on_rate_limited(rule, result)` hook before the 429 is rendered — subscribe to alert on abusive clients, or override it (call `super` to keep the event). Note `discriminator` is the **raw** client IP (or user id) — personal data that `filter_parameters` does not reach, so hash, truncate or drop it in `on_rate_limited` if subscribers persist it.
 
 **Notes**
 - The store MUST support **atomic increment-with-expiry** (`Rails.cache` with `#increment`, or Redis) — a non-atomic store under-counts under concurrency.
@@ -2089,12 +2128,13 @@ class PaymentsController < ApplicationController
 end
 ```
 
-Per-key lifecycle: claim atomically (`write unless_exist`, TTL `lock_ttl:`) → run action → cache 2xx–4xx responses for `ttl:`; 5xx and raised exceptions release the claim so the client can retry. Replays carry `X-Idempotency-Replayed: true`; duplicates in flight get 409 + `Retry-After`; reusing a key with a **different payload** gets 422 (`idempotency_key_reuse`, fingerprint overridable via `idempotency_fingerprint`).
+Per-key lifecycle: claim atomically (`write unless_exist`, TTL `lock_ttl:`) → run action → cache 2xx–4xx responses for `ttl:`; 5xx and raised exceptions release the claim so the client can retry. Replays carry `X-Idempotency-Replayed: true` **and the original's `Location` / `Content-Location` / `ETag` / `Last-Modified` / `Link` headers** (captured with the cached response — a replayed 201 still says where the resource lives; tune the allow-list with `headers:`, `[]` to capture none); duplicates in flight get 409 + `Retry-After`; reusing a key with a **different payload** gets 422 (`idempotency_key_reuse`, fingerprint overridable via `idempotency_fingerprint`).
 
-**Options**: `*actions` (allow-list, required), `ttl:` (`24.hours`), `lock_ttl:` (`1.minute`), `header:` (`"Idempotency-Key"`), `required:` (`false`).
+**Options**: `*actions` (allow-list, required), `ttl:` (`24.hours`), `lock_ttl:` (`1.minute`), `header:` (`"Idempotency-Key"`), `required:` (`false`), `headers:` (response headers replayed with the cached response; default `%w[Location Content-Location ETag Last-Modified Link]` — an allow-list on purpose: `Set-Cookie`, `Date`, request ids and rate-limit headers describe the original exchange and are never replayed).
 
 **Notes**
 - Cache keys are scoped per `controller#action` and the client key is SHA256-hashed, so the same key on different endpoints never collides.
+- The scope carries **no principal**: with client-chosen keys, two users sending the same key and payload to one endpoint share a record (the second is served the first's response, `Location` included). Override `idempotency_scope` — `def idempotency_scope = "#{super}:#{current_user&.id}"`.
 - There is **no in-process default store** on purpose: the first keyed request raises `ArgumentError` until you set `idempotency_store` (or the gem-wide fallback `ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } }`).
 - When `Respondable` is included, the 400/409/422 bodies delegate to `render_error`.
 - Declare halting filters (authentication, `Throttleable`) **before** including this concern — a 401/403 rendered by an inner filter would be cached and replayed for the full TTL. Responses rendered by `rescue_from` handlers are never cached.
