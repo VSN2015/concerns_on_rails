@@ -1763,7 +1763,7 @@ end
 
 ## 📦 Respondable
 
-Standardized JSON envelopes for API controllers — two methods, zero state.
+Standardized JSON envelopes for API controllers — two intent-revealing render methods, plus an opt-in app-wide switch to RFC 9457 problem details.
 
 ```ruby
 class Api::ArticlesController < ApplicationController
@@ -1797,12 +1797,27 @@ end
 { "success": false, "error": { "message": "...", "code": "...", "details": [...] } }
 ```
 
+**RFC 9457 problem details** — switch the error format once and every 4xx the gem's concerns render
+through `render_error` (ErrorHandleable, Throttleable, Idempotentable, CursorPaginatable, Deprecatable,
+WebhookVerifiable, Authorizable) becomes an `application/problem+json` document; `render_success` is untouched:
+
+```ruby
+respondable_by error_format: :problem_details, problem_type_base: "https://api.example.com/problems"
+# 422 application/problem+json
+# { "type": "https://api.example.com/problems/record_invalid", "title": "Unprocessable Content", "status": 422,
+#   "detail": "Validation failed", "instance": "/api/articles", "code": "record_invalid", "errors": ["Name can't be blank"] }
+```
+
+`type` is `problem_type_base/<code>` (or `about:blank` without a base or code), `title` the status reason phrase,
+`instance` the request path; `code` and `errors` ride along as extension members.
+
 **API**
 
 | Method            | Signature                                                                                  |
 |-------------------|--------------------------------------------------------------------------------------------|
 | `render_success`  | `render_success(data: nil, status: :ok, meta: {})`                                         |
 | `render_error`    | `render_error(message:, status: :unprocessable_entity, code: nil, errors: nil)`            |
+| `respondable_by`  | `respondable_by(error_format: :envelope, problem_type_base: nil)` — class-level; `error_format:` is `:envelope` (default) or `:problem_details` |
 
 > `data:` is a keyword arg (not positional) on purpose — it sidesteps Ruby 3's behavior of treating hash literals as kwargs when a method declares any keyword params.
 

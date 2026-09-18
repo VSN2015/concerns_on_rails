@@ -67,7 +67,7 @@ end
 |-----------|-------------|
 | `enforce_throttles` | `before_action` entry point. Iterates every applicable rule (action scope **and** `if:`/`unless:`), increments its counter, and renders a 429 if a limit is exceeded — emitting that rule's headers and `on_rate_limited`. When every rule passes, the `X-RateLimit-*` headers describe the **tightest** rule (fewest remaining). Public so subclasses can call or override it. |
 | `on_rate_limited(rule, result)` | Public override point + instrumentation seam, run once per throttled request before the body is rendered. Default: `ActiveSupport::Notifications.instrument("rate_limited.concerns_on_rails", controller:, action:, rule:, discriminator:, count:, limit:, period:, reset_at:, retry_after:)`. Override to alert or block; call `super` to keep the event. The payload's `discriminator` is the **raw** value (client IP by default) — see the privacy note below. |
-| `throttled_response(rule, result)` | Renders the 429 body. Public override point. By default renders `{ success: false, error: { message: "...", code: "rate_limited" } }` with `status: :too_many_requests`. If `Respondable` is also included the call is delegated to `render_error`. Override this method to customize the body format. |
+| `throttled_response(rule, result)` | Renders the 429 body. Public override point. By default renders `{ success: false, error: { message: "...", code: "rate_limited" } }` with `status: :too_many_requests`. If `Respondable` is also included the call is delegated to `render_error`. The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`. Override this method to customize the body format. |
 
 ### Class methods
 
