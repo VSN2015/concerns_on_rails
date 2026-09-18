@@ -1888,18 +1888,20 @@ end
 
 ## 🔗 Includable
 
-Whitelisted association sideloading + sparse fieldsets for JSON APIs — zero arbitrary `.includes` from user input.
+Whitelisted association sideloading + sparse fieldsets for JSON APIs — zero arbitrary `.includes` from user input, nested paths included.
 
 ```ruby
 class ArticlesController < ApplicationController
   include ConcernsOnRails::Controllers::Includable
 
-  includable :author, :comments,
-             fields: { articles: %i[id title published_at], authors: %i[id name] }
+  includable :author, comments: :author,                    # flat + nested, like `includes` arguments
+             fields: { articles: %i[id title published_at], authors: %i[id name] },
+             default: :author,                              # loaded when the client sends no ?include at all
+             strategy: :preload                             # :includes (default) | :preload | :eager_load
 
   def index
     render json: with_includes(Article.all),
-           include: requested_includes,
+           include: requested_includes(as: :json),
            fields:  requested_fields
   end
 end
@@ -1908,19 +1910,22 @@ end
 **URL params**
 
 ```
-GET /articles?include=author,comments&fields[articles]=id,title&fields[authors]=id,name
+GET /articles?include=author,comments.author&fields[articles]=id,title&fields[authors]=id,name
 ```
 
 **API**
 
-| Method               | What it does                                                                               |
-|----------------------|--------------------------------------------------------------------------------------------|
-| `with_includes(rel)` | Parses `params[:include]`, intersects with the allow-list, calls `relation.includes(...)`  |
-| `requested_includes` | Returns the sanitized `[:author, :comments]` array (pass to `render json:, include:`)     |
-| `requested_fields`   | Returns `{ articles: [:id, :title] }` sanitized map (pass to your serializer)             |
+| Method                        | What it does                                                                                     |
+|-------------------------------|--------------------------------------------------------------------------------------------------|
+| `with_includes(rel)`          | Parses `params[:include]`, keeps only allow-listed paths, applies them with the configured strategy |
+| `requested_includes(as:)`     | `:query` (default) → `[:author, { comments: :author }]` for `includes`/`preload`; `:paths` → `["author", "comments.author"]` for JSON:API serializers; `:json` → `[:author, { comments: { include: :author } }]` for `as_json`/`render json:` |
+| `requested_include_paths`     | The sanitized dotted paths in request order (what `as: :paths` returns)                            |
+| `requested_fields`            | Returns `{ articles: [:id, :title] }` sanitized map (pass to your serializer)                      |
 
 **Notes**
-- Non-whitelisted associations are **silently dropped** — no error, no arbitrary eager-loading.
+- A path is kept only if **every** segment follows the allow-list tree (`comments.author` needs `comments: :author`); anything else is **silently dropped** — no error, no arbitrary eager-loading.
+- `default:` applies only when `?include` is absent; `?include=` (blank) means "nothing" and is honoured. Defaults are validated against the allow-list at class load, stored frozen and `dup`ed per request.
+- **A typo in an option name becomes an association.** Inline nested Hashes arrive as `**nested`, so any keyword the macro does not name is registered as an allow-listed association instead of raising: `feilds:` silently leaves `includable_fields` empty — i.e. no sparse-fieldset allow-list at all.
 - Non-whitelisted tables in `params[:fields]` are dropped; non-whitelisted columns within an allowed table are dropped.
 - Pass `requested_fields` to your serializer (e.g. AMS / Blueprinter) — `Includable` itself does not alter the JSON output, only the query.
 
