@@ -1,4 +1,5 @@
 require "spec_helper"
+require "support/integration_harness"
 
 describe ConcernsOnRails::Controllers::Localizable do
   # A minimal stand-in for ActionDispatch::Request (only #headers is used).
@@ -89,6 +90,110 @@ describe ConcernsOnRails::Controllers::Localizable do
       inside = c.switch_locale { I18n.locale }
       expect(inside).to eq(:fr)
       expect(I18n.locale).to eq(:en) # restored
+    end
+  end
+  describe "response headers (Content-Language / Vary)" do
+    it "sets Content-Language to the resolved locale while switching" do
+      c = controller(params: { locale: "fr" }) { localizable available: %i[en fr de], default: :en }
+      c.switch_locale { nil }
+      expect(c.response.headers["Content-Language"]).to eq("fr")
+    end
+
+    it "appends Vary: Accept-Language when the header is a locale source, merging with an existing Vary" do
+      c = controller(accept_language: "de") { localizable available: %i[en fr de], default: :en }
+      c.response.set_header("Vary", "Accept")
+      c.switch_locale { nil }
+      expect(c.response.headers["Vary"]).to eq("Accept, Accept-Language")
+      expect(c.response.headers["Content-Language"]).to eq("de")
+
+      again = controller(accept_language: "de") { localizable available: %i[en fr de], default: :en }
+      again.response.set_header("Vary", "Accept-Language")
+      again.switch_locale { nil }
+      expect(again.response.headers["Vary"]).to eq("Accept-Language") # de-duplicated
+    end
+
+    it "does not add Vary when header: false (the locale cannot depend on Accept-Language)" do
+      c = controller(params: { locale: "fr" }) { localizable available: %i[en fr de], default: :en, header: false }
+      c.switch_locale { nil }
+      expect(c.response.headers["Content-Language"]).to eq("fr")
+      expect(c.response.headers).not_to have_key("Vary")
+    end
+
+    it "can be switched off with response_headers: false" do
+      c = controller(accept_language: "fr") { localizable available: %i[en fr de], default: :en, response_headers: false }
+      c.switch_locale { nil }
+      expect(c.response.headers).not_to have_key("Content-Language")
+      expect(c.response.headers).not_to have_key("Vary")
+    end
+
+    it "emits a BCP 47 tag (underscore locales become dashed)" do
+      saved = I18n.available_locales
+      I18n.available_locales = %i[en pt_BR]
+      c = controller(params: { locale: "pt_BR" }) { localizable available: %i[en pt_BR], default: :en }
+      c.switch_locale { nil }
+      expect(c.response.headers["Content-Language"]).to eq("pt-BR")
+    ensure
+      I18n.available_locales = saved
+    end
+
+    it "writes the headers before the action, so a raising action (rescue_from path) still carries them" do
+      c = controller(accept_language: "de") { localizable available: %i[en fr de], default: :en }
+      expect { c.switch_locale { raise "boom" } }.to raise_error("boom")
+      expect(c.response.headers["Content-Language"]).to eq("de")
+      expect(c.response.headers["Vary"]).to eq("Accept-Language")
+    end
+
+    it "keeps Rails' own Vary: Accept on a real content-negotiated response" do
+      # Rails adds Vary: Accept during render, but only while the header is
+      # blank, so a pre-action write of ours would silently drop that cache
+      # dimension. Only a real dispatch can catch it.
+      klass = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Localizable
+
+        localizable available: %i[en fr de], default: :en
+
+        def show
+          render json: { ok: true }
+        end
+      end
+
+      result = IntegrationHarness.dispatch(klass, :show,
+                                           headers: { "Accept" => "application/json", "Accept-Language" => "fr" })
+      vary = result.header("Vary").to_s.split(",").map(&:strip)
+      expect(vary).to include("Accept", "Accept-Language")
+      expect(result.header("Content-Language")).to eq("fr")
+    end
+
+    it "advertises no Vary when the resolver ignores the Accept-Language header" do
+      klass = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Localizable
+
+        localizable available: %i[en fr], default: :en, header: false, param: :locale
+
+        def show
+          render json: { ok: true }
+        end
+      end
+
+      result = IntegrationHarness.dispatch(klass, :show, query: "locale=fr", headers: { "Accept-Language" => "de" })
+      expect(result.header("Vary").to_s).not_to include("Accept-Language")
+      expect(result.header("Content-Language")).to eq("fr")
+    end
+
+    it "is a no-op on a controller without a response object" do
+      klass = Class.new do
+        def self.around_action(*); end
+        # no ActiveSupport here — stub what the included block needs
+        def self.class_attribute(*, **); end
+
+        def self.localizable_options
+          {}
+        end
+        include ConcernsOnRails::Controllers::Localizable
+      end
+      bare = klass.new
+      allow(bare).to receive(:resolved_locale).and_return(:en)
+      expect(bare.switch_locale { I18n.locale }).to eq(:en)
     end
   end
 end
