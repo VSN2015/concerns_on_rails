@@ -145,6 +145,19 @@ module ConcernsOnRails
         Digest::SHA256.hexdigest(JSON.generate(idempotency_deep_sort(filtered)))
       end
 
+      # The cache-key namespace, `controller#action` by default. Public
+      # override point, and one to reach for whenever keys are client-chosen:
+      # the default carries NO per-principal component, so two users sending
+      # the same key with the same payload to the same endpoint share one
+      # record — the second is served the first's cached response, INCLUDING
+      # its captured `Location`. Namespace by the authenticated principal:
+      #   def idempotency_scope = "#{super}:#{current_user&.id}"
+      def idempotency_scope
+        controller = respond_to?(:controller_path) ? controller_path : self.class.name || "anonymous"
+        action = respond_to?(:action_name) ? action_name.to_s : ""
+        "#{controller}##{action}"
+      end
+
       # Public override point for how a cached response is replayed. Captured
       # headers (`record["headers"]`, absent on records written before the
       # feature) are set before the body renders.
@@ -230,9 +243,26 @@ module ConcernsOnRails
         return {} unless respond_to?(:response) && response.respond_to?(:headers)
 
         rule[:headers].each_with_object({}) do |name, captured|
-          value = response.headers[name]
+          value = idempotency_header_value(name)
           captured[name] = value.to_s unless value.nil?
         end
+      end
+
+      # `response.headers` is a case-SENSITIVE Hash wrapper before Rails 7.1
+      # and case-insensitive (Rack::Headers) from 7.1 on, so an action setting
+      # the Rack-3-style "content-location" would capture nothing on 6.1 and
+      # everything after an upgrade. Fall back to a case-insensitive scan so
+      # capture behaves identically on every supported Rails; the allow-list's
+      # own casing is what gets stored and replayed.
+      def idempotency_header_value(name)
+        headers = response.headers
+        value = headers[name]
+        return value unless value.nil?
+        return nil unless headers.respond_to?(:find)
+
+        downcased = name.to_s.downcase
+        _, found = headers.find { |header, _| header.to_s.downcase == downcased }
+        found
       end
 
       def idempotency_resolve_existing(store, cache_key, rule, fingerprint)
@@ -276,12 +306,6 @@ module ConcernsOnRails
         # The user key is hashed so any validated key is safe in any backend
         # (memcached limits key length and bans whitespace/control characters).
         "idempotentable:#{idempotency_scope}:#{Digest::SHA256.hexdigest(key)}"
-      end
-
-      def idempotency_scope
-        controller = respond_to?(:controller_path) ? controller_path : self.class.name || "anonymous"
-        action = respond_to?(:action_name) ? action_name.to_s : ""
-        "#{controller}##{action}"
       end
 
       def idempotency_store!

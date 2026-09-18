@@ -228,6 +228,33 @@ describe ConcernsOnRails::Controllers::Idempotentable do
       expect(c.rendered).to be_nil
     end
 
+    it "namespaces records by an overridden idempotency_scope so two principals never share one" do
+      klass = idempotent_class(store) do
+        idempotent_actions :create
+
+        attr_accessor :principal
+
+        def idempotency_scope
+          "#{super}:#{principal}"
+        end
+      end
+
+      alice = instance(klass, key: "shared")
+      alice.principal = "alice"
+      alice.enforce_idempotency do
+        alice.response.status = 201
+        alice.response.body = '{"id":9001}'
+        alice.response.set_header("Location", "/orders/9001")
+      end
+
+      bob = instance(klass, key: "shared")
+      bob.principal = "bob"
+      expect(perform(bob)).to eq(1)
+      expect(bob.rendered).to be_nil
+      expect(bob.response.headers).not_to have_key("Location")
+      expect(store.data.size).to eq(2)
+    end
+
     it "honors a custom header name" do
       klass = idempotent_class(store) { idempotent_actions :create, header: "X-Client-Token" }
       c = instance(klass, key: "k", header: "X-Client-Token")
@@ -377,6 +404,17 @@ describe ConcernsOnRails::Controllers::Idempotentable do
       expect(replay.response.headers).not_to have_key("X-Request-Id")
       expect(replay.response.headers).not_to have_key("Set-Cookie")
       expect(replay.response.headers["X-Idempotency-Replayed"]).to eq("true")
+    end
+
+    it "captures a header the action set in another case (response.headers is case-sensitive before Rails 7.1)" do
+      klass = idempotent_class(store) { idempotent_actions :create }
+      perform_with_headers(instance(klass, key: "ci-1"), { "location" => "/payments/7", "etag" => 'W/"z"' })
+      expect(store.data.values.first["headers"]).to eq("Location" => "/payments/7", "ETag" => 'W/"z"')
+
+      replay = instance(klass, key: "ci-1")
+      perform(replay)
+      expect(replay.response.headers["Location"]).to eq("/payments/7")
+      expect(replay.response.headers["ETag"]).to eq('W/"z"')
     end
 
     it "headers: replaces the allow-list" do

@@ -1854,6 +1854,7 @@ Per-key lifecycle: claim atomically (`write unless_exist`, TTL `lock_ttl:`) → 
 
 **Notes**
 - Cache keys are scoped per `controller#action` and the client key is SHA256-hashed, so the same key on different endpoints never collides.
+- The scope carries **no principal**: with client-chosen keys, two users sending the same key and payload to one endpoint share a record (the second is served the first's response, `Location` included). Override `idempotency_scope` — `def idempotency_scope = "#{super}:#{current_user&.id}"`.
 - There is **no in-process default store** on purpose: the first keyed request raises `ArgumentError` until you set `idempotency_store` (or the gem-wide fallback `ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } }`).
 - When `Respondable` is included, the 400/409/422 bodies delegate to `render_error`.
 - Declare halting filters (authentication, `Throttleable`) **before** including this concern — a 401/403 rendered by an inner filter would be cached and replayed for the full TTL. Responses rendered by `rescue_from` handlers are never cached.
