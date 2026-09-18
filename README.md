@@ -2058,12 +2058,15 @@ class Api::BaseController < ApplicationController
   throttle_by limit: 100, period: 1.minute                          # by IP (default)
   throttle_by limit: 5,   period: 1.minute, only: :create,
               by: -> { current_user&.id || request.remote_ip }
+  throttle_by limit: 1000, period: 1.hour, unless: :staff?          # skip conditions
 end
 ```
 
 Fixed-window counter: the key embeds a floored time bucket (`epoch / period`) so each window starts clean and `X-RateLimit-Reset` is exact.
 
-**Options**: `limit:` (positive integer), `period:` (a `Duration` or seconds), `by:` (discriminator lambda, default per-IP), `only:` / `except:` (mutually exclusive action scoping), `name:` (disambiguates the counter key).
+**Options**: `limit:` (positive integer), `period:` (a `Duration` or seconds), `by:` (discriminator lambda, default per-IP), `only:` / `except:` (mutually exclusive action scoping), `if:` / `unless:` (a Symbol naming a controller method or a callable, evaluated per request — staff accounts, internal IPs, feature flags; both must pass when both given), `name:` (disambiguates the counter key).
+
+When several rules apply to one request the `X-RateLimit-*` headers describe the **tightest** one (fewest requests remaining, ties going to the rule that resets last), so a client sees the budget that runs out first. A throttled request instruments `rate_limited.concerns_on_rails` (payload: `rule`, `discriminator`, `count`, `limit`, `period`, `reset_at`, `retry_after`, `controller`, `action`) via the public `on_rate_limited(rule, result)` hook before the 429 is rendered — subscribe to alert on abusive clients, or override it (call `super` to keep the event). Note `discriminator` is the **raw** client IP (or user id) — personal data that `filter_parameters` does not reach, so hash, truncate or drop it in `on_rate_limited` if subscribers persist it.
 
 **Notes**
 - The store MUST support **atomic increment-with-expiry** (`Rails.cache` with `#increment`, or Redis) — a non-atomic store under-counts under concurrency.
