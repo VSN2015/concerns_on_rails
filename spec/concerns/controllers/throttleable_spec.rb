@@ -186,6 +186,47 @@ describe ConcernsOnRails::Controllers::Throttleable do
       end
     end
 
+    it "hands the controller to a one-argument lambda (the Rails 7.2 rate_limit idiom)" do
+      klass = throttled_class(store) do
+        # The single-argument lambda is the point of the example, not a &:staff? shorthand.
+        throttle_by limit: 1, period: 60, unless: ->(c) { c.staff? } # rubocop:disable Style/SymbolProc
+
+        def staff?
+          params[:staff] == "1"
+        end
+      end
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        staff = Array.new(2) { instance(klass, remote_ip: "9.9.9.9", params: { staff: "1" }) }
+        staff.each(&:enforce_throttles)
+        expect(staff.map(&:rendered)).to eq([nil, nil])
+
+        public_clients = Array.new(2) { instance(klass, remote_ip: "9.9.9.1") }
+        public_clients.each(&:enforce_throttles)
+        expect(public_clients.last.rendered[:status]).to eq(:too_many_requests)
+      end
+    end
+
+    it "hands the controller to a one-argument proc" do
+      c = controller(store: store, params: { staff: "1" }) do
+        throttle_by limit: 1, period: 60, if: proc { |ctrl| ctrl.params[:staff] != "1" }
+      end
+      c.enforce_throttles
+
+      expect(c.response.headers["X-RateLimit-Limit"]).to be_nil
+    end
+
+    it "calls a non-Proc callable object with the controller" do
+      condition = Class.new do
+        def call(controller)
+          controller.params[:staff] != "1"
+        end
+      end.new
+      c = controller(store: store, params: { staff: "1" }) { throttle_by limit: 1, period: 60, if: condition }
+      c.enforce_throttles
+
+      expect(c.response.headers["X-RateLimit-Limit"]).to be_nil
+    end
+
     it "requires BOTH conditions to pass when if: and unless: are given together" do
       c = controller(store: store) do
         throttle_by limit: 1, period: 60, if: -> { true }, unless: -> { true }
@@ -278,6 +319,23 @@ describe ConcernsOnRails::Controllers::Throttleable do
         expect(first.response.headers["X-RateLimit-Limit"]).to eq("2")
         expect(first.response.headers["X-RateLimit-Remaining"]).to eq("1")
         expect(first.response.headers["X-RateLimit-Reset"]).to eq(Time.utc(2026, 1, 1, 13, 0, 0).to_i.to_s)
+      end
+    end
+
+    it "break a tie on remaining with the rule that resets LAST" do
+      klass = throttled_class(store) do
+        throttle_by limit: 2, period: 60, name: "burst"
+        throttle_by limit: 2, period: 3600, name: "hourly"
+      end
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        c = instance(klass, remote_ip: "9.0.0.1")
+        c.enforce_throttles
+
+        # Both rules sit at 1 remaining; the headers must describe the hourly
+        # window, or Retry-After/Reset would promise relief in 60s while the
+        # client stays blocked for the rest of the hour.
+        expect(c.response.headers["X-RateLimit-Remaining"]).to eq("1")
+        expect(c.response.headers["X-RateLimit-Reset"]).to eq(Time.utc(2026, 1, 1, 13, 0, 0).to_i.to_s)
       end
     end
 

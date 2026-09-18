@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
+require "active_support/notifications"
 
 module ConcernsOnRails
   module Controllers
@@ -49,11 +50,12 @@ module ConcernsOnRails
         # Declare a rate-limit rule. `limit` requests per `period` (a Duration or
         # seconds), bucketed by `by:` (a callable, default per-IP). `only:`/
         # `except:` scope it to a subset of actions (mutually exclusive). `if:`/
-        # `unless:` (a Symbol naming a controller method, or a callable
-        # instance_exec'd on the controller) skip the rule per request — staff
-        # accounts, internal IPs, feature flags; both may be given, and both must
-        # pass. `name:` disambiguates the counter key when several rules share a
-        # discriminator.
+        # `unless:` (a Symbol naming a controller method, or a callable — a
+        # zero-arity Proc is instance_exec'd, anything else is handed the
+        # controller, as Rails' own before_action conditionals do) skip the rule
+        # per request — staff accounts, internal IPs, feature flags; both may be
+        # given, and both must pass. `name:` disambiguates the counter key when
+        # several rules share a discriminator.
         def throttle_by(limit:, period:, by: nil, only: nil, except: nil, name: nil, if: nil, unless: nil)
           # `if`/`unless` are keywords, so the parameters are read via binding.
           if_condition = binding.local_variable_get(:if)
@@ -128,7 +130,11 @@ module ConcernsOnRails
       # "rate_limited.concerns_on_rails" with the rule name, discriminator,
       # count/limit/period, reset_at/retry_after and controller/action — the
       # hook for alerting on abusive clients or logging. Call super to keep the
-      # event when overriding.
+      # event when overriding. NOTE the payload carries the RAW discriminator
+      # (the client IP by default) — personal data in most jurisdictions, and
+      # not covered by Rails' filter_parameters; override this hook to hash,
+      # truncate or drop it before the event reaches a log or an alerting
+      # service.
       def on_rate_limited(rule, result)
         ActiveSupport::Notifications.instrument(
           "rate_limited.concerns_on_rails",
@@ -164,7 +170,7 @@ module ConcernsOnRails
       end
 
       # if: must be truthy and unless: falsy; a Symbol names a controller
-      # method, a callable is instance_exec'd (so `request`/`current_user` work).
+      # method, a callable is evaluated against the controller.
       def throttle_conditions_pass?(rule)
         return false if rule[:if] && !throttle_evaluate_condition(rule[:if])
         return false if rule[:unless] && throttle_evaluate_condition(rule[:unless])
@@ -172,8 +178,15 @@ module ConcernsOnRails
         true
       end
 
+      # Arity-aware, like Rails' own before_action conditionals: a zero-arity
+      # Proc is instance_exec'd (so `request`/`current_user` resolve), while a
+      # one-arg Proc — `->(c) { c.staff? }`, the Rails 7.2 `rate_limit` idiom —
+      # and any other callable object are passed the controller.
       def throttle_evaluate_condition(condition)
-        condition.is_a?(Symbol) ? send(condition) : instance_exec(&condition)
+        return send(condition) if condition.is_a?(Symbol)
+        return condition.call(self) unless condition.is_a?(Proc)
+
+        condition.arity.zero? ? instance_exec(&condition) : condition.call(self)
       end
 
       def register_throttle_hit(rule)
@@ -194,10 +207,14 @@ module ConcernsOnRails
 
       # Several rules, one set of headers: the client should see the budget
       # that will run out first, not whichever rule happened to be declared last.
+      # Ties (equal remaining) go to the rule whose window resets LAST, so
+      # X-RateLimit-Reset never promises relief a longer window won't give.
       def emit_tightest_throttle_headers(applied)
         return if applied.empty?
 
-        rule, result = applied.min_by { |candidate, outcome| candidate[:limit] - outcome[:count] }
+        rule, result = applied.min_by do |candidate, outcome|
+          [candidate[:limit] - outcome[:count], -outcome[:reset_at]]
+        end
         emit_throttle_headers(rule, result)
       end
 
