@@ -117,7 +117,7 @@ describe ConcernsOnRails::Controllers::Respondable do
       end
 
       expect(result.status).to eq(422)
-      expect(result.header("Content-Type")).to include("application/problem+json")
+      expect(result.header("Content-Type")).to eq("application/problem+json")
       expect(JSON.parse(result.body)["status"]).to eq(422)
       expect(captured.string).not_to include("deprecated")
     end
@@ -217,7 +217,10 @@ describe ConcernsOnRails::Controllers::Respondable do
       end
       result = IntegrationHarness.dispatch(real, :show)
       expect(result.status).to eq(410)
-      expect(result.header("Content-Type")).to start_with("application/problem+json")
+      # Exactly the media type, no "; charset=utf-8": RFC 9457's registration
+      # defines no parameters, and a client comparing the header for equality
+      # would reject a parameterized one.
+      expect(result.header("Content-Type")).to eq("application/problem+json")
       expect(JSON.parse(result.body)).to include("type" => "about:blank", "status" => 410, "detail" => "Gone fishing", "code" => "gone")
     end
   end

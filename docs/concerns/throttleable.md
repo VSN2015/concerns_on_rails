@@ -64,7 +64,7 @@ end
 | Signature | Description |
 |-----------|-------------|
 | `enforce_throttles` | `before_action` entry point. Iterates every applicable rule, increments its counter, sets rate-limit headers, and renders a 429 response if the limit is exceeded. Public so subclasses can call or override it. |
-| `throttled_response(rule, result)` | Renders the 429 body. Public override point. By default renders `{ success: false, error: { message: "...", code: "rate_limited" } }` with `status: :too_many_requests`. If `Respondable` is also included the call is delegated to `render_error`. Override this method to customize the body format. |
+| `throttled_response(rule, result)` | Renders the 429 body. Public override point. By default renders `{ success: false, error: { message: "...", code: "rate_limited" } }` with `status: :too_many_requests`. If `Respondable` is also included the call is delegated to `render_error`. The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`. Override this method to customize the body format. |
 
 ### Class methods
 

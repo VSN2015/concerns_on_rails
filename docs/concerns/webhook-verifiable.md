@@ -64,7 +64,7 @@ Each call appends a rule; the **first** rule matching the current action wins (n
 | Stripe `t` outside the tolerance (stale **or** future) | 401 | `webhook_timestamp_stale` |
 | Stripe header unparseable (missing/non-numeric `t`, no `v1`) | 400 | `webhook_signature_malformed` |
 
-Bodies use the gem's standard envelope `{ "success": false, "error": { "message": ..., "code": ... } }`, delegating to `Respondable#render_error` when that concern is included.
+Bodies use the gem's standard envelope `{ "success": false, "error": { "message": ..., "code": ... } }`, delegating to `Respondable#render_error` when that concern is included. The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`.
 
 ## Methods
 

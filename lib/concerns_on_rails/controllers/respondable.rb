@@ -137,7 +137,20 @@ module ConcernsOnRails
         # runs it through Rack::Utils.status_code, which deprecation-warns for
         # :unprocessable_entity -- render_error's own default, so every
         # validation failure printed one.
-        render json: body, status: status_code, content_type: PROBLEM_JSON
+        result = render json: body, status: status_code, content_type: PROBLEM_JSON
+        suppress_problem_charset
+        result
+      end
+
+      # Rails appends "; charset=utf-8" to every rendered content type, but the
+      # RFC 9457 registration for application/problem+json defines no
+      # parameters -- a client comparing the header for equality rejects the
+      # document. `charset = false` drops the parameter. Guarded because the
+      # response object is not always a real ActionDispatch::Response.
+      def suppress_problem_charset
+        return unless respond_to?(:response, true) && response.respond_to?(:charset=)
+
+        response.charset = false
       end
 
       def problem_type_for(code)

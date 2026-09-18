@@ -82,7 +82,7 @@ Cache keys are scoped as `idempotentable:<controller>#<action>:<SHA256(key)>`, s
 | `idempotency_key` | The raw key sent for the matched rule (`nil` when absent). Handy for logging. |
 | `idempotency_fingerprint` | SHA256 digest of the request params (deep-sorted, minus `controller`/`action`/`format`), used to detect key reuse with a different payload. Override for raw-body APIs: `Digest::SHA256.hexdigest(request.raw_post)`. |
 | `replay_idempotent_response(record)` | Renders the cached response. Override to customize replay. |
-| `idempotency_error_response(message:, status:, code:)` | Single funnel for the 400/409/422 outcomes. Delegates to `render_error` when `Respondable` is included, otherwise renders `{ success: false, error: { message:, code: } }` inline. |
+| `idempotency_error_response(message:, status:, code:)` | Single funnel for the 400/409/422 outcomes. Delegates to `render_error` when `Respondable` is included, otherwise renders `{ success: false, error: { message:, code: } }` inline. The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`. |
 
 ## Examples
 
