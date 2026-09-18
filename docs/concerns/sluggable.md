@@ -86,6 +86,8 @@ sluggable_by :title, finders: true
 | `scope:` | Symbol / nil | `nil` | Activates `friendly_id`'s `:scoped` module. Slug uniqueness is enforced only within the given column (e.g. `account_id`), allowing the same slug across different scope values. The named column must exist in the table. |
 | `reserved_words:` | Array\<String\> / nil | `nil` | Activates `friendly_id`'s `:reserved` module. Records whose generated slug matches any entry in this list fail validation with an error message containing "reserved". Values are coerced to strings. |
 | `finders:` | Boolean | `false` | Activates `friendly_id`'s `:finders` module. `Model.find` accepts a slug string in addition to a numeric id, so no `Model.friendly.find` call is needed at call sites. |
+| `candidates:` | Array / nil | `nil` | friendly_id slug candidates, tried in order until one is available: each entry is a Symbol/String (a method on the record), a Proc, or an Array of those (values joined with the sequence separator) — `[:title, %i[title city], %i[title city year]]`. Only when every candidate is taken does friendly_id fall back to the first candidate plus its uuid suffix. Regeneration is still driven by the primary `field` changing; a NULL slug backfills through the candidates. Must be a non-empty Array. |
+| `max_length:` | Integer / nil | `nil` | Truncate each candidate to at most this many characters at the last separator (`-`) inside the limit — `"the-quick-brown-fox"` → `"the-quick"` at 12 — falling back to a hard cut for a single long word. Applied before the uniqueness check, so friendly_id's conflict suffix is appended *after* and may exceed the limit (friendly_id's own `slug_limit` instead squeezes the uuid inside it). Must be a positive Integer. |
 
 Options can be combined freely: `sluggable_by :title, history: true, scope: :account_id, finders: true`.
 
@@ -104,14 +106,16 @@ Post.find("hello-world")            # available only when finders: true
 
 | Signature | Description |
 |---|---|
-| `slug_source` | Returns the current value of the configured `sluggable_field` attribute. If the model does not respond to that attribute, falls back to `to_s`. Used internally by `friendly_id` to derive the slug. |
-| `should_generate_new_friendly_id?` | Returns `true` when the configured source attribute has a pending change (via `will_save_change_to_<field>?`). Overrides `friendly_id`'s default behavior so slugs regenerate on every update that changes the source field. |
+| `slug_source` | Returns the current value of the configured `sluggable_field` attribute (falling back to `to_s`), or — with `candidates:` — the candidates Array for friendly_id to resolve. Used internally by `friendly_id` to derive the slug. |
+| `regenerate_slug!` | Rebuilds the slug from the current source (candidates included) and `save!`s — even over a slug that was assigned by hand, which a normal save deliberately leaves alone. A conflict still gets friendly_id's uuid suffix. Returns `true`; raises `ActiveRecord::RecordInvalid` like `save!`. |
+| `should_generate_new_friendly_id?` | Returns `true` when the configured source attribute has a pending change (via `will_save_change_to_<field>?`), when the slug is blank, or during `regenerate_slug!`; `false` while the slug column itself is being assigned. Overrides `friendly_id`'s default behavior so slugs regenerate on every update that changes the source field. |
+| `normalize_friendly_id(value)` | friendly_id's normalization plus the `max_length:` word-boundary truncation. Defined on the including class so it takes precedence over friendly_id's module. |
 
 ### Class methods
 
 | Signature | Description |
 |---|---|
-| `sluggable_by(field, history:, scope:, reserved_words:, finders:)` | Configures the slug source column and optionally enables additional `friendly_id` modules. Raises `ArgumentError` if `field` or the `scope:` column does not exist in the schema. |
+| `sluggable_by(field, history:, scope:, reserved_words:, finders:, candidates:, max_length:)` | Configures the slug source column and optionally enables additional `friendly_id` modules. Raises `ArgumentError` if `field` or the `scope:` column does not exist in the schema. |
 
 ## Examples
 

@@ -231,6 +231,35 @@ describe ConcernsOnRails::Controllers::Deprecatable do
     end
   end
 
+  # Same public-only respond_to? blind spot Support::ErrorEnvelope had: a
+  # controller declaring `private def render_error` (the idiomatic way to keep
+  # a helper from becoming a routable action) plus no response object skipped
+  # the 410 entirely and ran the sunset action — a fail-open on the one branch
+  # whose whole job is to stop serving the endpoint.
+  describe "410 enforcement with a private render_error and no response" do
+    it "still renders the 410 instead of letting the action run" do
+      klass = deprecatable_class do
+        deprecate_actions :index, deprecated_at: "2025-01-01", sunset_at: "2026-01-15", after_sunset: :gone
+
+        private
+
+        def render_error(**kwargs)
+          @delegated = kwargs
+        end
+      end
+      klass.send(:attr_reader, :delegated)
+
+      travel_to Time.utc(2026, 6, 1) do
+        c = instance(klass, action: "index")
+        c.response = nil
+        c.apply_api_deprecations
+
+        expect(c.delegated[:status]).to eq(:gone)
+        expect(c.delegated[:code]).to eq("endpoint_sunset")
+      end
+    end
+  end
+
   describe "410 Gone enforcement (after_sunset: :gone)" do
     def gone_class
       deprecatable_class do
@@ -522,6 +551,50 @@ describe ConcernsOnRails::Controllers::Deprecatable do
       expect { declare { deprecate_actions :index } }.to raise_error(
         ArgumentError, /\AConcernsOnRails::Controllers::Deprecatable:/
       )
+    end
+  end
+
+  describe "caller-supplied Time objects are not mutated" do
+    # Time#utc is an alias of #gmtime: it converts the receiver IN PLACE and
+    # returns self. The macro runs while the controller class body loads, so a
+    # frozen constant took the whole app down at boot.
+    let(:tokyo) { Time.new(2026, 12, 31, 0, 0, 0, "+09:00") }
+    let(:announced) { Time.new(2026, 6, 1, 0, 0, 0, "+09:00") }
+
+    it "accepts frozen Times without raising" do
+      sunset = tokyo.freeze
+      from = announced.freeze
+
+      expect do
+        deprecatable_class { deprecate_actions :index, deprecated_at: from, sunset_at: sunset }
+      end.not_to raise_error
+    end
+
+    it "leaves an unfrozen Time's zone alone" do
+      sunset = tokyo
+      from = announced
+      deprecatable_class { deprecate_actions :index, deprecated_at: from, sunset_at: sunset }
+
+      expect(sunset.utc_offset).to eq(9 * 3600)
+      expect(from.utc_offset).to eq(9 * 3600)
+    end
+
+    it "still emits the correct Sunset instant" do
+      sunset = tokyo
+      from = announced
+      c = instance(deprecatable_class { deprecate_actions :index, deprecated_at: from, sunset_at: sunset })
+      c.apply_api_deprecations
+
+      expect(c.response.headers["Sunset"]).to eq(tokyo.getutc.httpdate)
+    end
+
+    it "accepts a frozen DateTime too" do
+      sunset = DateTime.new(2026, 12, 31, 0, 0, 0, "+09:00").freeze
+      from = announced.freeze
+
+      expect do
+        deprecatable_class { deprecate_actions :index, deprecated_at: from, sunset_at: sunset }
+      end.not_to raise_error
     end
   end
 end

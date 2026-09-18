@@ -18,9 +18,15 @@ module ConcernsOnRails
     # against `I18n.available_locales` before use, so a stray param or a
     # mismatched `available:` list can never raise `I18n::InvalidLocale`.
     #
+    # Every response carries `Content-Language: <resolved locale>` (BCP 47
+    # form, `pt_BR` → `pt-BR`) and, when the header is a locale source,
+    # `Vary: Accept-Language` appended to any existing Vary — written before
+    # the action runs, so a rescued error still carries them. Both are behind
+    # `response_headers:` (default `true`).
+    #
     # Options: `available:` (allow-list for param/header matching; defaults to
     # `I18n.available_locales`), `default:`, `param:` (default `:locale`),
-    # `header:` (default `true`).
+    # `header:` (default `true`), `response_headers:` (default `true`).
     module Localizable
       extend ActiveSupport::Concern
 
@@ -30,19 +36,23 @@ module ConcernsOnRails
       end
 
       class_methods do
-        def localizable(available: nil, default: nil, param: :locale, header: true)
+        def localizable(available: nil, default: nil, param: :locale, header: true, response_headers: true)
           self.localizable_options = {
             available: available&.map(&:to_sym),
             default: default&.to_sym,
             param: param&.to_sym,
-            header: header
+            header: header,
+            response_headers: response_headers ? true : false
           }
         end
       end
 
-      # Public so subclasses can override; runs the action under the resolved locale.
+      # Public so subclasses can override; writes the response headers, then
+      # runs the action under the resolved locale.
       def switch_locale(&)
-        I18n.with_locale(resolved_locale, &)
+        locale = resolved_locale
+        apply_locale_response_headers(locale)
+        I18n.with_locale(locale, &)
       end
 
       # The locale chosen for this request — always one I18n can switch to.
@@ -59,6 +69,49 @@ module ConcernsOnRails
       end
 
       private
+
+      # Content-Language always; Vary: Accept-Language only when the header can
+      # influence the choice (a param-only setup already differs by URL).
+      # Vary is appended and de-duplicated, never clobbered (Cacheable, the
+      # paginators' Link header — same rule).
+      def apply_locale_response_headers(locale)
+        return unless locale_response_headers?
+
+        response.set_header("Content-Language", locale.to_s.tr("_", "-"))
+        # Only advertise the dimension the resolver actually consults: with
+        # `header: false` (or no `localizable` call at all) Accept-Language
+        # cannot change the answer.
+        append_vary_accept_language if self.class.localizable_options[:header]
+      end
+
+      def locale_response_headers?
+        opts = self.class.localizable_options
+        return false if opts.key?(:response_headers) && !opts[:response_headers]
+
+        respond_to?(:response) && response.respond_to?(:set_header)
+      end
+
+      def append_vary_accept_language
+        existing = response.headers["Vary"].to_s.split(",").map(&:strip).reject(&:empty?)
+        return if existing.include?("*")
+
+        # Rails adds its own `Vary: Accept` during render, but ONLY while the
+        # header is still blank (ActionController::Rendering#_set_vary_header).
+        # Writing ours before the action would therefore SUPPRESS it and cost a
+        # cache dimension, so seed Accept ourselves whenever Rails would have.
+        merged = existing + vary_accept_dimension + ["Accept-Language"]
+        deduped = merged.each_with_object([]) do |value, list|
+          list << value unless list.any? { |seen| seen.casecmp?(value) }
+        end
+        response.set_header("Vary", deduped.join(", "))
+      end
+
+      def vary_accept_dimension
+        return [] unless respond_to?(:request, true) && (req = request)
+        return [] unless req.respond_to?(:should_apply_vary_header?) && req.should_apply_vary_header?
+
+        ["Accept"]
+      end
 
       def locale_from_param(opts, allowed)
         return nil unless opts[:param] && respond_to?(:params) && params
