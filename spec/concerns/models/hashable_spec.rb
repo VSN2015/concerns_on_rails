@@ -266,6 +266,30 @@ describe ConcernsOnRails::Hashable do
       end.to raise_error(ArgumentError, %r{conflicts with Sluggable/friendly_id})
     end
 
+    it "refuses the reverse declaration order too — Hashable first, Sluggable second" do
+      # The Hashable-side guard cannot see friendly_id yet in this order, so
+      # Sluggable carries the mirror guard; without it `to_param: true` would
+      # be a silent no-op (FriendlyId::Model#to_param lands above Hashable's).
+      ActiveRecord::Schema.define do
+        create_table :slugged_orders, force: true do |t|
+          t.string :name
+          t.string :slug
+          t.string :token
+        end
+      end
+
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "slugged_orders"
+          include ConcernsOnRails::Hashable
+
+          hashable_by :token, to_param: true
+
+          include ConcernsOnRails::Sluggable
+        end
+      end.to raise_error(ArgumentError, /conflicts with Hashable's `to_param: true` on ':token'/)
+    end
+
     it "validates prefix: and to_param: at class load" do
       build = lambda do |**opts|
         Class.new(TestModel) do

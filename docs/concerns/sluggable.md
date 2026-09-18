@@ -175,6 +175,7 @@ Page.friendly.find(old_slug)  # => page  (still resolves)
 - **`history: true` requires the `friendly_id_slugs` table.** Without it, saves will raise a database error. Run `rails generate friendly_id` or add the migration manually before enabling this option in production.
 - **`finders: true` vs `.friendly.find`.** Without `finders: true`, slug-based lookup requires `Model.friendly.find("slug")`. With it, the standard `Model.find("slug")` also works, but mixed numeric-and-slug `find` calls may behave unexpectedly on strings that look like integers.
 - **Default `sluggable_field` is `:name`.** If `sluggable_by` is never called, the concern defaults to `:name` as the source field. Calling `sluggable_by` with an explicit field overrides this class attribute.
+- **Refuses to share `to_param` with Hashable.** `friendly_id` overrides `to_param`, and so does `hashable_by ..., to_param: true` — whichever concern is included last silently wins. Including `Sluggable` on a model already configured that way raises `ArgumentError` at class load, and the mirror guard in `Hashable` covers the opposite declaration order. Drop one, or override `to_param` on the model yourself.
 - **`slug_source` falls back to `to_s`.** If the model does not respond to the configured field (e.g. in a subclass that overrides `column_names` or excludes the column), `slug_source` returns `to_s` rather than raising, which may produce unexpected slug values.
 
 ## Changed in 1.22.0

@@ -534,13 +534,15 @@ hashable_by :public_id, type: :custom, length: 14, prefix: "ord_", unique: true,
 order.public_id          # => "ord_k7m3pq9a2x5n8v"
 order_path(order)        # => "/orders/ord_k7m3pq9a2x5n8v"
 Order.find_by!(public_id: params[:id])
+# while backfilling, accept both shapes — to_param falls back to the integer id when public_id is blank
+Order.find_by(public_id: params[:id]) || Order.find(params[:id])
 ```
 
 **Notes**
 - Auto-assigns in `before_create` only when the field is blank — callers can pass an explicit value.
 - A `regenerate_<field>!` instance method is defined dynamically.
 - `prefix:` is prepended to every generated value (string types only — not `:integer`); the uniqueness check sees the full prefixed value.
-- `to_param: true` overrides `to_param` to return the hashed field, falling back to the id while it is blank — pair it with `find_by!(field: params[:id])`.
+- `to_param: true` overrides `to_param` to return the hashed field, falling back to the id while it is blank — pair it with `find_by!(field: params[:id])`, or with `find_by(field: params[:id]) || find(params[:id])` while a backfill is still in flight (a blank field puts an integer in the URL). Raises at class load alongside Sluggable, in either declaration order — friendly_id overrides `to_param` too.
 - `unique: true` prechecks for collisions and retries a bounded number of times (still add a unique index — that is the real guarantee).
 - For fixed-width numeric codes (e.g. `000042`), use a **string** column — integer columns drop leading zeros.
 - If your model has `validates :<field>, presence: true`, switch this concern's hook to `before_validation` in your model — it uses `before_create` by default.

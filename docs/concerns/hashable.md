@@ -56,7 +56,7 @@ hashable_by :field, type: :hex, length: 16, alphabet: nil, unique: false, prefix
 | `alphabet:` | `String` | `nil` | Required when `type: :custom`. A non-empty string of characters to sample from uniformly via `SecureRandom`. Raises `ArgumentError` if omitted or empty when `type: :custom`. |
 | `unique:` | `Boolean` | `false` | Pre-check each candidate against the table (unscoped) and retry a bounded number of times on a collision, at create time and in `regenerate_<field>!`. Pair with a unique index — the pre-check narrows the race, the index closes it. |
 | `prefix:` | `String` | `nil` | Prepended to every generated value (`prefix: "ord_"` → `"ord_k7m3pq9a"`), the Stripe/GitHub public-ID convention: the type of object is readable from the id and a leaked id can't be mistaken for another resource. String types only — `type: :integer` with a prefix raises `ArgumentError`. The uniqueness pre-check and the `regenerate_` method both work on the full prefixed value. |
-| `to_param:` | `Boolean` | `false` | When `true`, overrides `to_param` to return the hashed field, so `order_path(order)` and `redirect_to order` use it. Falls back to the primary key while the field is blank (an unsaved record still returns `nil`, like Rails). Look records up with `find_by!(field: params[:id])` — `find` still means the primary key. Raises at class load on a model that also includes Sluggable, since friendly_id overrides `to_param` too and the winner would depend on include order. |
+| `to_param:` | `Boolean` | `false` | When `true`, overrides `to_param` to return the hashed field, so `order_path(order)` and `redirect_to order` use it. Falls back to the primary key while the field is blank (an unsaved record still returns `nil`, like Rails) — while a backfill is in flight, look records up with `find_by(field: params[:id]) || find(params[:id])` so both shapes resolve; otherwise `find_by!(field: params[:id])`. `find` still means the primary key. Raises at class load on a model that also includes Sluggable, since friendly_id overrides `to_param` too and the winner would depend on include order. |
 
 **Generator output summary**
 
@@ -152,6 +152,14 @@ class OrdersController < ApplicationController
 end
 ```
 
+`to_param` falls back to the primary key while the field is blank, so a row whose
+`public_id` has not been backfilled yet still produces a URL — but that URL carries an
+integer, which `find_by!(public_id:)` will not resolve. Accept both while you backfill:
+
+```ruby
+@order = Order.find_by(public_id: params[:id]) || Order.find(params[:id])
+```
+
 ## Notes & gotchas
 
 - **`before_create` only, not `before_save`** — the value is generated once at creation and never overwritten by the callback on subsequent saves. Use `regenerate_<field>!` to rotate an existing value.
@@ -162,7 +170,7 @@ end
 - **`:integer` output is a Ruby `Integer`** — the generated value is in the range `0..(10**length - 1)`. It is zero-padded internally during generation but stored as a numeric type; if leading-zero preservation matters (e.g. `000042`), declare a `string` column instead.
 - **`:hex` output length is `length * 2`** — because `SecureRandom.hex(n)` returns `n` bytes encoded as hex. A `length: 16` configuration produces a 32-character string.
 - **`unique: true` is best-effort** — it pre-checks candidates and retries a bounded number of times (`MAX_GENERATION_ATTEMPTS`), then raises. Add a unique index for the real guarantee; for collision-prone configurations (short integer codes) also expect to handle `ActiveRecord::RecordNotUnique` at the application level.
-- **`to_param: true` changes URL generation, not lookup** — `Order.find(params[:id])` still queries the primary key and will raise on a public id. Use `find_by!(public_id: params[:id])` (or a `find_by_public_id!` dynamic finder). The override falls back to the id while the field is blank, so records created before the column was backfilled keep working.
+- **`to_param: true` changes URL generation, not lookup** — `Order.find(params[:id])` still queries the primary key and will raise on a public id. Use `find_by!(public_id: params[:id])` (or a `find_by_public_id!` dynamic finder). The override falls back to the id while the field is blank, so a not-yet-backfilled row still generates a URL — but that URL holds an integer, and a `find_by!(public_id:)` lookup 404s on it. Accept both until the backfill is done: `Order.find_by(public_id: params[:id]) || Order.find(params[:id])`.
 - **`prefix:` counts toward `length` nowhere** — `length:` sizes the random part only; the stored value is `prefix + random`. Size the column accordingly and keep the prefix out of `alphabet:` concerns (it is literal, never sampled).
 - **`before_create` fires after `before_validation`** — if the model has `validates :token, presence: true`, the validation runs before the token is assigned, causing a false failure. Work around this by adding `before_validation { self.token ||= self.class.generate_hashable_value }` in your model, or by removing the presence validation (the concern guarantees assignment on create).
 - **`regenerate_<field>!` uses `update!`** — it will raise `ActiveRecord::RecordInvalid` if other model validations fail at that point.

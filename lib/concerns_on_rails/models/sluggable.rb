@@ -18,6 +18,12 @@ module ConcernsOnRails
 
       # instance methods
       included do
+        # Checked here rather than in sluggable_by: friendly_id's to_param lands
+        # on the class at include time, so this is the first moment the clash
+        # exists — and it catches a model that includes Sluggable without ever
+        # calling the macro.
+        sluggable_guard_hashable_to_param!
+
         # declare class attributes and set default values
         class_attribute :sluggable_field, instance_accessor: false
         self.sluggable_field ||= :name
@@ -80,6 +86,18 @@ module ConcernsOnRails
         end
 
         private
+
+        # Mirror of Hashable's macro-time guard, covering the reverse
+        # declaration order (Hashable declared BEFORE Sluggable) — friendly_id's
+        # to_param would land above Hashable's and silently win.
+        def sluggable_guard_hashable_to_param!
+          return unless respond_to?(:hashable_to_param) && hashable_to_param
+
+          raise ArgumentError,
+                "ConcernsOnRails::Models::Sluggable: Sluggable/friendly_id overrides to_param, which conflicts with " \
+                "Hashable's `to_param: true` on ':#{hashable_field}' (the winner would depend on include order). " \
+                "Drop one, or override to_param on the model yourself."
+        end
 
         # Re-runs friendly_id with the extra modules. friendly_id merges config
         # across calls, so this layers :history / :scoped / :finders / :reserved onto :slugged.
