@@ -145,6 +145,35 @@ describe ConcernsOnRails::Controllers::Includable do
       expect(klass.new(params: { include: "remarks" }).requested_includes).to eq([:remarks])
     end
 
+    it "hands back a fresh default-path array, so a caller mutating it cannot corrupt the class" do
+      paths = klass.new.requested_includes(as: :paths)
+      paths << "remarks"
+
+      expect(klass.includable_default_paths).to eq(["writer"])
+      expect(klass.includable_default_paths).to be_frozen
+      expect(klass.new.requested_includes(as: :paths)).to eq(["writer"])
+    end
+
+    it "rejects malformed paths — blank segments, bare and doubled dots" do
+      c = klass.new(params: { include: "..,.writer,writer.,remarks..story,writer" })
+      expect(c.requested_includes(as: :paths)).to eq(["writer"])
+    end
+
+    it "supports strategy: :eager_load and really JOINs the association in" do
+      joined = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Includable
+
+        includable :writer, strategy: :eager_load
+      end
+      writer = Writer.create!(name: "Ann")
+      Story.create!(title: "T", writer: writer)
+
+      relation = joined.new(params: { include: "writer" }).with_includes(Story.all)
+      expect(relation.eager_load_values).to eq([:writer])
+      expect(relation.includes_values).to eq([])
+      expect(relation.to_a.first.association(:writer)).to be_loaded
+    end
+
     it "accepts Array params, ignores hash-shaped garbage and rejects an unknown as:" do
       c = klass.new(params: { include: ["writer", "remarks,secret"] })
       expect(c.requested_includes).to eq(%i[writer remarks])
@@ -164,6 +193,8 @@ describe ConcernsOnRails::Controllers::Includable do
         .to raise_error(ArgumentError, /default: remarks is not an includable path/)
       expect { build.call(assoc: [{ remarks: :story }], default: "remarks.story") }.not_to raise_error
       expect { build.call(assoc: [:writer], strategy: :join) }
+        .to raise_error(ArgumentError, /strategy: must be one of includes, preload, eager_load/)
+      expect { build.call(assoc: [:writer], strategy: nil) }
         .to raise_error(ArgumentError, /strategy: must be one of includes, preload, eager_load/)
       expect { build.call(assoc: [42]) }.to raise_error(ArgumentError, /associations must be Symbols, Strings, Arrays or Hashes/)
     end

@@ -1691,7 +1691,8 @@ GET /articles?include=author,comments.author&fields[articles]=id,title&fields[au
 
 **Notes**
 - A path is kept only if **every** segment follows the allow-list tree (`comments.author` needs `comments: :author`); anything else is **silently dropped** — no error, no arbitrary eager-loading.
-- `default:` applies only when `?include` is absent; `?include=` (blank) means "nothing" and is honoured. Defaults are validated against the allow-list at class load.
+- `default:` applies only when `?include` is absent; `?include=` (blank) means "nothing" and is honoured. Defaults are validated against the allow-list at class load, stored frozen and `dup`ed per request.
+- **A typo in an option name becomes an association.** Inline nested Hashes arrive as `**nested`, so any keyword the macro does not name is registered as an allow-listed association instead of raising: `feilds:` silently leaves `includable_fields` empty — i.e. no sparse-fieldset allow-list at all.
 - Non-whitelisted tables in `params[:fields]` are dropped; non-whitelisted columns within an allowed table are dropped.
 - Pass `requested_fields` to your serializer (e.g. AMS / Blueprinter) — `Includable` itself does not alter the JSON output, only the query.
 

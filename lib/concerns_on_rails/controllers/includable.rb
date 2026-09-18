@@ -38,7 +38,6 @@ module ConcernsOnRails
 
       LABEL = "ConcernsOnRails::Controllers::Includable".freeze
       STRATEGIES = %i[includes preload eager_load].freeze
-      SHAPES = %i[query paths json].freeze
       TREE = ConcernsOnRails::Support::IncludeTree
 
       included do
@@ -56,7 +55,10 @@ module ConcernsOnRails
         # the paths loaded when the client sends no `?include` at all (validated
         # against the allow-list); `strategy:` picks the eager-loading method.
         # Nested Hash entries arrive as **nested (Ruby 3 keyword rules) and are
-        # folded back into the association tree.
+        # folded back into the association tree — which also means an
+        # unrecognised keyword is registered as an association instead of
+        # raising: a typo like `feilds:` silently leaves the fieldset
+        # allow-list empty.
         def includable(*associations, fields: {}, default: nil, strategy: :includes, **nested)
           tree = TREE.from(associations + [nested], label: LABEL).freeze
           self.includable_tree = tree
@@ -71,16 +73,18 @@ module ConcernsOnRails
         private
 
         def includable_strategy!(strategy)
-          strategy = strategy.to_sym
+          strategy = strategy.to_sym if strategy.respond_to?(:to_sym)
           return strategy if STRATEGIES.include?(strategy)
 
           raise ArgumentError, "#{LABEL}: strategy: must be one of #{STRATEGIES.join(', ')} (got #{strategy.inspect})"
         end
 
         def includable_default_paths!(default, tree)
-          TREE.paths(TREE.from(default, label: LABEL)).each do |path|
+          paths = TREE.paths(TREE.from(default, label: LABEL))
+          paths.each do |path|
             raise ArgumentError, "#{LABEL}: default: #{path} is not an includable path" unless TREE.allowed?(path, tree)
           end
+          paths.freeze
         end
       end
 
@@ -108,9 +112,11 @@ module ConcernsOnRails
 
       # Allow-listed dotted paths from ?include= in request order (deduplicated).
       # An absent param yields the `default:` paths; a blank one yields none.
+      # The defaults are dup'd (and stored frozen): callers routinely mutate the
+      # returned Array, and the ?include= branch already hands back a fresh one.
       def requested_include_paths
         raw = params[:include]
-        return self.class.includable_default_paths if raw.nil?
+        return self.class.includable_default_paths.dup if raw.nil?
         return [] if raw.respond_to?(:each_pair) # ?include[x]=y — not a list
 
         tree = self.class.includable_tree

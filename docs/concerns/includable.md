@@ -36,15 +36,17 @@ end
 The `includable` macro accepts association arguments in the same shapes `ActiveRecord::QueryMethods#includes` does — Symbols, dotted Strings, Arrays and nested Hashes — plus `fields:`, `default:` and `strategy:` keywords.
 
 ```
-includable(*associations, fields: {}, default: nil, strategy: :includes)
+includable(*associations, fields: {}, default: nil, strategy: :includes, **nested)
 ```
 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `*associations` | `Symbol`, dotted `String`, `Array`, nested `Hash` (variadic) | `[]` | The association **tree** clients may request via `?include=`: `:author` allows `author`; `comments: :author` allows `comments` and `comments.author`; `comments: [:author, { reactions: :user }]` goes deeper. A requested path is kept only when every segment exists in the tree. Stored as a nested Hash on `includable_tree`; the top-level names on `includable_associations` (`Array<Symbol>`). |
 | `fields:` | `Hash{ Symbol/String => Array<Symbol/String> }` | `{}` | Sparse fieldset allow-list keyed by resource table name. Each value is the list of column names the client may request for that table via `?fields[table]=col,...`. Keys and values are normalized to `Symbol`. Stored as `Hash{ Symbol => Array<Symbol> }` on `includable_fields`. |
-| `default:` | same shapes as `*associations` | `nil` | Paths eager-loaded (and returned by `requested_includes`) when the request has **no** `include` parameter at all. Every default path must be allow-listed, or `ArgumentError` is raised at class load. A blank `?include=` disables them for that request. Stored as dotted Strings on `includable_default_paths`. |
+| `default:` | same shapes as `*associations` | `nil` | Paths eager-loaded (and returned by `requested_includes`) when the request has **no** `include` parameter at all. Every default path must be allow-listed, or `ArgumentError` is raised at class load. A blank `?include=` disables them for that request. Stored as a frozen Array of dotted Strings on `includable_default_paths`; `requested_include_paths` returns a `dup`. |
 | `strategy:` | `:includes`, `:preload` or `:eager_load` | `:includes` | The relation method `with_includes` calls. `:includes` lets ActiveRecord choose (it switches to a JOIN when the association is referenced in a `where`), `:preload` always issues separate queries, `:eager_load` always JOINs. Anything else raises `ArgumentError`. |
+
+> **An unrecognized keyword is an association, not an error.** A nested Hash written inline (`comments: :author`) reaches the macro as `**nested` under Ruby 3 keyword rules, so the macro cannot tell it apart from a mistyped option name. `includable :author, feilds: { articles: %i[id title] }` registers `feilds` as an allow-listed association and leaves `includable_fields` **empty** — and a serializer that reads `{}` as "no restriction" (ActiveModelSerializers, Blueprinter) then serializes every column. Nothing raises, at class load or at request time. Spell `fields:`, `default:` and `strategy:` carefully, and assert on `includable_fields` in a controller spec if the fieldset allow-list is load-bearing. Braces force a positional Hash if you want the keyword slot kept clean: `includable :author, { comments: :author }, fields: { ... }`.
 
 All of `includable_tree`, `includable_associations`, `includable_fields`, `includable_default_paths` and `includable_strategy` are `class_attribute`s; calling `includable` replaces them entirely (not merges).
 
@@ -67,14 +69,14 @@ The sanitized includes in the shape you need:
 Flat allow-lists keep returning a plain `Array<Symbol>` under `:query`, so existing call sites are unchanged. An unknown `as:` raises `ArgumentError`.
 
 **`requested_include_paths → Array<String>`**
-The allow-listed dotted paths from `params[:include]` in request order, deduplicated. Accepts a comma-separated String or an Array of them; a hash-shaped param yields `[]`. When the param is absent entirely the `default:` paths are returned; when it is present but blank, `[]`.
+The allow-listed dotted paths from `params[:include]` in request order, deduplicated. Accepts a comma-separated String or an Array of them; a hash-shaped param yields `[]`. When the param is absent entirely the `default:` paths are returned (as a fresh `dup` — the stored Array is frozen, so mutating the result is safe); when it is present but blank, `[]`.
 
 **`requested_fields → Hash{ Symbol => Array<Symbol> }`**
 Parses `params[:fields]` as a hash of `{ table => col_list }` pairs. Tables not present in `includable_fields` are dropped. Within each allowed table, the requested columns are intersected with the declared allow-list. Tables for which the intersection is empty are also dropped from the result. Returns `{}` when `params[:fields]` is absent or is not a hash-like object. Safe to pass directly to a serializer's `fields:` keyword.
 
 ### Class methods
 
-**`includable(*associations, fields: {}, default: nil, strategy: :includes) → void`**
+**`includable(*associations, fields: {}, default: nil, strategy: :includes, **nested) → void`**
 Declares the allow-lists for this controller. Calling the macro more than once replaces the previous allow-lists — it does not accumulate. Symbols, dotted Strings, Arrays and nested Hashes are accepted for associations (normalized into the `includable_tree`); Symbols and Strings for field keys/values. `default:` paths are validated against the tree and `strategy:` against `includes`/`preload`/`eager_load`, both raising `ArgumentError` at class load.
 
 ## Examples
@@ -147,6 +149,7 @@ requested_includes                 # => []
 ## Notes & gotchas
 
 - **A path is all-or-nothing.** `comments.author.payment_methods` is dropped entirely when `payment_methods` is not in the tree — the concern never trims a path down to its allowed prefix, because the client asked for something specific and silently serving less would be confusing. Ask for `comments.author` explicitly if that is what you want.
+- **A typo in an option name silently becomes an association.** `**nested` swallows every keyword the macro does not name, so `feilds:`/`defualt:`/`strategey:` are registered as allow-listed associations instead of raising `ArgumentError` at class load. The visible damage is an empty `includable_fields` (i.e. no sparse-fieldset allow-list at all) — see the warning under **Configuration**.
 - **`default:` means "absent", not "blank".** JSON:API semantics: a client that sends `?include=` is opting out of defaults. Treat the two cases differently in your tests.
 - **`strategy: :eager_load` + sparse fieldsets.** `eager_load` JOINs every requested association into one query; combining it with a `select` of a few columns needs the joined tables' columns too. Prefer `:preload` when you also select columns.
 - **Non-whitelisted values are silently dropped, not raised.** Both `requested_includes` and `requested_fields` return sanitized results without raising errors or setting response status. A client requesting `?include=secret` receives a response as if the parameter were absent.
@@ -155,6 +158,7 @@ requested_includes                 # => []
 - **Column lists accept both comma-separated strings and arrays.** The private `split_field_list` helper handles both forms, so `?fields[stories]=id,title` and a Rails-style `params[:fields][:stories]` array are both valid inputs.
 - **Calling `includable` more than once replaces the allow-lists entirely.** There is no merge/append behavior; the last call wins.
 - **`includable_associations` and `includable_fields` are `class_attribute`s.** Subclassing a controller that has already called `includable` inherits the parent's allow-lists but can override them independently by calling `includable` again in the subclass.
+- **`requested_include_paths` never hands out the class attribute.** The `default:` paths are stored frozen and `dup`ed per request, so a caller doing `paths = requested_includes(as: :paths); paths.concat(extra)` cannot corrupt the allow-list for every later request in the process.
 - **The concern does not serialize or render anything.** `with_includes` only affects the ActiveRecord query. `requested_includes` and `requested_fields` return plain Ruby values for the caller to pass to `render json:` or a serializer. The concern has no knowledge of the serializer in use.
 - **No runtime dependencies beyond `ActiveSupport::Concern`.** There are no gem dependencies beyond Rails itself; the concern works with any serializer.
 
