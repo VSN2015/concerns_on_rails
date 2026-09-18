@@ -27,9 +27,11 @@ module ConcernsOnRails
     #   User.consume_invite_code(code)            # authenticate AND revoke in one step (single use)
     #
     # `expires_in:` gives a field a lifetime: `<field>_expires_at` (a datetime
-    # column you add) is stamped whenever the token is generated — on create,
-    # on regenerate_<field>!, and for a caller-supplied token that arrives
-    # without its own expiry — and cleared by revoke_<field>!.
+    # column you add) is stamped when the token is generated — on create
+    # (a caller-supplied token that arrives without its own expiry included)
+    # and on regenerate_<field>! — and cleared by revoke_<field>!. Assigning a
+    # token to an already-persisted row stamps nothing; rotate with
+    # regenerate_<field>! instead.
     # `authenticate_by_<field>` / `consume_<field>` refuse an expired token,
     # `<field>_expired?` reports it, and the `<field>_expired` scope finds rows
     # for cleanup. `consume_<field>` (every field) revokes with a conditional
@@ -70,8 +72,11 @@ module ConcernsOnRails
           length = length.to_i
           expires_in = validate_tokenizable_options!(type, length, expires_in)
 
-          ensure_columns!(LABEL, field, types: "string:uniq")
-          ensure_columns!(LABEL, tokenizable_expiry_column(field), types: :datetime) if expires_in
+          # One call, so an unmigrated model is told about the token column AND
+          # its expiry column at once — one migration, not two boot failures.
+          columns = { field => "string:uniq" }
+          columns[tokenizable_expiry_column(field)] = :datetime if expires_in
+          ensure_columns!(LABEL, *columns.keys, types: columns)
 
           # Build a fresh hash so subclasses don't mutate the parent's config.
           self.tokenizable_fields = tokenizable_fields.merge(field => { type: type, length: length, expires_in: expires_in })
@@ -161,9 +166,23 @@ module ConcernsOnRails
           raise ArgumentError, "#{LABEL}: unknown type '#{type}'. Valid types: #{VALID_TYPES.join(', ')}" unless VALID_TYPES.include?(type)
           raise ArgumentError, "#{LABEL}: length must be a positive integer" unless length.positive?
           return nil if expires_in.nil?
-          return expires_in.to_i if expires_in.respond_to?(:to_i) && expires_in.to_i.positive?
+
+          seconds = positive_duration_seconds(expires_in)
+          return seconds if seconds
 
           raise ArgumentError, "#{LABEL}: expires_in must be a positive Duration or number of seconds"
+        end
+
+        # Mirrors Lockable#positive_duration_or_nil?. A bare respond_to?(:to_i)
+        # accepted values the siblings reject: `2.hours.from_now` is a Time whose
+        # to_i is ~1.8e9 seconds (the token would expire in 2083 — the feature
+        # silently off), and "2 hours" coerces to 2 seconds. Returns the lifetime
+        # in whole seconds, or nil when the value is not a positive duration.
+        def positive_duration_seconds(value)
+          return nil unless value.is_a?(ActiveSupport::Duration) || value.is_a?(Numeric)
+
+          seconds = value.to_i
+          seconds.positive? ? seconds : nil
         end
       end
 

@@ -364,5 +364,45 @@ describe ConcernsOnRails::Tokenizable do
         end
       end.to raise_error(ArgumentError, /expires_in must be a positive Duration or number of seconds/)
     end
+
+    it "rejects an expires_in: that is not a Duration or a number of seconds" do
+      # A bare respond_to?(:to_i) took these: a Time (expiry in 2083) and a String ("2 hours" -> 2 seconds).
+      [2.hours.from_now, "2 hours", :two_hours].each do |bad|
+        expect do
+          Class.new(TestModel) do
+            self.table_name = "reset_accounts"
+            include ConcernsOnRails::Tokenizable
+
+            tokenizable_by :reset_token, expires_in: bad
+          end
+        end.to raise_error(ArgumentError, /expires_in must be a positive Duration or number of seconds/)
+      end
+    end
+
+    it "checks the token column and its expiry column in one ensure_columns! call" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "reset_accounts"
+          include ConcernsOnRails::Tokenizable
+
+          tokenizable_by :magic_link, expires_in: 1.day
+        end
+      end.to raise_error(ArgumentError, /'magic_link'.*magic_link:string:uniq/)
+    end
+
+    it "does not stamp an expiry for a token assigned to an already-persisted row" do
+      account = travel_to(Time.utc(2026, 5, 1, 10)) { klass.create! }
+
+      # The stamp is a before_create / regenerate_<field>! affair: an update leaves the expiry alone.
+      account.update!(reset_token: "hand-assigned-token-12345")
+      expect(account.reload.reset_token_expires_at).to eq(Time.utc(2026, 5, 1, 12))
+
+      account.update_columns(reset_token_expires_at: nil)
+      account.update!(reset_token: "another-hand-assigned-tok")
+      expect(account.reload.reset_token_expires_at).to be_nil
+
+      travel_to(Time.utc(2026, 6, 1, 10)) { account.regenerate_reset_token! } # the supported rotation
+      expect(account.reload.reset_token_expires_at).to eq(Time.utc(2026, 6, 1, 12))
+    end
   end
 end
