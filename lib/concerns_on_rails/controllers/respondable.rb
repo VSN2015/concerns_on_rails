@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "rack/utils"
+require "concerns_on_rails/support/error_envelope"
 
 module ConcernsOnRails
   module Controllers
@@ -18,12 +19,19 @@ module ConcernsOnRails
     #     def create
     #       article = Article.new(article_params)
     #       if article.save
-    #         render_success(data: article, status: :created)
+    #         render_created(data: article, location: article_url(article))   # 201 + Location
     #       else
-    #         render_error(message: "Invalid", errors: article.errors.full_messages)
+    #         render_invalid(article)             # 422 record_invalid + errors.full_messages
     #       end
     #     end
     #   end
+    #
+    # `render_success` takes `location:` (the Location header — a String, or
+    # anything `url_for` resolves) and `headers:` (extra response headers);
+    # `render_created` is the 201 shorthand; `render_invalid(record)` renders a
+    # record's (or an ActiveModel::Errors') full_messages the way
+    # ErrorHandleable does for a rescued RecordInvalid, so `save` and `save!`
+    # actions look identical to clients.
     #
     # Error format: the classic `{ success: false, error: { message, code, details } }`
     # envelope by default, or RFC 9457 Problem Details —
@@ -62,6 +70,11 @@ module ConcernsOnRails
       PROBLEM_JSON = "application/problem+json".freeze
       # Distinguishes "not passed" from an explicit nil in respondable_by.
       UNSET = Object.new.freeze
+      # The bytes a header line cannot carry, stripped from every caller-supplied
+      # header name and value. CR/LF are the response-splitting pair; the rest
+      # are rejected outright by Rack::Lint and by Puma's own illegal-header
+      # scan, which this mirrors (horizontal tab, \x09, stays legal).
+      ILLEGAL_HEADER_BYTES = /[\x00-\x08\x0a-\x1f]/
 
       included do
         class_attribute :respondable_error_format, instance_accessor: false, default: :envelope
@@ -94,10 +107,42 @@ module ConcernsOnRails
       # Success envelope:
       #   { success: true, data: <data>, meta: <meta> }
       # `meta:` is omitted from the JSON when empty so simple responses stay clean.
-      def render_success(data: nil, status: :ok, meta: {})
+      # `location:` sets the Location header (String as-is, anything else through
+      # `url_for` when the controller has it); `headers:` adds arbitrary ones.
+      def render_success(data: nil, status: :ok, meta: {}, location: nil, headers: {})
+        respondable_set_headers(location, headers)
         body = { success: true, data: data }
         body[:meta] = meta if meta.is_a?(Hash) && meta.any?
         render json: body, status: status
+      end
+
+      # 201 Created with an optional Location — the create-action one-liner.
+      # The headers are written here rather than forwarded, so an app that
+      # overrode render_success with the older `(data:, status:, meta:)`
+      # signature still gets its Location set and never sees an unknown
+      # keyword.
+      def render_created(data: nil, location: nil, meta: {}, headers: {})
+        respondable_set_headers(location, headers)
+        render_success(data: data, status: :created, meta: meta)
+      end
+
+      # A validation failure as an error envelope (or problem document):
+      # `details` is the object's errors.full_messages, omitted when empty —
+      # the exact shape ErrorHandleable renders for a rescued RecordInvalid.
+      def render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")
+        messages = respondable_error_messages(record_or_errors)
+        # Through the shared envelope: it omits the errors: keyword when there
+        # is nothing to report. Omit it for an override that cannot take it
+        # either -- several concerns document the contract as
+        # `render_error(message:, status:, code:)`, and an app carrying that
+        # signature would otherwise get ArgumentError on every validation
+        # failure, which is the one path render_invalid exists for. Dropping
+        # the details matches what such an override asked for; it never
+        # rendered them.
+        details = messages.presence if respondable_render_error_takes_errors?
+        ConcernsOnRails::Support::ErrorEnvelope.render(
+          self, message: message, status: status, code: code, details: details
+        )
       end
 
       # Error envelope:
@@ -117,6 +162,94 @@ module ConcernsOnRails
       end
 
       private
+
+      # respond_to?(..., true) for the same reason the charset guard below uses
+      # it: the concern must not assume the reader is public on whatever the
+      # host object turns out to be.
+      def respondable_set_headers(location, headers)
+        return unless respond_to?(:response, true) && response.respond_to?(:set_header)
+
+        respondable_write_header("Location", respondable_header_token(respondable_location(location))) if location
+        (headers || {}).each do |name, value|
+          # An explicit nil means "no header", not an empty one.
+          next if value.nil?
+
+          respondable_write_header(respondable_header_token(name), respondable_header_token(value))
+        end
+      end
+
+      # Link is additive by definition (RFC 8288) and Paginatable /
+      # Deprecatable may already have written entries, so append to it rather
+      # than dropping theirs. Everything else is a plain set. A name or value
+      # that sanitized down to nothing is dropped: an empty `Location:` is
+      # meaningless, and a nameless header is not a header.
+      def respondable_write_header(name, value)
+        return if name.empty? || value.empty?
+
+        if name.casecmp("Link").zero? && (found = respondable_existing_header(name))
+          key, existing = found
+          name = key
+          value = [existing, value].reject { |part| part.nil? || part.to_s.empty? }.join(", ")
+        end
+
+        response.set_header(name, value)
+      end
+
+      # `response.headers` is case-SENSITIVE before Rails 7.1 and
+      # case-insensitive (Rack::Headers) from 7.1 on — the same split
+      # Idempotentable scans around. Without the fallback, `headers: { "link"
+      # => … }` alongside Paginatable's "Link" emits a SECOND Link header on
+      # 6.1 instead of extending the first; append under the spelling that is
+      # already there.
+      def respondable_existing_header(name)
+        headers = response.headers
+        value = headers[name]
+        return [name, value] unless value.nil?
+        return nil unless headers.respond_to?(:find)
+
+        headers.find { |header, _| header.to_s.casecmp(name).zero? }
+      end
+
+      # These are the gem's first response headers built from CALLER-supplied
+      # data, so coerce to String (an Integer fails Rack::Lint and breaks any
+      # middleware calling String methods on it) and strip the bytes a header
+      # line cannot carry. Names go through it too: CR/LF in an interpolated
+      # `headers:` KEY splits the response exactly as one in a value does.
+      def respondable_header_token(value)
+        value.to_s.gsub(ILLEGAL_HEADER_BYTES, "")
+      end
+
+      # A String is a URL already; a record / route Hash goes through the
+      # controller's url_for when there is one (the fake harness has none).
+      def respondable_location(location)
+        return location if location.is_a?(String)
+
+        respond_to?(:url_for, true) ? url_for(location) : location.to_s
+      end
+
+      # True when the render_error that will actually run accepts an `errors:`
+      # keyword. The concern's own does; an app override written to the
+      # three-keyword contract does not, and **kwargs takes anything.
+      def respondable_render_error_takes_errors?
+        return true unless respond_to?(:render_error, true)
+
+        method(:render_error).parameters.any? do |type, name|
+          type == :keyrest || (%i[key keyreq].include?(type) && name == :errors)
+        end
+      rescue NameError
+        true
+      end
+
+      def respondable_error_messages(record_or_errors)
+        errors = record_or_errors.respond_to?(:full_messages) ? record_or_errors : nil
+        errors ||= record_or_errors.errors if record_or_errors.respond_to?(:errors)
+        unless errors.respond_to?(:full_messages)
+          raise ArgumentError, "#{LABEL}: render_invalid expects a record (responding to #errors) or an ActiveModel::Errors, " \
+                               "got #{record_or_errors.class}"
+        end
+
+        errors.full_messages
+      end
 
       # RFC 9457: type (URI or about:blank), title (the status reason phrase),
       # status (integer), detail (the message), instance (request path when
