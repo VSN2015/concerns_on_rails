@@ -1775,8 +1775,10 @@ accepted as a suffix `?price_gte=10` or in bracket form `?price[gte]=10&price[lt
 
 Comparison values are cast the way ActiveRecord casts them (the column's own type), or through `type:`
 (any ActiveModel type name); `type:` also pre-casts the value handed to a `with:` lambda. Blank values
-are skipped and unknown operators / non-scalar values ignored — nothing raises at request time. For
-strict, validated contracts reach for `Permittable`.
+are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`/`lte` value the type
+cannot represent (`?price_gte=abc`) matches **nothing** rather than silently comparing against `0` —
+nothing raises at request time. `contains`/`starts_with` are case-insensitive on PostgreSQL, MySQL and
+SQLite alike. For strict, validated contracts reach for `Permittable`.
 
 **Modes**
 

@@ -23,8 +23,10 @@ module ConcernsOnRails
     # column's own attribute type — or through `type:` (any ActiveModel type
     # name: :integer, :decimal, :boolean, :date, :datetime, ...). `type:` also
     # pre-casts the value handed to a `with:` lambda. Blank values are skipped,
-    # unknown operators and non-scalar values are ignored; nothing here raises
-    # at request time — for strict, validated params use Permittable.
+    # unknown operators and non-scalar values are ignored, and a comparison
+    # value the type cannot represent (`?price_gte=abc`) matches nothing;
+    # nothing here raises at request time — for strict, validated params use
+    # Permittable.
     #
     # Usage:
     #   class ArticlesController < ApplicationController
@@ -43,6 +45,10 @@ module ConcernsOnRails
       OPERATORS = %i[not gt gte lt lte in not_in null contains starts_with].freeze
       COMPARISONS = { gt: :gt, gte: :gteq, lt: :lt, lte: :lteq }.freeze
       LIKE_ESCAPE = "\\".freeze
+      LIKE_SPECIAL = /[\\%_]/
+      NUMERIC_TYPES = %i[integer float decimal].freeze
+      NUMERIC_STRING = /\A\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?\s*\z/
+      UNCASTABLE = Object.new.freeze
 
       included do
         class_attribute :filterable_rules, default: {}
@@ -165,29 +171,49 @@ module ConcernsOnRails
       # ?price_gte=10 — one param per declared operator.
       def apply_filter_operator_suffixes(relation, field, options)
         options[:operators].each do |operator|
-          raw = params[:"#{field}_#{operator}"]
-          next if raw.blank?
-
-          relation = apply_filter_operator(relation, field, operator, raw, options)
+          relation = apply_filter_operator(relation, field, operator, params[:"#{field}_#{operator}"], options)
         end
         relation
       end
 
+      # The unset guard lives here, not in the two callers: the suffix form used
+      # to skip blanks and the bracket form did not, so `?price[gte]=` cast ""
+      # to nil and `price > NULL` handed back ZERO rows, while `?price_gte=` —
+      # documented as the same filter — correctly returned everything. It is
+      # `filterable_unset?`, not `blank?`, for the same reason `#filtered` uses
+      # it: a JSON body's `false` is a value, not an absent param.
       def apply_filter_operator(relation, field, operator, raw, options)
+        return relation if filterable_unset?(raw)
+
         case operator
         when :in, :not_in then apply_filter_list(relation, field, operator, raw)
         when :null then apply_filter_null(relation, field, raw)
         when :contains, :starts_with then apply_filter_like(relation, field, operator, raw)
-        when :not then ConcernsOnRails::Support::ScalarParam.scalar?(raw) ? relation.where.not(field => raw) : relation
+        when :not then filterable_operand?(raw) ? relation.where.not(field => raw) : relation
         else apply_filter_comparison(relation, field, operator, raw, options)
         end
+      end
+
+      # `ScalarParam.scalar?` deliberately excludes booleans (nothing there is
+      # safe to `.to_i`), but a JSON body carries a real `true`/`false` and
+      # `?deleted_at[null]=true` means something — so `null` and `not` take one.
+      def filterable_operand?(raw)
+        ConcernsOnRails::Support::ScalarParam.scalar?(raw) || raw == true || raw == false
       end
 
       def apply_filter_comparison(relation, field, operator, raw, options)
         return relation unless ConcernsOnRails::Support::ScalarParam.scalar?(raw)
 
+        value = filter_cast(relation, field, raw, options)
+        # A value the column's type cannot represent matches nothing. Casting it
+        # anyway is worse than useless: `?stock_gt=twelve` becomes `stock > 0`
+        # (Integer#cast("twelve") is 0, not nil) and quietly returns rows the
+        # caller never asked for, while the same typo against a datetime column
+        # casts to nil and returns none — one request answered two opposite ways.
+        return relation.none if value.equal?(UNCASTABLE)
+
         column = relation.model.arel_table[field]
-        relation.where(column.public_send(COMPARISONS.fetch(operator), filter_cast(relation, field, raw, options)))
+        relation.where(column.public_send(COMPARISONS.fetch(operator), value))
       end
 
       def apply_filter_list(relation, field, operator, raw)
@@ -198,41 +224,72 @@ module ConcernsOnRails
       end
 
       # A comma list ("a, b") or an array (?status_in[]=a) of scalars → the
-      # cleaned list, or nil when unsafe or empty.
+      # cleaned list, or nil when unsafe or empty. A hash-shaped param is NOT a
+      # list: `?status_in[x]=1` used to reach `to_s` and filter on the literal
+      # string `{"x"=>"1"}` instead of being ignored as documented.
       def filterable_list(raw)
-        list = raw.is_a?(Array) ? raw : raw.to_s.split(",")
-        return nil unless ConcernsOnRails::Support::ScalarParam.where_safe?(list)
+        list = filterable_raw_list(raw)
+        return nil if list.nil? || !ConcernsOnRails::Support::ScalarParam.where_safe?(list)
 
         list = list.map { |item| item.is_a?(String) ? item.strip : item }.reject { |item| item.to_s.empty? }
         list.empty? ? nil : list
       end
 
+      def filterable_raw_list(raw)
+        return raw if raw.is_a?(Array)
+
+        raw.to_s.split(",") if ConcernsOnRails::Support::ScalarParam.scalar?(raw)
+      end
+
       def apply_filter_null(relation, field, raw)
-        return relation unless ConcernsOnRails::Support::ScalarParam.scalar?(raw)
+        return relation unless filterable_operand?(raw)
 
         ActiveModel::Type::Boolean.new.cast(raw) ? relation.where(field => nil) : relation.where.not(field => nil)
       end
 
       # LIKE with the user's wildcards escaped — with an explicit ESCAPE clause,
       # since SQLite has no default escape character (Searchable does the same).
-      # Arel `matches` is ILIKE on PostgreSQL and the adapter's LIKE elsewhere.
+      # Arel `matches` is ILIKE on PostgreSQL and the adapter's LIKE elsewhere,
+      # so matching is case-insensitive on all three supported adapters.
+      # Escaped here rather than through `sanitize_sql_like`, which is only
+      # public from Rails 5.1 while the gemspec supports >= 5.0 — Searchable
+      # hand-rolls the identical gsub for the same reason.
       def apply_filter_like(relation, field, operator, raw)
         return relation unless ConcernsOnRails::Support::ScalarParam.scalar?(raw)
 
-        escaped = relation.model.sanitize_sql_like(raw.to_s, LIKE_ESCAPE)
+        escaped = raw.to_s.gsub(LIKE_SPECIAL) { |char| "#{LIKE_ESCAPE}#{char}" }
         pattern = operator == :contains ? "%#{escaped}%" : "#{escaped}%"
         relation.where(relation.model.arel_table[field].matches(pattern, LIKE_ESCAPE))
       end
 
       # `type:` wins; otherwise the column's own attribute type (what
       # `where(field => value)` would use); a virtual field passes through raw.
+      # Returns UNCASTABLE when the value is not representable in that type.
       def filter_cast(relation, field, value, options)
-        return options[:type].cast(value) if options[:type]
+        type = options[:type] || filterable_column_type(relation, field)
+        return value if type.nil?
+        return UNCASTABLE if filterable_uncastable?(type, value)
 
+        type.cast(value)
+      end
+
+      def filterable_column_type(relation, field)
         model = relation.model
-        return value unless model.respond_to?(:attribute_types) && model.attribute_types.key?(field.to_s)
+        return nil unless model.respond_to?(:attribute_types) && model.attribute_types.key?(field.to_s)
 
-        model.type_for_attribute(field.to_s).cast(value)
+        model.type_for_attribute(field.to_s)
+      end
+
+      # Numeric types are checked against the string BEFORE casting, because
+      # `Integer#cast`/`Decimal#cast` answer 0 for any non-numeric string rather
+      # than nil — the cast result alone cannot tell "0" from "twelve". Every
+      # other type reports the failure by casting to nil (blank values never get
+      # this far; `apply_filter_operator` skipped them).
+      def filterable_uncastable?(type, value)
+        return type.cast(value).nil? unless NUMERIC_TYPES.include?(type.type)
+        return false if value.is_a?(Numeric)
+
+        !NUMERIC_STRING.match?(value.to_s)
       end
 
       # Scalars (and arrays of scalars, which AR turns into `IN (...)`) are safe

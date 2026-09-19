@@ -209,6 +209,89 @@ describe ConcernsOnRails::Controllers::Filterable do
       expect(names(status_in: [{ x: 1 }])).to eq(["Lamp 100% cotton shade", "Desk", "Chair", "Lampshade"])
     end
 
+    # The suffix form skipped blanks and the bracket form did not, so an empty
+    # range box cast "" to nil and `price > NULL` returned NOTHING — the exact
+    # opposite of the documented "blank values are always skipped".
+    it "skips blank operator values in the bracket form too" do
+      all = ["Lamp 100% cotton shade", "Desk", "Chair", "Lampshade"]
+
+      expect(names(price: { gte: "" })).to eq(all)
+      expect(names(price: { gte: "  " })).to eq(all)
+      expect(names(price: { gte: "", lte: "" })).to eq(all)
+      expect(names(discontinued_at: { null: "" })).to eq(all)
+      expect(names(status: { in: "" })).to eq(all)
+      expect(names(name: { contains: "" })).to eq(all)
+    end
+
+    # Integer#cast("twelve") is 0, not nil, so the comparison silently became
+    # `stock > 0` and returned the stocked rows. Decimal does the same.
+    it "matches nothing when a comparison value is not representable in the type" do
+      expect(names(stock_gt: "twelve")).to eq([])
+      expect(names(stock_lte: "twelve")).to eq([])
+      expect(names(price_gte: "abc")).to eq([])
+      expect(names(price: { lte: "abc" })).to eq([])
+      expect(names(discontinued_at_gte: "not-a-date")).to eq([])
+
+      # A subset with type: goes the same way.
+      typed = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :stock, type: :integer, operators: %i[gte]
+      end
+      expect(typed.new(params: { stock_gte: "abc" }).filtered(Product.all).count).to eq(0)
+
+      # …but a value that IS representable still works, including a JSON-body
+      # number and a negative/decimal string.
+      expect(names(stock_gte: 5)).to eq(["Lamp 100% cotton shade", "Chair"])
+      expect(names(price_gt: "-1")).to eq(["Lamp 100% cotton shade", "Desk", "Chair", "Lampshade"])
+      expect(names(price_gte: "99.99")).to eq(%w[Desk Chair])
+    end
+
+    # Equality / not / in keep ActiveRecord's own casting, which already fails
+    # closed on garbage: Integer#serialize (unlike #cast) answers nil for a
+    # non-numeric string, so `where` emits `= NULL` / `!= NULL` and matches
+    # nothing. `relation.none` for the comparisons is the same answer, reached
+    # by hand because the pre-cast to 0 would otherwise defeat that guard.
+    it "matches nothing for garbage on the where-backed operators too" do
+      expect(names(stock_not: "twelve")).to eq([])
+      expect(names(stock_in: "twelve")).to eq([])
+      expect(names(stock: "twelve")).to eq([])
+    end
+
+    # `?status_in[x]=1` reached `raw.to_s` and filtered on the literal
+    # stringified hash instead of being ignored like every other non-scalar.
+    it "ignores a hash-shaped in / not_in param" do
+      all = ["Lamp 100% cotton shade", "Desk", "Chair", "Lampshade"]
+
+      expect(names(status_in: { x: "1" })).to eq(all)
+      expect(names(status_not_in: { x: "1" })).to eq(all)
+      expect(names(status: { in: { x: "1" } })).to eq(all)
+    end
+
+    # A JSON body carries a real boolean; ScalarParam.scalar? excludes those,
+    # and the suffix loop's `blank?` dropped `false` before it ever got there.
+    it "accepts a real boolean for null and not" do
+      expect(names(discontinued_at_null: true)).to eq(["Lamp 100% cotton shade", "Chair", "Lampshade"])
+      expect(names(discontinued_at_null: false)).to eq(["Desk"])
+      expect(names(discontinued_at: { null: true })).to eq(["Lamp 100% cotton shade", "Chair", "Lampshade"])
+      expect(names(discontinued_at: { null: false })).to eq(["Desk"])
+    end
+
+    # LIKE folds case on SQLite and MySQL and Arel emits ILIKE on PostgreSQL,
+    # so this is case-insensitive everywhere — the docs must not imply otherwise.
+    it "matches contains / starts_with case-insensitively" do
+      expect(names(name_contains: "LAMP")).to eq(["Lamp 100% cotton shade", "Lampshade"])
+      expect(names(name_starts_with: "lamp")).to eq(["Lamp 100% cotton shade", "Lampshade"])
+    end
+
+    it "ignores an array where a scalar operand is expected" do
+      all = ["Lamp 100% cotton shade", "Desk", "Chair", "Lampshade"]
+
+      expect(names(price_gt: %w[1 2])).to eq(all)
+      expect(names(name_contains: %w[a b])).to eq(all)
+      expect(names(discontinued_at_null: %w[true false])).to eq(all)
+    end
+
     it "ignores unknown bracket keys and, without operators:, ignores suffix params entirely" do
       expect(names(price: { between: "1,2" })).to eq(["Lamp 100% cotton shade", "Desk", "Chair", "Lampshade"])
 
