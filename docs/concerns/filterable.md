@@ -53,7 +53,7 @@ Passing **both** `scope:` and `with:` raises `ArgumentError` immediately at clas
 
 #### `filtered(relation) → ActiveRecord::Relation`
 
-Iterates over all rules declared with `filter_by`, reads the corresponding value from `params`, skips blank values, and applies the matching filter strategy. Returns the narrowed relation (or the original relation unchanged if no params are present).
+Iterates over all rules declared with `filter_by`, reads the corresponding value from `params`, skips unset values, and applies the matching filter strategy. Returns the narrowed relation (or the original relation unchanged if no params are present). "Unset" means `nil`, `""`, `"   "`, `[]` or `{}` — a boolean `false` is a *value* (a JSON body can legitimately send `{"active": false}`), not an absent filter.
 
 ```ruby
 def index
@@ -122,8 +122,8 @@ end
 
 ## Notes & gotchas
 
-- **Blank values are always skipped.** Both missing params and params set to an empty string (`""`) are treated identically — the filter is not applied and the relation is not narrowed. This means omitting a query parameter never unintentionally restricts results.
-- **Scope mode ignores the param value.** When `scope:` is used, only the *presence* (and non-blankness) of the param matters; the actual value is discarded. Any truthy string (`"1"`, `"true"`, `"yes"`) triggers the scope equally.
+- **Blank values are always skipped.** Both missing params and params set to an empty string (`""`) are treated identically — the filter is not applied and the relation is not narrowed. This means omitting a query parameter never unintentionally restricts results. The one exception is boolean `false`, which is a real value: `filter_by :active` with a JSON body of `{"active": false}` selects the inactive rows.
+- **Scope mode ignores the param value.** When `scope:` is used, only the *presence* (and non-blankness) of the param matters; the actual value is discarded. Any string — including the string `"false"` — triggers the scope equally. The exception is a real boolean `false`, which scope mode reads as "do not apply this scope", since applying it would give the caller the opposite of what it asked for.
 - **`scope:` and `with:` are mutually exclusive per `filter_by` call.** Declaring both raises `ArgumentError` at class-load time (not at request time), so the misconfiguration is caught immediately during development or test suite startup.
 - **At least one field is required.** Calling `filter_by` with no positional arguments raises `ArgumentError`.
 - **Rules accumulate across multiple `filter_by` calls.** Each call merges into `filterable_rules`; later calls for the same field key overwrite earlier ones.

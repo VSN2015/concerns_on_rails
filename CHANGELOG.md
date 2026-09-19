@@ -1,5 +1,485 @@
 <!-- CHANGELOG.md -->
 
+## 1.28.6 (2026-09-18)
+
+Ten feature PRs deepening existing concerns, released as a patch by request: no new
+concerns and no dependency changes, though several add an optional column or option.
+Every PR was reviewed before merge and carries the review's fixes; the `### Changed`
+and `### Fixed` sections below are those fixes, and they are the ones to read — a few
+tighten validation or start raising where the code used to accept bad input silently.
+Eight further PRs were reviewed in the same pass and held back: they carry defects
+that need more than a patch-sized change.
+
+### Added
+- **Models::Maskable**: `masked_attributes` (every declared field masked, keyed like
+  `attributes`) and a `masked:` serialization option — `as_json(masked: true)` /
+  `to_json(masked: true)` / `serializable_hash(masked: true)` swap the declared fields
+  for their masked forms (`masked: [:email]` for a subset; undeclared fields raise).
+  Composes with `only:`/`except:`/`methods:`/`include:`; plain serialization is
+  unchanged. (#65)
+- **Models::Activatable**: `before_activate` / `after_activate` / `before_deactivate` /
+  `after_deactivate` hooks (one transaction with the write; a raising after-hook rolls
+  back, a failed update skips it; overriding one moves that direction's batch verb to
+  the per-record path) and `activatable_by timestamps:` (`true` → `activated_at` /
+  `deactivated_at` stamped on each transition, or a Hash to rename/drop a side). The
+  batch fast path stamps too. (#78)
+- **Models::Hashable**: `prefix:` prepends a literal to generated values (Stripe-style
+  public IDs such as `ord_k7m3pq9a`; string types only), and `to_param: true` makes the
+  hashed field the URL parameter (falls back to the id while blank). Both validated at
+  class load. (#70)
+- **Models::Tokenizable**: `tokenizable_by … expires_in:` gives a token a lifetime —
+  `<field>_expires_at` is stamped on every generation, `authenticate_by_<field>` refuses
+  an expired token, `<field>_expired?` and the `<field>_expired` scope report it. New
+  `consume_<field>(value)` (every field) authenticates and revokes in one race-safe step
+  for single-use tokens. (#51)
+- **Models::Auditable**: `ConcernsOnRails.setup { |c| c.audit_actor = -> { Current.user&.id } }`
+  sets the `"by"` actor once for every audited model that passes no `actor:` (resolved
+  per save, `instance_exec`'d on the record); `actor: false` opts a model out, and
+  `actor: :method_name` stamps a record method's value. (#50)
+- **Models::CounterCacheable**: `recount_counter_caches!(association, parents:)` repairs
+  only the given parents (ids, records or a relation) — locked, zeroed and re-tallied in
+  one transaction, other rows untouched — so a post-import fix is O(their children).
+  Empty `parents:` is a no-op; the association is required when more than one is
+  declared. (#75)
+- **Controllers::Includable**: nested include allow-lists — `includable :author,
+  comments: :author` accepts `?include=comments.author` (a path must match every
+  segment). `requested_includes(as: :query | :paths | :json)` returns the sanitized
+  includes for `includes`/`preload`, JSON:API serializers, or `as_json(include:)`;
+  `requested_include_paths` exposes the dotted paths. `default:` loads named paths when
+  `?include` is absent (blank opts out); `strategy:` picks
+  `includes`/`preload`/`eager_load`. New `Support::IncludeTree`. (#69)
+- **Controllers::Idempotentable**: replays now carry the original response's `Location`,
+  `Content-Location`, `ETag`, `Last-Modified` and `Link` headers, so a retried `create`
+  still says where the resource lives. `idempotent_actions … headers:` tunes the
+  allow-list (`[]` to capture none). Records written before this release replay
+  unchanged. (#47)
+- **Controllers::Throttleable**: `throttle_by … if:/unless:` per-request skip conditions
+  (Symbol method or callable; both must pass), mirroring Rails 7.2's `rate_limit`. A
+  throttled request instruments `rate_limited.concerns_on_rails` (rule, discriminator,
+  count/limit/period, reset_at/retry_after, controller, action) through the new public
+  `on_rate_limited(rule, result)` hook. (#44)
+- **Controllers::Respondable**: `respondable_by error_format: :problem_details,
+  problem_type_base:` makes `render_error` emit RFC 9457 `application/problem+json`
+  documents (`type`, `title`, `status`, `detail`, `instance`, plus `code`/`errors`
+  extensions). Every concern that renders errors through Respondable follows, so the
+  switch is app-wide. The default stays `:envelope`. (#57)
+
+### Changed
+- **Controllers::Throttleable**: with several applicable rules the `X-RateLimit-*`
+  headers now describe the tightest passing rule (fewest remaining) instead of the last
+  one declared, and a tie on remaining is broken by the rule that resets *last* — so the
+  advertised `X-RateLimit-Reset` can no longer promise a 60-second wait when an hourly
+  rule is the real budget. `result[:discriminator]` is now available to
+  `throttled_response`. Note it is raw personal data (an IP or a user id) in the
+  instrumentation payload too; override `on_rate_limited` to hash or drop it. (#44)
+- **Controllers::Throttleable**: `if:`/`unless:` conditions are now arity-aware — a
+  one-argument callable receives the controller, a zero-arity Proc is still
+  `instance_exec`'d. Previously a `->(c) { … }` condition raised `ArgumentError` on
+  every request. (#44)
+- **Models::Auditable**: an explicit `actor: nil` now keeps meaning "never record who"
+  and no longer falls through to the gem-wide `config.audit_actor`; only omitting
+  `actor:` takes the fallback. `config.audit_actor` accepts a non-Proc callable and
+  `false` (a synonym for nil), and rejects a lambda that demands arguments at
+  configuration time rather than raising inside `before_save`. (#50)
+- **Models::CounterCacheable**: `recount_counter_caches!` now raises `ArgumentError`
+  for an association with no declared counter, instead of returning `{}` as a silent
+  success; and a scoped repair locks the named parent rows before tallying, so a
+  concurrent child write can no longer be lost. (#75)
+- **Controllers::Idempotentable**: response-header capture is case-insensitive, so an
+  app that sets `location` rather than `Location` (correct under Rack 3) is captured on
+  every supported Rails version, not only 7.1+. `idempotency_scope` is now a documented
+  public override point — the default namespace has no per-principal component, so two
+  users sharing a client-chosen key can be served each other's cached response. (#47)
+- **Controllers::Respondable**: the problem-details media type is emitted as bare
+  `application/problem+json`, with no `charset` parameter — RFC 9457 registers none, and
+  strict clients reject the parameterised form. (#57)
+
+### Fixed
+- **Models::Activatable**: lifecycle hooks are invoked with `send`, so a `private` hook
+  override runs instead of raising `NoMethodError` — which in a batch verb aborted and
+  rolled back the whole run. (#78)
+- **Models::Hashable**: the `to_param: true` / Sluggable conflict now raises in *either*
+  declaration order. With Hashable declared first, friendly_id's `to_param` used to land
+  above Hashable's and silently win, so `to_param: true` did nothing. (#70)
+- **Models::Tokenizable**: `expires_in:` now requires an `ActiveSupport::Duration` or a
+  `Numeric`. `expires_in: 2.hours.from_now` was accepted as ~1.8 billion seconds (tokens
+  effectively never expired) and `expires_in: "2 hours"` as 2 seconds. A model missing
+  both token columns now reports them in one error. (#51)
+- **Controllers::Includable**: `requested_includes(as: :paths)` returns a fresh array on
+  the `default:` path; it previously handed back the class attribute itself, so a caller
+  mutating the result corrupted every later request in the process. (#69)
+
+## 1.28.5 (2026-09-17)
+
+Eight feature PRs deepening existing concerns, released as a patch by request:
+no new concerns and no dependency changes, though several add an optional
+column or option. Every PR was reviewed before merge and carries the review's
+fixes; the notes below call out the ones that change a documented behaviour.
+1522 examples, 0 failures.
+
+### Added
+- **Models::Schedulable**: `overlapping(from, to)` scope and `overlaps?`
+  predicate for booking-clash checks. Open-ended windows (a `NULL` start or
+  end), touching intervals, reversed arguments and Range forms behave
+  identically in SQL and in Ruby. Affixable like the other scopes. (#58)
+- **Models::Duplicable**: per-call `only:` / `except:` association selection —
+  `invoice.duplicate!(except: :line_items)`. The macro's list stays the
+  ceiling, so a controller param cannot smuggle in an undeclared association.
+  An explicit `nil` counts as passed, not absent, so an empty checkbox list
+  copies nothing rather than everything. (#73)
+- **Models::Monetizable**: scope-aware `sum_`, `average_`, `minimum_` and
+  `maximum_<name>` aggregates plus their `formatted_` twins, with per-call
+  formatting overrides. BigDecimal throughout; a grouped relation returns a
+  Hash of converted values instead of raising. (#67)
+- **Models::Taggable**: `tag_counts` — tag to record count in one `GROUP BY`
+  query, relation-aware, with `limit:` for the top N. A `select`, `group` or
+  `order` on the relation is stripped; a `limit`/`offset` window is honoured by
+  resolving it to ids first. (#56)
+- **Models::Expirable**: `before_expire` / `after_expire` lifecycle hooks,
+  `expire_in!(duration)` and `clear_expiry!`. The hooks fire when a write
+  actually expires the record; a future time only schedules expiry and fires
+  nothing, so `after_expire { account.downgrade! }` is safe next to
+  `trial.expire_in!(14.days)`. Overriding either hook moves `expire_all` to the
+  per-record path. (#54)
+- **Controllers::SecureHeadable**: HSTS, cross-origin (COOP/COEP/CORP) and
+  Permissions-Policy presets, plus the `:recommended` and
+  `:cross_origin_isolation` bundles. `:recommended` uses `(self)`-scoped
+  permission values, so it denies third-party frames without disabling the
+  app's own camera, microphone, geolocation or Payment Request. HSTS is skipped
+  on a plaintext request (RFC 6797 §7.2) and never overwrites a stricter value
+  already on the response. (#55)
+- **Models::Addressable**: `address_fingerprint` (SHA-256 of the normalized
+  address), `same_address_as?`, `address_parts_changed?` and a `fingerprint:`
+  column option with a `with_address` finder for deduplication reports. The
+  column is stamped in `before_save`, after every `before_validation`, so a
+  sibling concern rewriting a mapped column cannot desync it. (#79)
+- **Controllers::Localizable**: `Content-Language` response header and
+  `Vary: Accept-Language`, both written before the action so a
+  `rescue_from`-rendered error carries them. Rails' own `Vary: Accept` is
+  preserved rather than suppressed, and `Vary` is advertised only when
+  `Accept-Language` can actually change the resolved locale. (#53)
+
+### Notes
+- **Addressable** defines `address_changed?` only when the model has no
+  `address` column of its own, so it never shadows ActiveModel's dirty
+  predicate; `address_parts_changed?` is always available.
+- Existing rows keep a `NULL` address fingerprint until they are re-saved.
+  Backfill with `Model.find_each(&:save)`; `update_columns`, `insert_all` and
+  `upsert_all` bypass callbacks and leave it stale.
+- The address digest is unkeyed, so treat the column as revealing the address.
+  Do not pair it with an `encryptable` address column.
+
+## 1.28.4 (2026-09-16)
+
+Eleven bug-fix PRs (#91–#101) from the audit of the shipped gem, released as a
+patch: no new concerns, no new options, no migrations, no dependency changes.
+Two close fail-open holes (WebhookVerifiable, Encryptable); the rest are
+correctness fixes for behaviour the docs already promised. Every fix ships with
+a regression spec that fails on 1.28.3. 1460 examples, 0 failures.
+
+### Security
+- **Controllers::WebhookVerifiable**: verification could be skipped entirely,
+  leaving the action to run on an unverified — possibly forged — payload. Two
+  paths: `webhook_verification_failed` returned `nil` when there was no response
+  object to render into, which left the `before_action` chain unhalted; and
+  `webhook_rule_for_action` returned `nil` (read as "no rule applies, carry on")
+  when `action_name` was unresolvable or `""`. Both fail closed now — the first
+  raises, the second falls back to the catch-all rule, or to a lone declared
+  rule, and verifies. With several action-specific rules and no catch-all it
+  raises rather than verifying against an arbitrary provider's secret, which
+  would reject a valid delivery as "signature invalid". The render guard also
+  honours a `render_error` override on its own, so a controller supplying one
+  but no response object renders its rejection instead of raising. Mirrors the
+  fix Authorizable got in 1.22. A resolvable action simply not covered by any
+  rule still passes through untouched. (#92)
+- **Models::Encryptable**: `<field>_ciphertext` — documented for "asserting no
+  plaintext is at rest" — returned the caller's **plaintext** whenever the value
+  had not round-tripped through the database (a new record, or any pending
+  assignment: exactly the state inside a `before_save`, a validator, or an
+  error-reporting path), so `log.info(user.ssn_ciphertext)` wrote the SSN
+  straight to the log. It returns `nil` in that state now. `<field>_encrypted?`
+  used a bare `.present?`, true for plaintext too; it now checks that what is
+  stored really is an encryption envelope, via the new
+  `Support::Encryptor.envelope?`. (#97)
+
+### Fixed
+- **Models::Aliasable**: an aliased `belongs_to` carrying `counter_cache:`
+  double-counted. The alias copy kept the `:counter_cache` option, and because
+  the `#association` override maps the alias back to the same association
+  object, ActiveRecord's counter-cache pass fired once per name — the parent's
+  count came out doubled on create and doubled on destroy, drifting permanently
+  negative once rows predating the alias were removed. The copy no longer
+  carries the option; the source reflection still owns the counter. (#93)
+- **Controllers::Paginatable**: `?page=99999999999999999999` was an
+  unauthenticated 500 — `(page - 1) * per_page` produced an offset no backend
+  accepts (`StatementInvalid` on a relation, `RangeError` on an Array). `page`
+  is now clamped to `MAX_PAGE` (1,000,000) and comes back as an empty page past
+  the end; `per_page` is held under the matching `MAX_PER_PAGE`, since with
+  `max_per_page: 0` ("no cap") the identical value overflowed `LIMIT` instead.
+  `paginate_by` also validates `per_page` now: 0 and negatives raise
+  `ArgumentError` at class-load time instead of misbehaving on every request
+  (`per_page: -1` means `LIMIT -1`, i.e. NO LIMIT on SQLite and MySQL —
+  serialising the whole table; `per_page: 0` made every page permanently empty).
+  A negative `max_per_page` still means "no cap", as documented. (#94)
+- **Models::Taggable**: `all_tags` raised on PostgreSQL for any model that also
+  includes `Models::Sortable` — `SELECT DISTINCT` cannot be ordered by a column
+  outside the select list, and Sortable installs exactly such a `default_scope`.
+  The inherited `ORDER BY` is dropped with `reorder(nil)`; the result is sorted
+  in Ruby anyway. Passed on SQLite, which permits it. (#95)
+- **Models::Lockable, Models::Stateable**: `ActiveRecord::Rollback` raised from
+  an `after_lock` / `after_transition` hook did nothing when the call was nested
+  inside a caller's own transaction — a bare `transaction` joins the enclosing
+  one and Rails swallows `Rollback` without rolling anything back. Both open a
+  savepoint now (`requires_new: true`), so the documented abort works: Lockable
+  no longer leaves a row locked in the database while reporting `false` in
+  memory (with `lock_access!`'s idempotency guard then making every retry a
+  no-op), and Stateable no longer commits a state change its hook asked to
+  abort. Stateable's `<event>!` also took its return value from `update!`, which
+  runs *before* the hook, so an aborted transition reported success —
+  `raise unless ticket.archive!` never fired and `transition_all` counted a row
+  it had rolled back. It reports `false` now, which `transition_all` treats as
+  the documented failed-record signal. Note `transition_all` opens one savepoint
+  per record. (#96)
+- **Support::ErrorEnvelope**: the `render_error` lookup was public-only, but
+  `render_error` is very often declared under `private` — the idiomatic way to
+  keep a controller helper from becoming a routable action. Those overrides were
+  silently ignored and the gem's inline envelope rendered instead, so an app
+  rendering RFC 9457 problem+json got the wrong shape for every Authorizable
+  403, WebhookVerifiable 401, Throttleable 429 and CursorPaginatable 400, with
+  no error or warning. Now `respond_to?(:render_error, true)`, the spelling
+  Authorizable already used for `current_user`. Controllers::Deprecatable keeps
+  its own copy of that check before rendering a sunset 410, and it had the same
+  blind spot — a private `render_error` with no response object skipped the 410
+  and served the sunset action. (#98)
+- **Controllers::Deprecatable**: `deprecate_actions` mutated the caller's own
+  `Time`. `Time#utc` is an alias of `#gmtime` and converts the receiver IN
+  PLACE, so a host passing a frozen constant (`SUNSET = Time.new(...).freeze`)
+  got a `FrozenError` while the controller class body was still loading — the
+  app would not boot — and an unfrozen `Time` was silently rewritten to UTC
+  behind the caller's back. Now `getutc`. (#99)
+- **Controllers::Filterable**: a boolean `false` read as "filter not supplied",
+  so `filter_by :active` could never select the inactive rows — `false.blank?`
+  is true, the rule was skipped and the UNFILTERED relation came back. Only JSON
+  request bodies were affected; a query string carries the String `"false"`,
+  which is not blank. Everything genuinely empty — `nil`, `""`, `"   "`, `[]`,
+  `{}` — is still skipped, and in `scope:` mode (which discards the value) an
+  explicit `false` still means "do not apply this scope". (#100)
+- **Models::Stateable**: `transition_all` silently skipped rows whose state is
+  NULL. `where.not(state: to)` compiles to `NOT (state = 'x')`, which SQL
+  three-valued logic evaluates to NULL — never TRUE — for a NULL state, so those
+  rows were dropped from the batch and from the returned count even though they
+  ARE eligible (`may_<event>?` returns true for them and the per-record
+  `<event>!` succeeds). The predicate is NULL-safe now. (#101)
+
+### Internal
+- **Specs**: the Aliasable join-alias SQL assertion accepts both the Rails 8.1
+  `AS`-qualified table alias and the older unqualified form, so the suite passes
+  on Rails 8.1 — unblocking the pending Rails 8.1 dependency bumps. No library
+  change. (#91)
+
+## 1.28.3 (2026-09-16)
+
+Three merged PRs from the September loop (#41, #43, #52), shipped as a patch at
+the maintainer's request: a SoftDeletable bug fix (`restore_all` /
+`really_destroy_all` dropped the caller's own predicate on the soft-delete
+column), a ColumnGuard change (every missing column reported in one error with
+one migration command) and an additive SoftDeletable `cascade:` option for
+has_many / has_one dependents. No new migrations or runtime dependencies.
+1396 examples, 0 failures.
+
+### Fixed
+- **Models::SoftDeletable**: `restore_all` and `really_destroy_all` now honour a
+  caller's predicate on the soft-delete column. Both used to `unscope` the
+  column outright to peel off the default scope's `deleted_at IS NULL`, which
+  also dropped `deleted_within(1.hour)` / `where(deleted_at: range)` /
+  `only_deleted` — so `User.deleted_within(1.hour).restore_all` restored the
+  whole trash can and `only_deleted.really_destroy_all` widened to the whole
+  relation. Only the default scope's own predicate is peeled now; predicates on
+  other columns (a host model's own `default_scope` included) are untouched. The
+  scopes themselves still unscope the column: chain `soft_deleted.where(...)`,
+  not `where(...).soft_deleted`. (#41)
+- **Models::Anonymizable**: the stamp column's migration hint now carries its
+  type (`anonymized_at:datetime`). (#43)
+
+### Changed
+- **Support::ColumnGuard**: a macro that finds several missing columns now
+  reports them all in one `ArgumentError` — `'street', 'city' and 'zip' do not
+  exist …` — with a single combined migration command
+  (`bin/rails generate migration AddAddressableColumnsToUsers street:string
+  city:string zip:string`) instead of failing boot once per column. Single-
+  column wording and generator name are unchanged. (#43)
+
+### Added
+- **Models::SoftDeletable**: `soft_deletable_by … cascade: %i[comments cover]`
+  soft-deletes has_many / has_one dependents with the record (same
+  transaction, same timestamp, through their own `soft_delete!` so hooks and
+  nested cascades run) and restores exactly those on `restore!` — a dependent
+  deleted independently earlier stays deleted. New `soft_delete!(at:)` keyword.
+  With a cascade configured, `soft_delete_all` / `restore_all` take the
+  per-record path. `belongs_to`, HABTM and `:through` are rejected at class
+  load; the target model must include SoftDeletable (checked at class load when
+  it already resolves, otherwise on the first cascade). (#52)
+
+### Notes
+`cascade:` is off by default — models without it behave exactly as before.
+`restore!` matches cascaded dependents by the parent's exact `deleted_at`, so
+give the columns `precision: 6` (the Rails 7 default) if two parents may be
+deleted within one second. With a cascade configured the single-`UPDATE` fast
+paths of `soft_delete_all` / `restore_all` are disabled (a bulk `UPDATE` cannot
+follow associations). Anything matching `/does not exist/` on a one-column
+ColumnGuard failure still matches — only the several-columns wording and
+generator name changed. The README's "use instead" table no longer lists
+association-cascade soft delete as a reason to reach for paranoia / discard.
+
+## 1.28.2 (2026-09-11)
+
+Six merged enhancement PRs from the September loop (#42, #84, #59 via #90, #80,
+#81, #82), all additive and column-free: ErrorHandleable rescues 14 exceptions
+instead of 3 and instruments every handled error, CursorPaginatable cursors can
+be HMAC-signed, Sortable applies a drag-and-drop order in one UPDATE, Sluggable
+gains slug candidates / word-boundary truncation / forced regeneration, and
+Sequenceable can defer numbering until an invoice is finalized. No new
+migrations or runtime dependencies. 1360 examples, 0 failures.
+
+### Added
+- **Controllers::ErrorHandleable**: the exception map grows from 3 to 14 —
+  `ActiveModel::ValidationError`, `RecordNotSaved`, `RecordNotDestroyed` (422),
+  `StaleObjectError`, `RecordNotUnique`, `InvalidForeignKey` (409),
+  `UnpermittedParameters`, `BadRequest`, `ParseError` (400),
+  `InvalidAuthenticityToken` (422) and `UnknownFormat` (406). Statuses follow
+  Rails' `rescue_responses`; database/parser-level errors render generic
+  messages so SQL, schema names and request input never leak. New
+  `handle_errors only:/except:` macro trims the map without touching a host
+  `rescue_from`; `error_handleable_keys` lists the active keys. (#42)
+- **Controllers::ErrorHandleable**: every handled error instruments
+  `handled_error.concerns_on_rails` (controller, action, code, status, message,
+  exception) via the public `on_handled_error(key, error, status:, message:)`
+  override point — report some codes to the error tracker, let the rest stay
+  quiet. (#84)
+- **Controllers::CursorPaginatable**: `cursor_paginate_by … signed: true` (or a
+  String key / callable) appends a URL-safe HMAC-SHA256 to every cursor and
+  rejects tampered, mis-signed or unsigned tokens with the usual 400, so
+  clients can no longer hand-craft page positions. Unsigned stays the default.
+  (#59, merged via #90)
+- **Sortable (model)**: `Model.reposition!(ids, missing: :append | :raise)`
+  applies a drag-and-drop id order as positions in one `UPDATE … CASE` inside
+  the current relation (unlisted rows appended or raised, foreign/duplicate ids
+  rejected, String ids cast, `:desc` lists inverted). Returns the count. (#80)
+- **Sluggable**: `candidates:` (friendly_id slug candidates tried in order
+  before the uuid fallback; regeneration still keyed to the primary field),
+  `max_length:` (word-boundary truncation, suffix appended after) and
+  `regenerate_slug!` (rebuild from the current source even over a
+  hand-assigned slug). (#81)
+- **Sequenceable**: `assign: :manual` defers numbering until `assign_<field>!`
+  (idempotent — `true` when assigned, `false` when already numbered; `save!`s
+  persisted records, leaves new ones for the caller's save), plus
+  `<field>_assigned?` and a `pending_<field>` scope. Numbering then follows
+  finalization order; `reset:` periods still come from `created_at`. (#82)
+
+### Notes
+Apps that include ErrorHandleable now get 11 more exceptions rescued into JSON
+4xx responses. One that relied on, say, `StaleObjectError` propagating to its
+error tracker should add `handle_errors except: :stale_object` (or `only:` the
+original trio) — or override `on_handled_error` to report the codes it cares
+about. Exceptions are registered by name, so a class a given Rails version
+lacks is simply never matched. Turning on `signed:` invalidates in-flight
+unsigned cursors (there is no mixed mode by design), so clients restart from
+the first page. `reposition!` writes positions with `update_all` and therefore
+bypasses acts_as_list's per-row callbacks by design.
+
+## 1.28.1 (2026-09-07)
+
+One additive Paginatable option (#89): `pagination_meta` can now publish the
+page window a pagination bar needs — first, last and N pages either side of the
+current page — instead of leaving every client to compute it from
+`total_pages`. Opt-in, controller-only, no extra query, and existing responses
+are byte-for-byte unchanged. 1314 examples, 0 failures.
+
+### Added
+- **Controllers::Paginatable**: `paginate_by window: 3` adds a `pages:` key to
+  `pagination_meta` — the first page, the last page, and N pages either side of
+  the current one, with the Symbol `:gap` standing in for each run left out
+  (`[1, :gap, 44, 45, 46, 47, 48, 49, 50, :gap, 100]`) — enough to render a
+  `1 … 44 45 46 [47] 48 49 50 … 100` bar straight from the meta Hash. Opt-in:
+  without `window:` the key is absent entirely (not `nil`), so no existing
+  meta Hash or serialized body changes shape, and `meta.key?(:pages)` is a
+  clean probe. The window is arithmetic over the `total` already counted, so it
+  costs no extra query on either the memoized `paginated` path or the fresh
+  `pagination_meta` one. A jump of exactly two pages is filled with the page it
+  would have hidden (`1 2 3`, never the wider `1 … 3`), and a `?page=` past the
+  last page windows around the last page as `rel="prev"` already does.
+  `window:` is validated at declaration — a non-negative Integer, or
+  `nil`/`false` to disable; `0` yields first, current and last only. Headers
+  and `Link` rels are unchanged: `pages:` is body-only by design. (#89)
+
+### Internal
+- `set_pagination_headers` no longer splats the memoized meta Hash, which
+  raised `unknown keyword: :pages` once that Hash could carry the window; the
+  four header values are passed explicitly.
+- README's advertised example counts were stale (1,160 and 1,303) and now read
+  1,314.
+
+## 1.28.0 (2026-09-06)
+
+Pagination is the theme: the four-PR Paginatable stack (#40, #45, #62, #83)
+from the September enhancement loop. Paginatable now paginates in-memory
+collections, both paginators emit RFC 8288 `Link` headers, results that were
+already paginated upstream can pass `total:`, and the page / per-page parameter
+names (including JSON:API's `page[number]` / `page[size]`) are configurable.
+Controller-only: no new columns, migrations or runtime dependencies. 1303
+examples, 0 failures.
+
+### Added
+- **Controllers::Paginatable**: `paginated` / `pagination_meta` accept in-memory
+  collections — an `Array`, `Set`, `Range` or any other non-Hash `Enumerable` —
+  not only ActiveRecord relations. The collection is materialized once, the
+  total is its size and the current page comes back as an `Array` with the same
+  `X-Total-Count` / `X-Page` / `X-Per-Page` / `X-Total-Pages` headers and
+  memoized meta. Relations still paginate in SQL. A `Hash`, `nil` or a
+  non-collection raises `ArgumentError` naming the class received. (#40)
+- **Controllers::Paginatable / CursorPaginatable**: RFC 8288 `Link` response
+  header — `first`/`prev`/`next`/`last` page URLs for Paginatable, `next`
+  (+ `prev` in bidirectional mode, `first` once a cursor is in play) for
+  CursorPaginatable — rebuilt from the current request with every other query
+  param preserved and appended to any existing `Link` header. Opt out with
+  `link_header: false` on either macro. Backed by the new shared
+  `Support::LinkHeader`. (#45)
+- **Controllers::Paginatable**: `paginated(collection, total:)` /
+  `pagination_meta(total:)` for collections that are already one page — an
+  external API's or search service's page N plus its total: nothing is sliced
+  or counted, and `total` drives the `X-*` headers and the `Link` header.
+  `total:` must be a non-negative Integer. (#62)
+- **Controllers::Paginatable**: `paginate_by page_param:` / `per_page_param:`
+  (a top-level name or a nested path such as `%i[page number]`) and
+  `style: :jsonapi` (`?page[number]=&page[size]=`); explicit `*_param:` options
+  win over the style, anything else raises at declaration. Readers dig the path
+  through `ScalarParam`, so a scalar where a Hash is expected falls back to the
+  default instead of raising. The `Link` header URLs are rebuilt under the
+  configured names (nested paths Rack-encoded, sibling keys preserved). (#83)
+
+### Notes
+The `Link` header is **on by default**, so every non-empty paginated response
+grows by one header. Its URLs are built from `request.base_url` + `request.path`,
+i.e. whatever host Rails sees — behind a proxy configure `trusted_proxies` /
+forwarded headers, or pass `link_header: false`. The `X-*` headers are
+unchanged either way, and the existing `?page=&per_page=` behaviour is
+byte-for-byte the same when no `page_param:` / `per_page_param:` / `style:` is
+given.
+
+### Internal
+- New `Support::LinkHeader` (autoloaded): `available?(controller)` — a request
+  exposing `base_url` / `path` / `query_parameters` (the dependency-free
+  `FakeController` has none, so emission is silently skipped); `url_for(request,
+  drop:, **overrides)` — Rack nested-query encoding, nested params survive, Hash
+  override values deep-stringified, `nil` / `drop:` removes a key;
+  `append(response, rels)` — never clobbers an existing `Link`.
+- `Paginatable.paginate_by` moved into `module ClassMethods` alongside its new
+  private helpers (RuboCop scope rule; the Stateable precedent).
+- Development dependencies: simplecov `~> 1.1`, sqlite3 `~> 2.9.6`, rubocop
+  `~> 1.89`; GitHub Actions `checkout` v7, `configure-pages` v6, `deploy-pages`
+  v5, `upload-pages-artifact` v5. The lockfile now resolves `permittable` 0.2.0
+  (the `~> 0.1` runtime pin is unchanged).
+
 ## 1.27.0 (2026-08-29)
 
 Scope-name collisions finally have an escape hatch on the eight concerns whose

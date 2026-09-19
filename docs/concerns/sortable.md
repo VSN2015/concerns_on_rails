@@ -115,6 +115,7 @@ Position values are automatically assigned on `create` and compacted on `destroy
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `sortable_by` | `sortable_by(field_config = nil, use_acts_as_list: true, scope: nil, add_new_at: nil, default_scope: true, **field_options)` | Configures the sort column and direction, validates the column exists, optionally sets up `acts_as_list`, and (since 1.22) controls whether the sticky ordering `default_scope` is installed. |
+| `reposition!` | `reposition!(ids, missing: :append)` | Applies an explicit id order as positions in **one** `UPDATE … SET <field> = CASE id WHEN … END` inside the current relation (`Task.where(list_id: 1).reposition!(ids)`), inside a transaction. The first id gets the top position (`acts_as_list`'s `top_of_list`, default 1); on a `:desc` list the first id gets the *highest* value so the list reads in the given order. Rows in the relation but not in `ids` are appended after, in their current order (`missing: :append`) or make the call raise (`missing: :raise`). Ids outside the relation, duplicates, or an unknown `missing:` raise `ArgumentError` before anything is written. String ids (from params) are cast through the primary key's type. Returns the number of rows updated. Bypasses acts_as_list callbacks (`update_all`). |
 
 ## Examples
 
@@ -180,6 +181,22 @@ t3 = Task.create!(name: "B1", project_id: project_b.id)  # position: 1 in Beta
 t1.reload.position  # => 2
 t2.position         # => 1
 t3.position         # => 1  (own sequence inside Beta)
+```
+
+**Saving a drag-and-drop order**
+
+```ruby
+class TasksController < ApplicationController
+  def reorder
+    list = List.find(params[:list_id])
+    list.tasks.reposition!(params.require(:ids))    # ids in the order the user dropped them
+    head :no_content
+  end
+end
+
+# before: A(1) B(2) C(3)     params[:ids] = ["3", "1"]
+Task.reposition!(%w[3 1])   # => 3   C(1) A(2) B(3) — B wasn't listed, so it keeps its place after the listed rows
+Task.reposition!(%w[3 1], missing: :raise)   # ArgumentError — a paginated/partial list must be explicit
 ```
 
 ## Notes & gotchas

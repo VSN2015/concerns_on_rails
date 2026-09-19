@@ -188,6 +188,18 @@ describe ConcernsOnRails::Models::CounterCacheable do
       Comment.recount_counter_caches!(:post)
       expect(post.reload.comments_count).to eq(0)
     end
+
+    it "raises on an association with no declared counter instead of reporting a silent success" do
+      Comment.create!(post: post)
+      post.update_columns(comments_count: 99)
+
+      expect { Comment.recount_counter_caches!(:psot) }
+        .to raise_error(ArgumentError, /no counter declared for association `psot` \(declared: post, author\)/)
+      expect { Comment.recount_counter_caches!(:psot, parents: post) }
+        .to raise_error(ArgumentError, /no counter declared for association `psot`/)
+
+      expect(post.reload.comments_count).to eq(99) # neither call touched a row
+    end
   end
 
   describe "argument validation" do
@@ -300,6 +312,97 @@ describe ConcernsOnRails::Models::CounterCacheable do
       expect(other.reload.comments_count).to eq(1)
       expect(other.reload.approved_comments_count).to eq(1)
       expect(updates.length).to eq(2) # old parent −, new parent + (both counters batched)
+    end
+  end
+
+  describe ".recount_counter_caches! with parents:" do
+    let(:third) { Post.create! }
+
+    before do
+      Comment.create!(post: post, approved: true)
+      Comment.create!(post: post)
+      Comment.create!(post: other)
+      3.times { Comment.create!(post: third) }
+      Post.update_all(comments_count: 99, approved_comments_count: 99) # drift everywhere
+    end
+
+    it "repairs only the given parents — ids, records or a relation — and leaves the rest alone" do
+      result = Comment.recount_counter_caches!(:post, parents: [post.id, other])
+      expect(result).to eq(comments_count: 2, approved_comments_count: 1)
+      expect(post.reload.values_at(:comments_count, :approved_comments_count)).to eq([2, 1])
+      expect(other.reload.values_at(:comments_count, :approved_comments_count)).to eq([1, 0])
+      expect(third.reload.values_at(:comments_count, :approved_comments_count)).to eq([99, 99])
+
+      Comment.recount_counter_caches!(:post, parents: Post.where(id: third.id))
+      expect(third.reload.values_at(:comments_count, :approved_comments_count)).to eq([3, 0])
+      expect(post.reload.comments_count).to eq(2)
+    end
+
+    it "zeroes a listed parent that has no children and treats an empty parents: as a no-op" do
+      lonely = Post.create!
+      Post.where(id: lonely.id).update_all(comments_count: 5)
+
+      expect(Comment.recount_counter_caches!(:post, parents: lonely)).to eq(comments_count: 0, approved_comments_count: 0)
+      expect(lonely.reload.comments_count).to eq(0)
+
+      expect(Comment.recount_counter_caches!(:post, parents: Post.none)).to eq(comments_count: 0, approved_comments_count: 0)
+      expect(Comment.recount_counter_caches!(:post, parents: [])).to eq(comments_count: 0, approved_comments_count: 0)
+      expect(third.reload.comments_count).to eq(99)
+    end
+
+    it "requires the association when parents: would be ambiguous" do
+      expect { Comment.recount_counter_caches!(parents: [post.id]) }
+        .to raise_error(ArgumentError, /parents: needs the association when more than one is declared \(post, author\)/)
+
+      author = User.create!
+      Comment.create!(author: author)
+      User.update_all(posts_count: 42)
+      expect(Comment.recount_counter_caches!(:author, parents: author)).to eq(posts_count: 1)
+      expect(author.reload.posts_count).to eq(1)
+    end
+
+    it "refuses parents: from the wrong class instead of rewriting whatever shares those ids" do
+      author = User.create!
+      expect { Comment.recount_counter_caches!(:post, parents: author) }
+        .to raise_error(ArgumentError, /parents: must contain Post records \(got User\)/)
+      expect { Comment.recount_counter_caches!(:post, parents: User.where(id: author.id)) }
+        .to raise_error(ArgumentError, /parents: must contain Post records \(got User\)/)
+
+      # Still the drifted 99 the before block wrote: the refused calls neither
+      # zeroed nor rewrote anything.
+      expect(post.reload.comments_count).to eq(99)
+    end
+
+    it "refuses an explicit parents: nil rather than widening into a full-table rewrite" do
+      expect { Comment.recount_counter_caches!(:post, parents: nil) }
+        .to raise_error(ArgumentError, /parents: cannot be nil/)
+      expect { Comment.recount_counter_caches!(:post, parents: Post.find_by(id: -1)) }
+        .to raise_error(ArgumentError, /parents: cannot be nil/)
+
+      expect(third.reload.comments_count).to eq(99) # nothing zeroed, nothing rewritten
+      expect(Comment.recount_counter_caches!(:post)).to eq(comments_count: 3, approved_comments_count: 1)
+    end
+
+    it "locks the listed parents inside the transaction, before the children are tallied" do
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*args|
+        statements << args.last[:sql].to_s
+      end
+      begin
+        Comment.recount_counter_caches!(:post, parents: post)
+      ensure
+        ActiveSupport::Notifications.unsubscribe(subscriber)
+      end
+
+      opened  = statements.index { |sql| sql.start_with?("begin") }
+      locked  = statements.index { |sql| sql.start_with?('SELECT "posts"."id" FROM "posts"') }
+      tallied = statements.index { |sql| sql.include?('FROM "comments"') }
+      zeroed  = statements.index { |sql| sql.start_with?('UPDATE "posts"') }
+
+      expect([opened, locked, tallied, zeroed]).to all(be_a(Integer))
+      expect(opened).to be < locked  # the lock is taken inside the transaction
+      expect(locked).to be < tallied # ...and before the tally the rewrite depends on
+      expect(tallied).to be < zeroed
     end
   end
 end
