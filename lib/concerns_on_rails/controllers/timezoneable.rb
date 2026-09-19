@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/vary_header"
 
 module ConcernsOnRails
   module Controllers
@@ -140,7 +141,15 @@ module ConcernsOnRails
         # (ActionController::API has no cookies at all, and still skips.)
         return unless respond_to?(:cookies, true) && cookies
 
-        cookies[opts[:cookie]] = opts[:persist].merge(value: zone.name)
+        options = opts[:persist].merge(value: zone.name)
+        # The cookie jar only coerces an ActiveSupport::Duration `expires:` into
+        # an absolute time from Rails 5.2 on; 5.0/5.1 hand the Duration itself
+        # to the cookie writer and raise. Resolve it here — which is what the
+        # modern jar does internally, so nothing changes there. (`merge` above
+        # already copied the declared Hash, so the declaration is untouched and
+        # the next request resolves a fresh expiry.)
+        options[:expires] = options[:expires].from_now if options[:expires].respond_to?(:from_now)
+        cookies[opts[:cookie]] = options
       end
 
       # X-Time-Zone (or the configured name) plus Vary: Time-Zone when the
@@ -151,14 +160,7 @@ module ConcernsOnRails
         return unless name && zone && respond_to?(:response) && response.respond_to?(:set_header)
 
         response.set_header(name, zone.name)
-        append_vary_time_zone if self.class.timezoneable_options[:header]
-      end
-
-      def append_vary_time_zone
-        existing = response.headers["Vary"].to_s.split(",").map(&:strip).reject(&:empty?)
-        return if existing.any? { |value| value.casecmp?("Time-Zone") }
-
-        response.set_header("Vary", (existing + ["Time-Zone"]).join(", "))
+        Support::VaryHeader.append(self, "Time-Zone") if self.class.timezoneable_options[:header]
       end
 
       # Match a raw source value against the allow-list (when present), returning

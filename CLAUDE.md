@@ -247,7 +247,11 @@ and a subclass never rips a scope out from under its parent), `BatchOps` (the ho
 fast-path predicate — every named instance method still owned by the concern, i.e.
 unoverridden — plus the transactional `find_each` batch runner shared by every `*_all` verb:
 Integer count, DB-side filtering for idempotency, rollback via `ActiveRecord::RecordNotSaved`
-on a failed record).
+on a failed record), `VaryHeader` (the shared `Vary` appender behind Localizable's
+`Accept-Language` and Timezoneable's `Time-Zone`: appends, de-duplicates case-insensitively,
+leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —
+seeds `Accept` itself whenever Rails' own `_set_vary_header` would have, since that only
+fires while the header is still blank).
 `lib/concerns_on_rails/railtie.rb` loads only when `Rails::Railtie` is defined.
 
 ### Test structure

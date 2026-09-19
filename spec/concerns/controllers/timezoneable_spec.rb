@@ -1,4 +1,5 @@
 require "spec_helper"
+require "support/integration_harness"
 
 describe ConcernsOnRails::Controllers::Timezoneable do
   # A minimal stand-in for ActionDispatch::Request (only #headers is used).
@@ -110,7 +111,11 @@ describe ConcernsOnRails::Controllers::Timezoneable do
       c = controller(params: { time_zone: "London" }, cookies: jar) { timezoneable cookie: :time_zone, persist: true }
       c.switch_time_zone { :ran }
       expect(jar[:time_zone]).to include(value: "London")
-      expect(jar[:time_zone][:expires]).to eq(1.year) # a Duration — the cookie jar resolves it at write time
+      # Resolved to an absolute time HERE, not left as a Duration for the jar:
+      # only Rails 5.2+ coerces one, and the gemspec supports 5.0.
+      expect(jar[:time_zone][:expires]).to be_within(5.seconds).of(1.year.from_now)
+      # …and the declared options survive it, so the next request re-resolves.
+      expect(c.class.timezoneable_options[:persist][:expires]).to eq(1.year)
 
       from_header = {}
       controller(time_zone_header: "London", cookies: from_header) { timezoneable cookie: :time_zone, persist: true }
@@ -129,7 +134,7 @@ describe ConcernsOnRails::Controllers::Timezoneable do
       end
       c.switch_time_zone { :ran }
       expect(jar[:zone]).to include(value: "London", same_site: :lax, secure: true)
-      expect(jar[:zone][:expires]).to eq(30.days)
+      expect(jar[:zone][:expires]).to be_within(5.seconds).of(30.days.from_now)
 
       expect { controller { timezoneable persist: true } }
         .to raise_error(ArgumentError, /persist: requires cookie:/)
@@ -155,6 +160,35 @@ describe ConcernsOnRails::Controllers::Timezoneable do
       c = controller(params: { time_zone: "London" }) { timezoneable }
       c.switch_time_zone { :ran }
       expect(c.response.headers).not_to have_key("X-Time-Zone") # off by default
+    end
+
+    it "leaves a Vary: * response alone — it already outranks every named dimension" do
+      c = controller(time_zone_header: "London") { timezoneable response_header: true }
+      c.response.set_header("Vary", "*")
+      c.switch_time_zone { :ran }
+      expect(c.response.headers["Vary"]).to eq("*")
+    end
+
+    it "keeps Rails' own Vary: Accept on a real content-negotiated response" do
+      # Rails adds Vary: Accept during render, but only while the header is
+      # still blank (ActionController::Rendering#_set_vary_header), so writing
+      # ours before the action would silently drop that cache dimension and a
+      # shared cache could serve a JSON body to an HTML request. Only a real
+      # dispatch can catch it.
+      klass = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Timezoneable
+
+        timezoneable default: "UTC", response_header: true
+
+        def show
+          render json: { ok: true }
+        end
+      end
+
+      result = IntegrationHarness.dispatch(klass, :show,
+                                           headers: { "Accept" => "application/json", "Time-Zone" => "London" })
+      expect(result.header("Vary").to_s.split(",").map(&:strip)).to include("Accept", "Time-Zone")
+      expect(result.header("X-Time-Zone")).to eq("London")
     end
 
     it "reports which source won through time_zone_source" do
