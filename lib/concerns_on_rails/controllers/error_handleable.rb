@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
+require "active_support/notifications"
 
 module ConcernsOnRails
   module Controllers

@@ -120,4 +120,44 @@ describe ConcernsOnRails::Support::ErrorEnvelope do
     expect { render_on(c) }.not_to raise_error
     expect(c.delegated).to eq(message: "nope", status: :forbidden, code: "forbidden")
   end
+
+  it "omits errors: for a three-kwarg override even when there ARE details" do
+    # Guarding on `details` alone only covered the empty case — i.e. the one
+    # that was never broken. With details present this used to raise
+    # `ArgumentError: unknown keyword: :errors` at request time, turning
+    # ErrorHandleable's 422 into a 500 on exactly the path that has something
+    # to report.
+    c = controller_class do
+      def render_error(message:, status:, code: nil)
+        @delegated = { message: message, status: status, code: code }
+      end
+    end.new
+
+    expect { render_on(c, details: ["Name can't be blank"]) }.not_to raise_error
+    expect(c.delegated).to eq(message: "nope", status: :forbidden, code: "forbidden")
+  end
+
+  it "passes errors: to an override that declares it" do
+    c = controller_class do
+      def render_error(message:, status:, code: nil, errors: nil)
+        @delegated = { message: message, status: status, code: code, errors: errors }
+      end
+    end.new
+
+    render_on(c, details: ["Name can't be blank"])
+
+    expect(c.delegated[:errors]).to eq(["Name can't be blank"])
+  end
+
+  it "passes errors: to an override that takes **kwargs" do
+    c = controller_class do
+      def render_error(**kwargs)
+        @delegated = kwargs
+      end
+    end.new
+
+    render_on(c, details: ["Name can't be blank"])
+
+    expect(c.delegated[:errors]).to eq(["Name can't be blank"])
+  end
 end

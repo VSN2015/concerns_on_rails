@@ -42,13 +42,58 @@ module ConcernsOnRails
       #   that stores/reads plaintext when no key is configured — never in prod).
       # raise_on_decrypt_error: true (default) raises DecryptionError on a bad
       #   read; false returns nil (a narrow reporting-path opt-out, less safe).
+      # key_id: the id (0-255) stamped into envelopes written with `key`; bump it
+      #   when rotating so old rows stay identifiable. Prefer 0..25 — see
+      #   Models::Encryptable#needs_reencryption.
+      # previous_keys: { key_id => material-or-Proc } still able to DECRYPT rows
+      #   written before a rotation (never used to encrypt). Remove an id once
+      #   `Model.reencrypt_all!` has rewritten every row under the current key.
       attr_accessor :key, :key_derivation_salt, :on_missing_key, :raise_on_decrypt_error
+      attr_reader :key_id, :previous_keys
 
       def initialize
         @key = nil
         @key_derivation_salt = DEFAULT_KDF_SALT
         @on_missing_key = :raise
         @raise_on_decrypt_error = true
+        @key_id = 0
+        @previous_keys = {}.freeze
+      end
+
+      def key_id=(value)
+        unless value.is_a?(Integer) && value.between?(0, 255)
+          raise ArgumentError, "ConcernsOnRails::Encryption: key_id must be an Integer between 0 and 255 (got #{value.inspect})"
+        end
+
+        @key_id = value
+      end
+
+      def previous_keys=(value)
+        unless value.is_a?(Hash) && value.keys.all? { |id| id.is_a?(Integer) && id.between?(0, 255) }
+          raise ArgumentError,
+                "ConcernsOnRails::Encryption: previous_keys must map Integer key ids (0-255) to key material " \
+                "(got #{previous_keys_shape(value)})"
+        end
+
+        @previous_keys = value.dup.freeze
+      end
+
+      # Every id that can currently decrypt — the current key first, then the
+      # previous ones in declaration order.
+      def key_ids
+        [key_id, *previous_keys.keys].uniq
+      end
+
+      # Raw material for the key an envelope names: the current key when the id
+      # matches `key_id`, else the matching previous key (Procs resolved). nil
+      # when the id is unknown.
+      def key_material_for(id)
+        return key_material if id == key_id
+
+        material = previous_keys[id]
+        material = material.call if material.respond_to?(:call)
+        material = material.to_s unless material.nil?
+        material.nil? || material.empty? ? nil : material
       end
 
       # Resolve the configured key (calling a Proc) to raw String material, or
@@ -81,6 +126,20 @@ module ConcernsOnRails
         raise MissingKeyError,
               "ConcernsOnRails::Models::Encryptable: no encryption key configured. Set " \
               "ConcernsOnRails.configure_encryption { |c| c.key = ... } or pass key: to the macro."
+      end
+
+      private
+
+      # Describe a rejected previous_keys value by its SHAPE only. The value is
+      # key material, and the most likely mistakes would otherwise put a live
+      # secret into the exception message, the backtrace, the log and the
+      # tracker — String ids, and equally an inverted `{ material => id }` hash
+      # whose KEYS are the secret. Only Integer ids, which cannot be key
+      # material, are ever printed verbatim.
+      def previous_keys_shape(value)
+        return value.class.to_s unless value.is_a?(Hash)
+
+        "Hash with keys #{value.keys.map { |id| id.is_a?(Integer) ? id : id.class.to_s }.inspect}"
       end
     end
   end

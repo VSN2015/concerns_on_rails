@@ -20,11 +20,16 @@ module ConcernsOnRails
         # with no error or warning. Authorizable already uses this spelling for
         # current_user (`respond_to?(via, true)`) for exactly the same reason.
         if controller.respond_to?(:render_error, true)
-          # errors: only when there are details — several concerns document the
-          # override contract as `render_error(message:, status:, code:)`, and
-          # an unconditional errors: kwarg would break those implementations.
+          # errors: only when there are details AND the effective render_error
+          # can actually accept them. Several concerns document the override
+          # contract as `render_error(message:, status:, code:)`, so passing the
+          # kwarg unconditionally raised `ArgumentError: unknown keyword:
+          # :errors` at request time against those apps — turning a 422 into a
+          # 500 on exactly the path that has something to report. Guarding on
+          # `details` alone only covered the empty case, i.e. the one that was
+          # never broken.
           kwargs = { message: message, code: code, status: status }
-          kwargs[:errors] = details if details
+          kwargs[:errors] = details if details && accepts_errors?(controller)
           controller.send(:render_error, **kwargs)
         else
           error = { message: message }
@@ -32,6 +37,17 @@ module ConcernsOnRails
           error[:details] = details if details
           controller.render(json: { success: false, error: error }, status: status)
         end
+      end
+
+      # True when the controller's render_error takes an `errors:` keyword (or
+      # a **rest that would swallow it). Fails open: if the method cannot be
+      # reflected on, keep the old behaviour and pass the details.
+      def accepts_errors?(controller)
+        controller.method(:render_error).parameters.any? do |type, name|
+          type == :keyrest || (%i[key keyreq].include?(type) && name == :errors)
+        end
+      rescue NameError
+        true
       end
     end
   end

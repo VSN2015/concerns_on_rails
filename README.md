@@ -148,7 +148,7 @@ across all 43 concerns — press <kbd>/</kbd> and type.
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured columns exist and raises `ArgumentError` early — listing *every* missing column at once, with one ready-to-paste `rails generate migration` command that adds them all
 - **Composable** — concerns are independent; mix and match per model
-- **Tested like an app, not a snippet** — **1,624 RSpec examples** run against a real database on every CI build
+- **Tested like an app, not a snippet** — **1,828 RSpec examples** run against a real database on every CI build
 - **Documented twice** — everything in this README also lives as a per-concern page on the [docs site](https://vsn2015.github.io/concerns_on_rails), searchable and deep-linkable
 
 ---
@@ -724,7 +724,7 @@ expirable_by :valid_until
 
 ## ✨ Normalizable
 
-Auto-normalize attribute values in `before_validation` — strip whitespace, downcase emails, dedupe spaces, run any custom transform.
+Auto-normalize attribute values in `before_validation` — strip whitespace, downcase emails, dedupe spaces, chain transforms, run any custom lambda.
 
 ```ruby
 class User < ApplicationRecord
@@ -733,27 +733,37 @@ class User < ApplicationRecord
   normalizable :email,                  with: :email                       # strip + downcase
   normalizable :phone,                  with: :phone                       # digits only
   normalizable :first_name, :last_name, with: :whitespace                  # strip — same rule, multiple fields
-  normalizable :slug,                   with: ->(v) { v.to_s.parameterize } # custom lambda
+  normalizable :display_name,           with: %i[squish titleize]          # a chain, applied left to right
+  normalizable :bio,                    with: %i[squish nullify_blank]     # "" / "   " → nil
+  normalizable :website,                with: :url                         # "Example.COM/x" → "https://example.com/x"
+  normalizable :slug,                   with: ->(v) { v.to_s.parameterize } # custom lambda (chains with presets too)
 end
 
 User.create(email: "  ALICE@Example.com  ").email   # => "alice@example.com"
 User.create(phone: "+1 (415) 555-1234").phone       # => "14155551234"
+
+# The same rule outside a record — lookups and params see what the DB sees:
+User.find_by(email: User.normalize(:email, params[:email]))
 ```
 
 **Built-in presets**
 
-| Preset       | Transform                                |
-|--------------|------------------------------------------|
-| `:email`     | `strip` + `downcase`                     |
-| `:phone`     | digits only (`gsub(/\D/, "")`)           |
-| `:whitespace`| `strip`                                  |
-| `:squish`    | `squish` (collapse inner whitespace)     |
-| `:downcase`  | `downcase`                               |
-| `:upcase`    | `upcase`                                 |
+| Preset          | Transform                                                            |
+|-----------------|----------------------------------------------------------------------|
+| `:email`        | `strip` + `downcase`                                                 |
+| `:phone`        | digits only (`gsub(/\D/, "")`)                                       |
+| `:whitespace` / `:strip` | `strip`                                                     |
+| `:squish`       | `squish` (collapse inner whitespace)                                 |
+| `:downcase` / `:upcase` / `:capitalize` | the String method of the same name                   |
+| `:titleize`     | upcase each word's first letter and downcase the rest, **in place** — deliberately *not* `String#titleize` (that is `humanize(underscore(v))`, which splits `"Jean-Luc"` into `"Jean Luc"` and drops the `_id` of `"customer_id"`). No character is added or removed, so hyphens and underscores survive; only case changes, so `"DVD player"` → `"Dvd Player"` |
+| `:parameterize` | `parameterize` (URL slug)                                            |
+| `:nullify_blank`| `""` or whitespace-only → `nil` (content untouched)                  |
+| `:url`          | strip, default scheme to `https://` (`host:port` counts as schemeless), lowercase scheme + host, keep userinfo/path/query, drop a redundant default port. Only `http`/`https` are canonicalized — any other scheme (`mailto:`, `tel:`, `javascript:`, `data:`) and unparseable input come back stripped for your format validator to reject |
 
 **Notes**
 - Runs in `before_validation`, so DB constraints and AR validations see the normalized value.
-- `nil` values are skipped — no `nil → ""` coercion.
+- `with:` takes a preset, a Proc, or an Array of them (applied in order); every entry is validated at class load.
+- `nil` values are skipped — no `nil → ""` coercion (use `:nullify_blank` for the opposite direction).
 - Preset normalizers pass non-string values through unchanged.
 - Works on Rails 5+ (no dependency on Rails 7.1's built-in `normalizes`).
 
@@ -787,13 +797,24 @@ Article.search("ruby framework")  # title OR body must contain "ruby" AND "frame
 # match: :prefix           — term%  (starts with)
 # match: :exact            — term   (full match)
 searchable_by :sku, match: :prefix
+
+# ranked: true — best matches first: exact, then prefix, then substring hits;
+# within a tier the earlier-declared column wins. Portable CASE expression, no index needed.
+searchable_by :title, :body, ranked: true
+Article.search("ruby")                        # "ruby" (title) → "Ruby" (body) → "Rubyists…" → "…about ruby"
+Article.search("ruby", ranked: false)         # per-call override (and `ranked: true` opts in per call)
+Article.recent.search("ruby")                 # relevance leads; the existing ORDER BY breaks ties
+Article.group(:author_id).search("ruby")      # grouped relations are returned unranked
+Article.search(q).pluck(:id, Article.search_rank(q))  # the score itself (0 = exact hit on the first column)
 ```
 
 **Notes**
 - Uses Arel's `matches`, which emits `ILIKE` on Postgres (case-insensitive) and `LIKE` elsewhere.
 - The query is escaped before interpolation — `%`, `_`, and `\` from user input are treated as literals, not wildcards.
 - Blank or nil queries return the relation unchanged, so it's safe to drop into a controller pipeline.
-- Reach for `pg_search` / Elasticsearch when you need ranking, stemming, or full-text indexes.
+- `ranked:` uses `reorder`, so relevance leads — until something reorders again. `Controllers::Sortable#sorted` and `CursorPaginatable` both reorder unconditionally, so chain `.search` **after** them (`paginated(sorted(Article.all).search(q))`), not before.
+- Grouped relations are returned unranked (ORDER BY on a non-grouped column is a hard error on Postgres/MySQL), so `Article.group(:author_id).search(q).count` is safe; pass `ranked: false` when the `group`/`distinct` comes after the search. Under `mode: :all` the per-term scores are summed.
+- Reach for `pg_search` / Elasticsearch when you need stemming, weighting by frequency, or full-text indexes.
 
 ---
 
@@ -1014,6 +1035,26 @@ guard rejects are skipped (not errors). Unlike every other batch verb in this ge
 the guarded `<event>!` method, because that path runs validations via `update!` while a bulk
 `update_all` would silently skip them.
 
+**Timestamps and per-event hooks**
+
+```ruby
+stateable_by :status, states: %i[draft review published archived], default: :draft,
+             timestamps: true,                  # or %i[published archived] — stamps <state>_at
+             transitions: { publish: { from: %i[draft review], to: :published }, archive: { to: :archived } }
+
+article.publish!          # status = "published" AND published_at = Time.current, in ONE update!
+article.archived!         # direct setters and transition_to! stamp too; the default state on create does not
+
+def before_publish  = check_embargo!          # per-event hooks, fired inside the generic pair and the
+def after_publish   = notify_subscribers      # same transaction: before_transition → before_publish →
+                                              # write → after_publish → after_transition
+```
+
+`timestamps:` requires the `<state>_at` columns (checked at class load, one typed migration hint); the column is
+**not** affixed, and one Rails owns (`created_at` / `updated_at`) is refused. Per-event hooks follow the affixed
+event name (`before_status_publish` with `prefix: true`), may be private, and — like the generic hooks — fire only
+for guarded `<event>!` transitions. `Model.stateable_timestamps` lists the stamped states.
+
 **Prefix / suffix** — avoid clashes when the state names overlap with other concerns or scopes:
 
 ```ruby
@@ -1200,9 +1241,25 @@ article.sanitized_body  # => "<b>Hi</b>alert(1)"                    (script tag 
 | `Hash`       | `{ tags: [...], attributes: [...] }` allow-list.                       |
 | `Proc`       | Used as-is (you own the non-String guard).                             |
 
+**Serialization & clean-up**
+
+```ruby
+article.sanitized_attributes                 # => { "body" => "<b>Hi</b>alert(1)", "summary" => "sum" } — every declared field, cleaned
+article.as_json(sanitized: true)             # declared fields swapped for their sanitized form, the rest raw
+render json: article.as_json(sanitized: [:body], only: %i[id body])   # subset; composes with only:/except:/methods:
+article.as_json(sanitized: true, include: :comments)                  # nested records are sanitized too
+article.as_json(sanitized: true, include: { comments: { sanitized: false } })  # …unless a child opts out
+
+Article.sanitize_all!                        # repair on: :write rows in place → count changed (on: :read columns stay raw)
+Article.sanitize_all!(:body)                 # name an on: :read field to overwrite it — destroys the raw value
+Article.where(legacy: true).sanitize_all!(:body)   # scope-aware, subset of fields
+```
+
 **Notes**
 - `on: :read` (default) is **non-destructive**: it adds a `sanitized_<field>` reader and leaves the stored column untouched.
 - `on: :write` overwrites the column in `before_validation` — **lossy and irreversible** (never use it on code, Markdown, math, or prices), and bypassed by `update_column` / `update_all` / raw SQL.
+- `sanitize_all!` is the repair tool for that bypass (and for rows written before the concern was added): one `update_columns` per row that actually changes, skipping validations/callbacks on purpose, inside a transaction. A bare call repairs the `on: :write` fields only — with none declared it returns `0` without a query.
+- `sanitized:` sanitizes the **serialized** value, so it composes with [Maskable](#-maskable) in either include order: `as_json(masked: true, sanitized: true)` never falls back to the raw column.
 - For full user-authored rich text, prefer [Action Text](https://guides.rubyonrails.org/action_text_overview.html).
 
 ---
@@ -1323,7 +1380,7 @@ One entry is recorded **per changed field per save** (creates record `"from" => 
 
 ## 🔐 Lockable
 
-Failed-attempt tracking + **account lockout** ("Devise lockable-lite") for apps rolling their own authentication (Rails 8 auth generator / `has_secure_password`) — which ships **no brute-force protection** out of the box. Two columns on the model's own table; no tokens, no mailers.
+Failed-attempt tracking + **account lockout** ("Devise lockable-lite") for apps rolling their own authentication (Rails 8 auth generator / `has_secure_password`) — which ships **no brute-force protection** out of the box. Two columns on the model's own table (plus an optional unlock-token column for self-service unlock links); no mailers.
 
 ```ruby
 class User < ApplicationRecord
@@ -1343,9 +1400,14 @@ user.unlock_access!             # manual unlock   (hooks: before/after_unlock)
 User.locked / User.unlocked     # expiry-aware scopes
 
 User.unlock_expired              # => 3 — unlocks every row whose unlock_in window has elapsed
+
+# Self-service unlock (Devise's :email strategy, minus the mailer) — needs a string column:
+#   lockable_by max_attempts: 5, unlock_token: :unlock_token
+user.lock_access!; user.unlock_token   # minted in the same write as the lock — mail it as a link
+User.unlock_by_token(params[:token])   # constant-time lookup; unlocks once (hooks fire), returns the user or nil
 ```
 
-**Options**: `attempts:` (`:failed_attempts`, must be an integer column), `locked_at:` (`:locked_at`, datetime column), `max_attempts:` (`5`; `nil` = count but never auto-lock), `unlock_in:` (`nil` = locked until manual unlock; a duration makes the lock lapse by itself), `prefix:` / `suffix:` (affix the scope names).
+**Options**: `attempts:` (`:failed_attempts`, must be an integer column), `locked_at:` (`:locked_at`, datetime column), `max_attempts:` (`5`; `nil` = count but never auto-lock), `unlock_in:` (`nil` = locked until manual unlock; a duration makes the lock lapse by itself), `unlock_token:` (`nil`; a string column that receives a 43-char URL-safe token on lock, is cleared by every unlock path, and is honoured only while the lock is live — so `unlock_in:` doubles as the link's TTL), `prefix:` / `suffix:` (affix the scope names).
 
 **Bulk operations**
 
@@ -1420,16 +1482,20 @@ account.notifications?           # boolean keys get a predicate
 account.items_per_page_changed?  # per-key dirty (and items_per_page_was)
 account.reset_theme              # drop the key → the default applies again
 account.flag_beta                # affixed accessor
+
+Account.where_theme("dark")       # one scope per key, cast like the writer — SQLite json_extract,
+Account.active.where_flag_beta(true).where_items_per_page(50)   # PostgreSQL ->>, MySQL JSON_EXTRACT
+Account.where_theme(nil)         # unset key, explicit null, or NULL column
 ```
 
-**Options** (per key): `type:` (`:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`, `:json`), `default:` (a value, or a Proc `instance_exec`'d per read), `in:` (inclusion validation, errors on the accessor name). Macro options: `prefix:` / `suffix:` affix the generated method names (the collision escape hatch). The macro is repeatable — repeat calls for the same column merge keys, different columns are independent, and subclasses can add keys without affecting the parent.
+**Options** (per key): `type:` (`:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`, `:json`), `default:` (a value, or a Proc `instance_exec`'d per read), `in:` (inclusion validation, errors on the accessor name), `query:` (`false` skips this key's `where_` scope). Macro options: `prefix:` / `suffix:` affix the generated method names (the collision escape hatch), `query:` sets the default for every key in the call. The macro is repeatable — repeat calls for the same column merge keys, different columns are independent, and subclasses can add keys without affecting the parent.
 
 **Notes**
 - Works on a plain `text` column (JSON encoded/decoded internally), a native `json`/`jsonb` column, or a column the host app already `serialize`d — detected automatically. `serialize` itself is never used, so the Rails 7.1 API drift is irrelevant.
 - nil vs unset: a written `nil` (explicit JSON null) reads back as `nil` and does **not** fall back to the default; `reset_<key>` removes the key so the default applies again. `:decimal` is stored as a precision-safe string, `:date`/`:datetime` as ISO8601 (datetime in UTC at microsecond precision).
 - Writing one key dirties (and saves) the **whole column** — concurrent writers to different keys are last-write-wins on the hash. Undeclared keys are preserved. `:json` readers return a dup: reassign, don't mutate in place.
 - Generated names are collision-checked against existing methods and columns at macro time (`ArgumentError`; affix to escape). Read-side casting never raises — corrupt column JSON decodes as `{}`, garbage values cast to `nil`.
-- Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) when you need to **query** into the store (jsonb operators, store-backed scopes).
+- **Querying**: every key gets a `where_<accessor>(value)` equality scope — `json_extract` on SQLite, `->>` on PostgreSQL (a `text` column is cast to `jsonb`), `JSON_UNQUOTE(JSON_EXTRACT())` on MySQL/MariaDB, which also gets a `JSON_TYPE` predicate so a stored JSON `null` is never confused with the string `"null"`. The value is cast exactly as the writer stores it (`where_items_per_page("50")` works; one that will not cast raises), and `where_<key>(nil)` matches an unset key, an explicit JSON null and a `NULL` column on all three. Defaults are **not** queryable (a never-written key is absent in the DB). `:json` keys and other adapters raise; `query: false` opts out, and a `where_<accessor>` the model already defines is left alone with a deprecation warning rather than overwritten. A row holding blank or corrupt JSON reads as an unset key on SQLite (`json_valid` guard) but aborts the whole query on PostgreSQL and MySQL — there is no portable guard. Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) for jsonb operators, ranges or containment queries.
 
 ---
 
@@ -1491,13 +1557,31 @@ Patient.where_email("a@b.com")       # chainable Relation (accepts arrays too)
 
 **Options** (`encryptable *fields, …`, repeatable): `type:` (cast the decrypted value — `:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`), `key:` (per-field override; a String or lazy Proc), `blind_index:` (`true`, or `{ column:, expression: }` — maintains a deterministic keyed-HMAC companion column, default `<field>_bidx`, for equality lookups; `expression:` normalizes symmetrically on write and query).
 
+**Key rotation** — bump the key id, keep the old key for decrypting, re-encrypt, drop the old key:
+
+```ruby
+ConcernsOnRails.configure_encryption do |c|
+  c.key           = ENV["ENCRYPTION_KEY_V2"]          # encrypts every new write
+  c.key_id        = 1                                 # stamped into the envelope header (any id 0..255)
+  c.previous_keys = { 0 => ENV["ENCRYPTION_KEY_V1"] } # still DECRYPTS rows written before the rotation
+end
+
+Patient.needs_reencryption.count        # rows still under an old key — a prefix compare on the envelope, no decryption
+Patient.reencrypt_all!                  # rewrite them (and their blind indexes) under the current key → count
+patient.ssn_key_id                      # => 1
+# then remove `0 =>` from previous_keys
+```
+
+Reads pick the key by the envelope's id, so old and new rows coexist; `find_by_<field>` / `where_<field>` match blind-index digests under the current **and** previous keys during the window. Per-field `key:` fields sit outside rotation.
+
 **Notes**
 - The declared column must be `text`/binary (it stores an opaque envelope, not the logical type); a blind-index column holds a 64-char hex digest — add an index on it.
 - Ciphertext is non-deterministic (random IV), so `where(ssn: ...)` matches nothing — query through a blind index. `nil` stays `nil`; presence checks work normally.
 - `ssn_ciphertext` is `nil` while the field has an unsaved change (so it can never return the plaintext you just assigned), and `ssn_encrypted?` asks whether what is stored really is an envelope.
-- Never `update_column(s)` an encrypted field — that bypasses the type and writes raw plaintext. Declaring a field with both `encryptable` and `auditable_by` raises (either order).
+- `update_column(s)` on an encrypted field DOES encrypt (the value still serializes through the attribute type), but it skips validations, callbacks, dirty tracking and the blind-index refresh — so a value written that way is unsearchable until the row is saved normally. Declaring a field with both `encryptable` and `auditable_by` raises (either order).
 - Wrong key / tampered ciphertext / malformed envelope raise `Encryption::DecryptionError`. Encrypted field names are auto-registered with Rails' `filter_parameters` (via the gem's railtie), so they're redacted from request logs.
-- Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need key rotation today or Rails-managed key infrastructure (rotation is planned — the envelope already reserves the `key_id` byte).
+- Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` streams with `find_each` and rewrites each row with one UPDATE — no validations/callbacks (only the ciphertext changes), guarded on the ciphertext it read so a concurrent write is never reverted, and skipping any field with an unsaved change. A row whose key id is no longer configured raises `DecryptionError` naming the id.
+- Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need Rails-managed key infrastructure (KMS, per-record keys) or deterministic encryption.
 
 ---
 
@@ -1712,12 +1796,32 @@ class ArticlesController < ApplicationController
   filter_by :status, :category                                       # ?status=draft → .where(status: 'draft')
   filter_by :published, scope: :published                            # ?published=1 → Article.published
   filter_by :q, with: ->(rel, v) { rel.where("title ILIKE ?", "%#{v}%") }
+  filter_by :price, :created_at, operators: true                     # ?price_gte=10&created_at_lt=2026-01-01
+  filter_by :min_stock, type: :integer, with: ->(rel, v) { rel.where(rel.model.arel_table[:stock].gteq(v)) }
 
   def index
     render json: filtered(Article.all)
   end
 end
 ```
+
+**Operators** (opt-in per filter, direct-where mode only — `operators: true` or a subset like `%i[gte lte]`),
+accepted as a suffix `?price_gte=10` or in bracket form `?price[gte]=10&price[lte]=50`:
+
+| Operator | Param                              | SQL                                   |
+|----------|------------------------------------|---------------------------------------|
+| `not`    | `?status_not=draft`                | `status != 'draft'`                   |
+| `gt` `gte` `lt` `lte` | `?price_gte=10`       | `price >= 10` (cast through the column type) |
+| `in` `not_in` | `?status_in=a,b` or `?status_in[]=a` | `status IN ('a','b')`         |
+| `null`   | `?deleted_at_null=true`            | `deleted_at IS NULL` (`false` → `IS NOT NULL`) |
+| `contains` `starts_with` | `?title_contains=rails` | `title LIKE '%rails%'` (wildcards escaped; ILIKE on PostgreSQL) |
+
+Comparison values are cast the way ActiveRecord casts them (the column's own type), or through `type:`
+(any ActiveModel type name); `type:` also pre-casts the value handed to a `with:` lambda. Blank values
+are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`/`lte` value the type
+cannot represent (`?price_gte=abc`) matches **nothing** rather than silently comparing against `0` —
+nothing raises at request time. `contains`/`starts_with` are case-insensitive on PostgreSQL, MySQL and
+SQLite alike. For strict, validated contracts reach for `Permittable`.
 
 **Modes**
 
@@ -1729,7 +1833,7 @@ end
 
 **Notes**
 - Blank params are skipped — unset filters don't narrow the relation.
-- Passing both `:scope` and `:with` raises `ArgumentError`.
+- Passing both `:scope` and `:with` raises `ArgumentError`; so do `operators:` on a `scope:`/`with:` filter, an unknown operator name, or an unknown `type:` — all at class load.
 - Scope mode pairs naturally with `Publishable.published`, `SoftDeletable.active`, `Expirable.active`, etc.
 
 ---
@@ -1743,6 +1847,8 @@ class ArticlesController < ApplicationController
   include ConcernsOnRails::Controllers::Sortable
 
   sortable_by :created_at, :title, :published_at,
+              author: { column: "authors.name", joins: :author },  # an association column
+              price:  { nulls: :last },                            # NULLs after the values
               default: :created_at, direction: :desc
 
   def index
@@ -1751,11 +1857,14 @@ class ArticlesController < ApplicationController
 end
 ```
 
-**URL params**: `?sort=title&direction=asc`
+**URL params**: `?sort=-created_at,title` or `?sort=title&direction=asc`
 
-- `params[:sort]` selects the column; non-whitelisted values fall back to the declared default.
-- `params[:direction]` accepts `asc` / `desc` (case-insensitive); invalid values fall back to the declared default direction.
-- If no `default:` is given, the **first** declared field is used.
+- `params[:sort]` is a comma-separated list of sort **keys**, each optionally prefixed with `-` (descending) or `+` (ascending) — the JSON:API convention. A `+` must be percent-encoded as `%2B`, since a raw `+` in a query string decodes to a space. Non-whitelisted keys are dropped and a repeated key collapses to its first occurrence; when nothing valid remains the declared default applies.
+- Un-prefixed keys take `params[:direction]` (`asc` / `desc`, case-insensitive), then the declared default direction.
+- A plain Symbol sorts by that column of the relation's own table. A `key: { ... }` rule can point elsewhere: `column: "table.column"` plus `joins:` (anything `left_outer_joins` accepts — LEFT OUTER by default so rows without the association are kept; `join: :inner` drops them), and/or `nulls: :first | :last` (Rails 6.1+). Joins are added only when that key is requested.
+- `sorted` uses `reorder`, so the requested columns **replace** any prior `ORDER BY` (including a model `default_scope` order).
+- `nulls:` uses PostgreSQL's native `NULLS FIRST/LAST`; on every other adapter it emits the portable `CASE WHEN col IS NULL` equivalent, so the row order is the same and nothing sends MySQL syntax it rejects.
+- If no `default:` is given, the **first** declared key is used. A `default:` that is *not* in the allow-list is legal — it orders the relation but stays unselectable by clients.
 
 > Distinct from `Models::Sortable` (which manages list position via `acts_as_list`). Both can coexist on a model + its controller.
 
@@ -1779,9 +1888,9 @@ class Api::ArticlesController < ApplicationController
   def create
     article = Article.new(article_params)
     if article.save
-      render_success(data: article, status: :created)
+      render_created(data: article, location: article_url(article))   # 201 + Location
     else
-      render_error(message: "Invalid", errors: article.errors.full_messages)
+      render_invalid(article)                                          # 422 record_invalid + full_messages
     end
   end
 end
@@ -1815,7 +1924,9 @@ respondable_by error_format: :problem_details, problem_type_base: "https://api.e
 
 | Method            | Signature                                                                                  |
 |-------------------|--------------------------------------------------------------------------------------------|
-| `render_success`  | `render_success(data: nil, status: :ok, meta: {})`                                         |
+| `render_success`  | `render_success(data: nil, status: :ok, meta: {}, location: nil, headers: {})` — `location:` sets the `Location` header (a String, or anything `url_for` resolves); `headers:` sets extra response headers (names and values are coerced to String and stripped of CR/LF, so caller data cannot split the response) |
+| `render_created`  | `render_created(data: nil, location: nil, meta: {}, headers: {})` — `render_success` with `status: :created` |
+| `render_invalid`  | `render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")` — `render_error` with `errors.full_messages` as `details` (omitted when empty, and when an app's `render_error` override cannot take an `errors:` keyword); same shape as ErrorHandleable's `RecordInvalid` handler, problem-details aware |
 | `render_error`    | `render_error(message:, status: :unprocessable_entity, code: nil, errors: nil)`            |
 | `respondable_by`  | `respondable_by(error_format: :envelope, problem_type_base: nil)` — class-level; `error_format:` is `:envelope` (default) or `:problem_details` |
 
@@ -2037,9 +2148,14 @@ A declarative, **block-only** per-action authorization gate. Each rule is a pred
 class Api::BaseController < ApplicationController
   include ConcernsOnRails::Controllers::Authorizable
 
-  authorize_by { current_user.present? }                          # every action
+  authorize_by(name: :signed_in) { current_user.present? }        # every action
   authorize_by(only: %i[update destroy]) { |_action, user| user.admin? }
   require_role :admin, :editor, only: :publish                    # role sugar
+end
+
+class Api::PagesController < Api::BaseController
+  skip_authorization only: %i[index show]                         # public pages — even the inherited rules skip
+  helper_method :authorized?                                      # <%= link_to "Delete", ... if authorized?(:destroy) %>
 end
 ```
 
@@ -2047,15 +2163,20 @@ The predicate runs via `instance_exec`, so `current_user` (and any helper) resol
 
 **API**
 
-| Method         | Signature                                                                                  |
-|----------------|--------------------------------------------------------------------------------------------|
-| `authorize_by` | `authorize_by(only: nil, except: nil, status: :forbidden, message: "Forbidden", &block)`   |
-| `require_role` | `require_role(*roles, via: :current_user, role_method: :role, only:, except:, status:, message:)` |
+| Method                    | Signature                                                                                  |
+|---------------------------|--------------------------------------------------------------------------------------------|
+| `authorize_by`            | `authorize_by(only: nil, except: nil, status: :forbidden, message: "Forbidden", name: nil, &block)` |
+| `require_role`            | `require_role(*roles, via: :current_user, role_method: :role, only:, except:, status:, message:, name:)` |
+| `skip_authorization`      | `skip_authorization(only: %i[index show])` / `skip_authorization(except: %i[destroy])` / bare — exempt actions from every rule, inherited ones included; bare form exempts all |
+| `authorized?`             | `authorized?(action = action_name)` — evaluate the rules without rendering (for views / conditional UI) |
+| `on_authorization_denied` | `on_authorization_denied(rule)` — override point; instruments `authorization_denied.concerns_on_rails` (call `super` to keep the event) |
 
 **Notes**
 - Rules run in declaration order; the first failing rule renders and halts.
+- Every denial emits `authorization_denied.concerns_on_rails` with `controller`, `action`, `actor_id`, `actor_type`, `rule` (the `name:`), `status`, `message` — subscribe for audit logs or alerting on repeated denials. The actor is reduced to scalars on purpose: notification payloads aren't filtered by `config.filter_parameters`.
 - When `Respondable` is also included, denials delegate to `render_error` (envelope `{ success: false, error: { message:, code: "forbidden" } }`); otherwise the same envelope is rendered inline.
 - `only:` / `except:` are mutually exclusive (passing both raises `ArgumentError`); `authorize_by` requires a block and `require_role` requires at least one role.
+- `skip_authorization` validates its arguments at class-load time, because every mistake there fails **open**: a nil `only:`/`except:`, or an empty/non-action `except:` (`[]`, `false`, `""` — what `except: Rails.env.production? && :destroy` collapses to), raises instead of exempting every action of the controller *and its subclasses*. Only the bare form grants a blanket skip. The skip is inherited and outranks rules a subclass declares afterwards; `skip_authorization only: []` switches it back off.
 - **Non-goals**: no policy objects, no ability DSL, no resource inference — reach for [`pundit`](https://github.com/varvet/pundit) / [`cancancan`](https://github.com/CanCanCommunity/cancancan) when you outgrow a predicate per action.
 
 ---
@@ -2101,15 +2222,18 @@ class ApplicationController < ActionController::Base
 
   timezoneable available: ["UTC", "Eastern Time (US & Canada)"], default: "UTC"
   # timezoneable param: :tz, header: false, cookie: :time_zone
+  # timezoneable cookie: :time_zone, persist: true          # ?time_zone=London sticks for a year
+  # timezoneable response_header: true                       # X-Time-Zone: London (+ Vary: Time-Zone)
 end
 ```
 
 Resolution order: `params[param]` → `Time-Zone` header → cookie (if enabled) → `default` → the current `Time.zone`. Every value — the configured `available:` / `default:` **and** each request candidate — is resolved through `ActiveSupport::TimeZone[...]`, so a zone accepted at boot can never be rejected at request time.
 
-**Options**: `available:` (allow-list applied to param/header/cookie matching; `default:` bypasses it, mirroring Localizable), `default:`, `param:` (default `:time_zone`), `header:` (default `true`, reads the `Time-Zone` header), `cookie:` (default `false`; `true` reads the `:time_zone` cookie, or pass a cookie name).
+**Options**: `available:` (allow-list applied to param/header/cookie matching; `default:` bypasses it, mirroring Localizable), `default:`, `param:` (default `:time_zone`), `header:` (default `true`, reads the `Time-Zone` header), `cookie:` (default `false`; `true` reads the `:time_zone` cookie, or pass a cookie name), `persist:` (default `false`; `true` or a Hash of cookie options — writes a **param**-chosen zone into the `cookie:` so a settings link makes it stick; needs `cookie:`), `response_header:` (default `false`; `true` emits `X-Time-Zone`, or pass a header name — `Vary: Time-Zone` is appended when the header source is on).
 
 **Notes**
-- An unknown `available:` / `default:` zone raises `ArgumentError` at declaration time (fail-fast on misconfiguration).
+- An unknown `available:` / `default:` zone raises `ArgumentError` at declaration time (fail-fast on misconfiguration); so does `persist:` without `cookie:`.
+- `time_zone_source` tells you which source won (`:param`, `:header`, `:cookie`, `:default`, `:current`) — handy for a "times shown in London (from your browser)" hint.
 - Pairs naturally with the model concerns that read the clock (`Schedulable`, `Publishable`, `Expirable`, `SoftDeletable`).
 
 ---
@@ -2170,12 +2294,13 @@ end
 | `:stripe` | `Stripe-Signature` | `t=<unix>,v1=<hex>[,v1=…]` — signs `"#{t}.#{body}"`, every `v1` tried, `tolerance:` rejects stale **and** future timestamps |
 | `:hex` / `:base64` | — (`header:` required) | plain hex / strict Base64 HMAC of the body |
 
-**Options**: `*actions` (none = catch-all; the first matching rule wins), `secret:` (String, callable `instance_exec`'d per request, or Array for rotation — any match passes), `scheme:` (`:hex`), `header:` (overrides the preset), `tolerance:` (Stripe only, `300`s default), `digest:` (`:sha256`; `:sha1`/`:sha512` for `:hex`/`:base64` only).
+**Options**: `*actions` (none = catch-all; the first matching rule wins), `secret:` (String, callable `instance_exec`'d per request, or Array for rotation — any match passes), `scheme:` (`:hex`), `header:` (overrides the preset), `tolerance:` (Stripe only, `300`s default), `digest:` (`:sha256`; `:sha1`/`:sha512` for `:hex`/`:base64` only), `replay:` (`true` = the gem-wide `cache_store`, a store object, or `false`/`nil` for off) + `replay_ttl:` (`24.hours`) — replay protection for the schemes that carry no timestamp.
 
 **Notes**
 - Comparison is constant-time and the attacker-controlled header is **never decoded** — garbage (including invalid UTF-8 bytes) just fails with 401, it cannot raise.
 - A secret that resolves **blank at request time raises `ArgumentError`** — a misconfigured endpoint should page you, not 401 into the provider's silent retry loop.
-- Failure codes: `webhook_signature_missing` / `webhook_signature_invalid` / `webhook_timestamp_stale` → 401; `webhook_signature_malformed` (unparseable Stripe header) → 400. With `Respondable`, bodies delegate to `render_error`; override `webhook_verification_failed` to customize.
+- **Replay protection** (`replay:`): GitHub, Shopify and plain-HMAC signatures carry no timestamp, so a captured delivery verifies forever. After a signature verifies, a SHA256 of what identifies the delivery — the signature header, or for Stripe the signed `"#{t}.#{body}"` payload, since unknown `v0=` keys and stray whitespace let a captured Stripe header be mutated without invalidating it — is written to the store with `unless_exist:` (atomic — memcached `add` / Redis `SET NX` via `Rails.cache`); a second delivery with the same signature within `replay_ttl:` is rejected with **409 `webhook_replayed`**. Forged traffic never consumes a slot; the key is scoped per controller action. The store must answer `#write(key, value, expires_in:, unless_exist:)` and `#read(key)` (`#delete(key)` is optional but recommended) — `Rails.cache` does. The marker is a short 60-second claim until the action finishes, then promoted to `replay_ttl:` — so a handler that 500s releases it at once, and one that raises (or a filter that halts after verification) leaves only the 60-second claim to expire, either way the provider's retry (identical body, identical signature) gets through. If the store is unreachable the check fails **open**: Rails' Redis and memcached stores return false from `#write` on a connection error, and rejecting every inbound delivery during a cache blip would be worse than accepting a rare duplicate. A per-process `MemoryStore` gives no protection across workers. Stripe's own retries re-sign with a new `t=`, so they pass; a manual GitHub redelivery has the identical signature and is treated as a replay — override `webhook_verification_failed` if you'd rather answer 200.
+- Failure codes: `webhook_signature_missing` / `webhook_signature_invalid` / `webhook_timestamp_stale` → 401; `webhook_signature_malformed` (unparseable Stripe header) → 400; `webhook_replayed` → 409. With `Respondable`, bodies delegate to `render_error`; override `webhook_verification_failed` to customize.
 - Declare **before** `Idempotentable` (a 401 cached by its around filter would be replayed) and before `Throttleable` (forged traffic shouldn't burn rate budget). Webhook endpoints also need `skip_before_action :verify_authenticity_token`.
 - In tests: `skip_before_action :verify_webhook_signature!`, or sign payloads for real with `OpenSSL::HMAC`. After a pass, `webhook_verified?` is true.
 
@@ -2224,6 +2349,7 @@ class Api::ArticlesController < ApplicationController
 
   http_cache_actions :index, :show, max_age: 5.minutes,
                      visibility: :public, vary: "Accept"
+  etag_with :locale                           # the body depends on I18n.locale → folded into the ETag, Vary: Accept-Language
 
   def show
     @article = Article.find(params[:id])
@@ -2234,7 +2360,7 @@ end
 
 # A matching response then carries:
 #   Cache-Control: public, max-age=300
-#   Vary: Accept
+#   Vary: Accept-Language, Accept
 #   ETag: W/"…"
 #   Last-Modified: Thu, 01 Jan 2026 12:00:00 GMT
 ```
@@ -2242,6 +2368,15 @@ end
 `http_cache_actions` declares the `Cache-Control`/`Vary` policy (emitted via `after_action` — it rides a 304 too); `stale_resource?` sets the ETag/Last-Modified validators and, on a safe request whose precondition matches, sends `304 Not Modified` and returns `false`.
 
 **Options** (`http_cache_actions *actions, …`, repeatable; no actions = catch-all; **last matching rule wins**): `visibility:` (`:private` default | `:public`), `max_age:` (Integer/Duration), `must_revalidate:`, `no_store:` (overrides everything → bare `no-store`), `stale_while_revalidate:`, `vary:` (String or Array, appended to any existing `Vary`).
+
+**ETag context** (`etag_with`, repeatable — the analogue of Rails' class-level `etag { }`): when the representation depends on more than the record — the locale, the requested fields, the caller's role — declare it and the values are folded into the ETag so two representations of one resource never share a validator. Sources are presets (`:locale` → also `Vary: Accept-Language`, `:format` → `Vary: Accept`, `:query`), Symbols naming controller methods, or a block (`instance_exec`'d); `vary:` overrides the implied header(s), `vary: false` suppresses them; nil values are ignored. Per call: `stale_resource?(@article, extras: [params[:fields]])`. An explicit `etag:` stays verbatim only when there is no context to fold in.
+
+**A source with no `Vary` forces `private`.** A controller method, a block, or a preset with `vary: false` folds a dimension into the ETag that no cache can key on — `Vary` has no way to say *who is asking* — so the response is not shareable and `Cache-Control` is emitted as `private` whatever the rule declared. (`:query` is exempt: the URL already carries it.)
+
+```ruby
+http_cache_actions :show, max_age: 30, visibility: :public
+etag_with { current_user&.role }             # => Cache-Control: private, max-age=30
+```
 
 **Conditional-GET correctness**
 - Weak ETag `W/"<md5>"` from the resource's cache key (collections fold their members' keys + size); `If-None-Match` is matched with **weak comparison**, honours `*`, and accepts a comma-separated list.
@@ -2332,12 +2467,12 @@ Both forms reference the same module, so you can freely mix them.
 
 | Need | Use instead |
 |------|-------------|
-| Complex state machines (callbacks, transition logging) | [`aasm`](https://github.com/aasm/aasm) |
+| Complex state machines — guard clauses, multi-state events, a full transition audit log (`Stateable` has per-event hooks and `<state>_at` stamps, but records no transition history) | [`aasm`](https://github.com/aasm/aasm) |
 | Sentinel-aware unique indexes on soft-deleted rows (`deleted_at` in the index) | [`paranoia`](https://github.com/rubysherpas/paranoia) or [`discard`](https://github.com/jhawthorn/discard) |
 | Tagging with contexts, ownership, or tag clouds | [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) |
-| Full-text search with ranking / stemming | [`pg_search`](https://github.com/Casecommons/pg_search) / Elasticsearch |
+| Indexed full-text search — stemming, tsvector/GIN, typo tolerance (`Searchable` ranks LIKE matches, but never builds an index) | [`pg_search`](https://github.com/Casecommons/pg_search) / Elasticsearch |
 | Versioned audit trails with undo/reify, who-dunnit queries, or association tracking | [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) |
-| Field encryption with managed key rotation / Rails-native key infrastructure | [`lockbox`](https://github.com/ankane/lockbox) / Rails 7+ native `encrypts` |
+| Field encryption with KMS-backed / per-record keys or Rails-native key infrastructure | [`lockbox`](https://github.com/ankane/lockbox) / Rails 7+ native `encrypts` |
 | Deep clone with per-attribute regex/prepend rules or belongs_to graph copying | [`amoeba`](https://github.com/amoeba-rb/amoeba) |
 
 `Sluggable` wraps [`friendly_id`](https://github.com/norman/friendly_id) and `Sortable` wraps [`acts_as_list`](https://github.com/brendon/acts_as_list), so you get those leaders' engines behind the declarative macro.
@@ -2367,9 +2502,9 @@ Point your agent at `llms.txt` for an overview, or paste a single concern's `.md
 
 ```sh
 bundle install                                  # install dev dependencies
-bundle exec rspec                               # run the test suite (1,624 examples)
+bundle exec rspec                               # run the test suite (1,828 examples)
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.28.6.gem      # install locally
+gem install ./concerns_on_rails-1.28.8.gem      # install locally
 
 # Preview the docs site locally (GitHub Pages serves docs/ as-is):
 cd docs && python3 -m http.server 8000          # → http://localhost:8000

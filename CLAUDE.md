@@ -82,9 +82,13 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (affixable via `prefix:`/`suffix:`), `activate!`/`deactivate!`/`toggle_active!`. Batch
   `activate_all`/`deactivate_all` (same validators-gated fast path as Publishable/Expirable).
 - **`Stateable`** — lightweight string-backed state machine: states, `default:`,
-  `transitions:`, `prefix:`/`suffix:`; guarded `<event>!` + `may_<event>?`,
-  `before/after_transition` hooks. Batch `transition_all(event)` — deliberately NO fast path,
-  since the per-record path runs validations via `update!` and `update_all` would skip them.
+  `transitions:`, `prefix:`/`suffix:`, `lock:`, `timestamps:` (`<state>_at` stamped on entry;
+  Rails-owned `created_at`/`updated_at` refused at macro time; NOT affixed, so a state named
+  `published`/`deleted` collides with Publishable/SoftDeletable); guarded `<event>!` +
+  `may_<event>?`, `before/after_transition` plus per-event `before_/after_<event>` hooks
+  (invoked with `send`, so private overrides work). Batch `transition_all(event)` —
+  deliberately NO fast path, since the per-record path runs validations via `update!` and
+  `update_all` would skip them.
 - **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all`,
   `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only).
 - **`Normalizable`** — `before_validation` normalization. Presets (`:email`, `:phone`,
@@ -108,6 +112,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `reset_failed_attempts!`; expiry-aware `.locked`/`.unlocked` scopes. Batch
   `unlock_expired` (mirrors `unlock_access!`; no validators gate needed since
   `update_columns` already skips them; returns 0 without a query when `unlock_in` is nil).
+  `unlock_token:` mints a self-service unlock link — timing-safe scoped finder, race-safe
+  single-use consumption (one conditional UPDATE), TTL tied to `unlock_in`, claimed in its
+  own savepoint so a vetoing hook puts the token back, Duplicable-reset and
+  FilterParameterRegistry-registered.
 - **`Aliasable`** — full association aliasing: `alias_association :new, :old`
   (alias_method argument order, repeatable, declared after the source). Read/write/
   build_/create_/ids delegators + a renamed reflection copy so joins/includes/
@@ -138,8 +146,16 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   non-deterministic ⇒ unsearchable; opt into `blind_index: true` (or
   `{ column:, expression: }`) for a deterministic-HMAC companion column +
   `find_by_<field>`/`where_<field>`/`<field>_fingerprint` finders (nil values
-  return none/nil, never `bidx IS NULL` matches; key rotation still planned —
-  envelope reserves the bytes). Fields auto-register with Rails
+  return none/nil, never `bidx IS NULL` matches). Key rotation: gem-level
+  `key_id` / `previous_keys` config, envelope-driven multi-key decrypt, blind-index
+  lookups match current + previous digests, `needs_reencryption` (case-exact SUBSTR on the
+  4-char header prefix, binary cast on MySQL) / `reencrypt_all!` / `reencrypt!` /
+  `<field>_key_id`; per-field `key:` fields sit outside rotation. `reencrypt_all!`
+  is the ONE `*_all` verb that deliberately skips `Support::BatchOps` — re-runnable,
+  not atomic — and it never writes a field it could not decrypt. Each row is one
+  `update_all` GUARDED on the ciphertext read at load (a concurrent write is
+  skipped, never reverted), fields with unsaved changes are skipped, and a
+  successful `reencrypt!` reloads. Fields auto-register with Rails
   filter_parameters via `FilterParameterRegistry` + the railtie.
 - **`CounterCacheable`** — conditional denormalized counters ("counter_culture-lite"),
   declared on the CHILD. `counter_cacheable_by association, count:, if:, touch:`
@@ -172,9 +188,16 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 
 - **`Paginatable`** — offset pagination (`paginated`, `pagination_meta`) + `X-*` headers.
 - **`Filterable`** — declarative URL-param filtering (`filter_by`: direct-where / `scope:` /
-  `with:` lambda).
+  `with:` lambda) + comparison operators (`?price_gte=` suffix or `?price[gte]=` bracket form,
+  from a frozen allow-list mapped to fixed Arel nodes) and type coercion; an uncastable
+  comparison value returns `none` (fail-closed), blank values are skipped in both forms, and
+  `contains`/`starts_with` are case-INsensitive on every adapter.
 - **`Sortable`** — allow-listed, multi-column ordering from `params[:sort]` (uses `reorder`).
-- **`Respondable`** — standard JSON success/error envelopes (`render_success`/`render_error`).
+- **`Respondable`** — standard JSON success/error envelopes (`render_success`/`render_error`),
+  plus `render_created(data:, location:)` and `render_invalid(record)`; `location:`/`headers:`
+  on `render_success` (names and values stripped of illegal bytes, `Link` appended
+  case-insensitively). `respondable_by error_format: :problem_details` switches every
+  error-rendering concern to RFC 9457 app-wide.
 - **`ErrorHandleable`** — `rescue_from` for RecordNotFound / ParameterMissing / RecordInvalid.
 - **`Includable`** — allow-listed association sideloading (nested include trees via `Support::IncludeTree`,
   `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets.
@@ -187,7 +210,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (`idempotent_actions`); 409 on in-flight duplicates, 422 on payload mismatch.
 - **`WebhookVerifiable`** — HMAC verification for inbound webhooks (`verify_webhook`):
   scheme presets `:stripe`/`:github`/`:shopify`/`:hex`/`:base64`, constant-time compare,
-  Stripe timestamp tolerance, secret rotation; 401/400 before the action runs.
+  Stripe timestamp tolerance, secret rotation; 401/400 before the action runs. `replay:` /
+  `replay_ttl:` add replay protection for timestamp-less schemes (store must answer BOTH
+  `#write` and `#read`; short claim promoted in an after_action and released on 5xx; Stripe
+  keys off the signed payload, not the parsed header).
 - **`CursorPaginatable`** — cursor/keyset pagination (no COUNT; `cursor_paginate_by
   order:, per_page:, max_per_page:`; `cursor_paginated`/`cursor_pagination_meta`;
   `X-Per-Page`/`X-Count`/`X-Has-More`/`X-Next-Cursor` headers). Opaque table+order-pinned
@@ -247,7 +273,11 @@ and a subclass never rips a scope out from under its parent), `BatchOps` (the ho
 fast-path predicate — every named instance method still owned by the concern, i.e.
 unoverridden — plus the transactional `find_each` batch runner shared by every `*_all` verb:
 Integer count, DB-side filtering for idempotency, rollback via `ActiveRecord::RecordNotSaved`
-on a failed record).
+on a failed record), `VaryHeader` (the shared `Vary` appender behind Localizable's
+`Accept-Language` and Timezoneable's `Time-Zone`: appends, de-duplicates case-insensitively,
+leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —
+seeds `Accept` itself whenever Rails' own `_set_vary_header` would have, since that only
+fires while the header is still blank).
 `lib/concerns_on_rails/railtie.rb` loads only when `Rails::Railtie` is defined.
 
 ### Test structure

@@ -1,5 +1,264 @@
 <!-- CHANGELOG.md -->
 
+## 1.28.8 (2026-09-19)
+
+The last six open feature PRs, released as a patch by request. These had never been
+reviewed — they were excluded from the previous two waves because they would not merge —
+so each was rebased onto master, reviewed adversarially, and fixed. **Five of the six
+carried a CRITICAL defect**, two of which could destroy data. The `### Fixed` section is
+the important one; several entries describe behaviour that never worked as documented.
+
+Also fixes a live defect in `Support::ErrorEnvelope` found during the review, which
+affected eight concerns on 1.28.7 and earlier. 1828 examples, 0 failures.
+
+### Added
+- **Models::Encryptable**: key rotation. `ConcernsOnRails.configure_encryption { |c|
+  c.key_id = 1; c.previous_keys = { 0 => old } }` — new writes stamp `key_id`, reads
+  decrypt with whichever configured key the envelope names (unknown id → `DecryptionError`
+  naming it), and blind-index lookups match current + previous digests.
+  `Model.needs_reencryption(*fields)`, `Model.reencrypt_all!(*fields)` /
+  `record.reencrypt!`, and `<field>_key_id`. Per-field `key:` fields sit outside rotation.
+  The envelope format is unchanged: 1.28.x already wrote and authenticated a `key_id` byte,
+  so every existing row is a key-id-0 envelope and decrypts untouched after upgrading. (#77)
+- **Models::Lockable**: `lockable_by … unlock_token:` mints a URL-safe token in the same
+  write as the lock, for self-service unlock links without Devise.
+  `User.unlock_by_token(token)` consumes it once — constant-time compare, one conditional
+  UPDATE decides the winner, hooks fire — and the token lives exactly as long as the lock.
+  Cleared on every unlock path, reset by Duplicable, and registered with the
+  filter_parameters registry. (#61)
+- **Models::Stateable**: `stateable_by … timestamps: true` (or a list of states) stamps
+  `<state>_at` in the same write as the state change, for guarded events, direct setters,
+  `transition_to!` and `transition_all`. Per-event `before_<event>` / `after_<event>` hooks
+  fire inside the generic `before_transition` / `after_transition` pair and the same
+  transaction, and may be declared `private`. (#49)
+- **Controllers::Filterable**: `filter_by … operators: true` (or a subset) adds `not`,
+  `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `null`, `contains` and `starts_with` to
+  direct-where filters, read as a suffix (`?price_gte=10`) or in bracket form
+  (`?price[gte]=10`). Every operator comes from a frozen allow-list mapped to a fixed Arel
+  node, so no param string reaches SQL. Values are cast through the column's type or the
+  new `type:` option, which also pre-casts what a `with:` lambda receives. Opt-in per
+  filter; existing filters are unchanged. (#46)
+- **Controllers::WebhookVerifiable**: `verify_webhook … replay:` / `replay_ttl:` rejects a
+  redelivery with 409 `webhook_replayed` — replay protection for the schemes that carry no
+  timestamp (GitHub, Shopify, plain HMAC). The check runs only after the signature
+  verifies. A short claim is taken before the action and promoted on completion, and
+  released on a 5xx so a transient failure does not burn the delivery id. (#60)
+- **Controllers::Respondable**: `render_success` accepts `location:` and `headers:`, and
+  gains `render_created(data:, location:)` (201 + `Location`) and `render_invalid(record)`
+  (422 + the record's `full_messages`). Header names and values are stripped of bytes a
+  header line cannot carry, and a `Link` value is appended to an existing one — matched
+  case-insensitively — rather than replacing it. Works in both the envelope and the
+  problem-details format. (#105, replacing #74)
+
+### Changed
+- **Controllers::Filterable**: an uncastable comparison value (`?price_gte=abc`) returns
+  `none` rather than matching. Fail-closed was chosen because ignoring the filter would
+  return the very rows the client tried to exclude; it matches what plain `where` already
+  does with the same input, and is scoped to the four new comparison operators so no
+  pre-existing filter changes on upgrade. `contains` / `starts_with` are case-INsensitive
+  on every adapter — there is no `case_sensitive:` option. (#46)
+- **Models::Stateable**: `timestamps:` refuses to derive a stamp column from a state named
+  `created` or `updated`, which would otherwise target Rails' own `created_at`/`updated_at`.
+  Stamp columns are NOT affixed by `prefix:`/`suffix:`, so a state named `published` or
+  `deleted` collides with Publishable's and SoftDeletable's columns — rename the state or
+  leave it out of `timestamps:`. (#49)
+- **Models::Encryptable**: `record.reencrypt!` rewrites through a guarded `UPDATE` that
+  matches the ciphertext read at load, then reloads. A row written by someone else in the
+  meantime is left alone instead of being reverted, and a field with unsaved changes is
+  skipped rather than silently committed. (#77)
+
+### Fixed
+- **Support::ErrorEnvelope**: the `errors:` keyword was passed to a host app's
+  `render_error` whenever details were present, but several concerns document the override
+  contract as `render_error(message:, status:, code:)`. Such an app got `ArgumentError:
+  unknown keyword: :errors` at request time — a 500 instead of the 4xx, on exactly the path
+  that has something to report. The previous guard tested `details` alone, so it covered
+  only the empty case, i.e. the one that was never broken. This reached every concern that
+  funnels through the envelope, most commonly ErrorHandleable's rescued `RecordInvalid`.
+- **Models::Encryptable**: `previous_keys=` printed the offending hash's keys on a bad
+  shape, so an inverted `{ ENV["KEY_V1"] => 0 }` raised **with the live key in the exception
+  message** — into logs, backtraces and error trackers. Only the value's class is reported
+  now. (#77)
+- **Models::Encryptable**: `needs_reencryption` detected MySQL by adapter name, so Trilogy
+  (Rails 7.1+) and MariaDB fell through to a case-folding comparison and returned **zero
+  rows**. `reencrypt_all!` then reported 0, an operator would conclude the rotation was
+  complete and drop the old key, and every pre-rotation row would become permanently
+  undecryptable. (#77)
+- **Models::Lockable**: a `before_unlock` / `after_unlock` hook that vetoed the unlock
+  permanently burned the token while leaving the account locked — the claim ran in a bare
+  transaction that joined the enclosing one, so `unlock_access!`'s savepoint rolled back
+  while the claim committed. The user's emailed link was dead with no way back. The claim
+  now takes its own savepoint and is rolled back with the unlock. (#61)
+- **Models::Lockable**: `unlock_by_token` no longer honours a token once the lock has
+  lapsed, and no longer uses `unscoped` — a mailed link could otherwise reach a row hidden
+  behind a `default_scope` (a soft-deleted or deactivated account). (#61)
+- **Controllers::WebhookVerifiable**: a store answering `#write` but not `#read` passed
+  declaration-time validation and then provided **no replay protection at all**, silently —
+  the endpoint looked protected and accepted every redelivery. Both methods are now
+  required. (#60)
+- **Controllers::WebhookVerifiable**: the Stripe replay key hashed the raw
+  `Stripe-Signature` header, which is *parsed* rather than compared — appending an unknown
+  `v0=…` pair or re-spacing the commas produced a still-valid header with a fresh key,
+  defeating the protection. Stripe now keys off the signed `"<timestamp>.<body>"` payload.
+  (#60)
+- **Controllers::WebhookVerifiable**: `replay: false` raised at class load, so
+  `replay: Rails.env.production?` broke controller loading in development and test. It is
+  now a synonym for "off". (#60)
+- **Controllers::Respondable**: caller-supplied header **names** reached the response
+  unsanitized, so a CR/LF in an interpolated name was response splitting. Names now go
+  through the same filter as values, widened from CR/LF to the full illegal-byte range.
+  (#105)
+- **Controllers::Filterable**: a bracket-form operator with a blank value
+  (`?price[gte]=`) became `price > NULL` and returned **nothing**, while the documented
+  equivalent `?price_gte=` correctly returned everything — an empty min/max box silently
+  emptied the result set. Both forms now skip blanks, and both honour a boolean `false`.
+  (#46)
+- **Controllers::Filterable**: `?stock_gt=twelve` silently became `stock > 0` and returned
+  the stocked rows (`ActiveModel::Type::Integer#cast("twelve")` is `0`, not `nil`), while
+  the same typo on a datetime column returned none — one malformed request answered two
+  opposite ways. (#46)
+- **Controllers::Filterable**: LIKE escaping no longer relies on `sanitize_sql_like`, which
+  is not public before Rails 5.1 while the gemspec claims `>= 5.0`. (#46)
+
+### Internal
+- Docs corrected: "Never `update_column(s)` an encrypted field — those bypass the type and
+  write raw plaintext" was **false** (`update_columns` serializes through the attribute
+  type), and `reencrypt_all!` is built on it. (#77)
+
+## 1.28.7 (2026-09-19)
+
+The eight PRs held back from 1.28.6, released as a patch by request. Each carried a
+CRITICAL or a design-level defect found in review; each now carries the fix, and in
+most cases a spec that was verified to fail against the unfixed code. Read the
+`### Fixed` section: several of these defects were live in the PRs' own green CI,
+and two of them are security-shaped.
+
+Also in this release: the Rails 8.1 component bumps are unblocked, and `json` is
+pinned below 3 (json 3 removes `JSON.generate(..., quirks_mode:)`, which
+ActiveSupport 7.1 calls, and changes `JSON.parse`'s positional options, which
+ActiveSupport 8.1 uses — with json 3.0.2 the suite fails in Storable's decode path).
+1730 examples, 0 failures.
+
+### Added
+- **Controllers::Cacheable**: `etag_with` folds request context into the ETag —
+  presets `:locale` / `:format` / `:query`, controller-method Symbols, or a block — so
+  locale-, fieldset- or role-dependent representations of one resource never share a
+  validator; each source adds its implied `Vary` (`vary:` overrides, `vary: false`
+  suppresses), merged with the `http_cache_actions` policy. `stale_resource?` /
+  `set_cache_validators` gain a per-call `extras:`. (#48)
+- **Controllers::Authorizable**: denials instrument
+  `authorization_denied.concerns_on_rails` (controller, action, actor_id, actor_type,
+  rule name, status, message) via the `on_authorization_denied(rule)` override point;
+  `authorize_by`/`require_role` accept `name:`. `skip_authorization only:/except:`
+  exempts actions from every rule, inherited ones included. `authorized?(action)`
+  evaluates the rules without rendering, for view predicates. (#68)
+- **Controllers::Timezoneable**: `persist:` writes a param-chosen zone into the
+  `cookie:` cookie; `response_header:` emits the resolved zone (`X-Time-Zone` or a
+  custom name) and appends `Vary: Time-Zone`; `time_zone_source` reports which source
+  won. (#71)
+- **Controllers::Sortable**: `params[:sort]` accepts JSON:API-style `-key` / `+key`
+  per-column direction prefixes, and `sortable_by` accepts rule hashes —
+  `key: { column: "table.column", joins:, join: :left|:inner, nulls: :first|:last }` —
+  for association-column sorting (lazy LEFT OUTER JOIN by default) and NULLs pinned
+  first or last (Rails 6.1+). (#63)
+- **Models::Searchable**: `searchable_by ..., ranked: true` orders `search` results by
+  relevance — exact, then prefix, then substring, earlier-declared columns first
+  within a tier — via a portable CASE expression; the relation's existing ORDER BY
+  becomes the tiebreaker. `search(q, ranked:)` overrides per call and `search_rank(q)`
+  exposes the score expression. (#64)
+- **Models::Normalizable**: `with:` accepts an Array of presets/callables applied left
+  to right, validated at class load. New presets `:strip`, `:capitalize`, `:titleize`,
+  `:parameterize`, `:nullify_blank` and `:url`. `Model.normalize(field, value)` applies
+  a field's rule to a bare value for lookups and params. (#66)
+- **Models::Sanitizable**: `sanitized_attributes` and a `sanitized:` serialization
+  option — `as_json(sanitized: true | [:fields])` — which composes with
+  `only:`/`except:`, is carried into `include:` children, and sanitizes the *serialized*
+  value so a Maskable mask survives. `Model.sanitize_all!(*fields)` rewrites legacy rows
+  in place for the current scope (by default the `on: :write` fields only), transactional
+  via `Support::BatchOps`, refreshing Encryptable blind indexes. (#72)
+- **Models::Storable**: `where_<accessor>(value)` scope per key — equality on a stored
+  key via `json_extract` (SQLite), `->>` (PostgreSQL) or `JSON_UNQUOTE(JSON_EXTRACT())`
+  (MySQL). Values are cast as the writer stores them; `where_<key>(nil)` matches
+  unset/null. Opt out per key or per macro with `query: false`. (#76)
+- **Support::VaryHeader**: shared `Vary` appender used by Timezoneable and Localizable —
+  seeds Rails' own `Accept` dimension, appends rather than clobbers, de-duplicates
+  case-insensitively and leaves `Vary: *` alone. (#71)
+
+### Changed
+- **Controllers::Cacheable**: a response whose ETag varies on a dimension `Vary` cannot
+  express — a block or controller-method source, or any source with `vary: false` — is
+  now emitted as `Cache-Control: private` regardless of the rule's declared
+  `visibility:`. Such a response is not shareable, and there is no `Vary` that makes it
+  so. (#48)
+- **Controllers::Sortable**: PostgreSQL uses native `NULLS FIRST/LAST`; every other
+  adapter gets the portable `CASE WHEN col IS NULL` equivalent. A `default:` outside the
+  allow-list orders the relation without becoming client-selectable, repeated sort keys
+  collapse to their first occurrence, and `+` must be percent-encoded as `%2B` (Rack
+  decodes a raw `+` to a space). `sort_requests` is the override point; `sort_fields` is
+  read-only. (#63)
+- **Controllers::Authorizable**: the denial payload carries `actor_id:`/`actor_type:`
+  rather than the `current_user` object — notification payloads are not filtered by
+  `config.filter_parameters`. (#68)
+- **Models::Normalizable**: `:url` accepts only `http`/`https`; a value carrying any
+  other scheme is returned stripped rather than blessed as normalized. `:titleize` is
+  deliberately **not** `String#titleize`. (#66)
+- **Models::Storable**: a `where_<key>` scope whose name is already taken no longer
+  aborts the declaration — it is skipped with a deprecator warning, so an existing model
+  defining that method still boots after an upgrade. (#76)
+- **Models::Searchable**: a grouped relation is returned unranked, since a rank
+  `ORDER BY` over `GROUP BY` is an error on PostgreSQL and on MySQL under
+  `ONLY_FULL_GROUP_BY`. (#64)
+
+### Fixed
+- **Controllers::Authorizable**: `skip_authorization except: []` (or `false`, or `""`)
+  exempted **every** action of the controller and all its subclasses — each of those
+  values is truthy while matching no real action name, so the `!except.include?(action)`
+  test was true everywhere. `except: Rails.env.production? && :destroy` is the realistic
+  spelling. Now rejected at class load, along with non-Symbol/String entries; `only:`
+  still accepts them, where they are inert. (#68)
+- **Models::Sanitizable**: `serializable_hash` re-read the raw column instead of
+  post-processing the serialized value, so on a model including both Maskable and
+  Sanitizable it overwrote the mask with sanitized plaintext — order-dependently, and
+  therefore silently. (#72)
+- **Controllers::Timezoneable**: the `cookie:` source now works on a real
+  `ActionController::Base`. `#cookies` is PRIVATE there, so the `respond_to?(:cookies)`
+  guard was always false and the documented cookie source silently did nothing in every
+  real Rails app; only the specs' public-`cookies` double made it look alive. Both guards
+  now ask `respond_to?(:cookies, true)`. (#71)
+- **Controllers::Timezoneable**: `Vary` is no longer written before the action runs,
+  which suppressed Rails' own `Vary: Accept` (`_set_vary_header` only adds it when `Vary`
+  is blank) and let a shared cache serve a JSON body to an HTML request. (#71)
+- **Controllers::Sortable**: MySQL is detected by behaviour rather than by adapter name.
+  The previous `adapter_name.include?("mysql")` test was false for Trilogy, so a
+  `nulls:` rule emitted PostgreSQL syntax against MySQL 8 — a 1064 parse error on every
+  request using that sort key. A dotted Symbol column (`sortable_by :"authors.name"`)
+  is quoted correctly again; it had regressed to `"posts"."authors.name"`. Sort keys are
+  de-duplicated, so `?sort=` with thousands of repeated keys no longer builds thousands
+  of ORDER BY terms. (#63)
+- **Models::Normalizable**: `:titleize` no longer destroys data. It was
+  `Inflector.titleize`, i.e. `humanize(underscore(v))`, which deleted characters —
+  `"Jean-Luc Picard"` → `"Jean Luc Picard"`, `"customer_id"` → `"Customer"` — and ran in
+  `before_validation`, so the original was gone. `:url` no longer drops a URL's
+  `userinfo` on Ruby's newer `uri` versions. (#66)
+- **Models::Storable**: `serialize :settings, coder: JSON, type: Hash` — the form Rails
+  7.1's own deprecation message directs users to — was misclassified as a non-JSON coder,
+  so the whole query feature refused to run on a perfectly queryable column. A blank or
+  corrupt store value no longer makes every `where_` query raise on SQLite. A read-only
+  finder no longer mutates the caller's `Time`. Key names are validated at macro time.
+  (#76)
+- **Models::CounterCacheable**: the locking spec added in 1.28.6 matched the SQLite
+  transaction statement with `start_with?("begin")`; Rails 7.2+ switched SQLite to
+  IMMEDIATE transactions and upcased it, so the assertion silently found nothing on
+  Rails 8.x. Test-only.
+
+### Internal
+- `json` is pinned to `< 3` in the Gemfile. Verified against a real 8.1.3.1 gemset:
+  with json 3.0.2 the suite fails in Storable's decode path; with `json < 3` Rails
+  8.1.3.1 is green.
+- `require "active_support/notifications"` added to `authorizable.rb` and
+  `error_handleable.rb`, which instrument without requiring it — a direct require of
+  either file used to `NameError` on the first event. (#68)
+
 ## 1.28.6 (2026-09-18)
 
 Ten feature PRs deepening existing concerns, released as a patch by request: no new
