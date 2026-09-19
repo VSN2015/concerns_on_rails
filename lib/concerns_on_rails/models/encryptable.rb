@@ -365,14 +365,40 @@ module ConcernsOnRails
         end
 
         def encryptable_define_helpers(field)
-          # Raw stored value: the DB ciphertext once persisted (before the type
-          # deserializes it). Useful for migrations, debugging, and asserting no
-          # plaintext is at rest.
-          define_method("#{field}_ciphertext") { read_attribute_before_type_cast(field) }
-          define_method("#{field}_encrypted?") { read_attribute_before_type_cast(field).present? }
-          # The key id in the stored envelope (nil when nothing is stored yet).
+          # The value AT REST — the column's stored content, before the type
+          # deserializes it. Useful for migrations, debugging, and asserting no
+          # plaintext is at rest. nil while the field carries an unsaved change.
+          #
+          # That last clause is the fix: this used to return
+          # read_attribute_before_type_cast unconditionally, and for a column
+          # overridden with `attribute` that is the caller's PLAINTEXT whenever
+          # the value has not round-tripped through the database — a new record,
+          # or any record with a pending assignment (i.e. exactly the state
+          # inside a before_save, a validator, or an error-reporting path). A
+          # reader named `_ciphertext`, documented for "asserting no plaintext
+          # is at rest", handed back the SSN, so `log.info(user.ssn_ciphertext)`
+          # wrote it straight to the log.
+          define_method("#{field}_ciphertext") do
+            next nil if new_record? || public_send("#{field}_changed?")
+
+            read_attribute_before_type_cast(field)
+          end
+
+          # True only when what is stored really is an encryption envelope. The
+          # old `.present?` was true for plaintext too, so the natural guard
+          # `raise unless user.ssn_encrypted?` passed on a record whose column
+          # held the raw value. Note this is honestly false under
+          # `on_missing_key: :passthrough`, where plaintext at rest is the
+          # opted-into behavior.
+          define_method("#{field}_encrypted?") do
+            ConcernsOnRails::Support::Encryptor.envelope?(public_send("#{field}_ciphertext"))
+          end
+
+          # The key id stamped into the stored envelope, for auditing a rotation
+          # ("which key is this row under?"). nil when nothing is at rest yet —
+          # it reads <field>_ciphertext, so it is never asked of plaintext.
           define_method("#{field}_key_id") do
-            stored = read_attribute_before_type_cast(field)
+            stored = public_send("#{field}_ciphertext")
             stored.nil? ? nil : ConcernsOnRails::Support::Encryptor.key_id(stored)
           end
         end

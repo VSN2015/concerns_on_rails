@@ -1,14 +1,76 @@
 require "active_support/concern"
+# The presets call String#squish / #parameterize, which are core_ext, not
+# part of active_support/concern. Each concern file requires what it uses so
+# a direct require of this file still works.
+require "active_support/core_ext/string/filters"
+require "active_support/core_ext/string/inflections"
+require "uri"
 require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
   module Models
     # Declarative attribute normalization that runs in before_validation.
     #
+    #   normalizable :email,   with: :email                     # one preset
+    #   normalizable :name,    with: %i[squish titleize]        # a chain, applied left to right
+    #   normalizable :bio,     with: %i[squish nullify_blank]   # "" / "   " -> nil
+    #   normalizable :website, with: :url                       # "Example.COM/x" -> "https://example.com/x"
+    #   normalizable :slug,    with: ->(v) { v.to_s.parameterize }
+    #
+    #   User.normalize(:email, params[:email])   # the same rule, outside a record — for lookups
+    #
     # On Rails 7.1+ you may prefer the framework-native `normalizes` macro for
     # new code; this concern provides the same ergonomics on Rails 5.0–7.0.
     module Normalizable
       extend ActiveSupport::Concern
+
+      LABEL = "ConcernsOnRails::Models::Normalizable".freeze
+      # "scheme:" — but a colon followed by a port number is "host:port"
+      # ("localhost:3000"), not a scheme, so those still get https:// prepended.
+      # A longer digit run is no port, so "tel:14155551234" reads as a scheme.
+      URL_SCHEME = %r{\A([a-z][a-z0-9+.-]*):(?!\d{1,5}(?:[/?#]|\z))}i
+      # The only schemes `:url` canonicalizes. Anything else — "javascript:",
+      # "data:", "mailto:", "tel:" — comes back stripped but otherwise untouched:
+      # rewriting it would bless it as a normalized URL, and `link_to` renders
+      # whichever scheme it is handed.
+      URL_SCHEMES = %w[http https].freeze
+      # A `:titleize` word: a run of letters that starts one, so the tail of
+      # "3rd" or "O'Brien" keeps the case it was typed with. Capitalizing these
+      # in place is what String#titleize is mistaken for — that is
+      # humanize(underscore(v)), which rewrites "Jean-Luc" to "Jean Luc" and
+      # drops the suffix of "customer_id" outright.
+      TITLEIZE_WORD = /(?<![[:alnum:]'])[[:alpha:]]+/
+
+      # `:url` — strip, default the scheme to https://, lowercase the scheme and
+      # host (the case-insensitive parts) and leave path/query alone. Input that
+      # carries a non-http(s) scheme, or that doesn't parse as a URI, comes back
+      # stripped but otherwise untouched, so a format validator can reject it.
+      def self.normalize_url(value)
+        stripped = value.strip
+        return stripped if stripped.empty?
+
+        scheme = stripped[URL_SCHEME, 1]
+        return stripped if scheme && !URL_SCHEMES.include?(scheme.downcase)
+
+        uri = URI.parse(scheme ? stripped : "https://#{stripped}")
+        uri.scheme = uri.scheme.downcase
+        downcase_host!(uri)
+        uri.to_s
+      rescue URI::InvalidURIError, URI::InvalidComponentError
+        stripped
+      end
+
+      # `host=` also clears the userinfo on uri >= 1.1 (Ruby 3.2's bundled
+      # uri 0.12.1 keeps it), so put it back — silently dropping credentials
+      # would leave the stored URL pointing somewhere else entirely.
+      def self.downcase_host!(uri)
+        return unless uri.host
+
+        userinfo = uri.userinfo
+        uri.host = uri.host.downcase
+        uri.userinfo = userinfo if userinfo
+      end
+      private_class_method :downcase_host!
 
       # Built-in normalization presets. Each is string-safe — non-string values
       # pass through unchanged so callers don't have to guard themselves.
@@ -16,9 +78,15 @@ module ConcernsOnRails
         email: ->(v) { v.is_a?(String) ? v.strip.downcase : v },
         phone: ->(v) { v.is_a?(String) ? v.gsub(/\D/, "") : v },
         whitespace: ->(v) { v.is_a?(String) ? v.strip : v },
+        strip: ->(v) { v.is_a?(String) ? v.strip : v },
         squish: ->(v) { v.is_a?(String) ? v.squish : v },
         downcase: ->(v) { v.is_a?(String) ? v.downcase : v },
-        upcase: ->(v) { v.is_a?(String) ? v.upcase : v }
+        upcase: ->(v) { v.is_a?(String) ? v.upcase : v },
+        capitalize: ->(v) { v.is_a?(String) ? v.capitalize : v },
+        titleize: ->(v) { v.is_a?(String) ? v.gsub(TITLEIZE_WORD, &:capitalize) : v },
+        parameterize: ->(v) { v.is_a?(String) ? v.parameterize : v },
+        nullify_blank: ->(v) { v.is_a?(String) && v.strip.empty? ? nil : v },
+        url: ->(v) { v.is_a?(String) ? Normalizable.normalize_url(v) : v }
       }.freeze
 
       included do
@@ -29,35 +97,57 @@ module ConcernsOnRails
       class_methods do
         include ConcernsOnRails::Support::ColumnGuard
 
-        # Declare which fields should be normalized and how.
+        # Declare which fields should be normalized and how. `with:` is a preset
+        # Symbol, a Proc, or an Array of those applied in order.
         # Example:
         #   normalizable :email, with: :email
         #   normalizable :first_name, :last_name, with: :whitespace
+        #   normalizable :name, with: %i[squish titleize]
         #   normalizable :slug, with: ->(v) { v.to_s.parameterize }
         def normalizable(*fields, with:)
-          raise ArgumentError, "ConcernsOnRails::Models::Normalizable: at least one field is required" if fields.empty?
+          raise ArgumentError, "#{LABEL}: at least one field is required" if fields.empty?
 
           normalizer = resolve_normalizer(with)
-          ensure_columns!("ConcernsOnRails::Models::Normalizable", fields)
+          ensure_columns!(LABEL, fields)
           self.normalizable_rules = normalizable_rules.merge(fields.to_h { |f| [f.to_sym, normalizer] })
+        end
+
+        # Run a field's rule on a bare value — the same transform the record
+        # applies, for lookups and params:
+        #   User.find_by(email: User.normalize(:email, params[:email]))
+        # nil stays nil (records skip nil too); an undeclared field raises.
+        def normalize(field, value)
+          normalizer = normalizable_rules[field.to_sym]
+          unless normalizer
+            raise ArgumentError,
+                  "#{LABEL}: no normalization rule for #{field.to_sym.inspect} (declared: #{normalizable_rules.keys.join(', ')})"
+          end
+
+          value.nil? ? nil : normalizer.call(value)
         end
       end
 
-      class_methods do
+      module ClassMethods
         private
+
+        # An Array composes: each step receives the previous step's output.
+        def resolve_normalizer_chain(with)
+          raise ArgumentError, "#{LABEL}: with: [] needs at least one normalizer" if with.empty?
+
+          steps = with.map { |step| resolve_normalizer(step) }
+          ->(v) { steps.reduce(v) { |memo, step| step.call(memo) } }
+        end
 
         def resolve_normalizer(with)
           case with
+          when Array then resolve_normalizer_chain(with)
           when Symbol
             PRESETS.fetch(with) do
-              raise ArgumentError,
-                    "ConcernsOnRails::Models::Normalizable: unknown preset '#{with}'. " \
-                    "Valid presets: #{PRESETS.keys.join(', ')}"
+              raise ArgumentError, "#{LABEL}: unknown preset '#{with}'. Valid presets: #{PRESETS.keys.join(', ')}"
             end
           when Proc then with
           else
-            raise ArgumentError,
-                  "ConcernsOnRails::Models::Normalizable: :with must be a preset symbol or a Proc/lambda, got #{with.class}"
+            raise ArgumentError, "#{LABEL}: :with must be a preset symbol or a Proc/lambda (or an Array of them), got #{with.class}"
           end
         end
       end

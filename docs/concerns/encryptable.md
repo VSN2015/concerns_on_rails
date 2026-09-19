@@ -114,8 +114,8 @@ Repeatable — each call declares more encrypted fields. Rules accumulate (reass
 ## Accessor surface
 
 - `field` / `field=` — plaintext in, plaintext out (crypto happens at the DB boundary).
-- `field_ciphertext` — the raw stored envelope once persisted (for migrations, debugging, and asserting no plaintext is at rest).
-- `field_encrypted?` — whether a value is currently stored.
+- `field_ciphertext` — the raw stored envelope once persisted (for migrations, debugging, and asserting no plaintext is at rest). `nil` while the field carries an unsaved change (a new record, or any pending assignment), so it can never hand back the plaintext you just assigned.
+- `field_encrypted?` — whether what is stored really is an encryption envelope (not merely whether a value is present). Honestly `false` under `on_missing_key: :passthrough`, where plaintext at rest is the opted-into behaviour.
 
 ## Querying encrypted fields (blind index)
 
