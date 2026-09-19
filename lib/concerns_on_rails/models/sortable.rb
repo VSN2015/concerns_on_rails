@@ -49,6 +49,9 @@ module ConcernsOnRails
       # Example: Task.sortable_by(priority: :asc)
       # A real module (not `class_methods do`) so the helpers aren't constrained
       # by Metrics/BlockLength (the Stateable precedent).
+      LABEL = "ConcernsOnRails::Models::Sortable".freeze
+      MISSING_MODES = %i[append raise].freeze
+
       module ClassMethods
         include ConcernsOnRails::Support::ColumnGuard
 
@@ -83,7 +86,69 @@ module ConcernsOnRails
           acts_as_list(list_options)
         end
 
+        # Apply an explicit id order as positions — the "save this drag-and-drop
+        # order" operation acts_as_list lacks — in ONE UPDATE (`SET position =
+        # CASE id WHEN … END`) inside the current relation, in a transaction.
+        # Rows in the relation but not in `ids` are pushed after them in their
+        # current order (`missing: :append`) or make the call raise
+        # (`missing: :raise`); ids outside the relation, duplicates and an
+        # unknown `missing:` raise before anything is written. The first id gets
+        # the top position; on a :desc list it gets the highest value instead.
+        # Returns the number of rows updated. Bypasses acts_as_list callbacks by
+        # design (no per-row shifting).
+        def reposition!(ids, missing: :append)
+          unless MISSING_MODES.include?(missing)
+            raise ArgumentError,
+                  "#{LABEL}: missing: must be :append or :raise (got #{missing.inspect})"
+          end
+
+          ordered = sortable_reposition_order(sortable_cast_ids(ids), missing)
+          return 0 if ordered.empty?
+
+          node = Arel::Nodes::Case.new(arel_table[primary_key])
+          sortable_positions_for(ordered).each { |id, position| node.when(id).then(position) }
+          transaction { unscoped.where(primary_key => ordered).update_all(sortable_field => node) }
+        end
+
         private
+
+        # Params arrive as Strings; compare on the primary key's own type.
+        def sortable_cast_ids(ids)
+          type = type_for_attribute(primary_key)
+          Array(ids).map { |id| type.cast(id.respond_to?(:id) ? id.id : id) }
+        end
+
+        # The relation's members in the requested order, validated: no
+        # duplicates, nothing foreign, and the unlisted rest appended (or raised).
+        def sortable_reposition_order(ids, missing)
+          duplicates = ids.tally.select { |_id, n| n > 1 }.keys
+          raise ArgumentError, "#{LABEL}: duplicate id(s) #{duplicates.join(', ')} in ids" if duplicates.any?
+
+          current = all.reorder(sortable_field => sortable_direction, primary_key => :asc).pluck(primary_key)
+          unknown = ids - current
+          raise ArgumentError, "#{LABEL}: id(s) #{unknown.join(', ')} are not in this relation" if unknown.any?
+
+          rest = current - ids
+          if rest.any? && missing == :raise
+            raise ArgumentError,
+                  "#{LABEL}: #{rest.size} record(s) in this relation are missing from ids (pass missing: :append to push them after)"
+          end
+
+          ids + rest
+        end
+
+        # [[id, position], ...] from the top of the list; reversed for :desc so
+        # the first id sorts first.
+        def sortable_positions_for(ordered)
+          top = sortable_top_of_list
+          positions = Array.new(ordered.size) { |index| top + index }
+          positions.reverse! if sortable_direction == :desc
+          ordered.zip(positions)
+        end
+
+        def sortable_top_of_list
+          method_defined?(:acts_as_list_top) ? new.acts_as_list_top : 1
+        end
 
         def resolve_sortable_config(field_config, field_options)
           if field_config.nil? && field_options.any?
