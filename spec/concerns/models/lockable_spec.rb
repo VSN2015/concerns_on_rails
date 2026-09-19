@@ -798,6 +798,10 @@ describe ConcernsOnRails::Lockable do
           t.datetime :locked_at
           t.string :unlock_token
         end
+
+        create_table :naked_lock_users, force: true do |t|
+          t.string :email
+        end
       end
     end
 
@@ -861,29 +865,80 @@ describe ConcernsOnRails::Lockable do
       user.lock_access!
       token = user.unlock_token
 
-      # Two requests that both read the row before either wrote it. The claim
-      # is a conditional UPDATE, so the second finds nothing left to clear and
-      # must not unlock again or fire a second after_unlock.
-      first = klass.unscoped.find(user.id)
-      second = klass.unscoped.find(user.id)
-      expect(second.unlock_token).to eq(token)
+      # The loser is the request that read the row BEFORE the winner wrote it:
+      # it still holds the token in memory, so only the conditional UPDATE can
+      # stop it. Replaying the claim with that stale row is what a second
+      # in-flight request does, and it must neither unlock nor fire a second
+      # after_unlock. (Two plain unlock_by_token calls would not reach here —
+      # the second one's find_by returns nothing at all.)
+      stale = klass.find(user.id)
+      expect(stale.unlock_token).to eq(token)
 
-      results = [klass.unlock_by_token(token), klass.unlock_by_token(token)]
-      expect(results.compact.size).to eq(1)
+      expect(klass.unlock_by_token(token)).to eq(user)
+      expect(klass.send(:unlock_by_claimed_token, stale, :unlock_token, token)).to be_nil
+      expect(stale.events).to be_nil
       expect(user.reload.access_locked?).to be(false)
       expect(user.reload.unlock_token).to be_nil
-      expect(first.id).to eq(second.id)
     end
 
-    it "still honours a token after the lock lapsed on its own (clears the stale lock cleanly)" do
+    it "puts the token back when a hook vetoes the unlock, so the link is not burned" do
+      vetoing = Class.new(TestModel) do
+        self.table_name = "token_lock_users"
+        include ConcernsOnRails::Lockable
+
+        lockable_by max_attempts: 2, unlock_token: :unlock_token
+
+        cattr_accessor :veto
+        self.veto = true
+
+        def before_unlock
+          raise ActiveRecord::Rollback if self.class.veto
+        end
+      end
+      record = vetoing.create!(email: "veto@x.com")
+      record.lock_access!
+      token = record.unlock_token
+
+      expect(vetoing.unlock_by_token(token)).to be_nil
+      expect(record.reload.unlock_token).to eq(token) # still mailable
+      expect(record.access_locked?).to be(true)
+
+      vetoing.veto = false
+      expect(vetoing.unlock_by_token(token)).to eq(record)
+      expect(record.reload.access_locked?).to be(false)
+    end
+
+    it "refuses (and retires) a token once the lock has lapsed on its own" do
       user.lock_access!
       token = user.unlock_token
       travel_to(20.minutes.from_now) do
         expect(user.reload.access_locked?).to be(false)
-        expect(klass.unlock_by_token(token)).to eq(user)
+        # The account is already usable: the link is not a live credential any
+        # more, and the dangling token must not sit in the row forever.
+        expect(klass.unlock_by_token(token)).to be_nil
       end
       expect(user.reload.unlock_token).to be_nil
-      expect(user.locked_at).to be_nil
+      expect(user.events).to be_nil # no unlock hooks for a refused link
+    end
+
+    it "does not reach a row the model's default scope hides" do
+      scoped = Class.new(TestModel) do
+        self.table_name = "token_lock_users"
+        include ConcernsOnRails::Lockable
+
+        lockable_by max_attempts: 2, unlock_token: :unlock_token
+        default_scope { where(email: "visible@x.com") }
+      end
+      hidden = scoped.unscoped.create!(email: "hidden@x.com")
+      hidden.lock_access!
+
+      expect(scoped.unlock_by_token(hidden.unlock_token)).to be_nil
+      expect(hidden.reload.access_locked?).to be(true)
+    end
+
+    it "registers the token column with the filter-parameter registry" do
+      klass # the macro runs at class-definition time
+      expect(ConcernsOnRails.filter_parameter_registry.include?("user[unlock_token]")).to be(true)
     end
 
     it "unlock_expired clears tokens along with the lock" do
@@ -925,6 +980,20 @@ describe ConcernsOnRails::Lockable do
           lockable_by unlock_token: :locked_at
         end
       end.to raise_error(ArgumentError, /unlock_token must be a different column/)
+    end
+
+    it "reports all three missing columns in ONE migration command" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "naked_lock_users"
+          include ConcernsOnRails::Lockable
+
+          lockable_by unlock_token: :unlock_token
+        end
+      end.to raise_error(
+        ArgumentError,
+        /AddLockableColumnsToNakedLockUsers failed_attempts:integer locked_at:datetime unlock_token:string:uniq/
+      )
     end
   end
 end

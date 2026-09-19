@@ -1387,7 +1387,7 @@ user.lock_access!; user.unlock_token   # minted in the same write as the lock â€
 User.unlock_by_token(params[:token])   # constant-time lookup; unlocks once (hooks fire), returns the user or nil
 ```
 
-**Options**: `attempts:` (`:failed_attempts`, must be an integer column), `locked_at:` (`:locked_at`, datetime column), `max_attempts:` (`5`; `nil` = count but never auto-lock), `unlock_in:` (`nil` = locked until manual unlock; a duration makes the lock lapse by itself), `unlock_token:` (`nil`; a string column that receives a 43-char URL-safe token on lock and is cleared by every unlock path), `prefix:` / `suffix:` (affix the scope names).
+**Options**: `attempts:` (`:failed_attempts`, must be an integer column), `locked_at:` (`:locked_at`, datetime column), `max_attempts:` (`5`; `nil` = count but never auto-lock), `unlock_in:` (`nil` = locked until manual unlock; a duration makes the lock lapse by itself), `unlock_token:` (`nil`; a string column that receives a 43-char URL-safe token on lock, is cleared by every unlock path, and is honoured only while the lock is live â€” so `unlock_in:` doubles as the link's TTL), `prefix:` / `suffix:` (affix the scope names).
 
 **Bulk operations**
 

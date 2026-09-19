@@ -57,8 +57,11 @@ module ConcernsOnRails
     #   * `unlock_token:` mints a 43-char URL-safe token when the account locks
     #     (kept while locked, cleared by every unlock path — manual, batch
     #     expiry, the quiet stale-lock reset) and `unlock_by_token` consumes it:
-    #     one link, one unlock. The mailer is yours. Reach for Devise's lockable
-    #     when you need per-strategy unlocks or its full mailer stack.
+    #     one link, one unlock. Its lifetime IS the lock's: once the lock has
+    #     lapsed under `unlock_in:` the token stops being honoured and is
+    #     retired on the next presentation, so `unlock_in:` doubles as the
+    #     link's TTL. The mailer is yours. Reach for Devise's lockable when you
+    #     need per-strategy unlocks or its full mailer stack.
     module Lockable
       extend ActiveSupport::Concern
 
@@ -94,10 +97,12 @@ module ConcernsOnRails
           self.lockable_max_attempts = max_attempts
           self.lockable_unlock_in = unlock_in
           self.lockable_unlock_token_field = unlock_token
-          ensure_columns!(LABEL, attempts, locked_at,
-                          types: { attempts => :integer, locked_at => :datetime })
-          ensure_columns!(LABEL, unlock_token, types: "string:uniq") if unlock_token
+          # ONE guard call, so a fresh model missing all three columns gets a
+          # single migration command instead of three boot failures.
+          ensure_columns!(LABEL, attempts, locked_at, unlock_token,
+                          types: lockable_column_types(attempts, locked_at, unlock_token))
           validate_lockable_attempts_column!(attempts)
+          lockable_register_filter_parameter(unlock_token) if unlock_token
           define_lockable_scopes(prefix, suffix)
         end
 
@@ -105,6 +110,10 @@ module ConcernsOnRails
         # fetched row, Tokenizable's pattern), unlock through unlock_access!
         # (hooks fire, token cleared — so a link works exactly once) and
         # return the record; nil for a blank, unknown or already-used token.
+        #
+        # Scoped like Tokenizable's authenticate_by_<field>, not unscoped: a
+        # default_scope (SoftDeletable's, an `active` flag) is the app saying
+        # "this row is not in play", and a mailed link must not reach it.
         def unlock_by_token(token)
           field = lockable_unlock_token_field
           raise ArgumentError, "#{LABEL}: unlock_token: is not configured (lockable_by unlock_token: :unlock_token)" unless field
@@ -112,30 +121,19 @@ module ConcernsOnRails
           given = token.to_s
           return nil if given.strip.empty?
 
-          record = unscoped.find_by(field => given)
+          record = find_by(field => given)
           return nil unless record
 
           stored = record[field].to_s
           return nil unless stored.bytesize == given.bytesize && ActiveSupport::SecurityUtils.secure_compare(stored, given)
 
+          # The token is only as good as the lock it was minted for. Once the
+          # lock has lapsed (unlock_in:) the account is usable again, so a late
+          # click is not a live credential — retire the dangling token rather
+          # than leave a permanently valid secret in the row.
+          return lockable_retire_token(record, field, given) unless record.access_locked?
+
           unlock_by_claimed_token(record, field, given)
-        end
-
-        # Claim the token with a conditional UPDATE before unlocking, the way
-        # Tokenizable's consume_<field> does. Read-then-write would let two
-        # concurrent clicks on the same link both unlock and both fire
-        # after_unlock; here they serialize on the row and only the one that
-        # still matched the token gets a row back. Inside a transaction, so a
-        # raising hook puts the token back instead of burning the link.
-        def unlock_by_claimed_token(record, field, given)
-          unlocked = nil
-          transaction do
-            next if unscoped.where(primary_key => record.id, field => given).update_all(field => nil).zero?
-
-            record[field] = nil
-            unlocked = record if record.unlock_access!
-          end
-          unlocked
         end
 
         # {} or { unlock_token_field => value } — merged into every write that
@@ -179,6 +177,61 @@ module ConcernsOnRails
         end
 
         private
+
+        # Claim the token with a conditional UPDATE before unlocking, the way
+        # Tokenizable's consume_<field> does. Read-then-write would let two
+        # concurrent clicks on the same link both unlock and both fire
+        # after_unlock; here they serialize on the row and only the one that
+        # still matched the token gets a row back.
+        #
+        # requires_new: a bare `transaction` JOINS an enclosing one, and a hook
+        # vetoing the unlock with ActiveRecord::Rollback is then swallowed with
+        # nothing rolled back — the claim committed on its own, burning the
+        # mailed link for good while the account stayed locked. The savepoint
+        # plus the explicit Rollback below put the token back whenever the
+        # unlock did not happen. unlock_access! snapshots the token before it
+        # writes, so its own abort path restores the in-memory value.
+        def unlock_by_claimed_token(record, field, given)
+          unlocked = nil
+          transaction(requires_new: true) do
+            next if unscoped.where(primary_key => record.id, field => given).update_all(field => nil).zero?
+
+            unlocked = record if record.unlock_access!
+            raise ActiveRecord::Rollback unless unlocked
+
+            # The short-circuit path in unlock_access! (locked_at already NULL)
+            # writes nothing, so sync the consumed token by hand.
+            record[field] = nil
+            record.send(:clear_attribute_changes, [field.to_s])
+          end
+          unlocked
+        end
+
+        # Drop a token whose lock is gone. Keyed on the token itself, so it is
+        # no oracle — only whoever holds the link can trigger it. Always nil.
+        def lockable_retire_token(record, field, given)
+          unscoped.where(primary_key => record.id, field => given).update_all(field => nil)
+          nil
+        end
+
+        def lockable_column_types(attempts, locked_at, unlock_token)
+          types = { attempts => :integer, locked_at => :datetime }
+          # Generator modifier syntax: an unlock token wants a unique index.
+          types[unlock_token] = "string:uniq" if unlock_token
+          types
+        end
+
+        # The unlock token is a credential that travels in a URL, so keep it
+        # out of request logs. The gem-level registry is consulted at filter
+        # time by the proc ConcernsOnRails::Railtie appends to
+        # config.filter_parameters at boot, so a model class that loads later
+        # (lazy loading in development) is still covered. Mirrors
+        # Models::Encryptable.
+        def lockable_register_filter_parameter(field)
+          ConcernsOnRails.filter_parameter_registry.add(field)
+        rescue StandardError
+          nil
+        end
 
         def validate_lockable!(attempts, locked_at, max_attempts:, unlock_in:, unlock_token: nil)
           raise ArgumentError, "#{LABEL}: attempts and locked_at must be different columns" if attempts == locked_at
