@@ -1,4 +1,4 @@
-`ErrorHandleable` installs `rescue_from` handlers for the controller exceptions a JSON API meets in practice — not-found lookups, missing/unpermitted parameters, validation failures (ActiveRecord *and* plain ActiveModel form objects), callback-aborted saves and destroys, optimistic-locking conflicts, unique-index and foreign-key races, malformed bodies and unsupported formats — and renders each as a uniform JSON error envelope. Without it, unhandled exceptions propagate as 500s or Rails HTML error pages, breaking JSON API clients. Including this concern ensures every error surface returns `{ success: false, error: { message, code } }` automatically, with no per-action rescue boilerplate.
+`ErrorHandleable` installs `rescue_from` handlers for the controller exceptions a JSON API meets in practice — not-found lookups, missing/unpermitted parameters, validation failures (ActiveRecord *and* plain ActiveModel form objects), callback-aborted saves and destroys, optimistic-locking conflicts, unique-index and foreign-key races, malformed bodies and unsupported formats — and renders each as a uniform JSON error envelope. Without it, unhandled exceptions propagate as 500s or Rails HTML error pages, breaking JSON API clients. Including this concern ensures every error surface returns `{ success: false, error: { message, code } }` automatically, with no per-action rescue boilerplate. The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`.
 
 ## When to use it
 
@@ -13,7 +13,7 @@
 
 ## Installation
 
-Include the concern in a base controller. Pairing it with `Respondable` is optional but recommended — when both are included, error handlers delegate to `Respondable#render_error` so the envelope shape is managed in a single place.
+Include the concern in a base controller. Pairing it with `Respondable` is optional but recommended — when both are included, error handlers delegate to `Respondable#render_error` so the envelope shape is managed in a single place. The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`.
 
 ```ruby
 class Api::BaseController < ApplicationController
@@ -164,7 +164,7 @@ The JSON shape rendered is identical to the `Respondable` path:
 ```json
 { "success": false, "error": { "message": "...", "code": "..." } }
 ```
-The `details` key is only present when there is something to list (validation messages, unpermitted parameter names).
+The `details` key is only present when there is something to list (validation messages, unpermitted parameter names). The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`.
 
 **Reporting handled errors selectively**
 

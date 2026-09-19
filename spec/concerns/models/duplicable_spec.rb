@@ -9,6 +9,7 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
         t.integer :sequence
         t.string :number
         t.string :token
+        t.datetime :token_expires_at
         t.datetime :issued_at
         t.datetime :deleted_at
         t.text :audit_log
@@ -236,7 +237,7 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
         include ConcernsOnRails::Models::SoftDeletable
         include ConcernsOnRails::Models::Lockable
 
-        tokenizable_by :token, type: :hex, length: 12
+        tokenizable_by :token, type: :hex, length: 12, expires_in: 1.hour
         sequenceable_by :sequence, into: :number, prefix: "INV-"
         auditable_by :title, into: :audit_log
         soft_deletable_by :deleted_at, default_scope: false
@@ -252,6 +253,19 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
       expect(copy.token).not_to eq(original.token)
       expect(copy.sequence).to eq(original.sequence + 1)
       expect(copy.number).to eq("INV-#{copy.sequence}")
+    end
+
+    it "gives the copy's token a fresh expiry instead of inheriting the original's" do
+      original = travel_to(Time.utc(2026, 1, 1, 10)) { klass.create!(title: "Q1") }
+      expect(original.token_expires_at).to eq(Time.utc(2026, 1, 1, 11))
+
+      # Without clearing the stamp alongside the token, the copy would carry a
+      # brand-new secret that expired five months ago.
+      travel_to(Time.utc(2026, 6, 1, 10)) do
+        copy = original.duplicate!
+        expect(copy.token_expires_at).to eq(Time.utc(2026, 6, 1, 11))
+        expect(copy.token_expired?).to be(false)
+      end
     end
 
     it "does not inherit the original's audit history (only the copy's own creation entry)" do
@@ -309,6 +323,67 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
       copy = original.duplicate!
       expect(copy.slug).to be_present
       expect(copy.slug).not_to eq(original.slug)
+    end
+  end
+
+  describe "per-call association selection (only: / except:)" do
+    let(:original) do
+      invoice = DupInvoice.create!(title: "Q1")
+      invoice.dup_line_items.create!(description: "Widget", quantity: 2)
+      invoice.dup_line_items.create!(description: "Gadget", quantity: 5)
+      DupNote.create!(dup_invoice_id: invoice.id, body: "attached")
+      invoice.dup_tags << DupTag.create!(name: "urgent")
+      invoice.reload
+    end
+
+    it "except: skips the named associations for this copy only" do
+      copy = original.duplicate!(except: :dup_line_items)
+      expect(copy.dup_line_items.count).to eq(0)
+      expect(copy.dup_note.body).to eq("attached")
+      expect(copy.dup_tags.pluck(:name)).to eq(["urgent"])
+
+      expect(original.duplicate!.dup_line_items.count).to eq(2) # the macro's list is untouched
+    end
+
+    it "only: copies just the named associations; only: [] is a shallow copy" do
+      copy = original.duplicate!(only: [:dup_tags])
+      expect(copy.dup_tags.pluck(:name)).to eq(["urgent"])
+      expect(copy.dup_line_items.count).to eq(0)
+      expect(copy.dup_note).to be_nil
+
+      shallow = original.duplicate!(only: [])
+      expect(shallow.dup_line_items.count).to eq(0)
+      expect(shallow.dup_note).to be_nil
+      expect(shallow.dup_tags).to be_empty
+      expect(shallow.title).to eq("Q1 (copy)")
+    end
+
+    it "treats an explicit nil as passed, not as absent" do
+      # A UI checkbox list sends nil when nothing is ticked; that must copy no
+      # associations, never fall through to a full deep copy.
+      shallow = original.duplicate!(only: nil)
+      expect(shallow.dup_line_items.count).to eq(0)
+      expect(shallow.dup_note).to be_nil
+      expect(shallow.dup_tags).to be_empty
+
+      full = original.duplicate!(except: nil)
+      expect(full.dup_line_items.count).to eq(2)
+      expect(full.dup_note.body).to eq("attached")
+      expect(full.dup_tags.pluck(:name)).to eq(["urgent"])
+    end
+
+    it "mixes with braceless overrides and validates the selection" do
+      copy = original.duplicate!(title: "Q3", except: :dup_note)
+      expect(copy.title).to eq("Q3")
+      expect(copy.dup_note).to be_nil
+      expect(copy.dup_line_items.count).to eq(2)
+
+      expect(original.duplicate({ title: "Q4" }, only: :dup_tags).title).to eq("Q4") # positional Hash form too
+
+      expect { original.duplicate(only: :dup_note, except: :dup_tags) }
+        .to raise_error(ArgumentError, /pass either :only or :except, not both/)
+      expect { original.duplicate(only: :bogus) }
+        .to raise_error(ArgumentError, /bogus is not a duplicable association \(declared: dup_line_items, dup_note, dup_tags\)/)
     end
   end
 end

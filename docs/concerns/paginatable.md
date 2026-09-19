@@ -32,8 +32,8 @@ end
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `per_page` | Integer | `25` | Default number of records per page when the caller supplies no `?per_page=` param, or supplies a value less than 1. Coerced with `.to_i`. |
-| `max_per_page` | Integer | `200` | Hard upper bound on `per_page`. Any caller-supplied value above this cap is silently reduced to this value. When set to `0` or a negative integer the cap is disabled and any requested `per_page` is honored. Coerced with `.to_i`. |
+| `per_page` | Integer | `25` | Default number of records per page when the caller supplies no `?per_page=` param, or supplies a value less than 1. Coerced with `.to_i`; a value below 1 raises `ArgumentError` at class-load time (`per_page: 0` would make every page empty, and `per_page: -1` means `LIMIT -1`, i.e. *no limit at all* on SQLite and MySQL). |
+| `max_per_page` | Integer | `200` | Hard upper bound on `per_page`. Any caller-supplied value above this cap is silently reduced to this value. When set to `0` or a negative integer the cap is disabled and any requested `per_page` is honored, up to the absolute `MAX_PER_PAGE` ceiling (1,000,000) that keeps an untrusted `?per_page=` from overflowing `LIMIT`. Coerced with `.to_i`. |
 | `link_header` | Boolean | `true` | Emit the RFC 8288 `Link` header (`first`/`prev`/`next`/`last`) on every paginated response. Set `false` to send only the `X-*` headers. |
 | `page_param` | Symbol/String or Array | `:page` | Where the page number is read from: a top-level param name, or an Array path into nested params (`%i[page number]` → `?page[number]=2`). Must be a name or a non-empty path of names. |
 | `per_page_param` | Symbol/String or Array | `:per_page` | Same for the page size (`%i[page size]` → `?page[size]=10`). |
@@ -44,8 +44,8 @@ end
 
 | Param | Default | Notes |
 |---|---|---|
-| `?page=` | `1` | Values below 1 (including negative numbers and zero) are clamped to `1`. |
-| `?per_page=` | value of `paginatable_per_page` | Values below 1 fall back to the class default; values above `max_per_page` are capped. |
+| `?page=` | `1` | Values below 1 (including negative numbers and zero) are clamped to `1`; values above `MAX_PAGE` (1,000,000) are clamped down to it, so an absurd `?page=` returns an empty page instead of a 500. |
+| `?per_page=` | value of `paginatable_per_page` | Values below 1 fall back to the class default; values above `max_per_page` are capped, and in every case the result is held under `MAX_PER_PAGE` (1,000,000). |
 
 Both names are configurable (`page_param:` / `per_page_param:` / `style: :jsonapi`). Nested paths are read by digging through the params (`params[:page][:number]`); a non-Hash where a Hash is expected, or an Array/Hash where a scalar is expected, falls back to the default exactly like garbage in the flat form.
 
@@ -193,8 +193,8 @@ end
 - **In-memory collections are sliced in Ruby.** The whole collection is already in memory by definition, so `paginated(array)` costs one `to_a` plus an `Array#[]` — there is no lazy path. If the data lives in a table, pass the relation so the database does the work.
 - **Relation detection is duck-typed.** Anything answering `limit` and `offset` takes the SQL path; that includes association proxies and model classes, and keeps a `has_many` collection paginating in the database rather than loading it.
 - **Headers require a live `response` object.** The `set_pagination_headers` method guards with `respond_to?(:response) && response`. In plain unit tests without a real HTTP response object, headers are silently skipped; the return value (the paginated relation) is still correct.
-- **Page clamping is one-directional.** Values below 1 are raised to 1, but there is no upper bound on `page`. Requesting a page far beyond the last page returns an empty relation and still sets all headers correctly, including the real `X-Total-Count`.
-- **`max_per_page: 0` (or any non-positive value) disables the cap.** The guard `cap.positive? ? [requested, cap].min : requested` means a zero or negative `max_per_page` lets any caller-requested value through unchecked.
+- **Page clamping is two-directional.** Values below 1 are raised to 1 and values above `MAX_PAGE` (1,000,000) are lowered to it — `page` is untrusted input whose only job is to become `(page - 1) * per_page`, and an unbounded value produced an offset no backend accepts (`StatementInvalid` on a relation, `RangeError` on an Array). Requesting a page far beyond the last page returns an empty relation and still sets all headers correctly, including the real `X-Total-Count`. For genuinely deep pagination use [CursorPaginatable](cursor-paginatable.md).
+- **`max_per_page: 0` (or any negative value) disables the cap.** The guard only asks whether the cap is positive, so a zero or negative `max_per_page` lets any caller-requested value through — bounded only by the absolute `MAX_PER_PAGE` ceiling (1,000,000), which exists so that "no cap" cannot be turned into an overflowing `LIMIT` by an untrusted `?per_page=`.
 - **`paginate_by` is inherited.** Because `paginatable_per_page` and `paginatable_max_per_page` are `class_attribute` values, a call to `paginate_by` in a parent controller is inherited by all subcontrollers unless they call `paginate_by` themselves.
 - **`COUNT` strips ordering.** The total-count query calls `.except(:order, :limit, :offset)` before `.count`, so pre-applied `ORDER BY` clauses on the relation do not produce an extra subquery or count error.
 - **Integer coercion.** Both `per_page` and `max_per_page` arguments to `paginate_by` are coerced with `.to_i`. Passing a string (e.g., from an env variable) is safe. Similarly, `params[:page]` and `params[:per_page]` are coerced with `.to_i`, so string params from query strings work without manual conversion.

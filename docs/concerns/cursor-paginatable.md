@@ -67,7 +67,7 @@ With no arguments: the meta Hash memoized by the last `cursor_paginated` call (n
 { per_page: 25, count: 25, has_more: true, next_cursor: "eyJ0IjoiYXJ0aWNsZXMiLCJvIjpb..." }
 ```
 
-**`render_invalid_cursor(error)`** — public override point for the 400 body. Delegates to Respondable's `render_error` when included; otherwise renders the same `{ success: false, error: { message:, code: "invalid_cursor" } }` envelope inline.
+**`render_invalid_cursor(error)`** — public override point for the 400 body. Delegates to Respondable's `render_error` when included; otherwise renders the same `{ success: false, error: { message:, code: "invalid_cursor" } }` envelope inline. The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`.
 
 ### Response headers
 
