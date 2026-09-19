@@ -163,6 +163,30 @@ describe ConcernsOnRails::Taggable do
       mixed = TagArticle.create!(title: "mixed", tag_list: "Elixir")
       expect(TagArticle.tagged_with("elixir")).to contain_exactly(mixed)
     end
+
+    it "matches case-insensitively in every position of the column, on every adapter" do
+      # LIKE folds case on SQLite and under MySQL's default _ci collation, but
+      # NOT on PostgreSQL — so tagged_with silently meant two different things
+      # until the predicate started asking Arel for a case-insensitive match
+      # (which is ILIKE on PostgreSQL). All four boundary branches, not just
+      # the whole-column one above.
+      first = TagArticle.create!(title: "first", tag_list: "Elixir, ruby")
+      middle = TagArticle.create!(title: "middle", tag_list: "ruby, Elixir, go")
+      last = TagArticle.create!(title: "last", tag_list: "go, Elixir")
+
+      expect(TagArticle.tagged_with("elixir")).to contain_exactly(first, middle, last)
+      expect(TagArticle.tagged_with("ELIXIR", "RUBY")).to contain_exactly(first, middle)
+    end
+
+    it "quotes the LIKE ESCAPE character through the adapter" do
+      # An inlined `ESCAPE '\'` parses on SQLite and PostgreSQL but is a syntax
+      # error on MySQL, where the backslash escapes its own closing quote inside
+      # a string literal. Comparing against the connection's own quoting pins
+      # that the escape goes through the adapter, on whichever adapter is running.
+      escape = ActiveRecord::Base.connection.quote("\\")
+
+      expect(TagArticle.tagged_with("ruby").to_sql).to include("ESCAPE #{escape}")
+    end
   end
 
   describe ".all_tags" do
