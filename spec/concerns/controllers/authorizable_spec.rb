@@ -4,7 +4,7 @@ describe ConcernsOnRails::Controllers::Authorizable do
   # FakeController has no callback machinery, so stub before_action and exercise
   # enforce_authorization directly (the before_action wiring itself is an
   # ActionController responsibility — mirrors secure_headable_spec).
-  AuthzActor = Struct.new(:role) unless defined?(AuthzActor)
+  AuthzActor = Struct.new(:role, :id) unless defined?(AuthzActor)
 
   let(:base_class) do
     Class.new(FakeController) do
@@ -183,9 +183,9 @@ describe ConcernsOnRails::Controllers::Authorizable do
       events
     end
 
-    it "instruments authorization_denied.concerns_on_rails with action, actor, rule name, status and message" do
+    it "instruments authorization_denied.concerns_on_rails with action, actor id/type, rule name, status and message" do
       events = denial_events do
-        c = controller(action: "destroy", user: AuthzActor.new("viewer")) do
+        c = controller(action: "destroy", user: AuthzActor.new("viewer", 42)) do
           require_role :admin, only: :destroy, name: :admins_only, message: "Admins only"
         end
         c.enforce_authorization
@@ -194,8 +194,25 @@ describe ConcernsOnRails::Controllers::Authorizable do
       expect(events.size).to eq(1)
       payload = events.first.payload
       expect(payload).to include(action: "destroy", rule: :admins_only, status: :forbidden, message: "Admins only")
-      expect(payload[:actor].role).to eq("viewer")
+      expect(payload).to include(actor_id: 42, actor_type: "AuthzActor")
       expect(payload).to have_key(:controller)
+    end
+
+    it "carries actor scalars only, never the actor object" do
+      # Payloads do NOT pass through config.filter_parameters, so a subscriber
+      # serialising payload[:actor] would dump the password digest and every
+      # reset/2FA token on a path an anonymous request triggers at will.
+      events = denial_events do
+        controller(user: AuthzActor.new("viewer", 42)) { authorize_by { false } }.enforce_authorization
+      end
+      expect(events.first.payload).not_to have_key(:actor)
+
+      # An actor without #id, and no actor at all, both degrade to nil.
+      events = denial_events { controller(user: Object.new) { authorize_by { false } }.enforce_authorization }
+      expect(events.first.payload).to include(actor_id: nil, actor_type: "Object")
+
+      events = denial_events { controller(user: nil) { authorize_by { false } }.enforce_authorization }
+      expect(events.first.payload).to include(actor_id: nil, actor_type: nil)
     end
 
     it "stays silent for allowed requests and defaults the rule name to nil" do
@@ -273,8 +290,48 @@ describe ConcernsOnRails::Controllers::Authorizable do
       expect { child(action: "index") { skip_authorization except: nil } }
         .to raise_error(ArgumentError, %r{given a nil :only/:except})
 
-      # An empty list is still a valid "exempt nothing".
+      # An empty list is still a valid "exempt nothing" on the only: side.
       c = child(action: "index") { skip_authorization only: [] }
+      c.enforce_authorization
+      expect(c.rendered[:status]).to eq(:forbidden)
+    end
+
+    it "refuses a degenerate except: — only the bare form may exempt everything" do
+      # except: exempts every action NOT listed, so [], false and "" each used to
+      # open the whole controller AND its subclasses without a word.
+      # `except: Rails.env.production? && :destroy` is the realistic spelling:
+      # it is :destroy in production and false everywhere else.
+      expect { child(action: "index") { skip_authorization except: [] } }
+        .to raise_error(ArgumentError, /:except is empty/)
+      expect { child(action: "index") { skip_authorization except: "" } }
+        .to raise_error(ArgumentError, /:except is empty/)
+      expect { child(action: "index") { skip_authorization except: false } }
+        .to raise_error(ArgumentError, /takes action names as symbols or strings, got false/)
+      expect { child(action: "index") { skip_authorization except: [:destroy, 42] } }
+        .to raise_error(ArgumentError, /takes action names as symbols or strings, got 42/)
+
+      # The same values on only: exempt nothing, so they stay accepted.
+      c = child(action: "index") { skip_authorization only: false }
+      c.enforce_authorization
+      expect(c.rendered[:status]).to eq(:forbidden)
+    end
+
+    it "is inherited, outranks rules a subclass declares afterwards, and is switched off with only: []" do
+      blanket = Class.new(parent) { skip_authorization }
+
+      # The inherited blanket skip is checked before any rule, so the rule the
+      # subclass declares here looks active but never runs (documented gotcha).
+      ignored_rule = Class.new(blanket) { authorize_by(name: :admins_only) { false } }
+      c = ignored_rule.new
+      c.define_singleton_method(:action_name) { "destroy" }
+      c.define_singleton_method(:current_user) { nil }
+      expect(c.enforce_authorization).to be_nil
+      expect(c.rendered).to be_nil
+
+      restored = Class.new(blanket) { skip_authorization only: [] }
+      c = restored.new
+      c.define_singleton_method(:action_name) { "destroy" }
+      c.define_singleton_method(:current_user) { nil }
       c.enforce_authorization
       expect(c.rendered[:status]).to eq(:forbidden)
     end

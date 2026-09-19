@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
+require "active_support/notifications"
 
 module ConcernsOnRails
   module Controllers
@@ -58,9 +59,15 @@ module ConcernsOnRails
         end
 
         # Exempt actions from every rule — the declared ones AND the inherited
-        # ones, which `skip_before_action` can't do selectively. `only:`/`except:`
-        # (mutually exclusive) pick the actions; bare `skip_authorization`
-        # exempts them all. Inherited by subclasses; re-declare to change it.
+        # ones. `skip_before_action :enforce_authorization, only: %i[...]` is
+        # selective per subclass too; what it can't do is carry the exemption
+        # outside the callback chain, where `authorized?` and
+        # `authorization_skipped?` read it (a view asking "may this user
+        # delete?" has to get the same answer the gate would give).
+        # `only:`/`except:` (mutually exclusive) pick the actions; the bare form
+        # exempts them all and is the ONLY way to ask for a blanket skip — an
+        # empty or non-action `except:` raises instead of opening everything.
+        # Inherited by subclasses; re-declare to change it.
         def skip_authorization(only: UNSET, except: UNSET)
           validate_skip_authorization!(only, except)
 
@@ -97,6 +104,12 @@ module ConcernsOnRails
 
         def validate_skip_authorization!(only, except)
           raise ArgumentError, "#{LABEL}: pass either :only or :except, not both" if only != UNSET && except != UNSET
+
+          validate_skip_not_nil!(only, except)
+          validate_skip_except!(except) unless except == UNSET
+        end
+
+        def validate_skip_not_nil!(only, except)
           return unless only.nil? || except.nil?
 
           # A nil only:/except: must NOT silently degrade to the bare form.
@@ -106,6 +119,31 @@ module ConcernsOnRails
           raise ArgumentError,
                 "#{LABEL}: skip_authorization was given a nil :only/:except. Pass a list of actions, " \
                 "or call skip_authorization with no arguments to exempt every action."
+        end
+
+        # `except:` is the dangerous side: every action NOT listed is exempted,
+        # so a degenerate value ([], false, "") exempts the whole controller and
+        # all of its subclasses — `except: Rails.env.production? && :destroy`
+        # collapses to `false` everywhere else. The same values on `only:` are
+        # inert (they exempt nothing), so only this side is guarded. A blanket
+        # skip stays reachable through the bare `skip_authorization` alone.
+        def validate_skip_except!(except)
+          actions = Array(except)
+          invalid = actions.reject { |action| action.is_a?(Symbol) || action.is_a?(String) }
+          raise ArgumentError, skip_except_type_error(invalid) unless invalid.empty?
+          raise ArgumentError, skip_except_empty_error if actions.all? { |action| action.to_s.empty? }
+        end
+
+        def skip_except_type_error(invalid)
+          "#{LABEL}: skip_authorization :except takes action names as symbols or strings, got " \
+            "#{invalid.map(&:inspect).join(', ')}. A value like `Rails.env.production? && :destroy` " \
+            "collapses to false, which would exempt every action."
+        end
+
+        def skip_except_empty_error
+          "#{LABEL}: skip_authorization :except is empty, so every action would be exempted. List the " \
+            "actions that must stay authorized, or call skip_authorization with no arguments when a " \
+            "blanket skip is what you want."
         end
 
         def skip_authorization_actions(value)
@@ -168,14 +206,21 @@ module ConcernsOnRails
       end
 
       # Instruments `authorization_denied.concerns_on_rails` with the
-      # controller, action, actor, rule name, status and message — the hook for
-      # audit logs or alerting on repeated denials. Public override point; call
-      # super to keep the event.
+      # controller, action, actor id/type, rule name, status and message — the
+      # hook for audit logs or alerting on repeated denials. Public override
+      # point; call super to keep the event.
+      #
+      # The actor is reduced to scalars on purpose: notification payloads do NOT
+      # pass through `config.filter_parameters`, so a subscriber serialising the
+      # event would otherwise dump the whole user record — password digest,
+      # reset and 2FA tokens — on a path an anonymous request triggers at will.
       def on_authorization_denied(rule)
+        actor = authorization_actor
         ActiveSupport::Notifications.instrument(
           "authorization_denied.concerns_on_rails",
           controller: authorization_controller_name, action: authorization_action_name,
-          actor: authorization_actor, rule: rule[:name], status: rule[:status], message: rule[:message]
+          actor_id: actor.respond_to?(:id) ? actor.id : nil, actor_type: actor&.class&.name,
+          rule: rule[:name], status: rule[:status], message: rule[:message]
         )
       end
 

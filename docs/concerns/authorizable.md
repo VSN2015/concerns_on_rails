@@ -76,10 +76,18 @@ Calling `require_role` without at least one role argument raises `ArgumentError`
 ### `skip_authorization`
 
 ```
-skip_authorization(only: nil, except: nil)
+skip_authorization                        # exempt every action
+skip_authorization(only: %i[index show])  # exempt these actions
+skip_authorization(except: %i[destroy])   # exempt every action BUT these
 ```
 
-Exempts actions from **every** rule — the ones declared on this controller and the ones inherited from a parent, which `skip_before_action :enforce_authorization` can only do wholesale. `only:` lists the exempt actions, `except:` lists the enforced ones (mutually exclusive; both raise `ArgumentError`), and the bare form exempts all actions. A **nil** `only:`/`except:` raises rather than degrading to the bare form — `skip_authorization only: PUBLIC_ACTIONS` with an undefined constant would otherwise exempt every action of this controller and all of its subclasses. An empty list is valid and exempts nothing. Stored in the `authorizable_skip` class attribute, so subclasses inherit it and can re-declare it.
+Exempts actions from **every** rule — the ones declared on this controller and the ones inherited from a parent. `only:` lists the exempt actions, `except:` lists the enforced ones (mutually exclusive; passing both raises `ArgumentError`), and the bare form exempts all actions. Stored in the `authorizable_skip` class attribute, so subclasses inherit it and can re-declare it.
+
+The arguments are validated at class-load time, because every mistake here fails **open**:
+
+- A **nil** `only:`/`except:` raises rather than degrading to the bare form — `skip_authorization only: PUBLIC_ACTIONS` with an undefined constant would otherwise exempt every action of this controller and all of its subclasses.
+- An empty or non-action `except:` (`[]`, `false`, `""`, `[:destroy, 42]`) raises for the same reason: `except:` exempts everything it does *not* list, so `skip_authorization except: Rails.env.production? && :destroy` — `false` outside production — used to open the whole controller silently. A blanket skip is reachable only by calling `skip_authorization` with no arguments.
+- The same values on `only:` are accepted, because they are inert: `only: []` exempts nothing, which is the safe direction (and is how a subclass switches an inherited skip back off).
 
 ```ruby
 class Api::PagesController < Api::BaseController   # BaseController requires a signed-in user
@@ -104,7 +112,7 @@ end
 | `authorization_denied(status:, message:)` | Renders the error envelope. Delegates to `render_error` when `Respondable` is also included; otherwise renders inline JSON. Public override point. |
 | `authorized?(action = action_name)` | Evaluates the rules for `action` (default: the current action) exactly as `enforce_authorization` would — honouring `only:`/`except:` and `skip_authorization` — but never renders. Returns `true`/`false`. Declare it as a `helper_method` to drive conditional UI (`link_to "Delete", ... if authorized?(:destroy)`). |
 | `authorization_skipped?(action = action_name)` | `true` when `skip_authorization` exempts the action. |
-| `on_authorization_denied(rule)` | Called before a denial is rendered. Instruments `authorization_denied.concerns_on_rails` with `controller`, `action`, `actor`, `rule` (the `name:`), `status` and `message`. Public override point — call `super` to keep the event, or replace it to log/alert differently. |
+| `on_authorization_denied(rule)` | Called before a denial is rendered. Instruments `authorization_denied.concerns_on_rails` with `controller`, `action`, `actor_id`, `actor_type`, `rule` (the `name:`), `status` and `message`. Public override point — call `super` to keep the event, or replace it to log/alert differently. |
 
 ## Examples
 
@@ -172,7 +180,7 @@ end
 ActiveSupport::Notifications.subscribe("authorization_denied.concerns_on_rails") do |event|
   p = event.payload
   Rails.logger.warn("[authz] #{p[:controller]}##{p[:action]} denied by #{p[:rule] || 'unnamed rule'} " \
-                    "for #{p[:actor]&.id || 'anonymous'} (#{p[:status]})")
+                    "for #{p[:actor_type]}##{p[:actor_id] || 'anonymous'} (#{p[:status]})")
 end
 
 class Api::BaseController < ApplicationController
@@ -214,9 +222,10 @@ end
 - **Respondable integration.** When `ConcernsOnRails::Controllers::Respondable` is also included in the controller, `authorization_denied` delegates to `render_error`, which produces a consistent `{ success: false, error: { message:, code: "forbidden" } }` envelope. Without Respondable the same shape is rendered inline directly. The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`.
 - **`authorization_denied` fails CLOSED when `response` is nil or absent (since 1.22).** A denial that cannot be rendered raises instead of returning nil — pre-1.22 the silent no-op let the action run unauthorized. Test harnesses driving `enforce_authorization` directly must provide a response object (or expect the raise).
 - **Subclass inheritance.** `authorizable_rules` is a `class_attribute`. Each call to `add_authorization_rule` replaces it with `authorizable_rules + [rule]` (a new array), so subclasses that add rules do not mutate the parent's array and the parent's rules are preserved at the front of the child's list.
-- **`skip_authorization` vs `skip_before_action`.** `skip_before_action :enforce_authorization` removes the whole gate; `skip_authorization only:` keeps it and exempts specific actions — including from rules inherited from a parent, which `except:` on the parent's rule can't express per subclass. Pundit's `skip_authorization` is an *instance* method with a different purpose; the two don't collide, but don't confuse them.
+- **`skip_authorization` vs `skip_before_action`.** `skip_before_action :enforce_authorization, only: %i[index show]` *is* selective and *does* work per subclass — that is not the difference. What it cannot do is follow the exemption outside the callback chain: it removes the callback, so `authorized?` and `authorization_skipped?` still report the action as gated, and a view driven by `authorized?` hides buttons for an action the controller in fact allows. `skip_authorization` records the exemption on the class, so the gate, the predicate and the view all agree. Pundit's `skip_authorization` is an *instance* method with a different purpose; the two don't collide, but don't confuse them.
+- **An inherited blanket `skip_authorization` outranks rules a subclass declares later.** The skip is checked before any rule runs and is inherited, so a subclass of a controller that called the bare `skip_authorization` is exempt from every rule — including the ones it declares itself, which look active but never run. Re-declare the skip in the subclass to switch it back on: `skip_authorization only: []` exempts nothing.
 - **`authorized?` runs the predicates.** It calls the same blocks `enforce_authorization` does (with the action you pass), so a predicate with side effects runs again; keep predicates pure.
-- **The event carries the actor object.** `payload[:actor]` is whatever `current_user` returns — pull the id out in your subscriber rather than logging the object.
+- **The event carries actor scalars, not the actor.** `payload[:actor_id]` (nil when there is no actor or it has no `id`) and `payload[:actor_type]` (its class name) are emitted instead of `current_user` itself. Notification payloads are **not** filtered by `config.filter_parameters`, so a subscriber that serialises the event would otherwise ship the whole user record — password digest, reset and 2FA tokens — on a path an anonymous request can trigger at will. Load the record from the id if a subscriber needs more.
 - **Not a policy framework.** There are no policy objects, resource inference, or ability DSL. For complex permission models, prefer [Pundit](https://github.com/varvet/pundit) or [CanCanCan](https://github.com/CanCanCommunity/cancancan).
 
 ## Changed in 1.22.0
