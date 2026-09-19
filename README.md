@@ -2228,6 +2228,7 @@ class Api::ArticlesController < ApplicationController
 
   http_cache_actions :index, :show, max_age: 5.minutes,
                      visibility: :public, vary: "Accept"
+  etag_with :locale                           # the body depends on I18n.locale → folded into the ETag, Vary: Accept-Language
 
   def show
     @article = Article.find(params[:id])
@@ -2238,7 +2239,7 @@ end
 
 # A matching response then carries:
 #   Cache-Control: public, max-age=300
-#   Vary: Accept
+#   Vary: Accept-Language, Accept
 #   ETag: W/"…"
 #   Last-Modified: Thu, 01 Jan 2026 12:00:00 GMT
 ```
@@ -2246,6 +2247,15 @@ end
 `http_cache_actions` declares the `Cache-Control`/`Vary` policy (emitted via `after_action` — it rides a 304 too); `stale_resource?` sets the ETag/Last-Modified validators and, on a safe request whose precondition matches, sends `304 Not Modified` and returns `false`.
 
 **Options** (`http_cache_actions *actions, …`, repeatable; no actions = catch-all; **last matching rule wins**): `visibility:` (`:private` default | `:public`), `max_age:` (Integer/Duration), `must_revalidate:`, `no_store:` (overrides everything → bare `no-store`), `stale_while_revalidate:`, `vary:` (String or Array, appended to any existing `Vary`).
+
+**ETag context** (`etag_with`, repeatable — the analogue of Rails' class-level `etag { }`): when the representation depends on more than the record — the locale, the requested fields, the caller's role — declare it and the values are folded into the ETag so two representations of one resource never share a validator. Sources are presets (`:locale` → also `Vary: Accept-Language`, `:format` → `Vary: Accept`, `:query`), Symbols naming controller methods, or a block (`instance_exec`'d); `vary:` overrides the implied header(s), `vary: false` suppresses them; nil values are ignored. Per call: `stale_resource?(@article, extras: [params[:fields]])`. An explicit `etag:` stays verbatim only when there is no context to fold in.
+
+**A source with no `Vary` forces `private`.** A controller method, a block, or a preset with `vary: false` folds a dimension into the ETag that no cache can key on — `Vary` has no way to say *who is asking* — so the response is not shareable and `Cache-Control` is emitted as `private` whatever the rule declared. (`:query` is exempt: the URL already carries it.)
+
+```ruby
+http_cache_actions :show, max_age: 30, visibility: :public
+etag_with { current_user&.role }             # => Cache-Control: private, max-age=30
+```
 
 **Conditional-GET correctness**
 - Weak ETag `W/"<md5>"` from the resource's cache key (collections fold their members' keys + size); `If-None-Match` is matched with **weak comparison**, honours `*`, and accepts a comma-separated list.
