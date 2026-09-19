@@ -313,7 +313,15 @@ module ConcernsOnRails
       def lockable_write_with_hooks(previous_values)
         completed = false
         begin
-          transaction do
+          # requires_new: a bare `transaction` JOINS an enclosing one rather
+          # than opening a savepoint, and Rails then swallows
+          # ActiveRecord::Rollback without rolling anything back. Inside a
+          # caller's `ApplicationRecord.transaction { user.lock_access! }`,
+          # a hook raising Rollback left the row locked in the database while
+          # the ensure below restored locked_at = nil in memory and this
+          # method returned false — and the idempotency guard in
+          # lock_access! then made every retry a no-op.
+          transaction(requires_new: true) do
             yield
             completed = true
           end

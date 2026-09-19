@@ -519,6 +519,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
         .to raise_error(ArgumentError, /pins SHA256/)
     end
   end
+
   describe "replay protection (replay: / replay_ttl:)" do
     class FakeReplayStore
       attr_reader :data, :writes
@@ -701,6 +702,105 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       expect(rule[:replay_ttl]).to eq(3600)
       plain = verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :hex, header: "X" }
       expect(plain.webhook_rules.first[:replay]).to be_nil
+    end
+  end
+
+  describe "#webhook_verification_failed" do
+    # The Authorizable precedent (1.22): a gate that cannot render its own
+    # rejection must raise, never return nil — returning let the action run on
+    # an unverified payload. See authorizable_spec.rb "fails CLOSED".
+    it "fails CLOSED when there is no response object" do
+      klass = verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :github }
+      c = instance(klass, headers: { "X-Hub-Signature-256" => github_sig("wrong", WH_BODY) })
+      c.response = nil
+
+      expect { c.verify_webhook_signature! }.to raise_error(/refusing to fail open/)
+      expect(c.webhook_verified?).to be false
+    end
+
+    it "fails CLOSED when the signature header is missing and there is no response object" do
+      klass = verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :github }
+      c = instance(klass)
+      c.response = nil
+
+      expect { c.verify_webhook_signature! }.to raise_error(/refusing to fail open/)
+    end
+
+    it "still renders when there is no response but a render_error override exists" do
+      klass = verifiable_class do
+        verify_webhook :receive, secret: WH_SECRET, scheme: :github
+
+        def render_error(message:, status:, code: nil, **)
+          @rendered = { message: message, status: status, code: code }
+        end
+      end
+      c = instance(klass, headers: { "X-Hub-Signature-256" => github_sig("wrong", WH_BODY) })
+      c.response = nil
+
+      expect { c.verify_webhook_signature! }.not_to raise_error
+      expect(c.instance_variable_get(:@rendered)).to include(code: "webhook_signature_invalid")
+    end
+  end
+
+  describe "an unresolvable action name" do
+    it "does not skip verification when rules are declared" do
+      klass = verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :github }
+      c = klass.new(params: {})
+      req = WebhookFakeRequest.new({}, WH_BODY)
+      c.define_singleton_method(:request) { req }
+      # No action_name at all — previously webhook_rule_for_action returned nil
+      # and every webhook was accepted without a signature check.
+      c.verify_webhook_signature!
+
+      expect(c.webhook_verified?).to be false
+      expect_failure(c, :unauthorized, "webhook_signature_missing")
+    end
+
+    it "does not skip verification when action_name is blank" do
+      klass = verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :github }
+      c = instance(klass, action: "")
+
+      c.verify_webhook_signature!
+
+      expect(c.webhook_verified?).to be false
+      expect_failure(c, :unauthorized, "webhook_signature_missing")
+    end
+
+    # With several per-provider rules and no catch-all there is no honest way
+    # to pick one: verifying a GitHub delivery against Stripe's secret rejects
+    # a perfectly valid payload with "signature invalid", sending the provider
+    # chasing a signing bug that does not exist. Still fails closed — the
+    # action does not run — but says what actually went wrong.
+    it "raises rather than verifying against an arbitrary provider's secret" do
+      klass = verifiable_class do
+        verify_webhook :stripe_hook, secret: WH_SECRET, scheme: :stripe
+        verify_webhook :github_hook, secret: "other-secret", scheme: :github
+      end
+      c = instance(klass, action: "")
+
+      expect { c.verify_webhook_signature! }
+        .to raise_error(/cannot tell which action/)
+    end
+
+    it "uses the catch-all rule when one is declared" do
+      klass = verifiable_class do
+        verify_webhook :github_hook, secret: "other-secret", scheme: :github
+        verify_webhook secret: WH_SECRET, scheme: :github
+      end
+      c = instance(klass, action: "")
+
+      c.verify_webhook_signature!
+
+      expect(c.webhook_verified?).to be false
+      expect_failure(c, :unauthorized, "webhook_signature_missing")
+    end
+
+    it "still verifies normally when the action IS resolvable and uncovered" do
+      klass = verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :github }
+      c = instance(klass, action: "index")
+
+      expect(c.verify_webhook_signature!).to be_nil
+      expect(c.rendered).to be_nil
     end
   end
 end

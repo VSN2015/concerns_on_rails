@@ -1,4 +1,5 @@
 require "spec_helper"
+require "support/integration_harness"
 require "active_support/rescuable"
 
 # NOTE: FakeController cannot simulate performed?/double-render; the concern's
@@ -725,6 +726,156 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       from_relation = make_controller.cursor_paginated(Item.all)
 
       expect(from_class.map(&:id)).to eq(from_relation.map(&:id))
+    end
+  end
+
+  describe "RFC 8288 Link header (through the real ActionController stack)" do
+    def cursor_link_controller(**macro)
+      IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by(order: { created_at: :asc }, per_page: 20, **macro)
+
+        define_method(:index) { render json: cursor_paginated(Item.all).map(&:id) }
+      end
+    end
+
+    def links(result)
+      header = result.header("Link")
+      return {} unless header
+
+      header.split(", ").to_h { |entry| entry.match(/\A<(.+)>; rel="(.+)"\z/).captures.reverse }
+    end
+
+    it "emits next (with the X-Next-Cursor token) on the first page, and no first/prev" do
+      result = IntegrationHarness.dispatch(cursor_link_controller, :index, query: "per_page=20")
+      token = result.header("X-Next-Cursor")
+      expect(token).to be_present
+      expect(links(result)).to eq("next" => "http://example.org/?per_page=20&cursor=#{token}")
+    end
+
+    it "emits first (cursor dropped) once a cursor is in play, and no next on the last page" do
+      first = IntegrationHarness.dispatch(cursor_link_controller, :index, query: "per_page=20")
+      second = IntegrationHarness.dispatch(cursor_link_controller, :index, query: "per_page=20&cursor=#{first.header('X-Next-Cursor')}")
+      expect(links(second).keys).to match_array(%w[first next])
+      expect(links(second)["first"]).to eq("http://example.org/?per_page=20")
+
+      third = IntegrationHarness.dispatch(cursor_link_controller, :index, query: "per_page=20&cursor=#{second.header('X-Next-Cursor')}")
+      expect(third.header("X-Has-More")).to eq("false")
+      expect(links(third).keys).to eq(%w[first])
+    end
+
+    it "adds prev in bidirectional mode, preserving the order preset param" do
+      klass = cursor_link_controller(bidirectional: true, order: nil, order_presets: { oldest: { created_at: :asc } })
+      first = IntegrationHarness.dispatch(klass, :index, query: "order=oldest&per_page=20")
+      second = IntegrationHarness.dispatch(klass, :index, query: "order=oldest&per_page=20&cursor=#{first.header('X-Next-Cursor')}")
+      expect(links(second).keys).to match_array(%w[first prev next])
+      expect(links(second)["prev"]).to eq("http://example.org/?order=oldest&per_page=20&cursor=#{second.header('X-Prev-Cursor')}")
+    end
+
+    it "can be switched off with cursor_paginate_by link_header: false" do
+      result = IntegrationHarness.dispatch(cursor_link_controller(link_header: false), :index, query: "per_page=20")
+      expect(result.header("Link")).to be_nil
+      expect(result.header("X-Next-Cursor")).to be_present
+    end
+
+    it "is skipped silently when the controller has no request (bare harness)" do
+      c = make_controller(per_page: 5)
+      c.class.cursor_paginate_by(order: { created_at: :asc })
+      c.cursor_paginated(Item.all)
+      expect(c.response.headers).not_to have_key("Link")
+      expect(c.response.headers["X-Has-More"]).to eq("true")
+    end
+  end
+
+  describe "signed cursors (cursor_paginate_by signed:)" do
+    let(:key) { "a-very-long-and-secret-signing-key" }
+
+    def signed_controller(params = {}, signed: key, **macro)
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by(order: { created_at: :asc }, signed: signed, **macro)
+      end
+      klass.new(params: params)
+    end
+
+    it "mints payload.signature tokens (URL-safe, 64-hex HMAC) and walks pages exactly like unsigned ones" do
+      page1 = signed_controller({ per_page: 10 })
+      page1.cursor_paginated(Item.all)
+      token = page1.response.headers["X-Next-Cursor"]
+      expect(token).to match(/\A[A-Za-z0-9_-]+\.[0-9a-f]{64}\z/)
+      expect(decode(token.split(".").first)).to include("t" => "items", "v" => be_an(Array))
+
+      page2 = signed_controller({ per_page: 10, cursor: token })
+      expect(page2.cursor_paginated(Item.all).map(&:id)).to eq(Item.order(:created_at, :id).pluck(:id)[10, 10])
+    end
+
+    it "rejects a tampered payload, a tampered signature, and an unsigned token — fail closed" do
+      page1 = signed_controller({ per_page: 10 })
+      page1.cursor_paginated(Item.all)
+      payload, signature = page1.response.headers["X-Next-Cursor"].split(".")
+
+      forged_payload = encode(decode(payload).merge("v" => [decode(payload)["v"][0], 1]))
+      [
+        "#{forged_payload}.#{signature}",
+        "#{payload}.#{signature.reverse}",
+        payload,
+        "#{payload}.",
+        "#{payload}.#{signature}.extra"
+      ].each do |bad|
+        expect { signed_controller({ cursor: bad }).cursor_paginated(Item.all) }
+          .to raise_error(described_class::InvalidCursor, /Invalid pagination cursor/), "accepted: #{bad}"
+      end
+    end
+
+    it "signs prev cursors in bidirectional mode too" do
+      page1 = signed_controller({ per_page: 10 }, bidirectional: true)
+      page1.cursor_paginated(Item.all)
+      page2 = signed_controller({ per_page: 10, cursor: page1.response.headers["X-Next-Cursor"] }, bidirectional: true)
+      page2.cursor_paginated(Item.all)
+      prev = page2.response.headers["X-Prev-Cursor"]
+      expect(prev).to match(/\A[A-Za-z0-9_-]+\.[0-9a-f]{64}\z/)
+      back = signed_controller({ per_page: 10, cursor: prev }, bidirectional: true)
+      expect(back.cursor_paginated(Item.all).map(&:id)).to eq(Item.order(:created_at, :id).pluck(:id)[0, 10])
+    end
+
+    it "keys from a Proc (resolved per request) or a String; tokens do not verify under another key" do
+      proc_page = signed_controller({ per_page: 5 }, signed: -> { "rotating-#{key}" })
+      proc_page.cursor_paginated(Item.all)
+      token = proc_page.response.headers["X-Next-Cursor"]
+      expect { signed_controller({ cursor: token }, signed: "rotating-#{key}").cursor_paginated(Item.all) }.not_to raise_error
+      expect { signed_controller({ cursor: token }, signed: key).cursor_paginated(Item.all) }
+        .to raise_error(described_class::InvalidCursor)
+    end
+
+    it "signed: true uses Rails.application.secret_key_base when Rails is present" do
+      app = Struct.new(:secret_key_base).new("rails-secret-key-base-value")
+      stub_const("Rails", Module.new)
+      Rails.define_singleton_method(:application) { app }
+      page1 = signed_controller({ per_page: 5 }, signed: true)
+      page1.cursor_paginated(Item.all)
+      token = page1.response.headers["X-Next-Cursor"]
+      expect { signed_controller({ cursor: token }, signed: "rails-secret-key-base-value").cursor_paginated(Item.all) }.not_to raise_error
+    end
+
+    it "signed: true without a Rails application raises a configuration error at first use" do
+      hide_const("Rails")
+      c = signed_controller({ per_page: 5 }, signed: true)
+      expect { c.cursor_paginated(Item.all) }
+        .to raise_error(ArgumentError, /signed: true needs Rails\.application\.secret_key_base.*pass signed: -> \{ \.\.\. \}/)
+    end
+
+    it "rejects a blank key and an unsupported signed: value at class load" do
+      expect { signed_controller({}, signed: "") }.to raise_error(ArgumentError, /signed: must be true, false, a String or a callable/)
+      expect { signed_controller({}, signed: 42) }.to raise_error(ArgumentError, /signed: must be true, false, a String or a callable/)
+    end
+
+    it "stays unsigned by default (existing tokens keep their shape)" do
+      c = make_controller(per_page: 10)
+      c.cursor_paginated(Item.all)
+      expect(c.response.headers["X-Next-Cursor"]).to match(/\A[A-Za-z0-9_-]+\z/)
+      expect(controller_class.cursor_paginatable_signed).to be(false)
     end
   end
 end
