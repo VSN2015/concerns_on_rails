@@ -11,6 +11,10 @@ on:
       - "script/build_llms_docs.rb"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
+  # Called by ci.yml on a v* tag so every released version redeploys the docs
+  # site from the exact tagged tree (docs/assets/js/concerns.js carries the
+  # version the site displays).
+  workflow_call:
 
 # Allow the GITHUB_TOKEN to deploy to Pages.
 permissions:
@@ -18,10 +22,12 @@ permissions:
   pages: write
   id-token: write
 
-# Allow one concurrent deployment; cancel in-progress runs for the same ref.
+# Allow one concurrent deployment. Queued runs are superseded, but an in-progress
+# deployment is always allowed to finish -- a release pushes master and the v* tag
+# back to back, so two deploys of the same tree can overlap.
 concurrency:
   group: "pages"
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
