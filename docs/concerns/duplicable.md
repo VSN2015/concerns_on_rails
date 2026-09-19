@@ -60,8 +60,8 @@ Business state (Publishable, Stateable, Activatable, Expirable, …) is a judgme
 
 | Signature | Description |
 |---|---|
-| `duplicate(overrides = {})` | Returns an **unsaved** deep copy: `dup` + identity resets + `reset:` + `suffix:` + `overrides` (assigned through writers) + copied associations + the `on_duplicate` hook. |
-| `duplicate!(overrides = {})` | `duplicate` then `save!` in one transaction — the copy and its copied children persist together via autosave. Returns the saved copy. |
+| `duplicate(overrides = {}, only: nil, except: nil)` | Returns an **unsaved** deep copy: `dup` + identity resets + `reset:` + `suffix:` + `overrides` (assigned through writers) + copied associations + the `on_duplicate` hook. `only:` / `except:` (a name or Array of names from the macro's `associations:` allow-list) choose which associations **this** copy carries; `only: []` copies none. Both together, or a name that isn't allow-listed, raise `ArgumentError`. Braceless overrides (`duplicate(title: "Q3", except: :line_items)`) work — `only`/`except` are reserved keys, so an attribute literally named that must be passed in a braced Hash. |
+| `duplicate!(overrides = {}, only: nil, except: nil)` | `duplicate` then `save!` in one transaction — the copy and its copied children persist together via autosave. Returns the saved copy. Same `only:` / `except:` semantics. |
 | `on_duplicate(copy)` | Override point (no-op default) — receives the unsaved copy as the last step of `duplicate`. |
 
 ## Examples
@@ -104,8 +104,28 @@ class SurveyTemplate < ApplicationRecord
 end
 ```
 
+**Per-copy association selection**
+
+```ruby
+class Invoice < ApplicationRecord
+  include ConcernsOnRails::Models::Duplicable
+
+  has_many :line_items
+  has_one  :note
+  has_and_belongs_to_many :tags
+  duplicable_by associations: %i[line_items note tags], suffix: { title: " (copy)" }
+end
+
+invoice.duplicate!                                  # everything the macro allows
+invoice.duplicate!(except: :line_items)             # "Duplicate without items" — note + tags still copied
+invoice.duplicate!(only: :tags)                     # just re-link the tags
+invoice.duplicate!(title: "Q3", only: [])           # shallow copy with an override
+invoice.duplicate(only: :payments)                  # ArgumentError — not in the allow-list
+```
+
 ## Notes & gotchas
 
+- **`only:` / `except:` filter, they don't extend.** The macro's `associations:` list is the ceiling: a per-call name outside it raises, so a controller param can never smuggle in an association you didn't vet. Children copied through their *own* Duplicable rules still use their own macro lists — the filter applies to the top level only.
 - **Declare associations before the macro** (the CounterCacheable convention) — `duplicable_by` validates each name against `reflect_on_association` and raises at class-load time, not at request time.
 - **`belongs_to` is deliberately rejected.** The copy keeps the foreign key from `dup`, so it *shares* its parents; copying a parent from the child side is almost always an accident.
 - **`has_many :through` is deliberately rejected.** Duplicate the direct association — the through rows follow from it.

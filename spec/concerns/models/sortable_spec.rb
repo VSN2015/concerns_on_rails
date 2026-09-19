@@ -306,4 +306,80 @@ describe ConcernsOnRails::Sortable do
       expect(first.reload.position).to eq(2)
     end
   end
+
+  describe ".reposition! (bulk reorder from an id list)" do
+    let!(:a) { Task.create!(name: "A") }
+    let!(:b) { Task.create!(name: "B") }
+    let!(:c) { Task.create!(name: "C") }
+
+    it "sets positions to match the id order in one UPDATE and returns the count" do
+      queries = []
+      callback = ->(*, payload) { queries << payload[:sql] if payload[:sql] =~ /\AUPDATE/i }
+      count = ActiveSupport::Notifications.subscribed(callback, "sql.active_record") { Task.reposition!([c.id, a.id, b.id]) }
+
+      expect(count).to eq(3)
+      expect(queries.size).to eq(1)
+      expect(queries.first).to match(/CASE .*"tasks"\."id" WHEN/i)
+      expect(Task.pluck(:name)).to eq(%w[C A B])
+      expect(Task.pluck(:position)).to eq([1, 2, 3])
+      expect(Task.reposition!(%w[1 2 3].map { |i| Task.find_by!(position: i).id.to_s })).to eq(3) # String ids from params
+    end
+
+    it "pushes rows missing from the list after it (in their current order) — or raises with missing: :raise" do
+      expect(Task.reposition!([c.id])).to eq(3)
+      expect(Task.pluck(:name)).to eq(%w[C A B])
+
+      expect { Task.reposition!([b.id], missing: :raise) }
+        .to raise_error(ArgumentError, /2 record\(s\) in this relation are missing from ids \(pass missing: :append/)
+      expect(Task.pluck(:name)).to eq(%w[C A B]) # nothing written
+      expect { Task.reposition!([b.id], missing: :nope) }.to raise_error(ArgumentError, /missing: must be :append or :raise/)
+    end
+
+    it "rejects ids outside the relation and duplicates, and stays inside a scoped relation" do
+      ActiveRecord::Schema.define do
+        create_table :scoped_tasks, force: true do |t|
+          t.string :name
+          t.integer :list_id
+          t.integer :position
+        end
+      end
+      klass = Class.new(TestModel) do
+        self.table_name = "scoped_tasks"
+        include ConcernsOnRails::Sortable
+
+        sortable_by :position, scope: :list_id
+      end
+      l1 = %w[x y z].map { |n| klass.create!(name: n, list_id: 1) }
+      l2 = klass.create!(name: "other", list_id: 2)
+
+      expect(klass.where(list_id: 1).reposition!([l1[2].id, l1[0].id, l1[1].id])).to eq(3)
+      expect(klass.where(list_id: 1).pluck(:name)).to eq(%w[z x y])
+      expect(l2.reload.position).to eq(1)
+
+      expect { klass.where(list_id: 1).reposition!([l2.id, l1[0].id]) }
+        .to raise_error(ArgumentError, /id\(s\) #{l2.id} are not in this relation/)
+      expect { klass.where(list_id: 1).reposition!([l1[0].id, l1[0].id]) }.to raise_error(ArgumentError, /duplicate id\(s\)/)
+      expect(klass.where(list_id: 3).reposition!([])).to eq(0)
+    end
+
+    it "gives the first id the highest position on a descending list" do
+      ActiveRecord::Schema.define do
+        create_table :ranked_tasks, force: true do |t|
+          t.string :name
+          t.integer :priority
+        end
+      end
+      klass = Class.new(TestModel) do
+        self.table_name = "ranked_tasks"
+        include ConcernsOnRails::Sortable
+
+        sortable_by priority: :desc, use_acts_as_list: false
+      end
+      x, y, z = %w[x y z].map { |n| klass.create!(name: n) }
+
+      expect(klass.reposition!([y.id, z.id, x.id])).to eq(3)
+      expect(klass.pluck(:name)).to eq(%w[y z x])
+      expect(klass.pluck(:priority)).to eq([3, 2, 1])
+    end
+  end
 end

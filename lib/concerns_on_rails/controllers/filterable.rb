@@ -95,12 +95,12 @@ module ConcernsOnRails
         private :filterable_normalize_operators, :filterable_operator_list, :filterable_normalize_type
       end
 
-      # Apply all declared filters to a relation based on params. Blank values
-      # are skipped so unset filters don't narrow the relation.
+      # Apply all declared filters to a relation based on params. Unset values
+      # are skipped so absent filters don't narrow the relation.
       def filtered(relation)
         self.class.filterable_rules.each do |field, options|
           value = params[field]
-          relation = apply_filter(relation, field, value, options) unless value.blank?
+          relation = apply_filter(relation, field, value, options) unless filterable_unset?(value)
           relation = apply_filter_operator_suffixes(relation, field, options) if options[:operators]
         end
         relation
@@ -108,14 +108,29 @@ module ConcernsOnRails
 
       private
 
+      # NOT `value.blank?`: `false.blank?` is true, so a genuine boolean false
+      # read as "filter not supplied" and the relation came back UNFILTERED —
+      # `filter_by :active` could never select the inactive rows. Query strings
+      # were unaffected (they carry the String "false", which is not blank), so
+      # this only bit JSON request bodies, where the value really is `false`.
+      # Everything actually empty — nil, "", "   ", [], {} — is still skipped.
+      def filterable_unset?(value)
+        return false if value == false
+        return true if value.nil?
+
+        value.respond_to?(:blank?) ? value.blank? : false
+      end
+
       def apply_filter(relation, field, value, options)
         if options[:with]
-          # `type:` pre-casts a with: lambda's value; the column's own type must
-          # NOT, or every existing lambda on a column-backed param silently
-          # starts receiving true / a Time where it used to get "1" / "2020-01-02".
-          options[:with].call(relation, options[:type] ? options[:type].cast(value) : value)
+          apply_filter_lambda(relation, value, options)
         elsif options[:scope]
-          relation.public_send(options[:scope])
+          # Scope mode discards the value, so an explicit `false` can only mean
+          # "do not apply this scope" — applying it would hand the client the
+          # exact opposite of what it asked for. (A query string still carries
+          # the String "false", which has always triggered the scope; only a
+          # real boolean is read as a negation.)
+          value == false ? relation : relation.public_send(options[:scope])
         elsif filterable_scalar?(value)
           relation.where(field => value)
         elsif options[:operators] && value.respond_to?(:each_pair)
@@ -127,6 +142,13 @@ module ConcernsOnRails
           # lambda or `operators:`.
           relation
         end
+      end
+
+      # `type:` pre-casts a with: lambda's value; the column's own type must
+      # NOT, or every existing lambda on a column-backed param silently starts
+      # receiving true / a Time where it used to get "1" / "2020-01-02".
+      def apply_filter_lambda(relation, value, options)
+        options[:with].call(relation, options[:type] ? options[:type].cast(value) : value)
       end
 
       # ?price[gte]=10&price[lte]=50 — unknown keys are ignored.
