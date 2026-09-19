@@ -102,7 +102,12 @@ describe ConcernsOnRails::Controllers::Paginatable do
 
   it "counts groups (not a raw Hash) for a grouped relation" do
     controller = controller_class.new(params: { per_page: 10 })
-    records = controller.paginated(Widget.group(:name))
+    # `.select(:name)` is the caller's job, not the concern's: the default
+    # `SELECT widgets.*` alongside `GROUP BY widgets.name` is invalid SQL on
+    # PostgreSQL and on MySQL's only_full_group_by, and only SQLite accepts it.
+    # The count path strips the select (`except(:select)`) and still counts
+    # groups, which is what this example is about.
+    records = controller.paginated(Widget.group(:name).select(:name))
     expect { records.to_a }.not_to raise_error
     # 50 distinct names => 50 groups
     expect(controller.response.headers["X-Total-Count"]).to eq("50")

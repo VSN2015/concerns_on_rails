@@ -595,12 +595,17 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
   describe "NULL ordering values" do
     it "raises loudly when the page-boundary row has a NULL ordering value" do
       Item.delete_all
-      Item.create!(name: "null-score", score: nil)
-      Item.create!(name: "scored", score: 1)
+      # Every row is NULL-scored on purpose. Where the NULL lands in the sort is
+      # adapter-specific — SQLite and MySQL order NULLs first ascending,
+      # PostgreSQL orders them last — so a mixed fixture only puts a NULL on the
+      # page boundary on two of the three. With no non-NULL score anywhere, the
+      # boundary row carries a NULL whichever way the adapter sorts, and the
+      # guard under test fires on every one of them.
+      Item.create!(name: "null-score-a", score: nil)
+      Item.create!(name: "null-score-b", score: nil)
 
       controller = make_controller(per_page: 1)
       expect do
-        # SQLite sorts NULLs first ascending, so the NULL row lands on the boundary
         controller.cursor_paginated(Item.all, order: :score)
       end.to raise_error(ArgumentError, /NULL on the page-boundary row/)
     end
