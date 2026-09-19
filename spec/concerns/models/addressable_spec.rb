@@ -669,4 +669,149 @@ describe ConcernsOnRails::Models::Addressable do
       expect(loc.city).to eq("Town")
     end
   end
+
+  describe "address_fingerprint, same_address_as?, address_changed? and fingerprint:" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :fingerprinted_locations, force: true do |t|
+          t.string :line1
+          t.string :line2
+          t.string :city
+          t.string :state
+          t.string :postal_code
+          t.string :country
+          t.string :address_fingerprint
+        end
+      end
+    end
+
+    def fingerprinted(**opts)
+      Class.new(TestModel) do
+        self.table_name = "fingerprinted_locations"
+        include ConcernsOnRails::Models::Addressable
+
+        addressable_by(**opts)
+      end
+    end
+
+    let(:klass) { fingerprinted }
+    let(:apple) { { line1: "  1 Infinite  Loop ", city: "Cupertino", state: "ca", postal_code: "95014", country: "us" } }
+    let(:apple_shouty) { { line1: "1 INFINITE LOOP", city: "cupertino", state: "CA", postal_code: " 95014", country: "US" } }
+
+    it "is stable across case, whitespace, postal formatting and the default country; nil for a blank address" do
+      a = klass.new(apple)
+      b = klass.new(apple_shouty)
+      expect(a.address_fingerprint).to match(/\A\h{64}\z/)
+      expect(a.address_fingerprint).to eq(b.address_fingerprint)
+      expect(klass.new(apple.merge(line1: "2 Infinite Loop")).address_fingerprint).not_to eq(a.address_fingerprint)
+      expect(klass.new(apple.merge(line2: "Suite 4")).address_fingerprint).not_to eq(a.address_fingerprint)
+
+      expect(klass.new(apple.except(:country)).address_fingerprint).to eq(a.address_fingerprint) # blank → default_country "US"
+      canada = klass.new(line1: "1 Rue Sainte-Catherine", city: "Montréal", postal_code: "h2x1y4", country: "ca")
+      spaced = klass.new(line1: "1 Rue Sainte-Catherine", city: "Montréal", postal_code: "H2X 1Y4", country: "CA")
+      expect(canada.address_fingerprint).to eq(spaced.address_fingerprint)
+
+      expect(klass.new.address_fingerprint).to be_nil
+      expect(klass.new(country: "US").address_fingerprint).to be_nil # a country alone is not an address
+    end
+
+    it "stamps after every before_validation, so a sibling concern cannot desync the column" do
+      # Normalizable registers its own before_validation AFTER Addressable's,
+      # so a fingerprint computed inside normalize_address would be taken from
+      # a city that is about to change -- and with_address would then miss the
+      # record itself.
+      klass = Class.new(TestModel) do
+        self.table_name = "fingerprinted_locations"
+        include ConcernsOnRails::Models::Addressable
+        include ConcernsOnRails::Models::Normalizable
+
+        addressable_by fingerprint: :address_fingerprint
+        normalizable :city, with: ->(value) { value.to_s.sub(/\s*\(.*\)\z/, "") }
+      end
+
+      record = klass.create!(line1: "1 Infinite Loop", city: "Cupertino (HQ)", state: "CA",
+                             postal_code: "95014", country: "US")
+      expect(record.city).to eq("Cupertino")
+      expect(record.reload.address_fingerprint).to eq(record.address_fingerprint)
+      expect(klass.with_address(record).count).to eq(1)
+    end
+
+    it "stamps on save(validate: false) too" do
+      record = klass.new(apple)
+      record.save(validate: false)
+      expect(record.reload.address_fingerprint).to eq(record.address_fingerprint)
+    end
+
+    it "keeps ActiveModel's address_changed? when the model has its own address column" do
+      ActiveRecord::Schema.define do
+        create_table :blob_locations, force: true do |t|
+          t.string :address
+          t.string :line1
+          t.string :city
+        end
+      end
+      legacy = Class.new(TestModel) do
+        self.table_name = "blob_locations"
+        include ConcernsOnRails::Models::Addressable
+
+        addressable_by required: %i[line1 city]
+      end
+
+      record = legacy.create!(address: "1 Infinite Loop, Cupertino", line1: "1 Infinite Loop", city: "Cupertino")
+      record.address = "2 Infinite Loop, Cupertino"
+      expect(record.address_changed?).to be(true) # Rails' dirty predicate, not the concern's
+      expect(record.address_parts_changed?).to be(false)
+    end
+
+    it "same_address_as? compares fingerprints and address_changed? tracks the mapped columns" do
+      a = klass.new(apple)
+      expect(a.same_address_as?(klass.new(apple_shouty))).to be(true)
+      expect(a.same_address_as?(klass.new(apple.merge(city: "Palo Alto")))).to be(false)
+      expect(klass.new.same_address_as?(klass.new)).to be(false) # two blanks are not "the same address"
+
+      saved = klass.create!(apple)
+      expect(saved.address_changed?).to be(false)
+      saved.line1 = "2 Infinite Loop"
+      expect(saved.address_changed?).to be(true)
+      saved.restore_attributes
+      saved.state = "CA" # already normalized to that
+      expect(saved.address_changed?).to be(false)
+    end
+
+    it "fingerprint: stamps the column in before_validation (after normalization) and powers with_address" do
+      klass = fingerprinted(fingerprint: :address_fingerprint)
+      first = klass.create!(apple)
+      second = klass.create!(apple_shouty)
+      other = klass.create!(apple.merge(line1: "500 Oracle Pkwy", city: "Redwood City", postal_code: "94065"))
+      blank = klass.new(line1: nil, city: nil, postal_code: nil, country: nil)
+      blank.save(validate: false) # required parts missing — bypass validation for the fixture
+      # save(validate: false) skips before_validation, so assert the nil-for-blank
+      # contract against the method itself too — the stored-column check alone
+      # would pass even if address_fingerprint digested an empty address.
+      expect(blank.address_fingerprint).to be_nil
+
+      expect(first.reload[:address_fingerprint]).to eq(first.address_fingerprint)
+      expect(second.reload[:address_fingerprint]).to eq(first[:address_fingerprint])
+      expect(blank.reload[:address_fingerprint]).to be_nil
+
+      expect(klass.with_address(first).order(:id)).to eq([first, second])
+      expect(klass.with_address(first).where.not(id: first.id)).to eq([second]) # "the duplicates of first"
+      expect(klass.with_address(first[:address_fingerprint]).count).to eq(2)
+      expect(klass.with_address(other).count).to eq(1)
+      # Tolerant like with_address: nil / a non-record answers false, not NoMethodError.
+      expect(first.same_address_as?(nil)).to be(false)
+      expect(first.same_address_as?("deadbeef")).to be(false)
+      expect(klass.with_address(blank)).to be_empty
+      expect(klass.with_address(nil)).to be_empty
+
+      first.update!(line1: "1 Infinite Loop, Building 2")
+      expect(first.reload[:address_fingerprint]).not_to eq(second[:address_fingerprint])
+    end
+
+    it "validates fingerprint: and requires it for with_address" do
+      expect { fingerprinted(fingerprint: :nope) }.to raise_error(ArgumentError, /'nope' does not exist/)
+      expect { klass.with_address("abc") }
+        .to raise_error(ArgumentError, /with_address needs `addressable_by fingerprint:` \(a column to store address_fingerprint in\)/)
+    end
+  end
 end

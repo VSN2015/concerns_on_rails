@@ -24,6 +24,7 @@ module ConcernsOnRails
     #   Article.tagged_with("ruby", "rails")          # records carrying BOTH tags
     #   Article.tagged_with("ruby", "go", any: true)  # records carrying ANY tag
     #   Article.all_tags                               # sorted unique tags in use
+    #   Article.published.tag_counts(limit: 20)        # { "ruby" => 12, "rails" => 7, ... } for a tag cloud
     #
     # Notes:
     #   * Matching is boundary-safe ("rail" does not match "rails").
@@ -32,7 +33,7 @@ module ConcernsOnRails
     #     "a" and "b"), everywhere, so what you read back always matches what
     #     a save would have produced.
     #   * Reach for acts-as-taggable-on when you need tag contexts, ownership,
-    #     tag counts/clouds, or polymorphic tags shared across models.
+    #     or polymorphic tags shared across models.
     module Taggable
       extend ActiveSupport::Concern
 
@@ -75,12 +76,53 @@ module ConcernsOnRails
         # All distinct tags currently stored across the table, sorted.
         # distinct + NULL filter dedupe DB-side, so identical tag strings ship
         # over the wire once instead of once per row.
+        #
+        # reorder(nil) drops any inherited ORDER BY: PostgreSQL rejects
+        # SELECT DISTINCT ordered by a column outside the select list ("for
+        # SELECT DISTINCT, ORDER BY expressions must appear in select list"),
+        # and Models::Sortable installs exactly such a default_scope — so
+        # Taggable + Sortable raised on Postgres while passing on SQLite,
+        # which permits it. The ordering is meaningless here anyway: the
+        # result is sorted in Ruby below.
         def all_tags
           where.not(taggable_field => nil)
+               .reorder(nil)
                .distinct
                .pluck(taggable_field)
                .flat_map { |raw| taggable_split(raw) }
                .uniq.sort
+        end
+
+        # Tag => number of records carrying it, ordered by count desc then tag
+        # asc (a Hash keeps insertion order, so `.first(n)` / `.keys` are the
+        # cloud). Relation-aware: `Article.published.tag_counts`. One GROUP BY
+        # query on the raw column — identical tag strings ship once with their
+        # row count and are split in Ruby, so the cost scales with DISTINCT tag
+        # strings, not rows. `limit:` keeps the top N.
+        def tag_counts(limit: nil)
+          counts = Hash.new(0)
+          taggable_count_scope.where.not(taggable_field => nil)
+                              .group(taggable_field).count.each do |raw, rows|
+            taggable_split(raw).each { |tag| counts[tag] += rows }
+          end
+          ordered = counts.sort_by { |tag, count| [-count, tag] }
+          ordered = ordered.first([limit.to_i, 0].max) if limit
+          ordered.to_h
+        end
+
+        # The rows to tally. A caller's select/group/order cannot survive the
+        # GROUP BY (COUNT(a, b) is invalid SQL, an array group key is
+        # meaningless, and a trailing ORDER BY breaks Postgres), so they are
+        # stripped. limit/offset genuinely pick rows, so they are honoured by
+        # resolving the window to ids first -- MySQL rejects LIMIT inside an
+        # IN subquery, so the ids come back through Ruby. The window is
+        # bounded by definition, so that stays cheap.
+        def taggable_count_scope
+          relation = all
+          base = relation.except(:select, :group)
+          return base.except(:order) unless (relation.limit_value || relation.offset_value) && primary_key
+
+          unscoped.where(primary_key => base.pluck(primary_key))
         end
 
         # Split a raw stored column value into a normalized tag array.

@@ -1,4 +1,5 @@
 require "spec_helper"
+require "support/integration_harness"
 
 describe ConcernsOnRails::Controllers::Respondable do
   let(:controller_class) do
@@ -62,6 +63,165 @@ describe ConcernsOnRails::Controllers::Respondable do
     it "omits :code and :details when not provided" do
       controller.render_error(message: "Boom")
       expect(controller.rendered[:json][:error]).to eq(message: "Boom")
+    end
+  end
+  describe "RFC 9457 problem details (respondable_by error_format: :problem_details)" do
+    let(:problem_class) do
+      Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Respondable
+
+        respondable_by error_format: :problem_details, problem_type_base: "https://api.example.com/problems/"
+      end
+    end
+
+    it "renders application/problem+json with type, title, status, detail and the code/errors extensions" do
+      c = problem_class.new
+      c.render_error(message: "Validation failed", status: :unprocessable_entity, code: "record_invalid",
+                     errors: ["Name can't be blank"])
+      expect(c.rendered[:content_type]).to eq("application/problem+json")
+      expect(c.rendered[:status]).to eq(422) # the Integer: see the deprecation example below
+      expect(c.rendered[:json]).to eq(
+        type: "https://api.example.com/problems/record_invalid",
+        title: Rack::Utils::HTTP_STATUS_CODES[422],
+        status: 422,
+        detail: "Validation failed",
+        code: "record_invalid",
+        errors: ["Name can't be blank"]
+      )
+    end
+
+    it "maps the renamed Rack status symbols without warning" do
+      # Rack 3.1 renamed 422 to :unprocessable_content and warns on every
+      # Rack::Utils.status_code call for the old name. 422 is render_error's
+      # default and the status of several ErrorHandleable handlers, so falling
+      # through would log a deprecation line on every validation failure.
+      # This has to run through the REAL stack: ActionDispatch::Response#status=
+      # is what re-converts the symbol, and FakeController never renders.
+      real = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Respondable
+
+        respondable_by error_format: :problem_details
+
+        def show
+          render_error(message: "nope", status: :unprocessable_entity, code: "record_invalid")
+        end
+      end
+
+      captured = StringIO.new
+      original = $stderr
+      begin
+        $stderr = captured
+        result = IntegrationHarness.dispatch(real, :show)
+      ensure
+        $stderr = original
+      end
+
+      expect(result.status).to eq(422)
+      expect(result.header("Content-Type")).to eq("application/problem+json")
+      expect(JSON.parse(result.body)["status"]).to eq(422)
+      expect(captured.string).not_to include("deprecated")
+    end
+
+    it "keeps each respondable_by option independent of the other" do
+      # A nil default meaning "not passed" silently reset the option the call
+      # did not name: problem details turned off, or the type base wiped.
+      base = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Respondable
+
+        respondable_by error_format: :problem_details, problem_type_base: "https://api.example.com/problems"
+      end
+      base.respondable_by problem_type_base: "https://api.example.com/v2"
+      expect(base.respondable_error_format).to eq(:problem_details)
+
+      child = Class.new(base)
+      child.respondable_by error_format: :problem_details
+      expect(child.respondable_problem_type_base).to eq("https://api.example.com/v2")
+
+      child.respondable_by problem_type_base: nil # an explicit nil still clears it
+      expect(child.respondable_problem_type_base).to be_nil
+    end
+
+    it "uses about:blank as the type without a code, and without a type base; omits absent members" do
+      c = problem_class.new
+      c.render_error(message: "Not here", status: :not_found)
+      expect(c.rendered[:json]).to eq(type: "about:blank", title: "Not Found", status: 404, detail: "Not here")
+
+      no_base = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Respondable
+
+        respondable_by error_format: :problem_details
+      end.new
+      no_base.render_error(message: "Nope", status: 403, code: "forbidden")
+      expect(no_base.rendered[:json]).to eq(type: "about:blank", title: "Forbidden", status: 403, detail: "Nope", code: "forbidden")
+    end
+
+    it "joins the type base and code with exactly one slash" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Respondable
+
+        respondable_by error_format: :problem_details, problem_type_base: "https://api.example.com/problems"
+      end
+      c = klass.new
+      c.render_error(message: "x", code: "rate_limited", status: 429)
+      expect(c.rendered[:json][:type]).to eq("https://api.example.com/problems/rate_limited")
+    end
+
+    it "adds instance (the request path) when a request is available" do
+      c = problem_class.new
+      request = Struct.new(:path).new("/api/articles/7")
+      c.define_singleton_method(:request) { request }
+      c.render_error(message: "Not here", status: :not_found)
+      expect(c.rendered[:json][:instance]).to eq("/api/articles/7")
+    end
+
+    it "leaves render_success untouched" do
+      c = problem_class.new
+      c.render_success(data: { id: 1 })
+      expect(c.rendered).to eq(json: { success: true, data: { id: 1 } }, status: :ok)
+    end
+
+    it "keeps the classic envelope by default and rejects an unknown format" do
+      expect(controller_class.respondable_error_format).to eq(:envelope)
+      expect do
+        Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Respondable
+
+          respondable_by error_format: :xml
+        end
+      end.to raise_error(ArgumentError, /error_format must be one of :envelope, :problem_details/)
+    end
+
+    it "switches every concern that funnels through render_error — ErrorHandleable's 404 becomes a problem document" do
+      require "active_support/rescuable"
+      klass = Class.new(FakeController) do
+        include ActiveSupport::Rescuable
+        include ConcernsOnRails::Controllers::Respondable
+        include ConcernsOnRails::Controllers::ErrorHandleable
+
+        respondable_by error_format: :problem_details, problem_type_base: "https://api.example.com/problems"
+      end
+      c = klass.new
+      c.rescue_with_handler(ActiveRecord::RecordNotFound.new("missing"))
+      expect(c.rendered[:content_type]).to eq("application/problem+json")
+      expect(c.rendered[:json]).to include(type: "https://api.example.com/problems/not_found", status: 404, detail: "Resource not found")
+    end
+
+    it "sets the real Content-Type through the ActionController stack" do
+      require "support/integration_harness"
+      real = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Respondable
+
+        respondable_by error_format: :problem_details
+
+        define_method(:show) { render_error(message: "Gone fishing", status: :gone, code: "gone") }
+      end
+      result = IntegrationHarness.dispatch(real, :show)
+      expect(result.status).to eq(410)
+      # Exactly the media type, no "; charset=utf-8": RFC 9457's registration
+      # defines no parameters, and a client comparing the header for equality
+      # would reject a parameterized one.
+      expect(result.header("Content-Type")).to eq("application/problem+json")
+      expect(JSON.parse(result.body)).to include("type" => "about:blank", "status" => 410, "detail" => "Gone fishing", "code" => "gone")
     end
   end
 end
