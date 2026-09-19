@@ -1861,9 +1861,9 @@ respondable_by error_format: :problem_details, problem_type_base: "https://api.e
 
 | Method            | Signature                                                                                  |
 |-------------------|--------------------------------------------------------------------------------------------|
-| `render_success`  | `render_success(data: nil, status: :ok, meta: {}, location: nil, headers: {})` — `location:` sets the `Location` header (a String, or anything `url_for` resolves); `headers:` sets extra response headers |
+| `render_success`  | `render_success(data: nil, status: :ok, meta: {}, location: nil, headers: {})` — `location:` sets the `Location` header (a String, or anything `url_for` resolves); `headers:` sets extra response headers (names and values are coerced to String and stripped of CR/LF, so caller data cannot split the response) |
 | `render_created`  | `render_created(data: nil, location: nil, meta: {}, headers: {})` — `render_success` with `status: :created` |
-| `render_invalid`  | `render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")` — `render_error` with `errors.full_messages` as `details` (omitted when empty); same shape as ErrorHandleable's `RecordInvalid` handler, problem-details aware |
+| `render_invalid`  | `render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")` — `render_error` with `errors.full_messages` as `details` (omitted when empty, and when an app's `render_error` override cannot take an `errors:` keyword); same shape as ErrorHandleable's `RecordInvalid` handler, problem-details aware |
 | `render_error`    | `render_error(message:, status: :unprocessable_entity, code: nil, errors: nil)`            |
 | `respondable_by`  | `respondable_by(error_format: :envelope, problem_type_base: nil)` — class-level; `error_format:` is `:envelope` (default) or `:problem_details` |
 

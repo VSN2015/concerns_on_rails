@@ -247,12 +247,29 @@ describe ConcernsOnRails::Controllers::Respondable do
 
     it "stringifies header values and strips CR/LF so caller data cannot split the response" do
       controller.render_success(data: nil, location: "/ok\r\nX-Injected: yes",
-                                headers: { "X-Retry-Count" => 3, "X-Note" => "a\nb" })
+                                headers: { "X-Retry-Count" => 3, "X-Note" => "a\nb", "X-Nul" => "a b" })
 
       # An Integer would fail Rack::Lint; the CR/LF would start a new header.
       expect(controller.response.headers["X-Retry-Count"]).to eq("3")
       expect(controller.response.headers["X-Note"]).to eq("ab")
+      expect(controller.response.headers["X-Nul"]).to eq("ab")
       expect(controller.response.headers["Location"]).to eq("/okX-Injected: yes")
+    end
+
+    it "strips CR/LF from header NAMES too, so an interpolated key cannot split the response either" do
+      c = controller_class.new
+      c.render_success(data: nil, headers: { "X-Trace-a\r\nSet-Cookie: admin=1" => "1" })
+
+      expect(c.response.headers.keys).to all(satisfy { |name| !name.match?(/[\r\n]/) })
+      expect(c.response.headers).not_to have_key("Set-Cookie")
+    end
+
+    it "skips a header that sanitizes down to nothing rather than emitting an empty one" do
+      c = controller_class.new
+      # "" is not nil, so a truthiness guard would emit `Location:` with no URI.
+      c.render_success(data: nil, location: "", headers: { "X-Absent" => nil, "X-Blank" => "\r\n", "" => "x" })
+
+      expect(c.response.headers).to eq({})
     end
 
     it "resolves a non-String location through url_for when the controller has it" do
@@ -321,6 +338,33 @@ describe ConcernsOnRails::Controllers::Respondable do
       invalid = klass.new
       expect { invalid.render_invalid(RespondableInvalidModel.new("ok")) }.not_to raise_error
       expect(invalid.rendered[:json][:legacy_error]).to eq("Validation failed")
+
+      # The path render_invalid actually exists for: a record that HAS errors.
+      # Passing errors: to a three-keyword override raised ArgumentError, i.e.
+      # a 500 on every validation failure. The details are dropped instead —
+      # that override never rendered them anyway.
+      record = RespondableInvalidModel.new(nil)
+      record.valid?
+      with_errors = klass.new
+      expect { with_errors.render_invalid(record) }.not_to raise_error
+      expect(with_errors.rendered).to eq(json: { legacy_error: "Validation failed", code: "record_invalid" },
+                                         status: :unprocessable_entity)
+    end
+
+    it "still hands details to an override that takes **kwargs" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Respondable
+
+        def render_error(message:, **rest)
+          @rendered = { json: { message: message }.merge(rest) }
+        end
+      end
+      record = RespondableInvalidModel.new(nil)
+      record.valid?
+      c = klass.new
+      c.render_invalid(record)
+
+      expect(c.rendered[:json][:errors]).to eq(["Name can't be blank"])
     end
 
     it "appends to an existing Link header instead of clobbering it" do
@@ -330,6 +374,17 @@ describe ConcernsOnRails::Controllers::Respondable do
       c.render_success(data: [], headers: { "Link" => %(</docs>; rel="help") })
 
       expect(c.response.headers["Link"]).to eq(%(</articles?page=2>; rel="next", </docs>; rel="help"))
+    end
+
+    it "appends under the spelling already in the response when the caller's case differs" do
+      # response.headers is case-SENSITIVE before Rails 7.1, so looking the
+      # existing value up with the caller's own key emitted a second header.
+      klass = Class.new(FakeController) { include ConcernsOnRails::Controllers::Respondable }
+      c = klass.new
+      c.response.set_header("Link", %(</articles?page=2>; rel="next"))
+      c.render_success(data: [], headers: { "link" => %(</docs>; rel="help") })
+
+      expect(c.response.headers).to eq("Link" => %(</articles?page=2>; rel="next", </docs>; rel="help"))
     end
 
     it "tolerates headers: nil" do
@@ -349,6 +404,54 @@ describe ConcernsOnRails::Controllers::Respondable do
       c.render_invalid(record)
       expect(c.rendered[:json]).to include(type: "https://api.example.com/problems/record_invalid", status: 422,
                                            detail: "Validation failed", errors: ["Name can't be blank"])
+    end
+
+    it "render_created's Location survives an Idempotentable replay" do
+      # Idempotentable captures its allow-listed headers AFTER the action, so
+      # the Location render_created set during it is stored and set again on
+      # the replayed 201 — the whole point of the captured-header feature.
+      store = Class.new do
+        def initialize = @data = {}
+        def read(key) = @data[key]
+        def delete(key) = @data.delete(key)
+
+        def write(key, value, options = {})
+          return if options[:unless_exist] && @data.key?(key)
+
+          @data[key] = value
+        end
+      end.new
+
+      klass = Class.new(FakeController) do
+        def self.around_action(*); end
+
+        include ConcernsOnRails::Controllers::Respondable
+        include ConcernsOnRails::Controllers::Idempotentable
+
+        self.idempotency_store = store
+        idempotent_actions :create
+      end
+
+      sent = { "Idempotency-Key" => "abc-123" }
+      request = Struct.new(:headers, keyword_init: false).new(sent)
+      run = lambda do
+        c = klass.new(params: { title: "x" })
+        c.define_singleton_method(:request) { request }
+        c.define_singleton_method(:action_name) { "create" }
+        c.enforce_idempotency do
+          c.render_created(data: { id: 42 }, location: "/articles/42")
+          c.response.status = 201
+          c.response.body = '{"id":42}'
+        end
+        c
+      end
+
+      first = run.call
+      expect(first.response.headers["Location"]).to eq("/articles/42")
+
+      replayed = run.call
+      expect(replayed.response.headers["Location"]).to eq("/articles/42")
+      expect(replayed.response.headers["X-Idempotency-Replayed"]).to eq("true")
     end
   end
 end
