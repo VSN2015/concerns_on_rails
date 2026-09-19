@@ -32,6 +32,7 @@ end
 | Column | Type | Required | Notes |
 |---|---|---|---|
 | _(configured field)_ | `string` | Yes | Stores the current state name as a plain string. |
+| `<state>_at` | `datetime` | With `timestamps:` | One per stamped state (`published_at`, `archived_at`, …). Written with `Time.current` in the same `update!` as the state change. |
 
 ```ruby
 # db/migrate/YYYYMMDDHHMMSS_add_status_to_articles.rb
@@ -61,6 +62,8 @@ stateable_by(field, states:, **options)
 | `transitions:` | `Hash` | `{}` | Named events. Each key is the event name (Symbol); each value is a hash with `:to` (required, Symbol) and optional `:from` (Symbol or Array of Symbols). Omitting `:from` means the transition is allowed from any state. |
 | `prefix:` | `true`, `String`, or `Symbol` | `nil` | Prepended to all generated method/scope names separated by `_`. Pass `true` to use the field name; pass a string/symbol to use a literal prefix. |
 | `suffix:` | `true`, `String`, or `Symbol` | `nil` | Appended to all generated method/scope names separated by `_`. Same coercion rules as `prefix:`. |
+| `timestamps:` | `true` or `Array<Symbol>` | `nil` | Stamp `<state>_at = Time.current` whenever the record is written into that state — guarded `<event>!`, direct `<state>!` and `transition_to!` alike (the default state on create is not stamped; re-entering a state re-stamps it). `true` stamps every state; an Array stamps those states. The columns must exist (`ArgumentError` at class load with a typed migration hint); an undeclared state raises. `Model.stateable_timestamps` lists the stamped states. |
+| `lock:` | `true`/`false` | `false` | Take a row lock and re-check the guard against the fresh row before each guarded transition (closes the check-then-write race). |
 
 **Transition config keys** (values inside the `transitions:` hash):
 
@@ -93,7 +96,7 @@ Shipment.state_open  # => WHERE state = 'open'
 |---|---|
 | `<state>?` (e.g. `draft?`, `published?`) | Predicate — returns `true` if the state column equals this state's string value. |
 | `<state>!` (e.g. `draft!`, `published!`) | Direct setter — calls `update!` with the target state, bypassing all transition guards. |
-| `<event>!` (e.g. `publish!`, `archive!`) | Guarded transition — raises `InvalidTransition` if the current state is not in the transition's `:from` list. Calls `update!` on success. |
+| `<event>!` (e.g. `publish!`, `archive!`) | Guarded transition — raises `InvalidTransition` if the current state is not in the transition's `:from` list. Calls `update!` on success, inside one transaction with the hooks: `before_transition(event, from, to)` → `before_<event>` → write → `after_<event>` → `after_transition(event, from, to)`. Per-event hooks are plain instance methods, looked up by the affixed event name (`before_status_publish` with `prefix: true`) and skipped when undefined; a raising hook rolls the state change back. |
 | `may_<event>?` (e.g. `may_publish?`, `may_archive?`) | Guard predicate — returns `true` if the guarded transition is currently allowed, without mutating state. |
 | `transition_to!(state)` | Moves to any declared state by name (Symbol or String), bypassing transition guards. Raises `InvalidTransition` for undeclared states. |
 
@@ -101,7 +104,7 @@ All method names honor `prefix:` / `suffix:` configuration. For example, with `p
 
 ### Class methods
 
-The `stateable_by` macro is the only public class method added by the concern; all builder helpers are private.
+`stateable_by` is the configuration macro. Besides it the concern adds `transition_all(event)` (run one declared transition across the relation) and the `stateable_timestamps` reader (the states `timestamps:` stamps); all builder helpers are private.
 
 ## Examples
 
@@ -167,6 +170,10 @@ ticket.transition_to!(:nope)
 
 ## Notes & gotchas
 
+- **Stamping is per write, not per create.** `timestamps:` writes `<state>_at` only when a state method runs (`publish!`, `published!`, `transition_to!`, `transition_all`); a record created in the default state has a `nil` stamp until it is explicitly moved. Re-entering a state re-stamps it and leaves the other stamps alone — `published_at` answers "when was it last published".
+- **Per-event hooks fire only for guarded transitions**, exactly like `before_transition`/`after_transition`; direct setters and `transition_to!` bypass both. `transition_all` fires them once per record. A private `before_<event>` / `after_<event>` is found and called like a public one.
+- **Stamp columns are not affixed.** `prefix:`/`suffix:` rename the generated methods and scopes, not the `<state>_at` column — a state named `published` stamps `published_at` and one named `deleted` stamps `deleted_at`, which are the columns `Publishable` and `SoftDeletable` own. If the model includes one of those concerns, rename the state (or leave that state out of `timestamps:`); writing their column from here changes what their scopes return without firing their hooks.
+- **`Duplicable` does not reset `<state>_at`.** The stamps are business state, like the state column itself — a copy that kept `status = "published"` but lost `published_at` would be inconsistent. List the columns in `duplicable_by reset:` if copies should start unstamped.
 - **`ArgumentError` at class load time** — `stateable_by` validates eagerly. Errors are raised when the class is loaded, not at runtime. The following all raise `ArgumentError`:
   - The configured column does not exist in the schema (message: `does not exist in the database`).
   - `states:` is empty.
@@ -174,6 +181,10 @@ ticket.transition_to!(:nope)
   - A transition omits `:to`.
   - A transition references a state name not declared in `states:`.
   - A transition event name matches an existing state setter name — use `prefix:` or `suffix:` to resolve the clash.
+  - `timestamps:` is neither `true`, `false`/`nil` nor an Array of states.
+  - `timestamps:` names a state not declared in `states:`.
+  - A stamped state's `<state>_at` column does not exist (all missing ones in one `:datetime` migration hint).
+  - A stamped state's `<state>_at` column is one Rails owns (`created_at` / `updated_at`) — stamping it would rewrite the row's creation time; rename the state or list the stamped states explicitly.
 
 - **Transition name / state name collision** — if you declare a state `:published` and also a transition named `published:`, `stateable_by` raises `ArgumentError` with a message indicating the clash. This is caught at class load time.
 
@@ -183,7 +194,7 @@ ticket.transition_to!(:nope)
 
 - **String storage** — state values are stored as plain strings, not integers. `status == "draft"` not `status == 0`. There is no automatic database constraint; add a `CHECK` constraint or database-level validation separately if needed.
 
-- **No transition history** — `Stateable` does not record when or from where a transition occurred. Combine with `Publishable` or `Schedulable` for time-stamped state tracking.
+- **No transition history** — `Stateable` records *when* a state was last entered (`timestamps:`), but not the states it came from or every previous visit. Combine with `Auditable` for a full trail.
 
 - **`transition_to!` bypasses guards** — it only validates that the target state is declared; it does not consult `transitions:` `:from` rules. Use it for administrative or migration tooling, not for business-rule enforcement.
 
