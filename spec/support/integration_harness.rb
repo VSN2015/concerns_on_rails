@@ -22,9 +22,12 @@ module IntegrationHarness
 
   # `params:` (a Hash) is form-encoded into the request body — how Permittable
   # exercises real ActionController::Parameters bodies.
-  def dispatch(controller_class, action, method: "GET", query: "", params: nil)
+  # `headers:` are request headers in their human spelling
+  # ("Accept-Language" => "fr"); they become the CGI-style env keys Rack wants.
+  def dispatch(controller_class, action, method: "GET", query: "", params: nil, headers: {})
     opts = { method: method }
     opts[:params] = params if params
+    headers.each { |name, value| opts["HTTP_#{name.to_s.tr('-', '_').upcase}"] = value }
     env = Rack::MockRequest.env_for("/?#{query}", **opts)
     status, headers, body = controller_class.action(action).call(env)
     # Rack bodies only guarantee #each (RackBody has no #map).
