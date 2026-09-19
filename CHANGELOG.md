@@ -1,5 +1,60 @@
 <!-- CHANGELOG.md -->
 
+## 1.28.9 (2026-09-19)
+
+CI now runs the matrix the gemspec actually claims: Rails 7.0–8.0 across Ruby 3.2/3.3/3.4,
+plus **PostgreSQL and MySQL** alongside SQLite. The suite had only ever run on SQLite, which
+is the most permissive of the three, and the first green-on-SQLite run of the new matrix
+failed 29 examples on MySQL and 7 on PostgreSQL.
+
+Almost all of those were specs asserting SQLite's own SQL rather than the gem misbehaving —
+but one was a real bug, and it is the reason this is a release and not just a CI change.
+
+### Fixed
+- **Models::Taggable**: `tagged_with` was broken on MySQL and inconsistent on PostgreSQL.
+  - On **MySQL** every `tagged_with` query was a **syntax error**. The clause inlined
+    `ESCAPE '\'` into hand-written SQL, and MySQL treats backslash as an escape character
+    inside string literals, so the escape consumed its own closing quote. SQLite and
+    PostgreSQL (with `standard_conforming_strings`) read it as a literal backslash, which is
+    why this was invisible for so long. The clause is now built with Arel `matches`, so the
+    adapter quotes the escape character itself — one code path, no per-adapter branching.
+  - On **PostgreSQL** `tagged_with` was case-SENSITIVE, while on SQLite and MySQL it folded
+    case: the same query returned different rows depending on the database. It is now
+    case-insensitive on all three (`ILIKE` on PostgreSQL).
+
+  ⚠️ **PostgreSQL users: this widens `tagged_with`.** A lookup that was case-sensitive before
+  now also matches differently-cased tags. That is the documented intent of the concern and
+  it makes the three adapters agree, but it is a behaviour change on upgrade. If you relied
+  on case-sensitive matching, declare `taggable_by :tags, downcase: true` and fold on write.
+  SQLite and MySQL users see no change. Note the Ruby-side helpers (`tagged_with?`,
+  `all_tags`, `tag_counts`) still compare exactly — `downcase: true` is what makes the scope
+  and the helpers agree.
+
+### Internal
+- **CI**: `.github/workflows/ci.yml` gains a Rails-version axis (7.0, 7.1, 7.2, 8.0 × Ruby
+  3.2/3.3/3.4, via `gemfiles/*.gemfile`) and an adapter axis (PostgreSQL and MySQL service
+  containers). `DB=postgresql` / `DB=mysql2` selects the adapter locally; SQLite stays the
+  default so a plain checkout still needs no services. (#102)
+- **Specs**: examples that asserted SQL now build the expected fragment from the
+  connection's own quoting, via new `TestDatabase.quoted_table` / `quoted_column` /
+  `qualified` helpers and `sqlite?` / `postgresql?` / `mysql?` predicates — so an assertion
+  means the same thing on every adapter instead of encoding SQLite's. Several examples got
+  *stronger* in the process: the Sortable NULL-ordering pair now asserts the PostgreSQL
+  native-`NULLS` branch and the portable-`CASE` branch separately, each also asserting the
+  other is absent.
+- Three examples depended on SQLite-only tolerance rather than on the gem: a grouped
+  relation selecting `*` (rejected by PostgreSQL, and by MySQL under `only_full_group_by`),
+  a non-finite Float written to a float column (SQLite's adapter overrides `quote` for
+  those; MySQL emits a bare `NaN`), and a NULL page-boundary fixture that assumed SQLite's
+  NULLs-first ordering (PostgreSQL sorts NULLs last ascending).
+
+### Known gap
+- `Models::Storable` guards its JSON extraction with `json_valid` on SQLite only. MySQL has
+  `JSON_VALID()` (5.7.8+) and could have the same guard; it was left alone deliberately
+  rather than shipped unverified, since a wrong guess there would break every
+  `where_<key>` query on that adapter. PostgreSQL has no equivalent before PG 16's
+  `IS JSON`. Now that the MySQL leg runs, this is a small follow-up.
+
 ## 1.28.8 (2026-09-19)
 
 The last six open feature PRs, released as a patch by request. These had never been
