@@ -130,18 +130,15 @@ module ConcernsOnRails
       # `details` is the object's errors.full_messages, omitted when empty —
       # the exact shape ErrorHandleable renders for a rescued RecordInvalid.
       def render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")
-        messages = respondable_error_messages(record_or_errors)
-        # Through the shared envelope: it omits the errors: keyword when there
-        # is nothing to report. Omit it for an override that cannot take it
-        # either -- several concerns document the contract as
+        # Through the shared envelope: it omits the errors: keyword both when
+        # there is nothing to report and when the effective render_error cannot
+        # accept it (several concerns document the contract as
         # `render_error(message:, status:, code:)`, and an app carrying that
         # signature would otherwise get ArgumentError on every validation
-        # failure, which is the one path render_invalid exists for. Dropping
-        # the details matches what such an override asked for; it never
-        # rendered them.
-        details = messages.presence if respondable_render_error_takes_errors?
+        # failure -- the one path render_invalid exists for).
         ConcernsOnRails::Support::ErrorEnvelope.render(
-          self, message: message, status: status, code: code, details: details
+          self, message: message, status: status, code: code,
+                details: respondable_error_messages(record_or_errors).presence
         )
       end
 
@@ -225,19 +222,6 @@ module ConcernsOnRails
         return location if location.is_a?(String)
 
         respond_to?(:url_for, true) ? url_for(location) : location.to_s
-      end
-
-      # True when the render_error that will actually run accepts an `errors:`
-      # keyword. The concern's own does; an app override written to the
-      # three-keyword contract does not, and **kwargs takes anything.
-      def respondable_render_error_takes_errors?
-        return true unless respond_to?(:render_error, true)
-
-        method(:render_error).parameters.any? do |type, name|
-          type == :keyrest || (%i[key keyreq].include?(type) && name == :errors)
-        end
-      rescue NameError
-        true
       end
 
       def respondable_error_messages(record_or_errors)
