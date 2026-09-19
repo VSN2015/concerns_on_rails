@@ -39,7 +39,7 @@ ConcernsOnRails.configure_encryption do |c|
   c.previous_keys = { 0 => -> { Rails.application.credentials.dig(:encryption, :key_v1) } }
 end
 
-# 2. See what's left under old keys — a LIKE on the fixed 4-char Base64 header prefix, no decryption
+# 2. See what's left under old keys — a compare against the fixed 4-char Base64 header prefix, no decryption
 Patient.needs_reencryption.count           # every gem-keyed encrypted field
 Patient.needs_reencryption(:ssn).count     # one field
 
@@ -52,7 +52,8 @@ patient.reencrypt!                         # one record
 ```
 
 - **Blind indexes during the window.** `find_by_<field>` / `where_<field>` match the digest under the current key **and** every previous key, so a row indexed under key 0 is still found before it is re-encrypted; `<field>_fingerprint` returns the current-key digest (what gets written). `reencrypt_all!` rewrites the index column too.
-- **`reencrypt_all!` uses `update_columns`** — no validations, no callbacks, no `updated_at` bump: the values do not change, only their ciphertext, and an Auditable capture or webhook must not fire for a key rotation. Each row is valid before and after, so there is no wrapping transaction to hold. This is the one `*_all` verb that does NOT go through `Support::BatchOps`: it is re-runnable rather than atomic, so a row that raises mid-stream leaves the rows before it already rotated. It also writes `WHERE id = ?` with no guard on the old ciphertext, so run it against rows the app is not concurrently writing, or a concurrent update can be reverted to the value read at load.
+- **`reencrypt_all!` writes one UPDATE per row** — no validations, no callbacks, no `updated_at` bump: the values do not change, only their ciphertext, and an Auditable capture or webhook must not fire for a key rotation. Each row is valid before and after, so there is no wrapping transaction to hold. This is the one `*_all` verb that does NOT go through `Support::BatchOps`: it is re-runnable rather than atomic, so a row that raises mid-stream leaves the rows before it already rotated, and re-running picks up the rest.
+- **Safe to run against a live table.** Each row's UPDATE is guarded on the exact ciphertext it was read with (`WHERE id = ? AND ssn = <ciphertext at load>`), so a value the app wrote between the read and the write is never reverted to the stale plaintext — the row is simply skipped, and it needs no rotating anyway because that write already used the current key. For the same reason `record.reencrypt!` skips a field with an unsaved change instead of committing it without validations. A successful `reencrypt!` reloads the record, so its `<field>_ciphertext` / `<field>_key_id` describe what is now at rest.
 - **Per-field `key:` fields are outside rotation.** They always stamp key id 0, decrypt with their own key, and are skipped by `needs_reencryption` / `reencrypt_all!`. Rotate them by changing the field key and re-saving.
 - **Unknown key id.** A row whose id is neither `key_id` nor in `previous_keys` raises `DecryptionError` ("encrypted with unknown key id N") — you removed a previous key too early.
 - **Every key id 0..255 works.** `needs_reencryption` compares the envelope's 4-character Base64 header with `SUBSTR(...) <> ?` (a binary cast on MySQL), not `LIKE`. A case-folding comparison would have confused ids 26–51 with 0–25, whose prefixes differ only in case, and quietly reported that nothing needed rotating.

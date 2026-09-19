@@ -1541,7 +1541,7 @@ ConcernsOnRails.configure_encryption do |c|
   c.previous_keys = { 0 => ENV["ENCRYPTION_KEY_V1"] } # still DECRYPTS rows written before the rotation
 end
 
-Patient.needs_reencryption.count        # rows still under an old key — a LIKE on the envelope prefix, no decryption
+Patient.needs_reencryption.count        # rows still under an old key — a prefix compare on the envelope, no decryption
 Patient.reencrypt_all!                  # rewrite them (and their blind indexes) under the current key → count
 patient.ssn_key_id                      # => 1
 # then remove `0 =>` from previous_keys
@@ -1555,7 +1555,7 @@ Reads pick the key by the envelope's id, so old and new rows coexist; `find_by_<
 - `ssn_ciphertext` is `nil` while the field has an unsaved change (so it can never return the plaintext you just assigned), and `ssn_encrypted?` asks whether what is stored really is an envelope.
 - `update_column(s)` on an encrypted field DOES encrypt (the value still serializes through the attribute type), but it skips validations, callbacks, dirty tracking and the blind-index refresh — so a value written that way is unsearchable until the row is saved normally. Declaring a field with both `encryptable` and `auditable_by` raises (either order).
 - Wrong key / tampered ciphertext / malformed envelope raise `Encryption::DecryptionError`. Encrypted field names are auto-registered with Rails' `filter_parameters` (via the gem's railtie), so they're redacted from request logs.
-- Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` writes with `update_columns` (no validations/callbacks — only the ciphertext changes) and streams with `find_each`. A row whose key id is no longer configured raises `DecryptionError` naming the id.
+- Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` streams with `find_each` and rewrites each row with one UPDATE — no validations/callbacks (only the ciphertext changes), guarded on the ciphertext it read so a concurrent write is never reverted, and skipping any field with an unsaved change. A row whose key id is no longer configured raises `DecryptionError` naming the id.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need Rails-managed key infrastructure (KMS, per-record keys) or deterministic encryption.
 
 ---

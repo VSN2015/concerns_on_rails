@@ -144,7 +144,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   4-char header prefix, binary cast on MySQL) / `reencrypt_all!` / `reencrypt!` /
   `<field>_key_id`; per-field `key:` fields sit outside rotation. `reencrypt_all!`
   is the ONE `*_all` verb that deliberately skips `Support::BatchOps` — re-runnable,
-  not atomic — and it never writes a field it could not decrypt. Fields auto-register with Rails
+  not atomic — and it never writes a field it could not decrypt. Each row is one
+  `update_all` GUARDED on the ciphertext read at load (a concurrent write is
+  skipped, never reverted), fields with unsaved changes are skipped, and a
+  successful `reencrypt!` reloads. Fields auto-register with Rails
   filter_parameters via `FilterParameterRegistry` + the railtie.
 - **`CounterCacheable`** — conditional denormalized counters ("counter_culture-lite"),
   declared on the CHILD. `counter_cacheable_by association, count:, if:, touch:`

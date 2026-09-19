@@ -70,12 +70,9 @@ module ConcernsOnRails
 
       def previous_keys=(value)
         unless value.is_a?(Hash) && value.keys.all? { |id| id.is_a?(Integer) && id.between?(0, 255) }
-          # Report the SHAPE only. The rejected value is key material, and the
-          # most likely mistake (String ids) would otherwise put a live secret
-          # into the exception message, the backtrace, the log and the tracker.
-          got = value.is_a?(Hash) ? "Hash with keys #{value.keys.inspect}" : value.class.to_s
           raise ArgumentError,
-                "ConcernsOnRails::Encryption: previous_keys must map Integer key ids (0-255) to key material (got #{got})"
+                "ConcernsOnRails::Encryption: previous_keys must map Integer key ids (0-255) to key material " \
+                "(got #{previous_keys_shape(value)})"
         end
 
         @previous_keys = value.dup.freeze
@@ -129,6 +126,20 @@ module ConcernsOnRails
         raise MissingKeyError,
               "ConcernsOnRails::Models::Encryptable: no encryption key configured. Set " \
               "ConcernsOnRails.configure_encryption { |c| c.key = ... } or pass key: to the macro."
+      end
+
+      private
+
+      # Describe a rejected previous_keys value by its SHAPE only. The value is
+      # key material, and the most likely mistakes would otherwise put a live
+      # secret into the exception message, the backtrace, the log and the
+      # tracker — String ids, and equally an inverted `{ material => id }` hash
+      # whose KEYS are the secret. Only Integer ids, which cannot be key
+      # material, are ever printed verbatim.
+      def previous_keys_shape(value)
+        return value.class.to_s unless value.is_a?(Hash)
+
+        "Hash with keys #{value.keys.map { |id| id.is_a?(Integer) ? id : id.class.to_s }.inspect}"
       end
     end
   end

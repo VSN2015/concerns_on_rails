@@ -467,6 +467,10 @@ describe ConcernsOnRails::Models::Encryptable do
       found = klass.find(legacy.id)
       expect(found.ssn).to eq("111-11-1111")
       expect(found.ssn_key_id).to eq(0)
+      # A successful rewrite reloads, so the readers describe what is at rest.
+      expect(found.reencrypt!).to be true
+      expect(found.ssn_key_id).to eq(1)
+      expect(found.ssn).to eq("111-11-1111")
 
       fresh = klass.create!(ssn: "222-22-2222")
       expect(fresh.ssn_key_id).to eq(1)
@@ -548,6 +552,32 @@ describe ConcernsOnRails::Models::Encryptable do
         .to raise_error(ArgumentError) { |e| expect(e.message).not_to include(secret) }
       expect { ConcernsOnRails.encryption.previous_keys = secret }
         .to raise_error(ArgumentError) { |e| expect(e.message).not_to include(secret) }
+      # The inverted hash — `{ material => id }` instead of `{ id => material }`
+      # — is the one shape whose KEYS are the secret.
+      expect { ConcernsOnRails.encryption.previous_keys = { secret => 0 } }
+        .to raise_error(ArgumentError) { |e| expect(e.message).not_to include(secret) }
+    end
+
+    it "never commits an unsaved change and never reverts a concurrent write" do
+      klass = model_class { encryptable :email, blind_index: true }
+      record = klass.create!(email: "a@example.com")
+      rotate!
+
+      # A pending edit belongs to a normal save (validations, callbacks), not to
+      # a key rotation — the field is skipped, so nothing is written at all.
+      pending_edit = klass.find(record.id)
+      pending_edit.email = "typo@example.com"
+      expect(pending_edit.reencrypt!).to be false
+      expect(klass.find(record.id).email).to eq("a@example.com")
+
+      # Another process rewrites the row (under the current key) between this
+      # record's load and its rewrite: the guard refuses rather than reverting.
+      stale = klass.find(record.id)
+      klass.find(record.id).update!(email: "b@example.com")
+      expect(stale.reencrypt!).to be false
+      expect(klass.reencrypt_all!).to eq(0)
+      expect(klass.find(record.id).email).to eq("b@example.com")
+      expect(klass.find_by_email("b@example.com")).to eq(record)
     end
 
     it "detects stale rows for key ids above 25, where a case-folding LIKE could not" do

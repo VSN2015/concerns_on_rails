@@ -55,9 +55,11 @@ module ConcernsOnRails
     #     plaintext yields different ciphertext every write, so `where(:ssn)`
     #     matches nothing. Query through a blind index instead. Presence/NULL
     #     checks (`where.not(ssn: nil)`) work normally.
-    #   * Never `update_column`/`update_columns` an encrypted field — those
-    #     bypass the type and write raw plaintext to the column (and skip the
-    #     blind-index refresh).
+    #   * `update_column`/`update_columns` DO encrypt (the value still
+    #     serializes through the attribute type — `reencrypt!` and Anonymizable
+    #     rely on it), but they skip validations, callbacks, dirty tracking and
+    #     the blind-index refresh, so a field written that way is unsearchable
+    #     until the row is saved normally.
     #   * Auditing an encrypted field would persist its plaintext to the audit
     #     column, so declaring a field with BOTH `encryptable` and `auditable_by`
     #     raises. Maskable masks the decrypted value; Normalizable normalizes the
@@ -303,8 +305,12 @@ module ConcernsOnRails
         end
 
         # Case-exact "the first 4 characters are not this prefix", per adapter.
+        # The MySQL family is matched the way Models::Storable matches it —
+        # Trilogy (the Rails 7.1+ default) reports "Trilogy" and MariaDB setups
+        # report "Mariadb", so a bare "mysql" test would drop both back onto the
+        # case-folding comparison this branch exists to avoid.
         def encryptable_prefix_mismatch_sql(quoted)
-          if connection.adapter_name.to_s.downcase.include?("mysql")
+          if connection.adapter_name.to_s.downcase.match?(/mysql|mariadb|trilogy/)
             "CAST(SUBSTRING(#{quoted}, 1, 4) AS BINARY) <> ?"
           else
             "SUBSTR(#{quoted}, 1, 4) <> ?"
@@ -465,16 +471,41 @@ module ConcernsOnRails
       end
 
       # Re-encrypt this record's gem-keyed fields (or the given subset) under
-      # the current key, refreshing their blind indexes — ONE update_columns,
-      # no validations/callbacks: the values don't change, only their
-      # ciphertext, and a callback (an Auditable capture, a webhook) must not
-      # fire for a key rotation. Returns true when something was rewritten.
+      # the current key, refreshing their blind indexes — ONE UPDATE, no
+      # validations/callbacks: the values don't change, only their ciphertext,
+      # and a callback (an Auditable capture, a webhook) must not fire for a key
+      # rotation. Returns true when something was rewritten, then reloads so the
+      # record's ciphertext readers describe what is now at rest.
+      #
+      # The UPDATE is GUARDED on the exact ciphertext each field was read with.
+      # A rotation runs for hours against a live table, and an unguarded
+      # `SET ssn = <plaintext read at load> WHERE id = ?` silently reverts any
+      # value the app wrote in between — data loss caused by the very sweep
+      # meant to protect it. A row that lost the guard needs no rotating anyway:
+      # the write that beat us used the current key. A field carrying an unsaved
+      # change is skipped for the same reason — persisting it here would commit
+      # the caller's pending edit with no validations behind their back.
       def reencrypt!(*fields)
-        updates = {}
-        self.class.encryptable_rotatable_fields(fields).each do |field|
-          next if read_attribute_before_type_cast(field).nil?
+        updates, guards, binds = encryptable_rotation_plan(fields)
+        return false if updates.empty?
+        return false unless encryptable_rotate_row!(updates, guards, binds) == 1
 
-          rule = self.class.encryptable_rules.fetch(field)
+        reload
+        true
+      end
+
+      private
+
+      # What reencrypt! would write: the new values (plus their refreshed blind
+      # indexes) and the ciphertext each one was read with, as guard predicates.
+      def encryptable_rotation_plan(fields)
+        updates = {}
+        guards = []
+        binds = []
+        self.class.encryptable_rotatable_fields(fields).each do |field|
+          stored = read_attribute_before_type_cast(field)
+          next if stored.nil? || public_send("#{field}_changed?")
+
           value = public_send(field)
           # A rotation must never be able to destroy data. Under
           # `raise_on_decrypt_error = false` a field that cannot be decrypted
@@ -483,16 +514,28 @@ module ConcernsOnRails
           # Refuse the field instead — re-running once the key is restored fixes it.
           next if value.nil?
 
+          rule = self.class.encryptable_rules.fetch(field)
           updates[field] = value
           updates[rule[:blind_index][:column]] = ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, value) if rule[:blind_index]
+          guards << "#{self.class.quoted_table_name}.#{self.class.connection.quote_column_name(field)} = ?"
+          binds << stored
         end
-        return false if updates.empty?
-
-        update_columns(updates)
-        true
+        [updates, guards, binds]
       end
 
-      private
+      # The guarded single-statement rewrite behind reencrypt!. `unscoped` so a
+      # row hidden by a default_scope (SoftDeletable) is still rotatable once
+      # the caller holds it, matching update_columns.
+      def encryptable_rotate_row!(updates, guards, binds)
+        primary_key = self.class.primary_key
+        # id_in_database is Rails 5.2+; for a persisted row whose primary key
+        # has not been reassigned in memory the attribute is the same value.
+        pk_value = respond_to?(:id_in_database) ? id_in_database : self[primary_key]
+        self.class.unscoped
+            .where(primary_key => pk_value)
+            .where(guards.join(" AND "), *binds)
+            .update_all(updates)
+      end
 
       # Recompute each blind-index column from the (changed) plaintext just
       # before the row is written, so the fingerprint always matches the value.

@@ -18,8 +18,11 @@ module ConcernsOnRails
     #
     # The 3-byte header is fed to GCM as additional authenticated data (AAD), so
     # the version/algorithm/key-id cannot be altered without failing the auth
-    # tag. `alg 0x11` (deterministic) and a non-zero `key_id` (rotation) are
-    # reserved for later features — the format tolerates them without a break.
+    # tag. `key_id` names the key that wrote the envelope and drives rotation
+    # (Models::Encryptable); everything written before rotation existed carries
+    # id 0, which is exactly what an unrotated config still stamps, so the
+    # format did not change. `alg 0x11` (deterministic) is still reserved — the
+    # format tolerates it without a break.
     module Encryptor
       module_function
 
