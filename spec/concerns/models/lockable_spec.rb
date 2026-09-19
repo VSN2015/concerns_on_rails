@@ -788,4 +788,212 @@ describe ConcernsOnRails::Lockable do
       expect(u.reload.locked_at).to be_nil
     end
   end
+
+  describe "unlock_token: (self-service unlock)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :token_lock_users, force: true do |t|
+          t.string :email
+          t.integer :failed_attempts, default: 0
+          t.datetime :locked_at
+          t.string :unlock_token
+        end
+
+        create_table :naked_lock_users, force: true do |t|
+          t.string :email
+        end
+      end
+    end
+
+    let(:klass) do
+      Class.new(TestModel) do
+        self.table_name = "token_lock_users"
+        include ConcernsOnRails::Lockable
+
+        lockable_by max_attempts: 2, unlock_in: 15.minutes, unlock_token: :unlock_token
+
+        attr_accessor :events
+
+        def after_unlock
+          (self.events ||= []) << :after_unlock
+        end
+      end
+    end
+
+    let(:user) { klass.create!(email: "a@x.com") }
+
+    it "mints a URL-safe token in the same write as the lock and clears it on unlock" do
+      expect(user.unlock_token).to be_nil
+      user.lock_access!
+      expect(user.unlock_token).to match(/\A[A-Za-z0-9_-]{43}\z/)
+      expect(user.reload.unlock_token).to be_present
+      expect(user.access_locked?).to be(true)
+
+      user.unlock_access!
+      expect(user.reload.unlock_token).to be_nil
+      expect(user.access_locked?).to be(false)
+    end
+
+    it "mints the token when register_failed_attempt! trips the lock, and keeps it while locked" do
+      user.register_failed_attempt!
+      expect(user.unlock_token).to be_nil
+      user.register_failed_attempt!
+      token = user.reload.unlock_token
+      expect(token).to be_present
+      user.register_failed_attempt! # locked: no counting, no re-mint
+      expect(user.reload.unlock_token).to eq(token)
+    end
+
+    it "unlock_by_token unlocks exactly once (hooks fire, record returned) and refuses wrong or blank tokens" do
+      user.lock_access!
+      token = user.unlock_token
+      expect(klass.unlock_by_token("wrong")).to be_nil
+      expect(klass.unlock_by_token(nil)).to be_nil
+      expect(klass.unlock_by_token("")).to be_nil
+      expect(user.reload.access_locked?).to be(true)
+
+      unlocked = klass.unlock_by_token(token)
+      expect(unlocked).to eq(user)
+      expect(unlocked.access_locked?).to be(false)
+      expect(unlocked.unlock_token).to be_nil
+      expect(unlocked.failed_attempts).to eq(0)
+      expect(unlocked.events).to eq([:after_unlock])
+      expect(klass.unlock_by_token(token)).to be_nil # single use
+    end
+
+    it "lets only one of two concurrent clicks on the same link win" do
+      user.lock_access!
+      token = user.unlock_token
+
+      # The loser is the request that read the row BEFORE the winner wrote it:
+      # it still holds the token in memory, so only the conditional UPDATE can
+      # stop it. Replaying the claim with that stale row is what a second
+      # in-flight request does, and it must neither unlock nor fire a second
+      # after_unlock. (Two plain unlock_by_token calls would not reach here —
+      # the second one's find_by returns nothing at all.)
+      stale = klass.find(user.id)
+      expect(stale.unlock_token).to eq(token)
+
+      expect(klass.unlock_by_token(token)).to eq(user)
+      expect(klass.send(:unlock_by_claimed_token, stale, :unlock_token, token)).to be_nil
+      expect(stale.events).to be_nil
+      expect(user.reload.access_locked?).to be(false)
+      expect(user.reload.unlock_token).to be_nil
+    end
+
+    it "puts the token back when a hook vetoes the unlock, so the link is not burned" do
+      vetoing = Class.new(TestModel) do
+        self.table_name = "token_lock_users"
+        include ConcernsOnRails::Lockable
+
+        lockable_by max_attempts: 2, unlock_token: :unlock_token
+
+        cattr_accessor :veto
+        self.veto = true
+
+        def before_unlock
+          raise ActiveRecord::Rollback if self.class.veto
+        end
+      end
+      record = vetoing.create!(email: "veto@x.com")
+      record.lock_access!
+      token = record.unlock_token
+
+      expect(vetoing.unlock_by_token(token)).to be_nil
+      expect(record.reload.unlock_token).to eq(token) # still mailable
+      expect(record.access_locked?).to be(true)
+
+      vetoing.veto = false
+      expect(vetoing.unlock_by_token(token)).to eq(record)
+      expect(record.reload.access_locked?).to be(false)
+    end
+
+    it "refuses (and retires) a token once the lock has lapsed on its own" do
+      user.lock_access!
+      token = user.unlock_token
+      travel_to(20.minutes.from_now) do
+        expect(user.reload.access_locked?).to be(false)
+        # The account is already usable: the link is not a live credential any
+        # more, and the dangling token must not sit in the row forever.
+        expect(klass.unlock_by_token(token)).to be_nil
+      end
+      expect(user.reload.unlock_token).to be_nil
+      expect(user.events).to be_nil # no unlock hooks for a refused link
+    end
+
+    it "does not reach a row the model's default scope hides" do
+      scoped = Class.new(TestModel) do
+        self.table_name = "token_lock_users"
+        include ConcernsOnRails::Lockable
+
+        lockable_by max_attempts: 2, unlock_token: :unlock_token
+        default_scope { where(email: "visible@x.com") }
+      end
+      hidden = scoped.unscoped.create!(email: "hidden@x.com")
+      hidden.lock_access!
+
+      expect(scoped.unlock_by_token(hidden.unlock_token)).to be_nil
+      expect(hidden.reload.access_locked?).to be(true)
+    end
+
+    it "registers the token column with the filter-parameter registry" do
+      klass # the macro runs at class-definition time
+      expect(ConcernsOnRails.filter_parameter_registry.include?("user[unlock_token]")).to be(true)
+    end
+
+    it "unlock_expired clears tokens along with the lock" do
+      user.lock_access!
+      travel_to(20.minutes.from_now) { expect(klass.unlock_expired).to eq(1) }
+      expect(user.reload.unlock_token).to be_nil
+    end
+
+    it "a failed attempt after the lock lapsed drops the stale token quietly" do
+      user.lock_access!
+      travel_to(20.minutes.from_now) do
+        user.register_failed_attempt!
+        expect(user.reload.unlock_token).to be_nil
+        expect(user.events).to be_nil # no unlock hooks from a failed login
+      end
+    end
+
+    it "exposes the configured column and raises a clear error when unlock_by_token is used without it" do
+      expect(klass.lockable_unlock_token_field).to eq(:unlock_token)
+      expect(LockUser.lockable_unlock_token_field).to be_nil
+      expect { LockUser.unlock_by_token("x") }.to raise_error(ArgumentError, /unlock_token: is not configured/)
+    end
+
+    it "requires the column (typed hint) and a column distinct from the other two" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "lock_users"
+          include ConcernsOnRails::Lockable
+
+          lockable_by unlock_token: :unlock_token
+        end
+      end.to raise_error(ArgumentError, /unlock_token.*does not exist.*unlock_token:string:uniq/)
+
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "token_lock_users"
+          include ConcernsOnRails::Lockable
+
+          lockable_by unlock_token: :locked_at
+        end
+      end.to raise_error(ArgumentError, /unlock_token must be a different column/)
+    end
+
+    it "reports all three missing columns in ONE migration command" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "naked_lock_users"
+          include ConcernsOnRails::Lockable
+
+          lockable_by unlock_token: :unlock_token
+        end
+      end.to raise_error(
+        ArgumentError,
+        /AddLockableColumnsToNakedLockUsers failed_attempts:integer locked_at:datetime unlock_token:string:uniq/
+      )
+    end
+  end
 end
