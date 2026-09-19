@@ -30,6 +30,21 @@ describe ConcernsOnRails::Storable do
     klass
   end
 
+  # `serialize :col, coder:, type:` is Rails 7.1+ syntax; 5.0-7.0 (which the
+  # gemspec still supports) take the coder positionally, and 7.1 deprecates
+  # that form. Both shapes must be recognized as JSON / non-JSON alike.
+  def serialized_model(coder, &declaration)
+    klass = Class.new(TestModel) { self.table_name = "storable_accounts" }
+    if ActiveRecord.version >= Gem::Version.new("7.1")
+      klass.serialize :settings, coder: coder, type: Hash
+    else
+      klass.serialize :settings, coder
+    end
+    klass.include ConcernsOnRails::Storable
+    klass.class_eval(&declaration)
+    klass
+  end
+
   describe "typed casting (text column)" do
     let(:klass) do
       model_class do
@@ -387,6 +402,16 @@ describe ConcernsOnRails::Storable do
           .to raise_error(ArgumentError, /enumerable/)
       end
 
+      it "rejects a key name that is not a plain identifier" do
+        # A key names the generated methods AND the `$.key` JSON path the query
+        # scopes address: a "." would reach into a nested document and a "?"
+        # would break the emitted fragment's bind-parameter arity.
+        expect { model_class { storable_by :settings, 'theme.dark': {} } }
+          .to raise_error(ArgumentError, /must be a plain identifier/)
+        expect { model_class { storable_by :settings, theme?: {} } }
+          .to raise_error(ArgumentError, /must be a plain identifier/)
+      end
+
       it "rejects a key colliding with an existing column" do
         expect { model_class { storable_by :settings, name: {} } }
           .to raise_error(ArgumentError, /collides/)
@@ -434,17 +459,22 @@ describe ConcernsOnRails::Storable do
     it "refuses to query a column the host app serialized with a non-JSON coder" do
       # Reads and writes are supported on such a column, but it holds YAML, so
       # json_extract would fail deep in the adapter ("malformed JSON").
-      klass = Class.new(TestModel) do
-        self.table_name = "storable_accounts"
-        serialize :settings, coder: YAML, type: Hash
-        include ConcernsOnRails::Storable
+      yaml_klass = serialized_model(YAML) { storable_by :settings, theme: { default: "light" } }
+      yaml_klass.create!(theme: "dark")
 
-        storable_by :settings, theme: { default: "light" }
-      end
-      klass.create!(theme: "dark")
-
-      expect { klass.where_theme("dark").to_a }
+      expect { yaml_klass.where_theme("dark").to_a }
         .to raise_error(ArgumentError, /serialized with a non-JSON coder/)
+    end
+
+    it "queries a column serialized with the JSON coder" do
+      # Rails 7.1 hides the coder inside an ActiveRecord::Coders::ColumnSerializer,
+      # so the canonical `serialize :settings, coder: JSON, type: Hash` looked
+      # non-JSON until the coder was unwrapped.
+      json_klass = serialized_model(JSON) { storable_by :settings, theme: { default: "light" } }
+      dark = json_klass.create!(theme: "dark")
+      json_klass.create!(theme: "light")
+
+      expect(json_klass.where_theme("dark")).to eq([dark])
     end
 
     it "filters a text-column store by key with typed values" do
@@ -474,6 +504,19 @@ describe ConcernsOnRails::Storable do
       expect(klass.where(name: "u").where_theme("dark").count).to eq(0)
     end
 
+    it "reads a blank or corrupt column as an unset key instead of aborting the query" do
+      # The readers decode such a row as {}; without the json_valid guard
+      # json_extract raises "malformed JSON" and takes the whole query with it.
+      dark = klass.create!(name: "d", theme: "dark")
+      blank = klass.create!(name: "b")
+      corrupt = klass.create!(name: "c")
+      klass.where(name: "b").update_all(settings: "")
+      klass.where(name: "c").update_all(settings: "not json at all")
+
+      expect(klass.where_theme("dark")).to eq([dark])
+      expect(klass.where_theme(nil).order(:id)).to eq([blank, corrupt])
+    end
+
     it "works on native json columns and affixed accessors" do
       klass.create!(digest: "daily", seats: 3, flag_beta: true)
       klass.create!(digest: "weekly", seats: 3, flag_beta: false)
@@ -484,27 +527,108 @@ describe ConcernsOnRails::Storable do
       expect(klass.where_flag_beta(false).count).to eq(1)
     end
 
-    it "emits json_extract on SQLite and refuses :json keys" do
+    it "rejects a value that will not cast to the key's type" do
+      # The comparison it would otherwise emit is adapter-dependent nonsense:
+      # `= ''` on PostgreSQL/MySQL (matching empty strings), `= NULL` on SQLite.
+      expect { klass.where_price("not money") }
+        .to raise_error(ArgumentError, /where_price: "not money" is not a valid :decimal value/)
+      expect { klass.where_trial_ends_at("whenever") }
+        .to raise_error(ArgumentError, /is not a valid :datetime value/)
+      expect { klass.where_notifications("") }
+        .to raise_error(ArgumentError, /is not a valid :boolean value/)
+    end
+
+    it "does not mutate the Time it is handed" do
+      time = Time.new(2026, 1, 2, 3, 4, 5, "+02:00").freeze
+      record = klass.create!(trial_ends_at: time)
+
+      expect(klass.where_trial_ends_at(time)).to eq([record])
+      expect(time.utc_offset).to eq(7200)
+    end
+
+    it "guards json_extract with json_valid on SQLite and refuses :json keys" do
       sql = klass.where_theme("dark").to_sql
-      expect(sql).to include(%(json_extract("storable_accounts"."settings", '$.theme') = 'dark'))
-      expect(klass.where_theme(nil).to_sql).to include(%(json_extract("storable_accounts"."settings", '$.theme') IS NULL))
+      expect(sql).to include(
+        %(CASE WHEN json_valid("storable_accounts"."settings") ) +
+        %(THEN json_extract("storable_accounts"."settings", '$.theme') END)
+      )
+      expect(sql).to include("= 'dark'")
+      expect(klass.where_theme(nil).to_sql).to include("END) IS NULL")
       expect { klass.where_widgets([]) }.to raise_error(ArgumentError, /where_widgets: :json keys are not queryable/)
     end
 
-    it "treats the scope name as a generated method for collision purposes" do
-      expect do
-        model_class do
-          def self.where_theme(*); end
+    it "tells an explicit JSON null apart from the string 'null' on MySQL" do
+      # JSON_UNQUOTE renders a stored JSON null as the 4-character string
+      # 'null', so IS NULL alone would miss it and = 'null' would match all of them.
+      allow(klass).to receive(:storable_adapter).and_return(:mysql)
+      json_type = %(JSON_TYPE(JSON_EXTRACT("storable_accounts"."settings", '$.theme')) = 'NULL')
 
-          storable_by :settings, theme: {}
-        end
-      end.to raise_error(ArgumentError, /'where_theme' collides/)
+      expect(klass.where_theme(nil).to_sql).to include("IS NULL OR #{json_type}")
+      expect(klass.where_theme("null").to_sql).to include("= 'null' AND NOT (#{json_type})")
+      # and chained, the fragment is grouped — the OR cannot leak past an AND
+      expect(klass.where(name: "x").where_theme(nil).to_sql).to include("'x' AND (JSON_UNQUOTE")
+    end
 
-      merged = model_class do
-        storable_by :settings, theme: { default: "light" }
-        storable_by :settings, theme: { default: "dark" } # same key re-declared — merge, no collision
+    describe "the where_ scope name" do
+      it "leaves a class method the host app already defines alone, warning instead of raising" do
+        host = nil
+
+        expect do
+          host = model_class do
+            def self.where_theme(*)
+              :host
+            end
+
+            storable_by :settings, theme: { default: "light" }
+          end
+        end.to output(/already defines 'where_theme'/).to_stderr
+
+        expect(host.where_theme("dark")).to eq(:host) # not clobbered
+        expect(host.new.theme).to eq("light")         # and the key is still declared
       end
-      expect(merged).to respond_to(:where_theme)
+
+      it "detects one hidden behind private_class_method" do
+        host = nil
+
+        expect do
+          host = model_class do
+            def self.where_theme(*)
+              :host
+            end
+            private_class_method :where_theme
+
+            storable_by :settings, theme: {}
+          end
+        end.to output(/already defines 'where_theme'/).to_stderr
+
+        expect(host.send(:where_theme, "dark")).to eq(:host)
+      end
+
+      it "skips the scope for query: false, per key and per macro" do
+        opted_out = model_class do
+          storable_by :settings, theme: {}, items_per_page: { type: :integer, query: false }
+          storable_by :flags, { beta: { type: :boolean } }, query: false
+        end
+
+        expect(opted_out).to respond_to(:where_theme)
+        expect(opted_out).not_to respond_to(:where_items_per_page)
+        expect(opted_out).not_to respond_to(:where_beta)
+        expect(opted_out.new).to respond_to(:items_per_page, :beta) # the accessors are untouched
+      end
+
+      it "re-declares its own scope without warning" do
+        merged = nil
+
+        expect do
+          merged = model_class do
+            storable_by :settings, theme: { default: "light" }
+            storable_by :settings, theme: { default: "dark" } # same key re-declared — merge, no collision
+          end
+        end.not_to output.to_stderr
+
+        expect(merged).to respond_to(:where_theme)
+        expect(merged.new.theme).to eq("dark")
+      end
     end
   end
 end

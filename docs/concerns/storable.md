@@ -36,15 +36,16 @@ add_column :accounts, :settings, :text   # or :jsonb on PostgreSQL
 
 ## Configuration
 
-### `storable_by(column, keys = {}, prefix: nil, suffix: nil, **kw_keys)`
+### `storable_by(column, keys = {}, prefix: nil, suffix: nil, query: true, **kw_keys)`
 
-Key specs may be passed as trailing keyword arguments or as the positional Hash (the escape hatch for keys literally named `prefix`/`suffix`). Per key:
+Key specs may be passed as trailing keyword arguments or as the positional Hash (the escape hatch for keys literally named `prefix`/`suffix`/`query`). A key name must be a plain identifier (letters, digits and underscores, not starting with a digit): it names both the generated methods and the JSON path the query scopes address. Per key:
 
 | option | default | meaning |
 |---|---|---|
 | `type:` | `:string` | One of `:string`, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`, `:json` |
 | `default:` | `nil` | Returned while the key is absent — never persisted. A Proc is `instance_exec`'d per read; Hash/Array defaults are deep-duped per read |
 | `in:` | — | Adds a model validation: a present, non-nil value must cast into the set (errors land on the accessor name) |
+| `query:` | `true` | `false` skips this key's `where_<accessor>` scope. The macro option of the same name sets the default for every key in the call |
 
 The macro is **repeatable** — repeat calls for the same column merge keys, different columns are independent, and subclasses can add keys without affecting the parent. Every generated name is collision-checked against existing methods and columns at macro time (`ArgumentError`; use `prefix:`/`suffix:` to rename).
 
@@ -58,7 +59,7 @@ Per declared key (names affixed as `<prefix>_<key>_<suffix>`):
 - `account.theme_changed?` / `account.theme_was` — per-key dirty, computed against the column's own previous value (cast)
 - `account.reset_theme` — removes the key so the reader resolves the default again (in-memory; save to persist)
 
-Class level: `Account.storable_keys` exposes the normalized registry (`{ settings: { theme: { type:, default:, in:, accessor: } } }`).
+Class level: `Account.storable_keys` exposes the normalized registry (`{ settings: { theme: { type:, default:, in:, query:, accessor: } } }`).
 
 ### Querying: `where_<accessor>(value)`
 
@@ -66,11 +67,13 @@ Every key also gets a scope that filters on the stored value with the database's
 
 | Adapter | Expression used |
 |---|---|
-| SQLite (3.38+ / JSON1) | `json_extract("accounts"."settings", '$.theme')` |
-| PostgreSQL | `("accounts"."settings" ->> 'theme')` — a `json`/`jsonb` column as-is, a `text` column cast via `::jsonb` (every row must hold valid JSON) |
-| MySQL 5.7+ / MariaDB 10.2+ | `JSON_UNQUOTE(JSON_EXTRACT("accounts"."settings", '$.theme'))` |
+| SQLite (JSON1) | `CASE WHEN json_valid("accounts"."settings") THEN json_extract("accounts"."settings", '$.theme') END` |
+| PostgreSQL | `("accounts"."settings" ->> 'theme')` — a `json`/`jsonb` column as-is, a `text` column cast via `::jsonb` |
+| MySQL 5.7+ / MariaDB 10.2+ | `JSON_UNQUOTE(JSON_EXTRACT("accounts"."settings", '$.theme'))`, paired with `JSON_TYPE(...) = 'NULL'` to tell a stored JSON null from the string `'null'` |
 
-The value is cast **exactly as the writer stores it** (`:integer` → integer, `:boolean` → boolean, `:decimal` → the precision-safe string, `:datetime` → the UTC ISO8601 string), then compared for equality; on SQLite booleans compare as `1`/`0`, on PostgreSQL/MySQL every extracted scalar is text. `where_<accessor>(nil)` matches an unset key and a `NULL` column on every adapter, and an explicit JSON `null` on SQLite and PostgreSQL. On MySQL `JSON_UNQUOTE(JSON_EXTRACT(...))` renders an explicit JSON `null` as the 4-character string `'null'`, so `IS NULL` does not match it there. `:json` keys are not queryable (raise), a column the host app serialized with a non-JSON coder raises rather than emitting JSON SQL it cannot read, and other adapters raise `ArgumentError` naming the adapter. The scope name takes part in the macro-time collision check like the accessors do.
+The value is cast **exactly as the writer stores it** (`:integer` → integer, `:boolean` → boolean, `:decimal` → the precision-safe string, `:datetime` → the UTC ISO8601 string), then compared for equality; on SQLite booleans compare as `1`/`0`, on PostgreSQL/MySQL every extracted scalar is text. A value that will not cast (`where_price("not money")`) raises `ArgumentError` rather than emitting a comparison whose meaning differs per adapter. `where_<accessor>(nil)` matches an unset key, an explicit JSON `null` and a `NULL` column on all three adapters. `:json` keys are not queryable (raise), a column the host app serialized with a non-JSON coder raises rather than emitting JSON SQL it cannot read, and other adapters raise `ArgumentError` naming the adapter.
+
+The scope is **best-effort**, unlike the accessors: it arrived after them, so a model that already defines `where_theme` itself (public or `private_class_method`) keeps its own method and gets no scope, warned through `ConcernsOnRails.deprecator` — upgrading the gem never raises at class load. Pass `query: false` (per key, or per macro call) to opt out silently.
 
 ```ruby
 Account.where_theme("dark")
@@ -108,7 +111,8 @@ account.reset_theme           # key removed: reads back "light" again
 - **Read-side safety**: corrupt column JSON decodes as `{}` (defaults apply); garbage values cast to `nil`. Readers never raise.
 - **Undeclared keys** already in the column are preserved through typed writes.
 - **Defaults are not queryable.** A key that was never written is absent from the stored JSON, so `where_notifications(true)` does not find records that merely *read* `true` through the default; `where_notifications(nil)` finds them. Backfill the key if you need to query it.
-- **Equality only, one key per scope.** Ranges, containment, ordering by a key and jsonb operators are out of scope — reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) there. PostgreSQL `text` stores are cast with `::jsonb`, so a row holding corrupt JSON makes the whole query fail (Storable itself always writes valid JSON).
+- **Equality only, one key per scope.** Ranges, containment, ordering by a key and jsonb operators are out of scope — reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) there.
+- **A row that does not hold JSON at all** (blank, or corrupt — Storable itself always writes valid JSON) reads as an unset key on SQLite, which guards `json_extract` with `json_valid`. PostgreSQL's `::jsonb` cast of a `text` store and MySQL's `JSON_EXTRACT` have no portable equivalent: one such row makes the **whole query** fail there. Clean the column up (or store it as `json`/`jsonb`) before relying on the scopes on those adapters.
 
 ## Changed in 1.22.0
 

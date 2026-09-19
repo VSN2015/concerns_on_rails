@@ -34,10 +34,13 @@ module ConcernsOnRails
     #   account.flag_beta          # => false   (prefixed accessor)
     #   account.items_per_page_changed?  # per-key dirty, computed off the column's _was
     #   account.reset_theme        # drop the key so the reader falls back to the default
+    #   Account.where_theme("dark")      # one equality scope per key
     #
     # Per key: `type:` (:string default, :integer, :float, :decimal, :boolean,
     # :date, :datetime, :json), `default:` (a value, or a Proc instance_exec'd
-    # per read), `in:` (an enumerable membership set). The macro is repeatable —
+    # per read), `in:` (an enumerable membership set), `query:` (false skips the
+    # `where_<accessor>` scope; also a macro option, defaulting all its keys).
+    # The macro is repeatable —
     # repeat calls for the SAME column merge keys; different columns are
     # independent. `prefix:`/`suffix:` rename the generated accessors as
     # `<prefix>_<key>_<suffix>`.
@@ -57,18 +60,27 @@ module ConcernsOnRails
     #     stored precision-safe as a String (BigDecimal), :date/:datetime as
     #     ISO8601 strings (datetime in UTC, microsecond precision).
     #   * Reserved option names: passing key specs as keyword arguments means a
-    #     key literally named `prefix` or `suffix` would be swallowed by the
-    #     affix options — declare those via the positional Hash escape hatch
-    #     (`storable_by :col, { prefix: { type: :string } }`).
-    #   * Reach for the store_attribute or jsonb_accessor gems when you need
-    #     querying into the store, jsonb operators, or store-backed scopes.
+    #     key literally named `prefix`, `suffix` or `query` would be swallowed
+    #     by the macro options — declare those via the positional Hash escape
+    #     hatch (`storable_by :col, { prefix: { type: :string } }`).
+    #   * Querying: every key also gets a `where_<accessor>(value)` equality
+    #     scope built on the adapter's JSON functions. `query: false` opts out,
+    #     and a name the host app already defines is left alone (a deprecator
+    #     warning, never a raise — the scopes arrived after the accessors did).
+    #     Reach for the store_attribute or jsonb_accessor gems when you need
+    #     jsonb operators, containment or range queries.
     module Storable
       extend ActiveSupport::Concern
 
       LABEL = "ConcernsOnRails::Models::Storable".freeze
 
       VALID_TYPES = %i[string integer float decimal boolean date datetime json].freeze
-      ALLOWED_SPEC_KEYS = %i[type default in].freeze
+      ALLOWED_SPEC_KEYS = %i[type default in query].freeze
+      # A key name is interpolated into the generated method names AND into the
+      # `$.key` JSON path the query scopes emit, so it is held to a plain
+      # identifier: a `.` would silently address a nested document and a `?` would
+      # break the bind-parameter arity of the emitted fragment.
+      KEY_NAME = /\A[a-zA-Z_][a-zA-Z0-9_]*\z/
       STORABLE_NATIVE_HASH_MUTEX = Mutex.new
 
       # Reusable ActiveModel casters for the JSON-native types. :decimal,
@@ -102,14 +114,15 @@ module ConcernsOnRails
         # Declare typed accessors over `column`. Key specs may arrive as the
         # positional `keys` Hash or as trailing keyword arguments (they are
         # merged); the positional form is the escape hatch for keys literally
-        # named `prefix`/`suffix`. See the module docs.
-        def storable_by(column, keys = {}, prefix: nil, suffix: nil, **kw_keys)
+        # named `prefix`/`suffix`/`query`. `query:` defaults every key's
+        # `where_<accessor>` scope; a key spec may override it. See the module docs.
+        def storable_by(column, keys = {}, prefix: nil, suffix: nil, query: true, **kw_keys)
           column = column.to_sym
           ensure_columns!(LABEL, column, types: :text)
 
           prepared = storable_merge_key_specs(keys, kw_keys).map do |key, raw_spec|
             key = key.to_sym
-            [key, storable_normalize_spec(key, raw_spec, prefix, suffix)]
+            [key, storable_normalize_spec(key, raw_spec, prefix, suffix, query)]
           end
 
           storable_install_keys(column, prepared)
@@ -141,8 +154,9 @@ module ConcernsOnRails
         # `where_<accessor>(value)` — equality on one stored key through the
         # adapter's JSON functions (json_extract / ->> / JSON_EXTRACT), the value
         # cast exactly as the writer stores it. nil matches an unset key, an
-        # explicit JSON null and a NULL column. Public because scope bodies run
-        # on the relation, which only delegates to public class methods.
+        # explicit JSON null and a NULL column on every adapter. Public because
+        # scope bodies run on the relation, which only delegates to public class
+        # methods.
         def storable_where(column, key, value)
           spec = storable_keys.fetch(column).fetch(key)
           if spec[:type] == :json
@@ -155,9 +169,13 @@ module ConcernsOnRails
           end
 
           expression = storable_json_expression(column, key)
-          return where("#{expression} IS NULL") if value.nil?
+          json_null = storable_json_null_expression(column, key)
+          return where(json_null ? "#{expression} IS NULL OR #{json_null}" : "#{expression} IS NULL") if value.nil?
 
-          where("#{expression} = ?", storable_query_value(spec[:type], value))
+          stored = storable_query_value(spec, value)
+          return where("#{expression} = ? AND NOT (#{json_null})", stored) if json_null
+
+          where("#{expression} = ?", stored)
         end
 
         private
@@ -165,16 +183,24 @@ module ConcernsOnRails
         # A column the host app serialized with YAML (or any non-JSON coder) is
         # supported for reads/writes but holds no JSON, so json_extract / ->> /
         # JSON_EXTRACT would blow up at query time ("malformed JSON" on SQLite).
+        # Rails 7.1 wraps the coder in an ActiveRecord::Coders::ColumnSerializer, so
+        # the canonical `serialize :settings, coder: JSON, type: Hash` only reveals
+        # its JSON coder one unwrap down; older versions hand back ::JSON itself.
         def storable_queryable_column?(column)
           type = type_for_attribute(column.to_s)
           return true unless defined?(ActiveRecord::Type::Serialized) && type.is_a?(ActiveRecord::Type::Serialized)
 
           coder = type.coder
-          coder == ActiveRecord::Coders::JSON ||
-            (defined?(ActiveSupport::JSON) && coder == ActiveSupport::JSON) ||
-            coder.class.name.to_s.include?("JSON")
+          coder = coder.coder while coder.respond_to?(:coder)
+          storable_json_coder?(coder)
         rescue StandardError
           true
+        end
+
+        def storable_json_coder?(coder)
+          coder == ActiveRecord::Coders::JSON || coder == ::JSON ||
+            (defined?(ActiveSupport::JSON) && coder == ActiveSupport::JSON) ||
+            coder.class.name.to_s.include?("JSON")
         end
 
         def storable_adapter
@@ -186,12 +212,21 @@ module ConcernsOnRails
           :other
         end
 
+        def storable_quoted_column(column)
+          "#{quoted_table_name}.#{connection.quote_column_name(column)}"
+        end
+
         # SQLite: json_extract(col, '$.key'); PostgreSQL: col ->> 'key' (a text
         # column cast to jsonb first); MySQL: JSON_UNQUOTE(JSON_EXTRACT(...)).
+        # A row whose column holds a blank or corrupt string is not JSON at all:
+        # SQLite's json_valid guard resolves it to NULL — the same {} the readers
+        # decode it as — while PostgreSQL's ::jsonb cast and MySQL's JSON_EXTRACT
+        # have no portable equivalent and abort the whole query on such a row.
         def storable_json_expression(column, key)
-          quoted = "#{quoted_table_name}.#{connection.quote_column_name(column)}"
+          quoted = storable_quoted_column(column)
           case storable_adapter
-          when :sqlite then "json_extract(#{quoted}, #{connection.quote("$.#{key}")})"
+          when :sqlite
+            "(CASE WHEN json_valid(#{quoted}) THEN json_extract(#{quoted}, #{connection.quote("$.#{key}")}) END)"
           when :postgresql
             source = %i[json jsonb].include?(columns_hash[column.to_s]&.type) ? quoted : "(#{quoted})::jsonb"
             "(#{source} ->> #{connection.quote(key.to_s)})"
@@ -201,11 +236,29 @@ module ConcernsOnRails
           end
         end
 
+        # MySQL only: JSON_UNQUOTE renders an explicit JSON null as the 4-character
+        # string 'null', so on its own `IS NULL` would miss a stored null and
+        # `= 'null'` would match every one of them. This predicate separates the
+        # two — SQLite's json_extract and PostgreSQL's ->> both yield SQL NULL
+        # there and need nothing extra.
+        def storable_json_null_expression(column, key)
+          return nil unless storable_adapter == :mysql
+
+          "JSON_TYPE(JSON_EXTRACT(#{storable_quoted_column(column)}, #{connection.quote("$.#{key}")})) = 'NULL'"
+        end
+
         # The stored representation of `value` for this key's type. SQLite's
         # json_extract yields SQL-native scalars (booleans as 1/0, numbers as
-        # numbers); PostgreSQL's ->> and MySQL's JSON_UNQUOTE yield text.
-        def storable_query_value(type, value)
-          stored = Casting.write(type, value)
+        # numbers); PostgreSQL's ->> and MySQL's JSON_UNQUOTE yield text. A value
+        # that will not cast is rejected rather than compared: the fragment it
+        # would otherwise emit means something different on every adapter
+        # (`= ''` matches empty strings on PostgreSQL/MySQL, `= NULL` nothing).
+        def storable_query_value(spec, value)
+          stored = Casting.write(spec[:type], value)
+          if stored.nil?
+            raise ArgumentError,
+                  "#{LABEL}: where_#{spec[:accessor]}: #{value.inspect} is not a valid :#{spec[:type]} value"
+          end
           return stored.to_s unless storable_adapter == :sqlite
 
           case stored
@@ -231,8 +284,13 @@ module ConcernsOnRails
                 "#{LABEL}: unknown option(s) #{unknown.join(', ')} in spec for ':#{key}' (allowed: #{ALLOWED_SPEC_KEYS.join(', ')})"
         end
 
-        def storable_normalize_spec(key, raw_spec, prefix, suffix)
+        def storable_normalize_spec(key, raw_spec, prefix, suffix, query)
           storable_assert_spec_shape!(key, raw_spec)
+          unless KEY_NAME.match?(key.to_s)
+            raise ArgumentError,
+                  "#{LABEL}: key ':#{key}' must be a plain identifier — letters, digits and underscores, not starting " \
+                  "with a digit (a key names both the generated methods and the JSON path the query scopes address)"
+          end
 
           type = (raw_spec[:type] || :string).to_sym
           unless VALID_TYPES.include?(type)
@@ -245,6 +303,7 @@ module ConcernsOnRails
           end
 
           { type: type, default: raw_spec[:default], in: inclusion,
+            query: raw_spec.fetch(:query, query),
             accessor: ConcernsOnRails::Support::Affix.name(key, prefix: prefix, suffix: suffix) }
         end
 
@@ -283,23 +342,16 @@ module ConcernsOnRails
         # reports the bare accessor name.
         def storable_method_names(accessor, type)
           base = accessor.to_s
-          names = [base, "#{base}=", "#{base}_changed?", "#{base}_was", "reset_#{base}", "where_#{base}"]
+          names = [base, "#{base}=", "#{base}_changed?", "#{base}_was", "reset_#{base}"]
           names << "#{base}?" if type == :boolean
           names.map(&:to_sym)
         end
 
         # A name is taken when it shadows a column's (lazily defined) attribute
-        # accessors or any already-defined instance method — or, for the
-        # `where_` scope, an existing class method. The column check needs a
-        # live schema; without one (db:create, precompile) it is skipped — the
-        # method checks below still run.
+        # accessors or any already-defined instance method. The column check
+        # needs a live schema; without one (db:create, precompile) it is
+        # skipped — the method checks below still run.
         def storable_method_taken?(method_name, accessor)
-          # Compare the exact generated name: sniffing the "where_" prefix made a
-          # key literally named where_used skip the column/instance checks entirely.
-          if method_name.to_s == "where_#{accessor}"
-            return singleton_class.method_defined?(method_name) ||
-                   ActiveRecord::Relation.method_defined?(method_name)
-          end
           return true if schema_reachable? && column_names.include?(accessor.to_s)
 
           method_defined?(method_name) || private_method_defined?(method_name)
@@ -323,7 +375,41 @@ module ConcernsOnRails
           define_method("#{base}_was") { storable_key_was(column, key) }
           define_method("reset_#{base}") { storable_reset(column, key) }
           define_method("#{base}?") { storable_get(column, key) == true } if spec[:type] == :boolean
-          scope "where_#{base}", ->(value) { storable_where(column, key, value) }
+          storable_define_query_scope(column, key, spec)
+        end
+
+        # Unlike the accessors, the query scope is best-effort and never raises:
+        # it landed after the accessors did, so an app upgrading the gem with its
+        # own `def self.where_role` must still boot. Such a name is left alone
+        # (warning through ConcernsOnRails.deprecator) instead of being silently
+        # overwritten, which is what bare `scope` would do. `query: false` opts
+        # out quietly, per key or per macro call.
+        def storable_define_query_scope(column, key, spec)
+          return unless spec[:query]
+
+          name = :"where_#{spec[:accessor]}"
+          unless storable_owned_methods[name] == [column, key] # our own re-declaration
+            if storable_query_scope_taken?(name)
+              ConcernsOnRails.deprecator.warn(
+                "#{LABEL}: #{self.name || 'an anonymous model'} already defines '#{name}', so the query scope for " \
+                "':#{key}' was not defined — pass query: false to silence this, or prefix:/suffix: to rename the accessors"
+              )
+              return
+            end
+
+            self.storable_owned_methods = storable_owned_methods.merge(name => [column, key])
+          end
+
+          scope name, ->(value) { storable_where(column, key, value) }
+        end
+
+        # `scope` raises for a name ActiveRecord::Relation owns but silently
+        # replaces one the host app defined itself, and singleton_class
+        # .method_defined? alone misses one hidden behind private_class_method.
+        def storable_query_scope_taken?(name)
+          respond_to?(name, true) ||
+            ActiveRecord::Relation.method_defined?(name) ||
+            ActiveRecord::Relation.private_method_defined?(name)
         end
 
         def storable_detect_native_hash(column)
@@ -533,9 +619,12 @@ module ConcernsOnRails
           CASTERS[:date].cast(value)&.iso8601
         end
 
-        # UTC iso8601(6): microsecond precision, the lesson CursorPaginatable learned.
+        # UTC iso8601(6): microsecond precision, the lesson CursorPaginatable
+        # learned. getutc, not utc — Time#utc mutates its receiver, so a plain
+        # `where_trial_ends_at(t)` would rewrite the caller's Time in place (and
+        # raise FrozenError on a frozen one) for what is only a read.
         def write_datetime(value)
-          coerce_time(value)&.utc&.iso8601(6)
+          coerce_time(value)&.getutc&.iso8601(6)
         end
 
         # A bare Date becomes midnight UTC (deterministic — Date#to_time would
