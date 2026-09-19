@@ -194,6 +194,7 @@ DEPENDENCIES
   concerns_on_rails!
   faker (~> 3.8)
   friendly_id (~> 5.4)
+  json (< 3)
   railties (>= 5.0, < 9)
   rake
   rspec (~> 3.12)
