@@ -243,6 +243,7 @@ describe ConcernsOnRails::Controllers::Cacheable do
 
     it "accepts a block (instance_exec'd) and a Symbol naming a controller method" do
       klass = cacheable_class do
+        http_cache_actions :show, max_age: 60, visibility: :public
         etag_with :requested_fields
         etag_with { params[:role] }
 
@@ -256,7 +257,14 @@ describe ConcernsOnRails::Controllers::Cacheable do
       d = etag_of(instance(klass, params: { fields: "id,title", role: "admin" }))
       expect([a, b, c].uniq.size).to eq(3)
       expect(d).to eq(a)
-      expect(instance(klass).tap { |x| x.stale_resource?(resource) }.response.headers).not_to have_key("Vary")
+
+      # Neither source has a Vary to advertise, so none is emitted — and the
+      # response stops being shareable, whatever the rule declared.
+      controller = instance(klass)
+      controller.stale_resource?(resource)
+      controller.apply_http_cache_headers
+      expect(controller.response.headers).not_to have_key("Vary")
+      expect(controller.response.headers["Cache-Control"]).to eq("private, max-age=60")
     end
 
     it "ignores nil extras so an absent context leaves the ETag alone" do
@@ -298,9 +306,15 @@ describe ConcernsOnRails::Controllers::Cacheable do
       c.stale_resource?(resource)
       expect(c.response.headers["Vary"]).to eq("Accept-Language, X-Locale")
 
-      c = instance(cacheable_class { etag_with :locale, vary: false })
+      suppressed = cacheable_class do
+        http_cache_actions :show, max_age: 60, visibility: :public
+        etag_with :locale, vary: false
+      end
+      c = instance(suppressed)
       c.stale_resource?(resource)
+      c.apply_http_cache_headers
       expect(c.response.headers).not_to have_key("Vary")
+      expect(c.response.headers["Cache-Control"]).to eq("private, max-age=60")
     end
 
     it "merges etag_with Vary with the http_cache_actions policy Vary, de-duplicated" do
@@ -333,6 +347,101 @@ describe ConcernsOnRails::Controllers::Cacheable do
     it "raises a clear error at request time for a Symbol that is neither a preset nor a controller method" do
       c = instance(cacheable_class { etag_with :nope })
       expect { c.stale_resource?(resource) }.to raise_error(ArgumentError, /etag_with :nope.*neither a preset.*nor a controller method/)
+    end
+
+    it "emits the sources' Vary from the after_action too, for an action that never calls stale_resource?" do
+      klass = cacheable_class do
+        http_cache_actions :show, max_age: 300, visibility: :public, vary: "Accept"
+        etag_with :locale
+      end
+      c = instance(klass)
+      c.apply_http_cache_headers
+
+      expect(c.response.headers["Vary"]).to eq("Accept, Accept-Language")
+      expect(c.response.headers["Cache-Control"]).to eq("public, max-age=300")
+    end
+
+    it "still calls an override of set_cache_validators that kept the three-keyword signature" do
+      klass = cacheable_class do
+        etag_with :locale
+
+        def set_cache_validators(resource = nil, etag: nil, last_modified: nil)
+          @legacy_override = true
+          super
+        end
+      end
+      c = instance(klass)
+
+      expect { c.stale_resource?(resource) }.not_to raise_error
+      expect(c.instance_variable_get(:@legacy_override)).to be(true)
+      expect(c.response.headers["ETag"]).to match(%r{\AW/"[0-9a-f]{32}"\z})
+    end
+  end
+
+  describe "unshareable ETag sources (forced private)" do
+    it "downgrades a :public rule when a block source has no Vary to advertise" do
+      klass = cacheable_class do
+        http_cache_actions :show, max_age: 300, visibility: :public, vary: "Accept"
+        etag_with { current_user_role }
+
+        def current_user_role
+          "admin"
+        end
+      end
+      c = instance(klass)
+      c.apply_http_cache_headers
+
+      expect(c.response.headers["Cache-Control"]).to eq("private, max-age=300")
+      expect(c.response.headers["Vary"]).to eq("Accept")
+    end
+
+    it "downgrades a :public rule for a Symbol source and for a preset with vary: false" do
+      symbol = cacheable_class do
+        http_cache_actions :show, max_age: 60, visibility: :public
+        etag_with :requested_fields
+
+        def requested_fields
+          "id"
+        end
+      end
+      suppressed = cacheable_class do
+        http_cache_actions :show, max_age: 60, visibility: :public
+        etag_with :locale, vary: false
+      end
+
+      [symbol, suppressed].each do |klass|
+        c = instance(klass)
+        c.apply_http_cache_headers
+        expect(c.response.headers["Cache-Control"]).to eq("private, max-age=60")
+      end
+    end
+
+    it "leaves :public alone when every source advertises a Vary (or is :query)" do
+      klass = cacheable_class do
+        http_cache_actions :show, max_age: 300, visibility: :public
+        etag_with :locale, :format, :query # :query is already keyed by the URL
+        etag_with :fields, vary: "X-Fields"
+
+        def fields
+          "id"
+        end
+      end
+      c = instance(klass)
+      c.apply_http_cache_headers
+
+      expect(c.response.headers["Cache-Control"]).to eq("public, max-age=300")
+      expect(c.response.headers["Vary"]).to eq("Accept-Language, Accept, X-Fields")
+    end
+
+    it "leaves no_store alone — it already overrides visibility" do
+      klass = cacheable_class do
+        http_cache_actions :show, no_store: true
+        etag_with { "role" }
+      end
+      c = instance(klass)
+      c.apply_http_cache_headers
+
+      expect(c.response.headers["Cache-Control"]).to eq("no-store")
     end
   end
 end

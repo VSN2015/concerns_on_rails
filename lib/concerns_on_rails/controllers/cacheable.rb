@@ -17,7 +17,6 @@ module ConcernsOnRails
     #     http_cache_actions :index, :show, max_age: 5.minutes,
     #                        visibility: :public, vary: "Accept"
     #     etag_with :locale                       # representation depends on I18n.locale
-    #     etag_with { current_user&.role }        # ...and on who is asking
     #
     #     def show
     #       @article = Article.find(params[:id])
@@ -29,6 +28,17 @@ module ConcernsOnRails
     # The method names are deliberately distinct from Rails'
     # `ActionController::ConditionalGet` (`fresh_when` / `stale?` / `expires_in`)
     # so including this concern in a real controller never shadows them.
+    #
+    # A user-scoped ETag source is deliberately NOT paired with `visibility:
+    # :public` above: no request header expresses "who is asking", so a
+    # controller declaring one is forced to `private` whatever the rule says.
+    #
+    #   class Api::ProfilesController < ApplicationController
+    #     include ConcernsOnRails::Controllers::Cacheable
+    #
+    #     http_cache_actions :show, max_age: 30
+    #     etag_with { current_user&.role }   # => Cache-Control: private, max-age=30
+    #   end
     #
     # Conditional-GET correctness (the value over a hand-rolled version):
     #   * ETag is a WEAK validator `W/"<md5>"` derived from the resource's cache
@@ -49,6 +59,11 @@ module ConcernsOnRails
     #     validator, and each source adds its `Vary` header (`:locale` →
     #     Accept-Language, `:format` → Accept). Per call: `stale_resource?(r,
     #     extras: [...])`.
+    #   * An `etag_with` source with NO `Vary` to advertise — a controller
+    #     method, a block, or a preset with `vary: false` — makes the response
+    #     unshareable, so `Cache-Control` is emitted as `private` however the
+    #     rule declared its `visibility:`. `:query` is exempt: the URL already
+    #     carries it.
     #
     # Notes:
     #   * `no_store: true` overrides everything (emits the lone `no-store`).
@@ -117,7 +132,10 @@ module ConcernsOnRails
         # accumulate and nil values are ignored. `vary:` names the request
         # headers the context depends on (default: the preset's — Accept-Language
         # for :locale, Accept for :format; none for methods/blocks); `vary: false`
-        # suppresses it. Emitted whenever validators are written.
+        # suppresses it. Emitted whenever validators are written. An entry left
+        # with no Vary at all (a method, a block, `vary: false`) downgrades the
+        # whole controller's Cache-Control to `private` — see
+        # http_cache_visibility_for.
         #
         #   etag_with :locale, :format
         #   etag_with :requested_fields, vary: "X-Fields"
@@ -200,6 +218,10 @@ module ConcernsOnRails
         value = http_cache_control_value(rule)
         response.set_header("Cache-Control", value) if value
         response.set_header("Vary", http_cache_merge_vary(rule[:vary])) if rule[:vary]
+        # Here too, not only from set_cache_validators: an action that renders
+        # without calling stale_resource? still owes the etag_with sources their
+        # Vary (idempotent — merge_vary appends and uniqs).
+        http_cache_write_etag_vary
         nil
       end
 
@@ -222,7 +244,15 @@ module ConcernsOnRails
         # validators were written before the safe-method check).
         return true unless http_cache_safe_request?
 
-        validators = set_cache_validators(resource, etag: etag, last_modified: last_modified, extras: extras)
+        # `extras:` is forwarded only when given: set_cache_validators is a
+        # documented override point, and an app that wrapped its previous
+        # three-keyword signature must not start raising ArgumentError.
+        validators =
+          if extras.nil?
+            set_cache_validators(resource, etag: etag, last_modified: last_modified)
+          else
+            set_cache_validators(resource, etag: etag, last_modified: last_modified, extras: extras)
+          end
         return true unless request_matches_cache?(etag: validators[:etag], last_modified: validators[:last_modified])
 
         http_cache_send_not_modified
@@ -320,11 +350,27 @@ module ConcernsOnRails
       def http_cache_control_value(rule)
         return "no-store" if rule[:no_store]
 
-        parts = [rule[:visibility].to_s]
+        parts = [http_cache_visibility_for(rule)]
         parts << "max-age=#{rule[:max_age]}" if rule[:max_age]
         parts << "must-revalidate" if rule[:must_revalidate]
         parts << "stale-while-revalidate=#{rule[:stale_while_revalidate]}" if rule[:stale_while_revalidate]
         parts.join(", ")
+      end
+
+      # A shared cache keys on the URL plus `Vary`. An etag_with source with no
+      # Vary to advertise — a controller method, a block, or a preset with
+      # `vary: false` — is a dimension no cache can key on (`Vary` has no way to
+      # say "who is asking"), so the representation is simply not shareable and
+      # the declared `visibility:` is downgraded rather than trusted. `:query`
+      # is exempt: the query string is already part of the cache key.
+      def http_cache_visibility_for(rule)
+        return "private" if http_cache_unshareable_etag?
+
+        rule[:visibility].to_s
+      end
+
+      def http_cache_unshareable_etag?
+        self.class.cacheable_etag_extras.any? { |entry| entry[:vary].empty? && entry[:source] != :query }
       end
 
       def http_cache_merge_vary(vary_list)
