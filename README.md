@@ -1755,11 +1755,12 @@ end
 
 **URL params**: `?sort=-created_at,title` or `?sort=title&direction=asc`
 
-- `params[:sort]` is a comma-separated list of sort **keys**, each optionally prefixed with `-` (descending) or `+` (ascending) — the JSON:API convention. Non-whitelisted keys are dropped; when nothing valid remains the declared default applies.
+- `params[:sort]` is a comma-separated list of sort **keys**, each optionally prefixed with `-` (descending) or `+` (ascending) — the JSON:API convention. A `+` must be percent-encoded as `%2B`, since a raw `+` in a query string decodes to a space. Non-whitelisted keys are dropped and a repeated key collapses to its first occurrence; when nothing valid remains the declared default applies.
 - Un-prefixed keys take `params[:direction]` (`asc` / `desc`, case-insensitive), then the declared default direction.
-- A plain Symbol sorts by that column of the relation's own table. A `key: { ... }` rule can point elsewhere: `column: "table.column"` plus `joins:` (anything `left_outer_joins` accepts — LEFT OUTER by default so rows without the association are kept; `join: :inner` drops them), and/or `nulls: :first | :last` (Rails 6.1+, PostgreSQL / SQLite — MySQL has no `NULLS FIRST/LAST`). Joins are added only when that key is requested.
+- A plain Symbol sorts by that column of the relation's own table. A `key: { ... }` rule can point elsewhere: `column: "table.column"` plus `joins:` (anything `left_outer_joins` accepts — LEFT OUTER by default so rows without the association are kept; `join: :inner` drops them), and/or `nulls: :first | :last` (Rails 6.1+). Joins are added only when that key is requested.
 - `sorted` uses `reorder`, so the requested columns **replace** any prior `ORDER BY` (including a model `default_scope` order).
-- If no `default:` is given, the **first** declared key is used.
+- `nulls:` uses PostgreSQL's native `NULLS FIRST/LAST`; on every other adapter it emits the portable `CASE WHEN col IS NULL` equivalent, so the row order is the same and nothing sends MySQL syntax it rejects.
+- If no `default:` is given, the **first** declared key is used. A `default:` that is *not* in the allow-list is legal — it orders the relation but stays unselectable by clients.
 
 > Distinct from `Models::Sortable` (which manages list position via `acts_as_list`). Both can coexist on a model + its controller.
 

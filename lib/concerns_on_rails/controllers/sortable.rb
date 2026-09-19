@@ -20,17 +20,18 @@ module ConcernsOnRails
     #
     # Reads params[:sort] — comma-separated sort KEYS, each optionally prefixed
     # with `-` (descending) or `+` (ascending), the JSON:API convention:
-    # `?sort=-created_at,title`. Un-prefixed keys take params[:direction]
-    # (asc/desc), then the configured default direction. Unknown keys are
-    # dropped; when nothing valid remains the default key applies.
+    # `?sort=-created_at,title`. A `+` must be percent-encoded as `%2B`; a raw
+    # `+` in a query string decodes to a space, leaving the key un-prefixed.
+    # Un-prefixed keys take params[:direction] (asc/desc), then the configured
+    # default direction. Unknown keys are dropped, a repeated key collapses to
+    # its first occurrence, and when nothing valid remains the default applies.
     #
     # A plain Symbol key sorts by that column of the relation's own table. A
     # `key: { ... }` rule may point at another table — `column: "table.column"`
     # plus `joins:` (anything `left_outer_joins`/`joins` accepts; LEFT OUTER by
     # default so rows without the association are kept, `join: :inner` to drop
-    # them) — and/or ask for `nulls: :first | :last` (Rails 6.1+, PostgreSQL /
-    # SQLite; MySQL has no NULLS FIRST/LAST syntax). Joins are added only when
-    # that key is actually requested.
+    # them) — and/or ask for `nulls: :first | :last` (Rails 6.1+). Joins are
+    # added only when that key is actually requested.
     module Sortable
       extend ActiveSupport::Concern
 
@@ -40,6 +41,12 @@ module ConcernsOnRails
       VALID_JOINS = %i[left inner].freeze
       RULE_OPTIONS = %i[column joins join nulls].freeze
       QUALIFIED_COLUMN = /\A[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\z/
+      # Adapters whose ORDER BY understands NULLS FIRST/LAST, named POSITIVELY
+      # and kept deliberately narrow. MySQL, MariaDB and SQLite < 3.30 have no
+      # such syntax, and a negative test cannot be trusted to name them all —
+      # Trilogy reports "Trilogy", not "MySQL". Anything unrecognised gets the
+      # portable CASE term, which is correct on every adapter including these.
+      NATIVE_NULLS_ADAPTERS = /postgres/i
 
       included do
         class_attribute :sortable_rules, default: {}
@@ -80,12 +87,13 @@ module ConcernsOnRails
           key
         end
 
-        # A plain field may be a dotted "authors.name" String, which worked on
-        # master because Rails' own arel_column resolved it. Keep it a qualified
-        # column instead of turning it into the Symbol :"authors.name", which
-        # arel_table quotes as ONE identifier and fails at request time.
+        # A plain field may be a dotted "authors.name", which worked on master
+        # because Rails' own arel_column resolved it. Keep it a qualified column
+        # instead of turning it into the Symbol :"authors.name", which arel_table
+        # quotes as ONE identifier and fails at request time. Match on the string
+        # form, so a dotted Symbol takes the same branch as a dotted String.
         def sortable_plain_rule(field)
-          column = field.is_a?(String) && field.match?(QUALIFIED_COLUMN) ? field : field.to_sym
+          column = field.to_s.match?(QUALIFIED_COLUMN) ? field.to_s : field.to_sym
           { column: column, joins: nil, join: :left, nulls: nil }
         end
 
@@ -104,7 +112,10 @@ module ConcernsOnRails
         end
 
         def sortable_rule_column!(key, column)
-          return column if column.is_a?(Symbol) || (column.is_a?(String) && column.match?(QUALIFIED_COLUMN))
+          # Dotted first, and matched on the string form: a dotted Symbol names a
+          # qualified column too, not one identifier for arel_table to quote whole.
+          return column.to_s if column.to_s.match?(QUALIFIED_COLUMN)
+          return column if column.is_a?(Symbol)
 
           raise ArgumentError, "#{LABEL}: #{key} column: must be a Symbol or a \"table.column\" String"
         end
@@ -160,21 +171,29 @@ module ConcernsOnRails
       # request order, each with its prefix direction or the request/default
       # fallback; the default key when none is valid.
       def sort_requests
-        rules = self.class.sortable_rules
+        # sortable_allowed_fields, NOT sortable_rules: the rules also hold a
+        # `default:` the author deliberately kept off the allow-list, and that
+        # key must stay unselectable.
+        allowed = self.class.sortable_allowed_fields
         fallback = sort_direction
         parsed = params[:sort].to_s.split(",").filter_map do |token|
           token = token.strip
           key = token.sub(/\A[-+]/, "").to_sym
-          [key, sort_prefix_direction(token, fallback)] if rules.key?(key)
+          [key, sort_prefix_direction(token, fallback)] if allowed.include?(key)
         end
+        # First occurrence of a key wins, so `?sort=` + "title," * 5000 cannot
+        # turn one unauthenticated request into 5000 ORDER BY terms.
+        parsed.uniq!(&:first)
         return parsed unless parsed.empty?
 
         default = self.class.sortable_default_field
         default ? [[default, fallback]] : []
       end
 
-      # Allow-listed sort columns from params[:sort]. Kept for subclasses that
-      # relied on it; `sort_requests` carries the per-column directions.
+      # The allow-listed keys from params[:sort], without their directions.
+      # Read-only: `sorted` builds its ORDER BY from `sort_requests`, so
+      # OVERRIDING THIS no longer changes the ordering — override
+      # `sort_requests` instead.
       def sort_fields
         sort_requests.map(&:first)
       end
@@ -208,20 +227,22 @@ module ConcernsOnRails
         node = sort_column_node(relation, rule[:column])
         ordering = direction == :desc ? node.desc : node.asc
         return ordering unless rule[:nulls]
-        # MySQL: an extra leading term, so the column ordering itself survives.
-        return [sort_mysql_nulls(node, rule[:nulls]), ordering] if sort_mysql?(relation)
+        # Everywhere but PostgreSQL: an extra leading term, so the column
+        # ordering itself survives.
+        return [sort_nulls_flag(node, rule[:nulls]), ordering] unless sort_native_nulls?(relation)
 
         rule[:nulls] == :first ? ordering.nulls_first : ordering.nulls_last
       end
 
-      def sort_mysql?(relation)
-        relation.model.connection.adapter_name.to_s.downcase.include?("mysql")
+      def sort_native_nulls?(relation)
+        relation.model.connection.adapter_name.to_s.match?(NATIVE_NULLS_ADAPTERS)
       end
 
-      # MySQL has no NULLS FIRST/LAST: Arel silently DROPS nulls_first there and
-      # emits invalid SQL for nulls_last. Sort on an IS NULL flag instead, which
-      # is the portable equivalent and what the docs used to hand-roll.
-      def sort_mysql_nulls(node, nulls)
+      # Without native NULLS FIRST/LAST, Arel silently DROPS nulls_first and
+      # emits SQL the server rejects for nulls_last (MySQL errno 1064). Sort on
+      # an IS NULL flag instead, which is the portable equivalent and what the
+      # docs used to hand-roll.
+      def sort_nulls_flag(node, nulls)
         flag = Arel::Nodes::Case.new.when(node.eq(nil)).then(1).else(0)
         nulls == :first ? flag.desc : flag.asc
       end
