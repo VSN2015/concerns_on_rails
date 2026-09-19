@@ -1,4 +1,4 @@
-A lightweight concern that enforces a consistent JSON envelope shape across every action in an API controller. Rather than each action constructing its own `render json:` call — and gradually drifting in shape — `Respondable` centralizes the two canonical response forms (`success` and `error`) behind two intent-revealing methods. The contract is stable enough that client-side code can rely on the `success` boolean as the single dispatch flag, the `data` key for payload, and the nested `error` object for machine-readable failure metadata.
+A lightweight concern that enforces a consistent JSON envelope shape across every action in an API controller. Rather than each action constructing its own `render json:` call — and gradually drifting in shape — `Respondable` centralizes the two canonical response forms (`success` and `error`) behind two intent-revealing methods. The contract is stable enough that, in the default `:envelope` format, client-side code can rely on the `success` boolean as the single dispatch flag, the `data` key for payload, and the nested `error` object for machine-readable failure metadata; `respondable_by error_format: :problem_details` swaps the error half for an RFC 9457 problem document, which carries no `success` key.
 
 ## When to use it
 
@@ -46,7 +46,20 @@ No generator, initializer, or configuration macro is required. Including the mod
 
 ## Configuration
 
-`Respondable` exposes no configuration macro. All behavior is controlled per-call through the keyword arguments documented in the Methods section below.
+### `respondable_by(error_format: :envelope, problem_type_base: nil)`
+
+Both options are independent: a call naming only one leaves the other as it was, and a subclass inherits whatever it does not restate. Pass `problem_type_base: nil` explicitly to clear it.
+
+Optional. Without it `render_error` emits the classic envelope below.
+
+| Option | Values | Default | Description |
+|---|---|---|---|
+| `error_format:` | `:envelope`, `:problem_details` | `:envelope` | `:problem_details` makes `render_error` emit an RFC 9457 document with `Content-Type: application/problem+json`: `type`, `title` (the HTTP reason phrase), `status` (integer), `detail` (the message), `instance` (the request path when a request is available), plus `code` and `errors` as extension members when given. Anything else raises `ArgumentError`. |
+| `problem_type_base:` | String URI | `nil` | Prefix joined with `code` (one slash) to form `type`, e.g. `https://api.example.com/problems/record_invalid`. Without a base, or without a code, `type` is `about:blank`. |
+
+**An app-defined `render_error` bypasses this setting.** The sibling concerns render through `Support::ErrorEnvelope`, which calls the host controller's `render_error` when it has one. Overriding that method with the documented `(message:, status:, code:)` contract replaces the gem's implementation, so `respondable_by` no longer has anything to act on and your override decides the format.
+
+Every concern in this gem that renders an error delegates to `render_error` when Respondable is included, so this one declaration changes the shape of every 4xx they produce. `render_success` is unaffected.
 
 ## Methods
 
@@ -78,7 +91,7 @@ Renders a JSON error envelope and halts the action. Returns the result of `rende
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `message` | String | _(required)_ | Human-readable description of the failure. Placed under `error.message`. |
+| `message` | String | _(required)_ | Human-readable description of the failure. Placed under `error.message` (`detail` in problem-details format). |
 | `status` | Symbol or Integer | `:unprocessable_entity` | HTTP status code. Any value accepted by Rails is valid (e.g. `:not_found`, `:forbidden`, `422`). |
 | `code` | String or nil | `nil` | Machine-readable error code (e.g. `"not_found"`, `"PERMISSION_DENIED"`). Included under `error.code` only when non-nil. |
 | `errors` | Array or nil | `nil` | Detailed error list — typically `record.errors.full_messages`. Included under `error.details` only when non-nil. |
@@ -176,7 +189,8 @@ end
 - **`meta` is omitted, not `null`, when empty.** Passing `meta: {}` (the default) results in a response body with no `meta` key at all. A client checking `response.meta` must guard against the key being absent, not just `null`.
 - **`code` and `details` follow the same omit-when-nil rule.** The minimal error body is `{ "success": false, "error": { "message": "..." } }`. Both `code` and `details` only appear when explicitly provided.
 - **`render_success` accepts `nil` data.** Calling `render_success` with no arguments is valid and produces `{ "success": true, "data": null }`. This is useful for actions that confirm an operation (e.g. `DELETE`) without returning a resource body.
-- **No state, no callbacks, no configuration macro.** The concern adds exactly two instance methods to the including controller. There are no `before_action` hooks, class-level macros, or instance variables introduced.
+- **No callbacks, no instance state.** The concern adds exactly two public instance methods to the including controller. There are no `before_action` hooks or instance variables introduced; the only state is the pair of class attributes `respondable_by` sets, which default to the classic envelope.
+- **`application/problem+json` is emitted without a charset parameter.** Rails appends `; charset=utf-8` to every rendered content type, but RFC 9457's media-type registration defines no parameters — a client comparing the header for equality would reject a parameterized one. The problem-details path therefore clears the charset after rendering.
 - **HTTP status symbols follow Rails conventions.** Any symbol or integer recognized by `Rack::Utils::SYMBOL_TO_STATUS_CODE` is accepted — the arguments are passed directly to `render`. Passing an invalid status symbol raises the same `ArgumentError` Rails itself would raise.
 - **`meta` must be a Hash.** The implementation checks `meta.is_a?(Hash) && meta.any?` before including it. Passing a non-Hash value (e.g. an Array) for `meta` causes it to be silently dropped from the response body.
 - **Pairing with `ErrorHandleable`.** When `ConcernsOnRails::Controllers::ErrorHandleable` is included alongside `Respondable` (in either order), its `rescue_from` handlers detect the presence of `render_error` and delegate to it rather than rendering inline. Include `Respondable` before `ErrorHandleable` in the class body to make the delegation intent explicit.

@@ -274,6 +274,15 @@ module ConcernsOnRails
         #     polymorphic).
         def aliasable_copy_options(src)
           opts = src.options.dup
+          # The SOURCE reflection already owns the counter. Carrying the option
+          # onto the copy makes ActiveRecord::CounterCache count it twice: it
+          # iterates _reflections and calls association(name) for each
+          # counter-cached one, and the #association override below maps the
+          # alias back to the SAME association object, so increment_counters
+          # fires once per name with no dedup guard. The parent's count came
+          # out doubled on create and doubled on destroy — drifting
+          # permanently negative once rows predating the alias were removed.
+          opts.delete(:counter_cache)
           if opts[:through]
             opts[:source] ||= aliasable_through_source_name(src)
           else
