@@ -35,6 +35,8 @@ end
 | Column | Type | Required | Notes |
 |--------|------|----------|-------|
 | `active` (or custom) | `boolean` | Yes | The default column name is `active`. Pass a different symbol to `activatable_by` to use any other boolean column. |
+| `activated_at` (or custom) | `datetime` | Only with `timestamps:` | Stamped on every activation. Required when `timestamps: true`; `timestamps: { activated_at: :enabled_at }` renames it, `{ activated_at: nil }` drops that side. |
+| `deactivated_at` (or custom) | `datetime` | Only with `timestamps:` | Stamped on every deactivation, under the same renaming/dropping rules. |
 
 Migration for the default column:
 
@@ -56,17 +58,30 @@ class AddEnabledToWidgets < ActiveRecord::Migration[7.1]
 end
 ```
 
+Migration for the stamp columns (only needed when you pass `timestamps:`):
+
+```ruby
+class AddActivationTimestampsToSubscriptions < ActiveRecord::Migration[7.1]
+  def change
+    add_column :subscriptions, :activated_at, :datetime
+    add_column :subscriptions, :deactivated_at, :datetime
+  end
+end
+```
+
 ## Configuration
 
-### `activatable_by(field = :active)`
+### `activatable_by(field = :active, prefix: nil, suffix: nil, timestamps: false)`
 
 Called once at the class level. Registers the backing column, validates its existence, and defines the `.active` and `.inactive` scopes.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `field` | Symbol | `:active` | The name of the boolean column that stores the active/inactive state. Must already exist in the database when the macro is evaluated; raises `ArgumentError` otherwise. |
+| `prefix:` / `suffix:` | Symbol / `true` | `nil` | Affix the `.active` / `.inactive` scope names so they don't collide with a sibling concern's. |
+| `timestamps:` | `true`, `false` or `Hash` | `false` | `true` stamps `activated_at` when a record is activated and `deactivated_at` when it is deactivated (`activate!`, `deactivate!`, `toggle_active!`, `activate_all`, `deactivate_all`). A Hash renames either column (`{ activated_at: :enabled_at }`) or drops a side (`deactivated_at: nil`); unknown keys raise. The stamp columns must already exist: `activatable_by` checks that at declaration and raises `ArgumentError` otherwise; the declared `datetime` type is not enforced, it only types the `bin/rails generate migration` hint in that error. The other column keeps its previous value, so the last activation and the last deactivation are both visible. |
 
-The macro accepts only the positional `field` argument. There are no keyword options.
+Besides the positional `field`, the macro takes the `prefix:`, `suffix:` and `timestamps:` keywords documented in the table above.
 
 ## Scopes
 
@@ -90,15 +105,16 @@ Subscription.inactive  # WHERE active = FALSE OR active IS NULL
 |-----------|-------------|
 | `active?` | Returns `true` if the backing column equals `true`; `false` for `false` or `nil`. |
 | `inactive?` | Returns `!active?`. |
-| `activate!` | Persists `true` to the backing column via `update`. Returns the result of `update`. |
-| `deactivate!` | Persists `false` to the backing column via `update`. Returns the result of `update`. |
+| `activate!` | Runs `before_activate`, persists `true` (and the `activated_at` stamp when configured) via `update`, then `after_activate` — all in one transaction. Returns the result of `update`; a `false` (validation failure) skips the after-hook, a raising after-hook rolls the write back. |
+| `deactivate!` | The mirror image: `before_deactivate`, `false` (+ `deactivated_at`), `after_deactivate`. |
+| `before_activate` / `after_activate` / `before_deactivate` / `after_deactivate` | No-op override points. Gating is per direction: overriding a direction's bang method or either of its two hooks moves **that** verb to the per-record path, so the hooks run for every record. Overriding `after_deactivate` leaves `activate_all` on the single-`UPDATE` fast path. |
 | `toggle_active!` | Calls `deactivate!` if currently active, `activate!` otherwise. A `NULL` column is treated as inactive, so toggling it sets the column to `true`. |
 
 ### Class methods
 
 | Signature | Description |
 |-----------|-------------|
-| `activatable_by(field = :active)` | Configuration macro. Validates the column, stores it in the `activatable_field` class attribute, and defines the `.active` / `.inactive` scopes. |
+| `activatable_by(field = :active, prefix: nil, suffix: nil, timestamps: false)` | Configuration macro. Validates that the boolean column and any configured stamp columns exist, stores them in the `activatable_field` / `activatable_timestamps` class attributes, and defines the `.active` / `.inactive` scopes (affixed by `prefix:` / `suffix:`). |
 
 ## Examples
 
@@ -148,6 +164,25 @@ sub = Subscription.create!(name: "Trial")  # active column is NULL
 sub.active?   # => false  (NULL treated as inactive)
 sub.toggle_active!
 sub.reload.active # => true
+```
+
+**Hooks and timestamps**
+
+```ruby
+class Subscription < ApplicationRecord
+  include ConcernsOnRails::Activatable
+
+  activatable_by timestamps: true
+
+  def after_activate   = Billing.resume!(self)
+  def after_deactivate = Billing.pause!(self)
+end
+
+sub = Subscription.create!(active: false)
+sub.activate!          # before_activate → UPDATE active = true, activated_at = now → after_activate
+sub.activated_at       # => 2026-09-05 10:00:00 UTC
+sub.deactivate!        # deactivated_at = now; activated_at keeps 10:00 (last activation)
+Subscription.inactive.activate_all   # hooks overridden → per record, so Billing.resume! runs for each
 ```
 
 ## Notes & gotchas

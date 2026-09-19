@@ -13,6 +13,9 @@ module ConcernsOnRails
     #     # Apply preset headers, plus any custom "Header-Name" => "value" pairs:
     #     secure_headers :nosniff, :sameorigin_frame, :no_referrer_leak, :disable_legacy_xss
     #     secure_headers "Permissions-Policy" => "geolocation=()"
+    #     # ...or the break-nothing baseline in one line, then relax what you must:
+    #     secure_headers :recommended
+    #     secure_headers :sameorigin_frame          # later declarations win
     #
     #     # Delegates to Rails' native CSP DSL — roll out report-only FIRST:
     #     content_security_policy_for(report_only: true) do |policy|
@@ -36,8 +39,31 @@ module ConcernsOnRails
     #   :no_referrer_leak   — Referrer-Policy: strict-origin-when-cross-origin
     #   :no_cross_domain    — X-Permitted-Cross-Domain-Policies: none
     #   :disable_legacy_xss — X-XSS-Protection: 0 (the only correct modern value)
+    #   :hsts               — Strict-Transport-Security: max-age=31536000; includeSubDomains
+    #                         (for API-only apps behind a TLS-terminating proxy; when
+    #                         you use force_ssl / config.ssl_options Rails sets it)
+    #   :same_origin_opener              — Cross-Origin-Opener-Policy: same-origin
+    #   :same_origin_opener_allow_popups — Cross-Origin-Opener-Policy: same-origin-allow-popups
+    #                                      (keeps OAuth / payment popups working)
+    #   :require_corp_embedder           — Cross-Origin-Embedder-Policy: require-corp
+    #   :same_origin_resource            — Cross-Origin-Resource-Policy: same-origin
+    #   :no_sensitive_permissions        — Permissions-Policy denying camera, microphone,
+    #                                      geolocation, payment, usb and motion sensors
+    #
+    # Bundles (expand to presets, so a later preset or custom pair still wins):
+    #   :recommended            — nosniff, deny_frame, no_referrer_leak, no_cross_domain,
+    #                             disable_legacy_xss, same_origin_opener_allow_popups,
+    #                             no_sensitive_permissions. Deliberately WITHOUT COEP/CORP
+    #                             (they block cross-origin embeds of your resources and
+    #                             CDN assets without CORP headers) and HSTS (belongs
+    #                             with force_ssl) — the baseline that breaks nothing.
+    #   :cross_origin_isolation — same_origin_opener, require_corp_embedder,
+    #                             same_origin_resource (SharedArrayBuffer / high-res
+    #                             timers need all three).
     module SecureHeadable
       extend ActiveSupport::Concern
+
+      HSTS_HEADER = "Strict-Transport-Security".freeze
 
       # Frozen, string-only header presets, each "Header-Name" => "value".
       # :disable_legacy_xss emits "0" deliberately — the legacy browser XSS
@@ -49,8 +75,34 @@ module ConcernsOnRails
         deny_frame: %w[X-Frame-Options DENY],
         no_referrer_leak: %w[Referrer-Policy strict-origin-when-cross-origin],
         no_cross_domain: %w[X-Permitted-Cross-Domain-Policies none],
-        disable_legacy_xss: %w[X-XSS-Protection 0]
-      }.freeze
+        disable_legacy_xss: %w[X-XSS-Protection 0],
+        # One year, subdomains included, no `preload` — the preload list is a
+        # months-long commitment that must be an explicit, custom-pair decision.
+        hsts: ["Strict-Transport-Security", "max-age=31536000; includeSubDomains"],
+        same_origin_opener: %w[Cross-Origin-Opener-Policy same-origin],
+        same_origin_opener_allow_popups: %w[Cross-Origin-Opener-Policy same-origin-allow-popups],
+        require_corp_embedder: %w[Cross-Origin-Embedder-Policy require-corp],
+        same_origin_resource: %w[Cross-Origin-Resource-Policy same-origin],
+        no_sensitive_permissions: ["Permissions-Policy",
+                                   "accelerometer=(), camera=(), geolocation=(), gyroscope=(), " \
+                                   "magnetometer=(), microphone=(), payment=(), usb=()"],
+        # The same list scoped to `(self)`: third-party frames are denied, the
+        # app's own pages keep getting/asking for permission. This is the one
+        # that belongs in a general-purpose bundle -- an empty allowlist denies
+        # the app itself, which silently breaks getUserMedia, geolocation and
+        # Payment Request with only a console warning.
+        self_sensitive_permissions: ["Permissions-Policy",
+                                     "accelerometer=(self), camera=(self), geolocation=(self), gyroscope=(self), " \
+                                     "magnetometer=(self), microphone=(self), payment=(self), usb=(self)"]
+      }.each_value { |pair| pair.each(&:freeze).freeze }.freeze
+
+      # Named sets of presets. Expanded in declaration position, so
+      # `secure_headers :recommended, :sameorigin_frame` relaxes the frame rule.
+      BUNDLES = {
+        cross_origin_isolation: %i[same_origin_opener require_corp_embedder same_origin_resource],
+        recommended: %i[nosniff deny_frame no_referrer_leak no_cross_domain disable_legacy_xss
+                        same_origin_opener_allow_popups self_sensitive_permissions]
+      }.each_value(&:freeze).freeze
 
       included do
         class_attribute :secure_headable_headers, instance_accessor: false, default: {}
@@ -67,14 +119,16 @@ module ConcernsOnRails
       end
 
       class_methods do
-        # Register preset headers (by symbol) plus optional custom
-        # "Header-Name" => "value" pairs. Later declarations win on collision.
+        # Register preset headers (by symbol, bundles expanded in place) plus
+        # optional custom "Header-Name" => "value" pairs. Later declarations —
+        # and later positions within one call — win on collision.
         def secure_headers(*presets, **custom)
-          resolved = presets.to_h do |key|
+          expanded = presets.flat_map { |key| BUNDLES.fetch(key, [key]) }
+          resolved = expanded.to_h do |key|
             PRESETS.fetch(key) do
               raise ArgumentError,
                     "ConcernsOnRails::Controllers::SecureHeadable: unknown preset '#{key}'. " \
-                    "Valid presets: #{PRESETS.keys.join(', ')}"
+                    "Valid presets: #{PRESETS.keys.join(', ')}. Bundles: #{BUNDLES.keys.join(', ')}"
             end
           end
 
@@ -107,7 +161,32 @@ module ConcernsOnRails
       def apply_secure_headers
         return unless respond_to?(:response) && response
 
-        self.class.secure_headable_headers.each { |name, value| response.set_header(name, value) }
+        self.class.secure_headable_headers.each do |name, value|
+          next if secure_headable_skip?(name)
+
+          response.set_header(name, value)
+        end
+      end
+
+      # HSTS is the one preset that is wrong to send unconditionally: RFC 6797
+      # section 7.2 forbids it over plaintext, and overwriting a value the app
+      # already set would silently shorten a longer max-age or drop `preload`.
+      def secure_headable_skip?(name)
+        return false unless name == HSTS_HEADER
+
+        secure_headable_plain_http? || secure_headable_existing_hsts.present?
+      end
+
+      def secure_headable_plain_http?
+        return false unless respond_to?(:request, true) && (req = request)
+
+        req.respond_to?(:ssl?) && !req.ssl?
+      end
+
+      def secure_headable_existing_hsts
+        return response.get_header(HSTS_HEADER) if response.respond_to?(:get_header)
+
+        response.headers[HSTS_HEADER] if response.respond_to?(:headers)
       end
     end
   end

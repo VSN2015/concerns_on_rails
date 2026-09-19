@@ -28,8 +28,17 @@ module ConcernsOnRails
     # Options: `as:` (explicit method name — required when the column does not
     # end in `_cents`), `unit:` ("$"), `precision:` (2), `delimiter:` (","),
     # `separator:` ("."), `subunit_to_unit:` (100).
+    #
+    # Class-level aggregates come for free and follow the current scope:
+    #   Product.sum_price                        # => BigDecimal, SUM(price_cents) / 100
+    #   Product.in_stock.average_price           # average / minimum / maximum too; nil on empty sets
+    #   Product.formatted_sum_price              # => "$1,234.56" — every aggregate has a formatted_ twin
+    #   product.formatted_price(unit: "€", delimiter: ".", separator: ",")   # per-call display overrides
     module Monetizable
       extend ActiveSupport::Concern
+
+      LABEL = "ConcernsOnRails::Models::Monetizable".freeze
+      AGGREGATES = %i[sum average minimum maximum].freeze
 
       included do
         class_attribute :monetizable_rules, instance_accessor: false, default: {}
@@ -54,15 +63,18 @@ module ConcernsOnRails
 
           ensure_columns!("ConcernsOnRails::Models::Monetizable", fields, types: :integer)
           config = { unit: unit, precision: precision, delimiter: delimiter, separator: separator, subunit_to_unit: subunit_to_unit }
-          fields.each { |cents_field| define_money_accessors(cents_field.to_sym, as, config) }
+          fields.each do |cents_field|
+            name = money_name(cents_field.to_sym, as)
+            define_money_accessors(cents_field.to_sym, name, config)
+            define_money_aggregates(cents_field.to_sym, name, config)
+          end
         end
       end
 
       class_methods do # rubocop:disable Metrics/BlockLength
         private
 
-        def define_money_accessors(cents_field, as, config)
-          name = money_name(cents_field, as)
+        def define_money_accessors(cents_field, name, config)
           subunit = config[:subunit_to_unit]
           self.monetizable_rules = monetizable_rules.merge(cents_field => name)
 
@@ -87,9 +99,27 @@ module ConcernsOnRails
                                 end
           end
 
-          define_method("formatted_#{name}") do
-            cents = self[cents_field]
-            cents.nil? ? nil : ConcernsOnRails::Support::Money.format(cents, config)
+          define_method("formatted_#{name}") do |**overrides|
+            options = ConcernsOnRails::Support::Money.format_options(config, overrides, LABEL)
+            ConcernsOnRails::Support::Money.format_each(self[cents_field], options)
+          end
+        end
+
+        # `sum_price` / `average_price` / `minimum_price` / `maximum_price` and
+        # their `formatted_` twins. Defined on the singleton so a relation
+        # (`Product.in_stock.sum_price`) delegates here inside its scoping;
+        # `public_send(aggregate)` then runs against the current scope.
+        def define_money_aggregates(cents_field, name, config)
+          subunit = config[:subunit_to_unit]
+          AGGREGATES.each do |aggregate|
+            define_singleton_method("#{aggregate}_#{name}") do
+              ConcernsOnRails::Support::Money.decimal(public_send(aggregate, cents_field), subunit)
+            end
+
+            define_singleton_method("formatted_#{aggregate}_#{name}") do |**overrides|
+              options = ConcernsOnRails::Support::Money.format_options(config, overrides, LABEL)
+              ConcernsOnRails::Support::Money.format_each(public_send(aggregate, cents_field), options)
+            end
           end
         end
 
