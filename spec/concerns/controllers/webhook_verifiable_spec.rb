@@ -690,10 +690,64 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       expect_failure(second, :conflict, "webhook_replayed")
     end
 
+    # The Stripe header is parsed, not compared: unknown keys and whitespace
+    # around the commas are ignored, so a captured header can be mutated into
+    # unlimited distinct-but-still-valid strings. Keying off the raw header let
+    # every one of them through, which is no replay protection at all.
+    it "keys Stripe off the signed payload, so a padded or re-spaced header is still a replay" do
+      now = Time.now.to_i
+      klass = verifiable_class { verify_webhook :receive, secret: WH_SECRET, scheme: :stripe, replay: FakeReplayStore.new }
+      canonical = stripe_header(WH_SECRET, WH_BODY, at: now)
+      instance(klass, headers: { "Stripe-Signature" => canonical }).verify_webhook_signature!
+
+      ["#{canonical},v0=deadbeef", canonical.sub(",", ", ")].each do |mutated|
+        c = instance(klass, headers: { "Stripe-Signature" => mutated })
+        c.verify_webhook_signature!
+        expect_failure(c, :conflict, "webhook_replayed")
+      end
+    end
+
     it "validates the options at class load" do
       expect { replay_class(replay: nil, replay_ttl: 1.hour) }.to raise_error(ArgumentError, /:replay_ttl requires :replay/)
       expect { replay_class(replay: "nope") }.to raise_error(ArgumentError, /:replay must be true or a store responding to #write/)
       expect { replay_class(replay_ttl: 0) }.to raise_error(ArgumentError, /:replay_ttl must be a positive duration/)
+    end
+
+    # A store that writes but cannot be read back silently disables the whole
+    # feature: a falsy unless_exist write is indistinguishable from a store
+    # outage, so without #read every delivery is waved through.
+    it "rejects a write-only store instead of silently providing no protection" do
+      write_only = Class.new do
+        # Never actually reached — both paths reject the store first. 1 rather
+        # than true so RuboCop doesn't read a writer as a predicate.
+        def write(_key, _value, _options = {})
+          1
+        end
+      end
+      expect { replay_class(replay: write_only.new) }
+        .to raise_error(ArgumentError, /:replay must be true or a store responding to #write and #read/)
+
+      ConcernsOnRails.setup { |c| c.cache_store = write_only.new }
+      klass = replay_class(replay: true)
+      expect { instance(klass, headers: { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) }).verify_webhook_signature! }
+        .to raise_error(ArgumentError, /does not respond to #read/)
+    end
+
+    # `replay: Rails.env.production?` must not blow up the class body in
+    # development — false is "off", not a malformed store.
+    it "treats replay: false as off" do
+      klass = replay_class(replay: false)
+      expect(klass.webhook_rules.first[:replay]).to be_nil
+      expect(klass.webhook_rules.first[:replay_ttl]).to be_nil
+      headers = { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) }
+      instance(klass, headers: headers).verify_webhook_signature!
+      second = instance(klass, headers: headers)
+      second.verify_webhook_signature!
+      expect(second.rendered).to be_nil
+      expect(second.webhook_verified?).to be(true)
+
+      expect { replay_class(replay: false, replay_ttl: 1.hour) }
+        .to raise_error(ArgumentError, /:replay_ttl requires :replay/)
     end
 
     it "exposes the replay settings on the rule" do

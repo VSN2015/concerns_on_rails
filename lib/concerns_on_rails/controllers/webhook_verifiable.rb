@@ -109,12 +109,15 @@ module ConcernsOnRails
         # with the same signature within `replay_ttl:` (default 24 hours) is
         # rejected with 409 `webhook_replayed`. `replay: true` uses the gem-wide
         # `ConcernsOnRails.config.cache_store`; pass a store object (anything with
-        # `#write(key, value, expires_in:, unless_exist:)`) to override.
+        # `#write(key, value, expires_in:, unless_exist:)` and `#read(key)`, plus
+        # an optional `#delete(key)`) to override. `replay: false` is off, so
+        # `replay: Rails.env.production?` is safe.
         def verify_webhook(*actions, secret:, scheme: :hex, header: nil, tolerance: nil, digest: :sha256,
                            replay: nil, replay_ttl: nil)
           actions = actions.flatten.map(&:to_s)
           scheme = scheme.to_sym
           digest = digest.to_sym
+          replay = normalize_webhook_replay(replay)
           validate_verify_webhook!(secret: secret, scheme: scheme, header: header, tolerance: tolerance, digest: digest)
           validate_webhook_replay!(replay, replay_ttl)
 
@@ -127,6 +130,12 @@ module ConcernsOnRails
         end
 
         private
+
+        # false is "off", not a bad store — `replay: Rails.env.production?`
+        # must not blow up the class body in development.
+        def normalize_webhook_replay(replay)
+          replay == false ? nil : replay
+        end
 
         def validate_verify_webhook!(secret:, scheme:, header:, tolerance:, digest:)
           raise ArgumentError, "#{LABEL}: unknown scheme :#{scheme} (supported: #{SCHEMES.keys.join(', ')})" unless SCHEMES.key?(scheme)
@@ -143,8 +152,12 @@ module ConcernsOnRails
           raise ArgumentError, "#{LABEL}: :replay_ttl requires :replay" if replay_ttl && replay.nil?
           return if replay.nil?
 
-          unless replay == true || replay.respond_to?(:write)
-            raise ArgumentError, "#{LABEL}: :replay must be true or a store responding to #write"
+          # #read is as load-bearing as #write: a falsy unless_exist write
+          # cannot be told apart from an unreachable store without reading the
+          # key back, so a write-only store would pass here and then provide no
+          # replay protection whatsoever.
+          unless replay == true || (replay.respond_to?(:write) && replay.respond_to?(:read))
+            raise ArgumentError, "#{LABEL}: :replay must be true or a store responding to #write and #read"
           end
 
           validate_webhook_replay_ttl!(replay_ttl)
@@ -319,17 +332,15 @@ module ConcernsOnRails
       end
 
       # Replay check, run ONLY after the signature verified so forged traffic
-      # never consumes a slot. The key is a SHA256 of the signature header
-      # (for a valid signature that identifies the body, and for Stripe the
-      # attempt's timestamp too), scoped per controller#action; the atomic
-      # unless_exist write is what makes two concurrent replays lose exactly
-      # one of them (memcached add / Redis SET NX through Rails.cache).
+      # never consumes a slot. The key is a SHA256 of what identifies the
+      # delivery (see webhook_replay_digest), scoped per controller#action; the
+      # atomic unless_exist write is what makes two concurrent replays lose
+      # exactly one of them (memcached add / Redis SET NX through Rails.cache).
       def webhook_replayed?(rule)
         return false unless rule[:replay]
 
         store = webhook_replay_store!(rule)
-        digest = Digest::SHA256.hexdigest(read_webhook_header(rule).to_s)
-        key = "webhook_replay:#{webhook_replay_scope}:#{digest}"
+        key = "webhook_replay:#{webhook_replay_scope}:#{webhook_replay_digest(rule)}"
 
         # Claim for a SHORT window only. The full replay_ttl is written by
         # commit_webhook_replay_claim once the action has actually completed.
@@ -347,9 +358,26 @@ module ConcernsOnRails
         # connection errors and return false. Confirm with a read, which fails
         # safe to nil, so a cache outage lets webhooks through instead of
         # rejecting every single one.
-        return false unless store.respond_to?(:read)
-
         !store.read(key).nil?
+      end
+
+      # What identifies this delivery. For every scheme but Stripe the header is
+      # compared byte-for-byte, so the header IS the identity. Stripe's is a
+      # parsed key/value list: unknown keys (v0=...) and whitespace around the
+      # commas are ignored by the parser, so a captured header can be mutated
+      # into unlimited distinct-but-still-valid strings, each of which would
+      # hash to a fresh key and replay straight past a raw-header marker. Key
+      # off the signed payload instead — t cannot move without breaking the
+      # signature, and the body is the delivery.
+      def webhook_replay_digest(rule)
+        value = read_webhook_header(rule).to_s
+        identity = if rule[:scheme] == :stripe
+                     parsed = parse_stripe_header(value)
+                     parsed ? "#{parsed[:timestamp]}.#{webhook_raw_body}" : value
+                   else
+                     value
+                   end
+        Digest::SHA256.hexdigest(identity)
       end
 
       def webhook_response_status
@@ -358,14 +386,21 @@ module ConcernsOnRails
         response.status || 200
       end
 
+      # An explicit store is checked at declaration time; the gem-wide fallback
+      # can only be checked here, once a request actually needs it.
       def webhook_replay_store!(rule)
         store = rule[:replay] == true ? ConcernsOnRails.config.resolved_cache_store : rule[:replay]
-        return store if store
+        raise ArgumentError, webhook_replay_store_hint("no store configured for replay: true") unless store
+        return store if store.respond_to?(:read)
 
-        raise ArgumentError,
-              "#{LABEL}: no store configured for replay: true. Pass replay: <store>, or the gem-wide fallback: " \
-              "ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } } " \
-              "(must support #write(key, value, expires_in:, unless_exist:))."
+        raise ArgumentError, webhook_replay_store_hint("the configured store does not respond to #read")
+      end
+
+      def webhook_replay_store_hint(problem)
+        "#{LABEL}: #{problem}. Pass replay: <store>, or the gem-wide fallback: " \
+          "ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } } " \
+          "(must support #write(key, value, expires_in:, unless_exist:) and #read(key); " \
+          "#delete(key) releases the claim when the action 5xxs)."
       end
 
       def webhook_replay_scope
