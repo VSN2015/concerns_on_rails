@@ -6,6 +6,8 @@ module ConcernsOnRails
     # string. Pure and stateless; used by Models::Monetizable. Uses BigDecimal
     # throughout so there is no binary-float rounding drift.
     module Money
+      FORMAT_OPTIONS = %i[unit precision delimiter separator subunit_to_unit].freeze
+
       module_function
 
       # format(199999) => "$1,999.99"
@@ -30,6 +32,33 @@ module ConcernsOnRails
         # (e.g. -0.001 at precision 2) never prints a spurious "-".
         sign = decimal.negative? && !rounded.zero? ? "-" : ""
         "#{sign}#{unit}#{number}"
+      end
+
+      # Merge per-call display overrides into a field's formatting config,
+      # rejecting typos (`units:`) instead of silently ignoring them.
+      def format_options(config, overrides, label)
+        return config if overrides.empty?
+
+        unknown = overrides.keys - FORMAT_OPTIONS
+        raise ArgumentError, "#{label}: unknown formatting option(s): #{unknown.join(', ')}" if unknown.any?
+
+        config.merge(overrides)
+      end
+
+      # Subunits to a BigDecimal amount. A grouped relation's aggregate is a
+      # Hash keyed by the GROUP BY value, so map over it rather than feeding
+      # the whole Hash to BigDecimal().
+      def decimal(cents, subunit)
+        return cents.transform_values { |value| decimal(value, subunit) } if cents.is_a?(Hash)
+
+        cents.nil? ? nil : BigDecimal(cents.to_s) / subunit
+      end
+
+      # format() that is likewise grouped-relation aware and nil-safe.
+      def format_each(cents, options)
+        return cents.transform_values { |value| format_each(value, options) } if cents.is_a?(Hash)
+
+        cents.nil? ? nil : format(cents, options)
       end
 
       # Insert the thousands delimiter into a non-negative integer string.

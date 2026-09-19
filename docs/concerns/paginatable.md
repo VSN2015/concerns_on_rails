@@ -1,4 +1,4 @@
-Adds offset-based pagination to any Rails controller, exposing a single `paginated` helper method that applies `LIMIT`/`OFFSET` to an ActiveRecord relation and writes standard `X-*` response headers. It requires no Kaminari, will_paginate, or any other pagination library — the entire implementation is self-contained.
+Adds offset-based pagination to any Rails controller, exposing a single `paginated` helper method that applies `LIMIT`/`OFFSET` to an ActiveRecord relation — or slices an in-memory collection such as an `Array`, `Set` or `Range` — and writes standard `X-*` response headers. It requires no Kaminari, will_paginate, or any other pagination library — the entire implementation is self-contained.
 
 ## When to use it
 
@@ -7,6 +7,7 @@ Adds offset-based pagination to any Rails controller, exposing a single `paginat
 - GraphQL or REST endpoints that feed paginated tables in React, Vue, or mobile clients that read `X-Total-Count` and `X-Total-Pages` from response headers.
 - Any controller that needs pagination without pulling in a full pagination gem and its view helpers.
 - Controllers that compose pagination with `ConcernsOnRails::Controllers::Filterable` or `ConcernsOnRails::Controllers::Sortable` — `paginated` accepts any scoped relation.
+- Endpoints whose results never touch the database — an external API response, a search-service hit list, a loaded association or a hand-built list of Structs — `paginated` slices any Enumerable and emits the identical headers, so clients cannot tell the two apart.
 
 ## Installation
 
@@ -31,23 +32,57 @@ end
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `per_page` | Integer | `25` | Default number of records per page when the caller supplies no `?per_page=` param, or supplies a value less than 1. Coerced with `.to_i`. |
-| `max_per_page` | Integer | `200` | Hard upper bound on `per_page`. Any caller-supplied value above this cap is silently reduced to this value. When set to `0` or a negative integer the cap is disabled and any requested `per_page` is honored. Coerced with `.to_i`. |
+| `per_page` | Integer | `25` | Default number of records per page when the caller supplies no `?per_page=` param, or supplies a value less than 1. Coerced with `.to_i`; a value below 1 raises `ArgumentError` at class-load time (`per_page: 0` would make every page empty, and `per_page: -1` means `LIMIT -1`, i.e. *no limit at all* on SQLite and MySQL). |
+| `max_per_page` | Integer | `200` | Hard upper bound on `per_page`. Any caller-supplied value above this cap is silently reduced to this value. When set to `0` or a negative integer the cap is disabled and any requested `per_page` is honored, up to the absolute `MAX_PER_PAGE` ceiling (1,000,000) that keeps an untrusted `?per_page=` from overflowing `LIMIT`. Coerced with `.to_i`. |
+| `link_header` | Boolean | `true` | Emit the RFC 8288 `Link` header (`first`/`prev`/`next`/`last`) on every paginated response. Set `false` to send only the `X-*` headers. |
+| `page_param` | Symbol/String or Array | `:page` | Where the page number is read from: a top-level param name, or an Array path into nested params (`%i[page number]` → `?page[number]=2`). Must be a name or a non-empty path of names. |
+| `per_page_param` | Symbol/String or Array | `:per_page` | Same for the page size (`%i[page size]` → `?page[size]=10`). |
+| `style` | `:flat` or `:jsonapi` | `:flat` | Shortcut: `:jsonapi` sets `page_param: %i[page number]` and `per_page_param: %i[page size]` (the JSON:API page-based strategy); `:flat` keeps `page` / `per_page`. Explicit `page_param:`/`per_page_param:` win over the style. |
+| `window` | Integer, `nil` or `false` | `nil` | Half-width of the page window published as `pagination_meta[:pages]` — first, last, and this many pages either side of the current page. `nil`/`false` omit the `pages:` key entirely; `0` is meaningful (first, current, last). A negative or non-Integer value raises `ArgumentError` at declaration. |
 
 **URL params read from `params`**
 
 | Param | Default | Notes |
 |---|---|---|
-| `?page=` | `1` | Values below 1 (including negative numbers and zero) are clamped to `1`. |
-| `?per_page=` | value of `paginatable_per_page` | Values below 1 fall back to the class default; values above `max_per_page` are capped. |
+| `?page=` | `1` | Values below 1 (including negative numbers and zero) are clamped to `1`; values above `MAX_PAGE` (1,000,000) are clamped down to it, so an absurd `?page=` returns an empty page instead of a 500. |
+| `?per_page=` | value of `paginatable_per_page` | Values below 1 fall back to the class default; values above `max_per_page` are capped, and in every case the result is held under `MAX_PER_PAGE` (1,000,000). |
+
+Both names are configurable (`page_param:` / `per_page_param:` / `style: :jsonapi`). Nested paths are read by digging through the params (`params[:page][:number]`); a non-Hash where a Hash is expected, or an Array/Hash where a scalar is expected, falls back to the default exactly like garbage in the flat form.
 
 ## Methods
 
 ### Instance methods
 
-**`paginated(relation) → ActiveRecord::Relation`**
+**`paginated(collection, total: nil) → ActiveRecord::Relation | Array`**
 
-Applies pagination to the given relation and sets the four standard response headers. The `relation` argument can be any ActiveRecord relation or scope — it is not mutated. The method strips `ORDER`, `LIMIT`, and `OFFSET` clauses before running the `COUNT` query, so pre-applied ordering does not affect the total count. Returns the paginated relation (a new relation object with `LIMIT` and `OFFSET` applied); the relation is not yet evaluated (lazy).
+Applies pagination to the given collection and sets the four standard response headers. The argument is not mutated. Two kinds of input are accepted:
+
+- **A relation** — anything that answers `limit` and `offset` (an `ActiveRecord::Relation`, an association `CollectionProxy`, a model class). The method strips `ORDER`, `LIMIT`, `OFFSET` and a custom `SELECT` before running the `COUNT` query, so pre-applied ordering does not affect the total. Returns a new relation with `LIMIT` and `OFFSET` applied; it is not yet evaluated (lazy).
+- **An in-memory collection** — any other non-`Hash` `Enumerable` (`Array`, `Set`, `Range`, `Enumerator`, …). It is materialized once with `to_a` (so an `Enumerator` is consumed a single time for both the count and the slice), the total is its size, and the current page is returned as an `Array` — `[]` when the requested page is past the end.
+
+A `Hash` is rejected with an `ArgumentError` rather than silently paginated as `[key, value]` pairs (call `.to_a` if that is what you mean); `nil` and non-collections (a String, an Integer) raise the same error, naming the class received.
+
+**`total:`** — the collection is already the current page (an external API or search service returned page N of a set it counted for you). Nothing is sliced, limited or counted: an Array comes back as the same Array, a relation is not given `LIMIT`/`OFFSET`, no `COUNT` runs, and `total` drives `X-Total-Count`, `X-Total-Pages` and the `Link` header. Must be a non-negative Integer (`ArgumentError` otherwise). Request the same `page`/`per_page` upstream that this controller reads.
+
+**`pagination_meta(collection = nil, total: nil) → Hash`**
+
+Returns `{ total:, page:, per_page:, total_pages: }` (plus `pages:` when `window:` is declared) **without** applying `LIMIT`/`OFFSET` or slicing — handy for body-based pagination composed with `Respondable`'s `meta:`. Called with no argument after `paginated`, it reuses that call's memoized metadata (no second `COUNT`); pass a relation or collection to compute fresh. Accepts exactly the same inputs as `paginated`; with `total:` the `COUNT` is skipped and the collection may be omitted entirely (`pagination_meta(total: result.total_hits)`).
+
+**`pagination_meta[:pages]` — the page window**
+
+Declaring `window: N` adds a `pages:` key: an Array of page numbers with the Symbol `:gap` standing in for each run of pages left out. It is built from the `total` already counted, so it costs no extra query, and it is absent (not `nil`) unless `window:` is declared — `meta.key?(:pages)` is a clean opt-in probe.
+
+The rules, for `window: 3` over 100 pages:
+
+| Current page | `pages:` | Why |
+|---|---|---|
+| `47` | `[1, :gap, 44, 45, 46, 47, 48, 49, 50, :gap, 100]` | first, ±3, last |
+| `2` | `[1, 2, 3, 4, 5, :gap, 100]` | the window already reaches page 1, so no leading gap |
+| `6` | `[1, 2, 3, 4, 5, 6, 7, 8, 9, :gap, 100]` | the gap would hide only page 2 — a `:gap` marker is no narrower than the number it replaces, so the page is emitted instead |
+| `99` | `[1, :gap, 96, 97, 98, 99, 100]` | mirror of `page: 2` |
+| `999` | `[1, :gap, 97, 98, 99, 100]` | a page past the end windows around the last page, matching what `rel="prev"` already does |
+
+With fewer pages than the window spans, every page is listed and no gap appears (`[1, 2, 3, 4, 5]` for 5 pages; `[1]` for one). An empty collection has `total_pages == 0` and gets no `pages:` key at all.
 
 The four `X-*` headers set on `response`:
 
@@ -57,6 +92,7 @@ The four `X-*` headers set on `response`:
 | `X-Page` | The resolved current page number (always >= 1). |
 | `X-Per-Page` | The resolved per-page value after applying defaults and the cap. |
 | `X-Total-Pages` | `ceil(total / per_page)`. Returns `"0"` when the relation is empty. |
+| `Link` | RFC 8288 web links: `<…?page=1>; rel="first", <…?page=1>; rel="prev", <…?page=3>; rel="next", <…?page=5>; rel="last"`. URLs are the current request's base URL + path with the page param replaced — under the configured name, nested ones encoded by Rack (`page%5Bnumber%5D=3`) with the rest of that nested Hash (`page[size]`) preserved — and every other query param kept. `prev`/`next` appear only when such a page exists (past the end, `prev` points at the last page). Not emitted for an empty collection, when `link_header: false`, or when the controller has no request. Appended to an existing `Link` header, never replacing it. |
 
 ## Examples
 
@@ -78,6 +114,22 @@ end
 #   X-Page: 2
 #   X-Per-Page: 20
 #   X-Total-Pages: 5
+```
+
+**Paginating an in-memory collection**
+
+```ruby
+class CatalogController < ApplicationController
+  include ConcernsOnRails::Controllers::Paginatable
+  include ConcernsOnRails::Controllers::Respondable
+
+  def search
+    hits = ExternalCatalog.search(params[:q])          # a plain Array from a third-party API
+    render_success(data: paginated(hits), meta: pagination_meta)
+  end
+end
+# GET /catalog/search?q=lamp&page=2&per_page=10
+# => data holds hits[10, 10]; meta and the X-* headers describe all of `hits`
 ```
 
 **Combining with filtering and sorting**
@@ -111,12 +163,38 @@ class ReportsController < ApplicationController
 end
 ```
 
+**JSON:API page-based pagination**
+
+```ruby
+class Api::ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Paginatable
+
+  paginate_by style: :jsonapi, per_page: 20, max_per_page: 100
+
+  def index
+    articles = paginated(Article.order(:id))
+    render json: { data: articles, meta: pagination_meta }
+  end
+end
+
+# GET /api/articles?page[number]=2&page[size]=10&filter[state]=live
+# X-Page: 2   X-Per-Page: 10
+# Link: <…?page%5Bnumber%5D=1&page%5Bsize%5D=10&filter%5Bstate%5D=live>; rel="first",
+#       <…?page%5Bnumber%5D=1…>; rel="prev", <…?page%5Bnumber%5D=3…>; rel="next", <…?page%5Bnumber%5D=9…>; rel="last"
+```
+
 ## Notes & gotchas
 
+- **`Link` header is on by default.** Every non-empty paginated response carries `first`/`prev`/`next`/`last` links built from `request.base_url + request.path` and the current query string — behind a proxy, make sure `X-Forwarded-Host`/`-Proto` reach Rails (`config.action_dispatch.trusted_proxies`) or the links will name the internal host. `paginate_by link_header: false` disables it; the `X-*` headers are unaffected.
+- **`Link` is appended, not set.** If Deprecatable (or a CDN hint) already put a `Link` header on the response, the pagination links are appended after it with a comma.
 - **No database columns required.** This is a pure controller concern with no model-layer dependency.
+- **`pages:` is body-only, by design.** The page window is published through `pagination_meta`, never as headers — the current page is already `X-Page`, and a dozen `rel="page"` entries would bloat the `Link` header without telling a client anything it cannot compute from `X-Total-Pages`. Render it in the response body (or a view) instead.
+- **`:gap` is a Symbol, so JSON turns it into a string.** `pages: [1, :gap, 47]` serializes as `[1, "gap", 47]`. Compare against `"gap"` on the client, or map the Symbol to whatever your serializer wants (`nil`, `"…"`) before rendering.
+- **In-memory collections are sliced in Ruby.** The whole collection is already in memory by definition, so `paginated(array)` costs one `to_a` plus an `Array#[]` — there is no lazy path. If the data lives in a table, pass the relation so the database does the work.
+- **Relation detection is duck-typed.** Anything answering `limit` and `offset` takes the SQL path; that includes association proxies and model classes, and keeps a `has_many` collection paginating in the database rather than loading it.
 - **Headers require a live `response` object.** The `set_pagination_headers` method guards with `respond_to?(:response) && response`. In plain unit tests without a real HTTP response object, headers are silently skipped; the return value (the paginated relation) is still correct.
-- **Page clamping is one-directional.** Values below 1 are raised to 1, but there is no upper bound on `page`. Requesting a page far beyond the last page returns an empty relation and still sets all headers correctly, including the real `X-Total-Count`.
-- **`max_per_page: 0` (or any non-positive value) disables the cap.** The guard `cap.positive? ? [requested, cap].min : requested` means a zero or negative `max_per_page` lets any caller-requested value through unchecked.
+- **Page clamping is two-directional.** Values below 1 are raised to 1 and values above `MAX_PAGE` (1,000,000) are lowered to it — `page` is untrusted input whose only job is to become `(page - 1) * per_page`, and an unbounded value produced an offset no backend accepts (`StatementInvalid` on a relation, `RangeError` on an Array). Requesting a page far beyond the last page returns an empty relation and still sets all headers correctly, including the real `X-Total-Count`. For genuinely deep pagination use [CursorPaginatable](cursor-paginatable.md).
+- **`max_per_page: 0` (or any negative value) disables the cap.** The guard only asks whether the cap is positive, so a zero or negative `max_per_page` lets any caller-requested value through — bounded only by the absolute `MAX_PER_PAGE` ceiling (1,000,000), which exists so that "no cap" cannot be turned into an overflowing `LIMIT` by an untrusted `?per_page=`.
 - **`paginate_by` is inherited.** Because `paginatable_per_page` and `paginatable_max_per_page` are `class_attribute` values, a call to `paginate_by` in a parent controller is inherited by all subcontrollers unless they call `paginate_by` themselves.
 - **`COUNT` strips ordering.** The total-count query calls `.except(:order, :limit, :offset)` before `.count`, so pre-applied `ORDER BY` clauses on the relation do not produce an extra subquery or count error.
 - **Integer coercion.** Both `per_page` and `max_per_page` arguments to `paginate_by` are coerced with `.to_i`. Passing a string (e.g., from an env variable) is safe. Similarly, `params[:page]` and `params[:per_page]` are coerced with `.to_i`, so string params from query strings work without manual conversion.

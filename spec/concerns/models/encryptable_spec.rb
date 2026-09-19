@@ -88,6 +88,70 @@ describe ConcernsOnRails::Models::Encryptable do
     end
   end
 
+  describe "#<field>_ciphertext never exposes plaintext" do
+    let(:klass) { model_class { encryptable :ssn } }
+
+    # read_attribute_before_type_cast on an `attribute`-overridden column is
+    # the caller's PLAINTEXT until the value round-trips through the database.
+    # A reader named _ciphertext returning an SSN — while _encrypted? answered
+    # true — put the value straight into any log line that trusted it.
+    it "returns nil (not the plaintext) for an unsaved new record" do
+      record = klass.new(ssn: "111-22-3333")
+
+      expect(record.ssn_ciphertext).to be_nil
+      expect(record.ssn_encrypted?).to be(false)
+    end
+
+    it "returns nil (not the plaintext) for a persisted record with a pending change" do
+      record = klass.create!(ssn: "111-22-3333").reload
+      record.ssn = "999-88-7777"
+
+      expect(record.ssn_ciphertext).to be_nil
+      expect(record.ssn_encrypted?).to be(false)
+    end
+
+    it "returns the envelope once the change is saved" do
+      record = klass.create!(ssn: "111-22-3333").reload
+      record.update!(ssn: "999-88-7777")
+
+      expect(record.ssn_ciphertext).to be_a(String)
+      expect(record.ssn_ciphertext).not_to include("999-88-7777")
+      expect(record.ssn_encrypted?).to be(true)
+    end
+
+    it "is nil for a persisted record whose value was never set" do
+      record = klass.create!.reload
+
+      expect(record.ssn_ciphertext).to be_nil
+      expect(record.ssn_encrypted?).to be(false)
+    end
+
+    it "reports encrypted? false when the column holds plaintext rather than an envelope" do
+      record = klass.create!(ssn: "111-22-3333")
+      klass.connection.execute(
+        "UPDATE encryptable_records SET ssn = 'not-an-envelope' WHERE id = #{record.id}"
+      )
+
+      expect(klass.find(record.id).ssn_encrypted?).to be(false)
+    end
+  end
+
+  describe "Support::Encryptor.envelope?" do
+    it "recognizes its own output and rejects everything else" do
+      envelope = ConcernsOnRails::Support::Encryptor.encrypt("x", key: "a" * 64)
+
+      expect(ConcernsOnRails::Support::Encryptor.envelope?(envelope)).to be(true)
+      expect(ConcernsOnRails::Support::Encryptor.envelope?("123-45-6789")).to be(false)
+      expect(ConcernsOnRails::Support::Encryptor.envelope?("not base64 !!")).to be(false)
+      expect(ConcernsOnRails::Support::Encryptor.envelope?(["short"].pack("m0"))).to be(false)
+      # valid Base64, right length, but an unknown version byte
+      bogus = [[0xFF].pack("C") + ("\0" * 40)].pack("m0")
+      expect(ConcernsOnRails::Support::Encryptor.envelope?(bogus)).to be(false)
+      expect(ConcernsOnRails::Support::Encryptor.envelope?(nil)).to be(false)
+      expect(ConcernsOnRails::Support::Encryptor.envelope?(42)).to be(false)
+    end
+  end
+
   describe "dirty tracking (on plaintext)" do
     let(:klass) { model_class { encryptable :ssn } }
 
