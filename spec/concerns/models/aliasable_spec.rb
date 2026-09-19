@@ -265,11 +265,14 @@ describe ConcernsOnRails::Aliasable do
 
   describe "query side" do
     it "joins(:alias) joins the source table, aliased when the where-hash references the alias" do
-      expect(Author.joins(:works).to_sql).to include('INNER JOIN "books"')
+      books = TestDatabase.quoted_table("books")
+      works = TestDatabase.quoted_table("works")
+
+      expect(Author.joins(:works).to_sql).to include("INNER JOIN #{books}")
       # Rails <= 8.0 renders the table alias as `"books" "works"`; Rails 8.1
       # renders it as `"books" AS "works"`. Both are the same join.
       expect(Author.joins(:works).where(works: { title: "X" }).to_sql)
-        .to match(/INNER JOIN "books" (?:AS )?"works"/)
+        .to match(/INNER JOIN #{Regexp.escape(books)} (?:AS )?#{Regexp.escape(works)}/)
     end
 
     it "joins(:alias).where(alias: {...}) finds matching rows" do
@@ -563,7 +566,7 @@ describe ConcernsOnRails::Aliasable do
       expect(author.works).to eq([book])
       author.works = []
       expect(author.reload.books).to be_empty
-      expect(subclass.joins(:works).to_sql).to include('INNER JOIN "books"')
+      expect(subclass.joins(:works).to_sql).to include("INNER JOIN #{TestDatabase.quoted_table('books')}")
     end
 
     it "allows declaring an alias in a subclass for a parent-defined association" do

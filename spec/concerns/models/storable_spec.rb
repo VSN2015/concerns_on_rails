@@ -37,6 +37,12 @@ describe ConcernsOnRails::Storable do
     klass = Class.new(TestModel) { self.table_name = "storable_accounts" }
     if ActiveRecord.version >= Gem::Version.new("7.1")
       klass.serialize :settings, coder: coder, type: Hash
+    elsif coder == YAML
+      # 5.0-7.0 have no ColumnSerializer to wrap the coder in: `serialize :col,
+      # YAML` installs the bare module, whose `load(nil)` raises TypeError on
+      # the first read. `serialize :col, Hash` is that era's spelling of a YAML
+      # column — an ActiveRecord::Coders::YAMLColumn, equally non-JSON.
+      klass.serialize :settings, Hash
     else
       klass.serialize :settings, coder
     end
@@ -504,7 +510,7 @@ describe ConcernsOnRails::Storable do
       expect(klass.where(name: "u").where_theme("dark").count).to eq(0)
     end
 
-    it "reads a blank or corrupt column as an unset key instead of aborting the query" do
+    it "reads a blank or corrupt column as an unset key wherever the adapter can test JSON validity" do
       # The readers decode such a row as {}; without the json_valid guard
       # json_extract raises "malformed JSON" and takes the whole query with it.
       dark = klass.create!(name: "d", theme: "dark")
@@ -513,8 +519,16 @@ describe ConcernsOnRails::Storable do
       klass.where(name: "b").update_all(settings: "")
       klass.where(name: "c").update_all(settings: "not json at all")
 
-      expect(klass.where_theme("dark")).to eq([dark])
-      expect(klass.where_theme(nil).order(:id)).to eq([blank, corrupt])
+      if TestDatabase.sqlite?
+        expect(klass.where_theme("dark")).to eq([dark])
+        expect(klass.where_theme(nil).order(:id)).to eq([blank, corrupt])
+      else
+        # The documented limitation (README + docs/concerns/storable.md):
+        # PostgreSQL's ::jsonb cast of a text store and MySQL's JSON_EXTRACT get
+        # no guard, so ONE such row fails the whole query. Asserted rather than
+        # skipped, so the day that stops being true this example says so.
+        expect { klass.where_theme("dark").to_a }.to raise_error(ActiveRecord::StatementInvalid)
+      end
     end
 
     it "works on native json columns and affixed accessors" do
@@ -546,14 +560,21 @@ describe ConcernsOnRails::Storable do
       expect(time.utc_offset).to eq(7200)
     end
 
-    it "guards json_extract with json_valid on SQLite and refuses :json keys" do
-      sql = klass.where_theme("dark").to_sql
-      expect(sql).to include(
-        %(CASE WHEN json_valid("storable_accounts"."settings") ) +
-        %(THEN json_extract("storable_accounts"."settings", '$.theme') END)
-      )
-      expect(sql).to include("= 'dark'")
-      expect(klass.where_theme(nil).to_sql).to include("END) IS NULL")
+    it "emits the adapter's own extraction (json_valid-guarded on SQLite) and refuses :json keys" do
+      column = TestDatabase.qualified("storable_accounts", "settings")
+      expression =
+        if TestDatabase.postgresql?
+          %(((#{column})::jsonb ->> 'theme'))
+        elsif TestDatabase.mysql?
+          %(JSON_UNQUOTE(JSON_EXTRACT(#{column}, '$.theme')))
+        else
+          # SQLite's json_valid guard is what keeps a blank or corrupt row from
+          # taking the whole query down with it.
+          %((CASE WHEN json_valid(#{column}) THEN json_extract(#{column}, '$.theme') END))
+        end
+
+      expect(klass.where_theme("dark").to_sql).to include("#{expression} = 'dark'")
+      expect(klass.where_theme(nil).to_sql).to include("#{expression} IS NULL")
       expect { klass.where_widgets([]) }.to raise_error(ArgumentError, /where_widgets: :json keys are not queryable/)
     end
 
@@ -561,7 +582,8 @@ describe ConcernsOnRails::Storable do
       # JSON_UNQUOTE renders a stored JSON null as the 4-character string
       # 'null', so IS NULL alone would miss it and = 'null' would match all of them.
       allow(klass).to receive(:storable_adapter).and_return(:mysql)
-      json_type = %(JSON_TYPE(JSON_EXTRACT("storable_accounts"."settings", '$.theme')) = 'NULL')
+      column = TestDatabase.qualified("storable_accounts", "settings")
+      json_type = %(JSON_TYPE(JSON_EXTRACT(#{column}, '$.theme')) = 'NULL')
 
       expect(klass.where_theme(nil).to_sql).to include("IS NULL OR #{json_type}")
       expect(klass.where_theme("null").to_sql).to include("= 'null' AND NOT (#{json_type})")

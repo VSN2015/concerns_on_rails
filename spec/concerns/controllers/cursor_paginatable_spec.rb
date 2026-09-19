@@ -525,10 +525,11 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       end.join("\n")
     end
 
-    it ":auto uses a row-value tuple for uniform multi-column orders on SQLite" do
+    it ":auto uses a row-value tuple for uniform multi-column orders on a row-value adapter" do
       sql = second_page_sql(controller_class, { score: :desc })
+      tuple = "(#{TestDatabase.qualified('items', 'score')}, #{TestDatabase.qualified('items', 'id')})"
 
-      expect(sql).to include('("items"."score", "items"."id") <')
+      expect(sql).to include("#{tuple} <")
       expect(sql).not_to include(" OR ")
     end
 

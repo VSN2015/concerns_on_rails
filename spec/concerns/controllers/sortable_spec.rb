@@ -100,8 +100,8 @@ describe ConcernsOnRails::Controllers::Sortable do
     end
 
     sql = klass.new(params: { sort: "articles.title" }).sorted(Article.all).to_sql
-    expect(sql).to include('"articles"."title"')
-    expect(sql).not_to include('"articles.title"')
+    expect(sql).to include(TestDatabase.qualified("articles", "title"))
+    expect(sql).not_to include(TestDatabase.quoted_column("articles.title"))
   end
 
   it "keeps a dotted Symbol field a qualified column too, exactly like the String form" do
@@ -112,14 +112,14 @@ describe ConcernsOnRails::Controllers::Sortable do
     end
 
     sql = klass.new(params: { sort: "articles.title" }).sorted(Article.all).to_sql
-    expect(sql).to include('"articles"."title"')
-    expect(sql).not_to include('"articles.title"')
+    expect(sql).to include(TestDatabase.qualified("articles", "title"))
+    expect(sql).not_to include(TestDatabase.quoted_column("articles.title"))
   end
 
   it "de-duplicates repeated sort keys instead of one ORDER BY term per token" do
     flood = controller_class.new(params: { sort: (["title"] * 5000).join(",") })
     order_by = flood.sorted(Article.all).to_sql.split(/ORDER BY/i).last
-    expect(order_by.scan('"articles"."title"').size).to eq(1)
+    expect(order_by.scan(TestDatabase.qualified("articles", "title")).size).to eq(1)
     # The first occurrence keeps its direction.
     expect(controller_class.new(params: { sort: "-title,title" }).sorted(Article.all).pluck(:title))
       .to eq(%w[Charlie Bob Alice])
@@ -227,7 +227,7 @@ describe ConcernsOnRails::Controllers::Sortable do
       sql = klass.new(params: { sort: "title" }).sorted(SortPost.all).to_sql
       expect(sql).not_to match(/JOIN/i)
       joined = klass.new(params: { sort: "author" }).sorted(SortPost.all).to_sql
-      expect(joined).to match(/LEFT OUTER JOIN "sort_authors"/i)
+      expect(joined).to include("LEFT OUTER JOIN #{TestDatabase.quoted_table('sort_authors')}")
     end
 
     it "supports an inner join when asked (join: :inner) and still reorders any prior ORDER BY" do
@@ -242,18 +242,33 @@ describe ConcernsOnRails::Controllers::Sortable do
 
     it "emits the portable CASE term on every adapter but PostgreSQL" do
       sql = klass.new(params: { sort: "+price" }).sorted(SortPost.all).to_sql
-      expect(sql).to match(/CASE WHEN "sort_posts"\."price" IS NULL/i)
-      expect(sql).not_to match(/NULLS (FIRST|LAST)/i)
+      price = TestDatabase.qualified("sort_posts", "price")
+
+      # Both halves of the branch are real behaviour, so assert whichever one
+      # the adapter under test is entitled to rather than only the portable one.
+      if TestDatabase.postgresql?
+        expect(sql).to include("#{price} ASC NULLS LAST")
+        expect(sql).not_to match(/CASE WHEN/i)
+      else
+        expect(sql).to include("CASE WHEN #{price} IS NULL")
+        expect(sql).not_to match(/NULLS (FIRST|LAST)/i)
+      end
     end
 
-    it "builds that CASE from a qualified association column too, not just an own-table one" do
+    it "builds that NULL ordering from a qualified association column too, not just an own-table one" do
       by_author = Class.new(FakeController) do
         include ConcernsOnRails::Controllers::Sortable
 
         sortable_by :title, author: { column: "sort_authors.name", joins: :sort_author, nulls: :first }
       end
       sql = by_author.new(params: { sort: "+author" }).sorted(SortPost.all).to_sql
-      expect(sql).to match(/CASE WHEN "sort_authors"\."name" IS NULL/i)
+      name = TestDatabase.qualified("sort_authors", "name")
+
+      if TestDatabase.postgresql?
+        expect(sql).to include("#{name} ASC NULLS FIRST")
+      else
+        expect(sql).to include("CASE WHEN #{name} IS NULL")
+      end
     end
 
     it "uses the native NULLS syntax on PostgreSQL" do
@@ -270,7 +285,7 @@ describe ConcernsOnRails::Controllers::Sortable do
       sql = klass.new(params: { sort: "+price" }).sorted(relation).to_sql
       # `... ASC NULLS LAST` is a parse error on MySQL (errno 1064), and a name
       # test for "mysql" alone never matched this adapter.
-      expect(sql).to match(/CASE WHEN "sort_posts"\."price" IS NULL/i)
+      expect(sql).to include("CASE WHEN #{TestDatabase.qualified('sort_posts', 'price')} IS NULL")
       expect(sql).not_to match(/NULLS (FIRST|LAST)/i)
     end
 
@@ -281,8 +296,8 @@ describe ConcernsOnRails::Controllers::Sortable do
         sortable_by :title, author: { column: :'sort_authors.name', joins: :sort_author }
       end
       sql = dotted.new(params: { sort: "author" }).sorted(SortPost.all).to_sql
-      expect(sql).to include('"sort_authors"."name"')
-      expect(sql).not_to include('"sort_authors.name"')
+      expect(sql).to include(TestDatabase.qualified("sort_authors", "name"))
+      expect(sql).not_to include(TestDatabase.quoted_column("sort_authors.name"))
     end
 
     it "validates the declaration at class load" do

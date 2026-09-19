@@ -319,7 +319,7 @@ describe ConcernsOnRails::Sortable do
 
       expect(count).to eq(3)
       expect(queries.size).to eq(1)
-      expect(queries.first).to match(/CASE .*"tasks"\."id" WHEN/i)
+      expect(queries.first).to match(/CASE .*#{Regexp.escape(TestDatabase.qualified('tasks', 'id'))} WHEN/i)
       expect(Task.pluck(:name)).to eq(%w[C A B])
       expect(Task.pluck(:position)).to eq([1, 2, 3])
       expect(Task.reposition!(%w[1 2 3].map { |i| Task.find_by!(position: i).id.to_s })).to eq(3) # String ids from params

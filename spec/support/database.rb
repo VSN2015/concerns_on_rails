@@ -67,6 +67,38 @@ module TestDatabase
     }
   end
 
+  def sqlite?
+    adapter == "sqlite3"
+  end
+
+  def postgresql?
+    adapter == "postgresql"
+  end
+
+  def mysql?
+    adapter == "mysql2"
+  end
+
+  # Identifier quoting is per adapter — "posts"."title" on SQLite and
+  # PostgreSQL, `posts`.`title` on MySQL — so an example that asserts on
+  # generated SQL has to build its expected fragment from the connection
+  # rather than hard-code one adapter's quote character. Dropping the quotes
+  # instead would assert far less: a bare "title" matches the SELECT list too.
+  def quoted_table(name)
+    ActiveRecord::Base.connection.quote_table_name(name)
+  end
+
+  def quoted_column(name)
+    ActiveRecord::Base.connection.quote_column_name(name)
+  end
+
+  # The qualified form — "posts"."title" / `posts`.`title`. Assembled from the
+  # two halves rather than leaning on quote_table_name("posts.title")'s
+  # dot-splitting, so the call site says which half is the table.
+  def qualified(table, column)
+    "#{quoted_table(table)}.#{quoted_column(column)}"
+  end
+
   # Specs create their tables in a `before` and drop them in an `after`, but a
   # server-backed database survives the process — so a run interrupted midway
   # (or a spec that raised before its `after`) leaves tables behind that the
