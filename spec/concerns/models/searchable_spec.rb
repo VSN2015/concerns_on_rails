@@ -262,6 +262,17 @@ describe ConcernsOnRails::Searchable do
       expect(RankedPost.search("ruby", ranked: false).order_values).to be_empty
     end
 
+    it "leaves a grouped relation unranked so grouped aggregates stay valid SQL" do
+      relation = RankedPost.group(:title).search("ruby")
+
+      # No ORDER BY at all: the rank columns are absent from the GROUP BY, which
+      # Postgres and ONLY_FULL_GROUP_BY MySQL reject outright (SQLite tolerates
+      # it, so assert on the SQL rather than on a raised error).
+      expect(relation.order_values).to be_empty
+      expect(relation.to_sql).not_to match(/ORDER BY/i)
+      expect(relation.count.values.sum).to eq(5)
+    end
+
     it "leaves blank queries unordered and unfiltered" do
       expect(RankedPost.search("").order_values).to be_empty
       expect(RankedPost.search(nil).count).to eq(5)

@@ -36,6 +36,7 @@ module ConcernsOnRails
     #                   the relation's existing ORDER BY becomes the tiebreaker.
     #                   `search(q, ranked: true/false)` overrides per call and
     #                   `search_rank(q)` exposes the expression for select/pluck.
+    #                   A grouped relation is returned unranked.
     #
     # Uses Arel's `matches`. The query is escaped before interpolation, so
     # `%` / `_` / `\` from user input are treated as literals.
@@ -94,7 +95,7 @@ module ConcernsOnRails
           terms = search_terms(query)
           raise ArgumentError, "ConcernsOnRails::Models::Searchable: search_rank needs a non-blank query" if terms.empty?
 
-          terms.map { |term| search_term_rank(term) }.reduce(:+)
+          search_rank_expression(terms)
         end
       end
 
@@ -126,10 +127,22 @@ module ConcernsOnRails
         end
 
         # reorder (not order) so relevance leads and whatever ORDER BY the
-        # relation already carried breaks ties.
+        # relation already carried breaks ties. A grouped relation is handed
+        # back untouched: the rank columns are not in the GROUP BY, so ordering
+        # by them is a hard error on Postgres and on MySQL under
+        # ONLY_FULL_GROUP_BY — and ranking aggregated rows means nothing anyway.
         def search_apply_rank(relation, terms)
-          rank = terms.map { |term| search_term_rank(term) }.reduce(:+)
-          relation.reorder(rank.asc, *relation.order_values)
+          return relation if relation.group_values.any?
+
+          relation.reorder(search_rank_expression(terms).asc, *relation.order_values)
+        end
+
+        # Sum the per-term scores. Built with an explicit InfixOperation rather
+        # than reduce(:+) because Arel::Nodes::Case only gained the Math helpers
+        # (and with them `+`) in Rails 6.0.
+        def search_rank_expression(terms)
+          terms.map { |term| search_term_rank(term) }
+               .reduce { |memo, node| Arel::Nodes::InfixOperation.new(:+, memo, node) }
         end
 
         # CASE WHEN <col1 exact> THEN 0 WHEN <col2 exact> THEN 1 WHEN <col1 prefix>

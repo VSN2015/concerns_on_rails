@@ -794,6 +794,7 @@ searchable_by :title, :body, ranked: true
 Article.search("ruby")                        # "ruby" (title) → "Ruby" (body) → "Rubyists…" → "…about ruby"
 Article.search("ruby", ranked: false)         # per-call override (and `ranked: true` opts in per call)
 Article.recent.search("ruby")                 # relevance leads; the existing ORDER BY breaks ties
+Article.group(:author_id).search("ruby")      # grouped relations are returned unranked
 Article.search(q).pluck(:id, Article.search_rank(q))  # the score itself (0 = exact hit on the first column)
 ```
 
@@ -801,7 +802,8 @@ Article.search(q).pluck(:id, Article.search_rank(q))  # the score itself (0 = ex
 - Uses Arel's `matches`, which emits `ILIKE` on Postgres (case-insensitive) and `LIKE` elsewhere.
 - The query is escaped before interpolation — `%`, `_`, and `\` from user input are treated as literals, not wildcards.
 - Blank or nil queries return the relation unchanged, so it's safe to drop into a controller pipeline.
-- `ranked:` uses `reorder`, so relevance is always the primary sort; under `mode: :all` the per-term scores are summed.
+- `ranked:` uses `reorder`, so relevance leads — until something reorders again. `Controllers::Sortable#sorted` and `CursorPaginatable` both reorder unconditionally, so chain `.search` **after** them (`paginated(sorted(Article.all).search(q))`), not before.
+- Grouped relations are returned unranked (ORDER BY on a non-grouped column is a hard error on Postgres/MySQL), so `Article.group(:author_id).search(q).count` is safe; pass `ranked: false` when the `group`/`distinct` comes after the search. Under `mode: :all` the per-term scores are summed.
 - Reach for `pg_search` / Elasticsearch when you need stemming, weighting by frequency, or full-text indexes.
 
 ---
