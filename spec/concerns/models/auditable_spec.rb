@@ -396,14 +396,25 @@ describe ConcernsOnRails::Auditable do
 
     after { Object.send(:remove_const, :AuditMetric) if defined?(AuditMetric) }
 
+    # The capture hook is driven directly rather than through save!, because a
+    # non-finite Float cannot reach a MySQL float column at all: the mysql2
+    # adapter has prepared statements off by default, so the value goes through
+    # ActiveRecord's generic `quote`, whose `when Numeric then value.to_s` emits
+    # a bare `NaN` that MySQL reads as a column name ("Unknown column 'NaN' in
+    # 'field list'"). SQLite quotes non-finite numerics as string literals and
+    # PostgreSQL binds them as parameters into a float8 that accepts NaN, so
+    # only MySQL trips — on the column, not on the trail. What is under test
+    # here is the JSON coercion inside the before_save hook, which is the same
+    # on every adapter and must not let JSON.generate raise.
     it "stores NaN and Infinity as strings instead of raising" do
       m = AuditMetric.create!(score: 1.0)
+
       m.score = Float::NAN
-      expect { m.save! }.not_to raise_error
+      expect { m.send(:auditable_capture_changes) }.not_to raise_error
       expect(m.audit_trail.last["to"]).to eq("NaN")
 
       m.score = Float::INFINITY
-      m.save!
+      m.send(:auditable_capture_changes)
       expect(m.audit_trail.last["to"]).to eq("Infinity")
     end
   end

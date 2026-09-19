@@ -28,7 +28,13 @@ RSpec.describe ConcernsOnRails::Support::LinkHeader do
 
     it "keeps nested params intact" do
       nested = FakeLinkRequest.new("http://h", "/p", ActiveSupport::HashWithIndifferentAccess.new("filter" => { "state" => "open" }))
-      expect(described_class.url_for(nested, page: 2)).to eq("http://h/p?filter%5Bstate%5D=open&page=2")
+      # Expectation derived from Rack rather than hardcoded: Rack 2 emits
+      # `filter[state]=open` and Rack 3 percent-encodes the brackets. The gem's
+      # contract is "nested params survive via Rack's nested-query encoding",
+      # so assert it delegates faithfully to whichever Rack is installed —
+      # hardcoding either spelling just fails on the other Rails line.
+      expected = Rack::Utils.build_nested_query("filter" => { "state" => "open" }, "page" => "2")
+      expect(described_class.url_for(nested, page: 2)).to eq("http://h/p?#{expected}")
     end
   end
 

@@ -102,7 +102,12 @@ describe ConcernsOnRails::Controllers::Paginatable do
 
   it "counts groups (not a raw Hash) for a grouped relation" do
     controller = controller_class.new(params: { per_page: 10 })
-    records = controller.paginated(Widget.group(:name))
+    # `.select(:name)` is the caller's job, not the concern's: the default
+    # `SELECT widgets.*` alongside `GROUP BY widgets.name` is invalid SQL on
+    # PostgreSQL and on MySQL's only_full_group_by, and only SQLite accepts it.
+    # The count path strips the select (`except(:select)`) and still counts
+    # groups, which is what this example is about.
+    records = controller.paginated(Widget.group(:name).select(:name))
     expect { records.to_a }.not_to raise_error
     # 50 distinct names => 50 groups
     expect(controller.response.headers["X-Total-Count"]).to eq("50")
@@ -435,9 +440,18 @@ describe ConcernsOnRails::Controllers::Paginatable do
       end
       result = IntegrationHarness.dispatch(jsonapi, :index, query: "page[number]=2&page[size]=10&q=abc")
       header = result.header("Link")
-      expect(header).to include(%(<http://example.org/?page%5Bnumber%5D=3&page%5Bsize%5D=10&q=abc>; rel="next"))
-      expect(header).to include(%(<http://example.org/?page%5Bnumber%5D=5&page%5Bsize%5D=10&q=abc>; rel="last"))
-      expect(header).to include(%(<http://example.org/?page%5Bnumber%5D=1&page%5Bsize%5D=10&q=abc>; rel="first"))
+      # Built with Rack, not hardcoded: Rack 2 (Rails 7.0) leaves the brackets
+      # raw while Rack 3 percent-encodes them. "encoded the Rack way" is the
+      # contract this example names, so ask Rack what that is.
+      jsonapi_url = lambda do |number|
+        query = Rack::Utils.build_nested_query(
+          "page" => { "number" => number.to_s, "size" => "10" }, "q" => "abc"
+        )
+        "http://example.org/?#{query}"
+      end
+      expect(header).to include(%(<#{jsonapi_url.call(3)}>; rel="next"))
+      expect(header).to include(%(<#{jsonapi_url.call(5)}>; rel="last"))
+      expect(header).to include(%(<#{jsonapi_url.call(1)}>; rel="first"))
       expect(result.header("X-Page")).to eq("2")
 
       flat = IntegrationHarness.build_controller do

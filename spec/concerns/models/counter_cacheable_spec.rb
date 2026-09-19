@@ -394,12 +394,15 @@ describe ConcernsOnRails::Models::CounterCacheable do
         ActiveSupport::Notifications.unsubscribe(subscriber)
       end
 
+      posts    = TestDatabase.quoted_table("posts")
+      comments = TestDatabase.quoted_table("comments")
+
       # Rails 7.1 emits "begin transaction"; 7.2+ switched SQLite to IMMEDIATE
       # transactions and upcased it ("BEGIN IMMEDIATE TRANSACTION"), so match loosely.
       opened  = statements.index { |sql| sql.match?(/\Abegin\b/i) }
-      locked  = statements.index { |sql| sql.start_with?('SELECT "posts"."id" FROM "posts"') }
-      tallied = statements.index { |sql| sql.include?('FROM "comments"') }
-      zeroed  = statements.index { |sql| sql.start_with?('UPDATE "posts"') }
+      locked  = statements.index { |sql| sql.start_with?("SELECT #{TestDatabase.qualified('posts', 'id')} FROM #{posts}") }
+      tallied = statements.index { |sql| sql.include?("FROM #{comments}") }
+      zeroed  = statements.index { |sql| sql.start_with?("UPDATE #{posts}") }
 
       expect([opened, locked, tallied, zeroed]).to all(be_a(Integer))
       expect(opened).to be < locked  # the lock is taken inside the transaction

@@ -28,6 +28,12 @@ module ConcernsOnRails
     #
     # Notes:
     #   * Matching is boundary-safe ("rail" does not match "rails").
+    #   * `tagged_with` matches case-INsensitively on every adapter — LIKE on
+    #     SQLite and MySQL, ILIKE on PostgreSQL — so one call means one thing
+    #     everywhere (how non-ASCII characters fold is still the database
+    #     collation's business). The Ruby-side helpers (`tagged_with?`,
+    #     `all_tags`, `tag_counts`) compare exactly, so `downcase: true`, which
+    #     folds on write, is what makes the scope and the helpers agree.
     #   * A tag cannot contain the delimiter (default ",") — input containing
     #     it is split into multiple tags on the spot (`add_tags("a,b")` adds
     #     "a" and "b"), everywhere, so what you read back always matches what
@@ -40,6 +46,10 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Models::Taggable".freeze
       DEFAULT_FIELD = :tags
       DEFAULT_DELIMITER = ",".freeze
+      # Same LIKE-escaping contract as Models::Searchable: the adapter quotes
+      # the escape character for us, so a backslash is portable here.
+      LIKE_ESCAPE = "\\".freeze
+      LIKE_SPECIAL = /[\\%_]/
 
       included do
         class_attribute :taggable_field, instance_accessor: false, default: DEFAULT_FIELD
@@ -68,9 +78,10 @@ module ConcernsOnRails
           tags = taggable_clean_all(names)
           return all if tags.empty?
 
-          clauses = tags.map { |t| taggable_clause(t) }
-          sql = clauses.map(&:first).join(any ? " OR " : " AND ")
-          where(sql, *clauses.flat_map(&:last))
+          predicates = tags.map { |tag| taggable_predicate(tag) }
+          return where(predicates.reduce { |memo, node| memo.or(node) }) if any
+
+          predicates.reduce(all) { |memo, node| memo.where(node) }
         end
 
         # All distinct tags currently stored across the table, sorted.
@@ -150,26 +161,36 @@ module ConcernsOnRails
                .reject(&:blank?).uniq
         end
 
-        # Boundary-safe match for one tag against the delimiter-joined column.
-        # Returns [sql_fragment, [bind_params...]]. An explicit ESCAPE clause makes
-        # the backslash escaping below work on every adapter (SQLite has no default
-        # LIKE escape), so a tag containing `_` or `%` matches literally.
-        def taggable_clause(tag)
-          column = "#{connection.quote_table_name(table_name)}.#{connection.quote_column_name(taggable_field)}"
-          # Escape the delimiter too (not just the tag): a delimiter that is a LIKE
-          # wildcard (% or _) must match literally. Use LIKE for the whole-column
-          # branch as well, so casing is uniform across all four branches — the
-          # previous `= ?` was case-sensitive while LIKE is not.
+        # Boundary-safe match for one tag against the delimiter-joined column:
+        # the tag alone, first, last, or somewhere in the middle. Built from
+        # Arel's `matches` rather than a hand-written LIKE string for two
+        # reasons.
+        #
+        # 1. The ESCAPE character is then quoted by the adapter. An inlined
+        #    `ESCAPE '\'` is a syntax error on MySQL, where a backslash escapes
+        #    its own closing quote inside a string literal, even though the very
+        #    same text is fine on SQLite and on PostgreSQL.
+        # 2. `case_sensitive: false` emits ILIKE on PostgreSQL, whose LIKE —
+        #    unlike SQLite's, and unlike MySQL's under a default _ci collation —
+        #    is case-sensitive, so `tagged_with` used to mean something
+        #    different there.
+        #
+        # An explicit ESCAPE is still what makes a tag containing `_` or `%`
+        # match literally (SQLite has no default LIKE escape).
+        def taggable_predicate(tag)
+          column = arel_table[taggable_field]
+          # Escape the delimiter too (not just the tag): a delimiter that is a
+          # LIKE wildcard (% or _) must match literally.
           delim = taggable_escape_like(taggable_delimiter)
           escaped = taggable_escape_like(tag)
-          esc = " ESCAPE '\\'"
-          ["(#{column} LIKE ?#{esc} OR #{column} LIKE ?#{esc} OR #{column} LIKE ?#{esc} OR #{column} LIKE ?#{esc})",
-           [escaped, "#{escaped}#{delim}%", "%#{delim}#{escaped}", "%#{delim}#{escaped}#{delim}%"]]
+          [escaped, "#{escaped}#{delim}%", "%#{delim}#{escaped}", "%#{delim}#{escaped}#{delim}%"]
+            .map { |pattern| column.matches(pattern, LIKE_ESCAPE, false) }
+            .reduce { |memo, node| memo.or(node) }
         end
 
         # Treat the user's tag as a LIKE literal: %, _ and \ are not wildcards.
         def taggable_escape_like(str)
-          str.gsub(/[\\%_]/) { |char| "\\#{char}" }
+          str.gsub(LIKE_SPECIAL) { |char| "#{LIKE_ESCAPE}#{char}" }
         end
       end
 
