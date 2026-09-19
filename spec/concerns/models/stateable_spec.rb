@@ -566,6 +566,13 @@ describe ConcernsOnRails::Stateable do
       expect(Ticket.stateable_timestamps).to eq([])
     end
 
+    it "does not hand out the states array itself" do
+      expect(stamped.stateable_timestamps).to eq(stamped.stateable_states)
+      expect(stamped.stateable_timestamps).not_to equal(stamped.stateable_states)
+      stamped.stateable_timestamps << :nope
+      expect(stamped.stateable_states).to eq(%i[draft review published archived])
+    end
+
     it "requires the <state>_at columns with a typed migration hint" do
       expect do
         Class.new(TestModel) do
@@ -595,6 +602,17 @@ describe ConcernsOnRails::Stateable do
           stateable_by :status, states: %i[draft published], timestamps: "yes"
         end
       end.to raise_error(ArgumentError, /timestamps: must be true or an Array of states/)
+    end
+
+    it "refuses to stamp a column Rails owns — created_at would be rewritten on every entry" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "stamped_posts"
+          include ConcernsOnRails::Stateable
+
+          stateable_by :status, states: %i[created published], timestamps: true
+        end
+      end.to raise_error(ArgumentError, /would stamp created_at, which Rails owns/)
     end
   end
 
@@ -640,6 +658,20 @@ describe ConcernsOnRails::Stateable do
       expect(ticket.log).to eq(
         [[:before_transition, :archive, "published", "archived"], [:after_transition, :archive, "published", "archived"]]
       )
+    end
+
+    it "calls a private hook — overriding one privately is a Rails idiom, and public_send would raise" do
+      private_hooks = Class.new(klass) do
+        private
+
+        def after_publish
+          (@log ||= []) << :private_after_publish
+        end
+      end
+      ticket = private_hooks.create!
+      ticket.publish!
+      expect(ticket.log).to include(:private_after_publish)
+      expect(ticket.reload.published?).to be(true)
     end
 
     it "shares the transaction — a raising after_<event> rolls the state change back" do

@@ -1050,9 +1050,10 @@ def after_publish   = notify_subscribers      # same transaction: before_transit
                                               # write → after_publish → after_transition
 ```
 
-`timestamps:` requires the `<state>_at` columns (checked at class load, one typed migration hint); per-event
-hooks follow the affixed event name (`before_status_publish` with `prefix: true`) and, like the generic hooks,
-fire only for guarded `<event>!` transitions. `Model.stateable_timestamps` lists the stamped states.
+`timestamps:` requires the `<state>_at` columns (checked at class load, one typed migration hint); the column is
+**not** affixed, and one Rails owns (`created_at` / `updated_at`) is refused. Per-event hooks follow the affixed
+event name (`before_status_publish` with `prefix: true`), may be private, and — like the generic hooks — fire only
+for guarded `<event>!` transitions. `Model.stateable_timestamps` lists the stamped states.
 
 **Prefix / suffix** — avoid clashes when the state names overlap with other concerns or scopes:
 

@@ -40,7 +40,8 @@ module ConcernsOnRails
     # in the same write as the state change — guarded events, direct setters
     # and transition_to! alike — so "when was it published / archived?" needs no
     # callback. The columns are checked at macro time (typed :datetime in the
-    # migration hint); the default state is not stamped on create.
+    # migration hint, and a stamp Rails owns — `created_at`/`updated_at` — is
+    # refused); the default state is not stamped on create.
     #
     # Options for stateable_by: default:, transitions:, prefix:, suffix:, lock:,
     # timestamps: (prefix:/suffix: take `true` to use the field name, or a
@@ -66,6 +67,12 @@ module ConcernsOnRails
 
       # Valid stateable_by keyword options (everything besides field/states:).
       OPTIONS = %i[default transitions prefix suffix lock timestamps].freeze
+
+      # Columns Rails owns. A state named `created` or `updated` derives one of
+      # them as its `<state>_at`, and ColumnGuard cannot catch it — the column
+      # exists — so every write into that state would quietly rewrite the row's
+      # creation time (or fight the automatic touch).
+      RESERVED_STAMP_COLUMNS = %w[created_at created_on updated_at updated_on].freeze
 
       included do
         class_attribute :stateable_field, instance_accessor: false
@@ -169,7 +176,7 @@ module ConcernsOnRails
         def stateable_timestamp_states(option)
           case option
           when nil, false then []
-          when true then stateable_states
+          when true then stateable_states.dup
           when Array then option.map(&:to_sym)
           else raise ArgumentError, "#{LABEL}: timestamps: must be true or an Array of states"
           end
@@ -194,14 +201,25 @@ module ConcernsOnRails
           stateable_transitions.each { |event, config| stateable_validate_transition!(event, config) }
         end
 
-        # Unknown states first (a config typo), then the `<state>_at` columns —
-        # all missing ones in one typed migration hint.
+        # Unknown states first (a config typo), then the columns Rails owns,
+        # then the `<state>_at` columns — all missing ones in one typed
+        # migration hint.
         def stateable_validate_timestamps!
           unknown = stateable_timestamps - stateable_states
           raise ArgumentError, "#{LABEL}: timestamps: references unknown states: #{unknown.join(', ')}" if unknown.any?
           return if stateable_timestamps.empty?
 
-          ensure_columns!(LABEL, stateable_timestamps.map { |state| :"#{state}_at" }, types: :datetime)
+          columns = stateable_timestamps.map { |state| :"#{state}_at" }
+          stateable_validate_stamp_columns!(columns)
+          ensure_columns!(LABEL, columns, types: :datetime)
+        end
+
+        def stateable_validate_stamp_columns!(columns)
+          reserved = columns.map(&:to_s) & RESERVED_STAMP_COLUMNS
+          return if reserved.empty?
+
+          raise ArgumentError, "#{LABEL}: timestamps: would stamp #{reserved.join(', ')}, which Rails owns; " \
+                               "rename the state or pass timestamps: the states to stamp"
         end
 
         def stateable_validate_transition!(event, config)
