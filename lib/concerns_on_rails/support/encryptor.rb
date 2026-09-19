@@ -18,8 +18,11 @@ module ConcernsOnRails
     #
     # The 3-byte header is fed to GCM as additional authenticated data (AAD), so
     # the version/algorithm/key-id cannot be altered without failing the auth
-    # tag. `alg 0x11` (deterministic) and a non-zero `key_id` (rotation) are
-    # reserved for later features — the format tolerates them without a break.
+    # tag. `key_id` names the key that wrote the envelope and drives rotation
+    # (Models::Encryptable); everything written before rotation existed carries
+    # id 0, which is exactly what an unrotated config still stamps, so the
+    # format did not change. `alg 0x11` (deterministic) is still reserved — the
+    # format tolerates it without a break.
     module Encryptor
       module_function
 
@@ -58,15 +61,7 @@ module ConcernsOnRails
       def decrypt(envelope, key:, salt: ConcernsOnRails::Encryption::DEFAULT_KDF_SALT)
         return nil if envelope.nil?
 
-        # "m0" is strict Base64 and raises ArgumentError on non-Base64 input.
-        raw =
-          begin
-            envelope.to_s.unpack1("m0").to_s
-          rescue ArgumentError
-            raise ConcernsOnRails::Encryption::DecryptionError, "malformed encryption envelope"
-          end
-        raise ConcernsOnRails::Encryption::DecryptionError, "malformed encryption envelope" if raw.bytesize < MIN_ENVELOPE_BYTES
-
+        raw = decode_envelope(envelope)
         header = raw.byteslice(0, HEADER_LEN)
         iv = raw.byteslice(HEADER_LEN, IV_LEN)
         tag = raw.byteslice(HEADER_LEN + IV_LEN, TAG_LEN)
@@ -83,6 +78,33 @@ module ConcernsOnRails
       rescue OpenSSL::Cipher::CipherError
         raise ConcernsOnRails::Encryption::DecryptionError,
               "could not decrypt value (wrong key or tampered ciphertext)"
+      end
+
+      # The key id an envelope was written with (header byte 3). A malformed
+      # envelope raises DecryptionError like decrypt does.
+      def key_id(envelope)
+        decode_envelope(envelope).getbyte(2)
+      end
+
+      # The Base64 text the 3-byte header always encodes to — exactly 4 chars
+      # (3 bytes → 4 sextets, no padding) — so "which key wrote this row" is a
+      # LIKE-prefix question in SQL. Base64 alphabet only: no LIKE wildcards.
+      def header_prefix(key_id)
+        [[VERSION_BYTE, ALG_GCM, key_id & 0xFF].pack(HEADER_FORMAT)].pack("m0")
+      end
+
+      # Strict Base64 decode + minimum-size check shared by decrypt and key_id.
+      def decode_envelope(envelope)
+        # "m0" is strict Base64 and raises ArgumentError on non-Base64 input.
+        raw =
+          begin
+            envelope.to_s.unpack1("m0").to_s
+          rescue ArgumentError
+            raise ConcernsOnRails::Encryption::DecryptionError, "malformed encryption envelope"
+          end
+        raise ConcernsOnRails::Encryption::DecryptionError, "malformed encryption envelope" if raw.bytesize < MIN_ENVELOPE_BYTES
+
+        raw
       end
 
       # True when `value` really is an envelope produced by #encrypt: strict
