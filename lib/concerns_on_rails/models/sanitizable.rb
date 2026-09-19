@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/html_sanitizers"
 
@@ -55,6 +56,8 @@ module ConcernsOnRails
       }.freeze
 
       LABEL = "ConcernsOnRails::Models::Sanitizable".freeze
+      # What `sanitized:` accepts besides `true` — a field or a list of them.
+      SANITIZED_OPTION_TYPES = [Symbol, String, Array].freeze
 
       included do
         # field => { sanitizer: <lambda>, on: :read|:write }
@@ -91,9 +94,10 @@ module ConcernsOnRails
         # Rewrite stored values in place for every record in the current scope —
         # the repair tool for rows written around the `on: :write` callback
         # (update_column / update_all / raw SQL / data that predates the concern).
-        # Runs each declared field's sanitizer (or just `fields`) and issues one
-        # update_columns per row whose values actually change; deliberately no
-        # validations, callbacks or updated_at bump (Anonymizable's contract).
+        # Runs the `on: :write` fields' sanitizers — or just `fields`, which may
+        # name an `on: :read` column — and issues one update_columns per row
+        # whose values actually change; deliberately no validations, callbacks
+        # or updated_at bump (Anonymizable's contract).
         # Returns the Integer count of rows rewritten.
         def sanitize_all!(*fields)
           # Bare call = the `on: :write` fields only. Those are the rows this
@@ -101,16 +105,17 @@ module ConcernsOnRails
           # the raw column that mode exists to preserve — naming one explicitly
           # is still allowed, but it has to be a deliberate act.
           fields = sanitizable_fields_for(fields.empty? ? sanitizable_write_fields : fields)
-          transaction do
-            count = 0
-            all.find_each do |record|
-              changes = record.send(:sanitizable_changes, fields)
-              next if changes.empty?
+          # Nothing declared `on: :write` — the usual shape for a read-mode
+          # model — so there is nothing to repair and no reason to stream the
+          # table to find that out.
+          return 0 if fields.empty?
 
-              record.update_columns(changes)
-              count += 1
-            end
-            count
+          # A row that vanished mid-batch makes update_columns return false;
+          # BatchOps turns that into RecordNotSaved and rolls the batch back,
+          # rather than counting it as rewritten.
+          ConcernsOnRails::Support::BatchOps.run(all, label: LABEL, message: "failed to sanitize record") do |record|
+            changes = record.send(:sanitizable_changes, fields)
+            changes.empty? ? :skip : record.update_columns(changes)
           end
         end
 
@@ -124,6 +129,10 @@ module ConcernsOnRails
         def sanitizable_fields_for(selection)
           declared = sanitizable_rules.keys
           return declared if selection == true
+
+          unless SANITIZED_OPTION_TYPES.any? { |type| selection.is_a?(type) }
+            raise ArgumentError, "#{LABEL}: sanitized: takes true or a list of declared fields, got #{selection.class}"
+          end
 
           Array(selection).map(&:to_sym).each do |field|
             next if declared.include?(field)
@@ -190,17 +199,51 @@ module ConcernsOnRails
       # `as_json` / `to_json` too. Fields dropped by `only:`/`except:` stay
       # dropped; undeclared fields in `sanitized:` raise.
       def serializable_hash(options = nil)
-        hash = super
         selection = options && options[:sanitized]
-        return hash unless selection
+        return super unless selection
+
+        # Rails hands a nested `include:` an empty options Hash, so a child
+        # would serialize raw while the caller believes the whole document is
+        # sanitized. Carry the request down; a child that is not Sanitizable
+        # ignores the unknown option. Children sanitize all of their own
+        # declared fields -- a parent's field list names the PARENT's columns.
+        hash = super(sanitizable_sanitized_options(options))
 
         self.class.sanitizable_fields_for(selection).each do |field|
           next unless hash.key?(field.to_s)
 
-          hash[field.to_s] = self.class.sanitizable_rules.fetch(field)[:sanitizer].call(self[field])
+          # Sanitize what was serialized, not the raw column: an overridden
+          # reader or a Maskable field must not slip its unfiltered value into
+          # the response through the sanitizer.
+          hash[field.to_s] = self.class.sanitizable_rules.fetch(field)[:sanitizer].call(hash[field.to_s])
         end
         hash
       end
+
+      # Propagate `sanitized: true` into every `include:` entry that does not
+      # already say otherwise, leaving the caller's Hash untouched.
+      def sanitizable_sanitized_options(options)
+        included = options[:include]
+        return options if included.blank?
+
+        options.merge(include: sanitizable_sanitized_includes(included))
+      end
+
+      def sanitizable_sanitized_includes(included)
+        case included
+        when Symbol, String then { included.to_sym => { sanitized: true } }
+        when Array then included.map { |entry| sanitizable_sanitized_includes(entry) }.reduce({}, :merge)
+        when Hash then included.to_h { |name, nested| [name, sanitizable_sanitized_child(nested)] }
+        else included
+        end
+      end
+
+      def sanitizable_sanitized_child(nested)
+        return { sanitized: true } unless nested.is_a?(Hash)
+
+        nested.key?(:sanitized) ? nested : nested.merge(sanitized: true)
+      end
+      private :sanitizable_sanitized_options, :sanitizable_sanitized_includes, :sanitizable_sanitized_child
 
       # Only fields declared with on: :write are mutated; on: :read fields keep
       # their raw column value and are exposed through their sanitized_ reader.
@@ -223,10 +266,29 @@ module ConcernsOnRails
           next if value.nil?
 
           sanitized = self.class.sanitizable_rules.fetch(field)[:sanitizer].call(value)
-          changes[field] = sanitized unless sanitized == value
+          next if sanitized == value
+
+          changes[field] = sanitized
+          sanitizable_add_blind_index(changes, field, sanitized)
         end
       end
-      private :sanitizable_changes
+
+      # update_columns skips before_save, so Encryptable's blind-index refresh
+      # never runs here. Without this, the `<field>_bidx` column would keep the
+      # fingerprint of the UNSANITIZED value — find_by_<field> would still
+      # resolve the record by markup that is no longer stored, and the clean
+      # value would not be findable at all (Anonymizable does the same for its
+      # erasure write).
+      def sanitizable_add_blind_index(changes, field, value)
+        return unless self.class.respond_to?(:encryptable_rules)
+
+        rule = self.class.encryptable_rules[field]
+        return unless rule && rule[:blind_index]
+
+        changes[rule[:blind_index][:column]] =
+          ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, value)
+      end
+      private :sanitizable_changes, :sanitizable_add_blind_index
     end
   end
 end

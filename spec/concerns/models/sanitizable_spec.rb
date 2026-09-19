@@ -10,6 +10,15 @@ describe ConcernsOnRails::Models::Sanitizable do
         t.string :code
         t.integer :views
       end
+
+      create_table :sanitizable_comments, force: true do |t|
+        t.integer :sanitizable_article_id
+        t.text :body
+      end
+
+      create_table :sanitizable_accounts, force: true do |t|
+        t.string :email
+      end
     end
   end
 
@@ -20,7 +29,9 @@ describe ConcernsOnRails::Models::Sanitizable do
       ActiveRecord::Base.connection.drop_table(table)
     end
 
-    Object.send(:remove_const, :SanitizableArticle) if Object.const_defined?(:SanitizableArticle)
+    %i[SanitizableArticle SanitizableComment].each do |const|
+      Object.send(:remove_const, const) if Object.const_defined?(const)
+    end
   end
 
   describe "non-destructive :read mode (default)" do
@@ -373,6 +384,156 @@ describe ConcernsOnRails::Models::Sanitizable do
       expect(a.body).to eq("<script>x</script>") # body not in the subset
       expect(b.reload.summary).to eq("<b>b</b>") # outside the scope
       expect { klass.sanitize_all!(:code) }.to raise_error(ArgumentError, /code is not a sanitizable field/)
+    end
+
+    it "rejects a sanitized: shape that is neither true nor a field list" do
+      expect { article.as_json(sanitized: { body: true }) }
+        .to raise_error(ArgumentError, /sanitized: takes true or a list of declared fields, got Hash/)
+    end
+
+    it "carries sanitized: into a nested include: instead of serializing the child raw" do
+      parent = article # defines SanitizableArticle before the association is declared
+
+      class SanitizableComment < TestModel
+        self.table_name = "sanitizable_comments"
+        include ConcernsOnRails::Models::Sanitizable
+
+        sanitizable :body, with: :strip
+      end
+      SanitizableArticle.has_many :sanitizable_comments, class_name: "SanitizableComment",
+                                                         foreign_key: :sanitizable_article_id
+      SanitizableComment.create!(sanitizable_article_id: parent.id, body: "<script>bad</script>ok")
+
+      json = parent.as_json(sanitized: true, include: :sanitizable_comments)
+      expect(json["sanitizable_comments"].first["body"]).to eq("badok")
+
+      # an explicit per-child setting still wins
+      raw = parent.as_json(sanitized: true, include: { sanitizable_comments: { sanitized: false } })
+      expect(raw["sanitizable_comments"].first["body"]).to eq("<script>bad</script>ok")
+    end
+
+    it "sanitizes the serialized value, not the raw column" do
+      klass = Class.new(TestModel) do
+        self.table_name = "sanitizable_articles"
+        include ConcernsOnRails::Models::Sanitizable
+
+        sanitizable :summary, with: :strip
+
+        def summary
+          "<b>#{super}</b>" # an overridden reader is what as_json serializes
+        end
+      end
+      record = klass.create!(summary: "hi")
+
+      expect(record.as_json(sanitized: true)["summary"]).to eq("hi")
+    end
+
+    it "returns 0 without querying when nothing is declared on: :write" do
+      read_only = Class.new(TestModel) do
+        self.table_name = "sanitizable_articles"
+        include ConcernsOnRails::Models::Sanitizable
+
+        sanitizable :body, with: :strip
+      end
+      read_only.create!(body: "<script>x</script>")
+
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*args|
+        statements << args.last[:sql].to_s
+      end
+      begin
+        expect(read_only.sanitize_all!).to eq(0)
+      ensure
+        ActiveSupport::Notifications.unsubscribe(subscriber)
+      end
+
+      expect(statements).to be_empty
+    end
+
+    it "raises RecordNotSaved and rolls the batch back when a row vanishes mid-sweep" do
+      first = klass.create!(title: "ok")
+      first.update_columns(title: "<b>first</b>")
+      gone = klass.create!(title: "ok")
+      gone.update_columns(title: "<b>gone</b>")
+
+      # update_columns returns false when the row it targets no longer exists.
+      allow_any_instance_of(klass).to receive(:update_columns) do |record, changes|
+        next false if record.id == gone.id
+
+        klass.unscoped.where(id: record.id).update_all(changes) == 1
+      end
+
+      expect { klass.sanitize_all! }.to raise_error(ActiveRecord::RecordNotSaved, /failed to sanitize record/)
+      expect(first.reload.title).to eq("<b>first</b>") # rolled back with the batch
+    end
+  end
+
+  describe "composition with Maskable" do
+    def account_class(order)
+      Class.new(TestModel) do
+        self.table_name = "sanitizable_accounts"
+        if order == :maskable_first
+          include ConcernsOnRails::Models::Maskable
+          include ConcernsOnRails::Models::Sanitizable
+        else
+          include ConcernsOnRails::Models::Sanitizable
+          include ConcernsOnRails::Models::Maskable
+        end
+
+        maskable :email, with: :email
+        sanitizable :email, with: :strip
+      end
+    end
+
+    %i[maskable_first sanitizable_first].each do |order|
+      it "keeps the mask when both options are requested (#{order})" do
+        record = account_class(order).create!(email: "jack@example.com")
+
+        json = record.as_json(masked: true, sanitized: true)
+
+        expect(json["email"]).to eq("j***@example.com")
+        expect(json["email"]).not_to include("jack@") # never the raw column
+      end
+
+      it "still sanitizes the masked-and-unrequested field on its own (#{order})" do
+        record = account_class(order).create!(email: "<b>jack@example.com</b>")
+
+        expect(record.as_json(sanitized: true)["email"]).to eq("jack@example.com")
+      end
+    end
+  end
+
+  describe "composition with Encryptable" do
+    before do
+      ConcernsOnRails.encryption.key = "concerns-on-rails-sanitizable-test-key"
+
+      ActiveRecord::Schema.define do
+        create_table :sanitizable_secrets, force: true do |t|
+          t.text :note
+          t.text :note_bidx
+        end
+      end
+    end
+
+    after { ConcernsOnRails.encryption.key = nil }
+
+    it "refreshes the blind index when sanitize_all! rewrites an encrypted field" do
+      klass = Class.new(TestModel) do
+        self.table_name = "sanitizable_secrets"
+        include ConcernsOnRails::Models::Encryptable
+        include ConcernsOnRails::Models::Sanitizable
+
+        encryptable :note, blind_index: true
+        sanitizable :note, with: :strip, on: :write
+      end
+      record = klass.create!(note: "clean")
+      # A write that bypassed both callbacks: raw markup at rest, fingerprinted raw.
+      record.update_columns(note: "<b>dirty</b>", note_bidx: klass.note_fingerprint("<b>dirty</b>"))
+
+      expect(klass.sanitize_all!).to eq(1)
+      expect(record.reload.note).to eq("dirty")
+      expect(klass.find_by_note("<b>dirty</b>")).to be_nil # the stale fingerprint is gone
+      expect(klass.find_by_note("dirty")).to eq(record)
     end
   end
 end
