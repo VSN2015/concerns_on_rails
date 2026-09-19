@@ -44,6 +44,8 @@ Each call appends a rule; the **first** rule matching the current action wins (n
 | `header:` | `String` | scheme preset | Required for `:hex`/`:base64` (they have no standard header); overrides the preset for the others. |
 | `tolerance:` | positive duration | `300` (Stripe only) | Replay window for `:stripe` — rejects `\|now − t\| > tolerance`. Raises if passed with any other scheme. |
 | `digest:` | `Symbol` | `:sha256` | `:sha1`/`:sha512` allowed for `:hex`/`:base64` only; the provider presets pin SHA256. |
+| `replay:` | `true`, a store, or `false` | `nil` (off) | Replay protection. After the signature verifies, `SHA256(delivery identity)` is written to the store with `unless_exist:` and `replay_ttl:`; a second delivery with the same signature is rejected with 409 `webhook_replayed`. The identity is the signature header, except for `:stripe` where it is the signed `"#{t}.#{body}"` payload — the raw Stripe header is not canonical (the parser ignores unknown `v0=` keys and whitespace, so a captured header can be mutated into unlimited valid variants). `true` uses `ConcernsOnRails.config.cache_store` (raises with a setup hint when none is configured); any object with `#write(key, value, expires_in:, unless_exist:)` and `#read(key)` works — `#read` is **required**, because without it a falsy `#write` cannot be told apart from an unreachable store. `#delete(key)` is optional (it releases the claim when the action 5xxs). `false` is the same as `nil`, so `replay: Rails.env.production?` is safe. Forged traffic never consumes a slot; keys are scoped per controller action. |
+| `replay_ttl:` | positive duration | `24.hours` | How long a seen signature stays blocked, counted from when the action **completed**. Requires `replay:`. For Stripe the `tolerance:` window already bounds replays, so a shorter ttl is fine there. |
 
 ### Schemes
 
@@ -113,6 +115,7 @@ end
 
 ## Notes & gotchas
 
+- **Replay protection is per exact signature.** Two legitimate deliveries with different bodies have different signatures and both pass; Stripe retries re-sign with a fresh `t=` and pass. A byte-identical redelivery (a captured request replayed, or a manual GitHub "Redeliver") is the case that is rejected — answer it with 200 instead by overriding `webhook_verification_failed` for `code == "webhook_replayed"` if your handler is idempotent and you want to keep the provider quiet.
 - **Order matters.** Declare this before `Idempotentable` — a 401 produced *inside* its around filter would be cached and replayed for the full TTL. Verifying before `Throttleable` keeps forged traffic from consuming legitimate rate budget (one HMAC is cheap).
 - **The raw body is the contract.** The signature covers the exact bytes the provider sent — parse `request.raw_post` in your action; re-serializing `params` may not round-trip byte-for-byte, and middleware that rewrites the body breaks verification.
 - **Never decoded, constant-time.** The attacker-controlled header value is compared against the *encoded* expected signature via digest-collapsed `secure_compare` — garbage, wrong encodings, and invalid UTF-8 bytes simply fail with 401; they cannot raise.
