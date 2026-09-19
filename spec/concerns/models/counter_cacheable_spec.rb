@@ -394,7 +394,9 @@ describe ConcernsOnRails::Models::CounterCacheable do
         ActiveSupport::Notifications.unsubscribe(subscriber)
       end
 
-      opened  = statements.index { |sql| sql.start_with?("begin") }
+      # Rails 7.1 emits "begin transaction"; 7.2+ switched SQLite to IMMEDIATE
+      # transactions and upcased it ("BEGIN IMMEDIATE TRANSACTION"), so match loosely.
+      opened  = statements.index { |sql| sql.match?(/\Abegin\b/i) }
       locked  = statements.index { |sql| sql.start_with?('SELECT "posts"."id" FROM "posts"') }
       tallied = statements.index { |sql| sql.include?('FROM "comments"') }
       zeroed  = statements.index { |sql| sql.start_with?('UPDATE "posts"') }
