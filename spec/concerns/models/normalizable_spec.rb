@@ -300,6 +300,19 @@ describe ConcernsOnRails::Models::Normalizable do
       expect(NormalizableExtra.normalize(:name, "jane doe")).to eq("Jane Doe")
     end
 
+    it ":titleize capitalizes each word in place and never rewrites the string" do
+      # String#titleize is humanize(underscore(v)): it splits "Jean-Luc" into two
+      # words and drops the suffix of "customer_id" altogether. Every character
+      # of the input has to survive.
+      expect(NormalizableExtra.normalize(:name, "jean-luc picard")).to eq("Jean-Luc Picard")
+      expect(NormalizableExtra.normalize(:name, "customer_id")).to eq("Customer_Id")
+      expect(NormalizableExtra.normalize(:name, "élodie dupont")).to eq("Élodie Dupont")
+      # A letter run that continues a word is left as typed.
+      expect(NormalizableExtra.normalize(:name, "3rd place")).to eq("3rd Place")
+      expect(normalized(name: "  o'brien   hASSAN ").name).to eq("O'brien Hassan")
+      expect(NormalizableExtra.normalize(:name, 42)).to eq(42)
+    end
+
     it ":url defaults the scheme to https, lowercases scheme + host, keeps the path and rejects nothing" do
       expect(normalized(website: "  Example.COM/Some/Path ").website).to eq("https://example.com/Some/Path")
       expect(normalized(website: "HTTP://Foo.Bar:8080/X?q=Y").website).to eq("http://foo.bar:8080/X?q=Y")
@@ -307,6 +320,20 @@ describe ConcernsOnRails::Models::Normalizable do
       expect(normalized(website: "localhost:3000/admin").website).to eq("https://localhost:3000/admin")
       expect(normalized(website: "not a url ").website).to eq("not a url") # left for a format validator to reject
       expect(normalized(website: "   ").website).to eq("")
+    end
+
+    it ":url keeps the userinfo across the host downcase and drops a default port" do
+      # `host=` also clears the userinfo on uri >= 1.1, which would repoint the
+      # URL at an unauthenticated host; on Ruby 3.2's uri 0.12.1 it does not.
+      expect(normalized(website: "https://user:PASS@Example.com/x").website).to eq("https://user:PASS@example.com/x")
+      expect(normalized(website: "https://Example.com:443/x").website).to eq("https://example.com/x")
+      expect(normalized(website: "http://Example.com:80/y").website).to eq("http://example.com/y")
+    end
+
+    it ":url leaves a non-http(s) scheme stripped but untouched rather than blessing it" do
+      expect(normalized(website: " javascript:alert(1) ").website).to eq("javascript:alert(1)")
+      expect(normalized(website: "DATA:text/html;base64,PHNjcmlwdD4=").website).to eq("DATA:text/html;base64,PHNjcmlwdD4=")
+      expect(normalized(website: "tel:14155551234").website).to eq("tel:14155551234")
     end
 
     it "Model.normalize(field, value) applies a field's rule outside a record (lookups, params)" do

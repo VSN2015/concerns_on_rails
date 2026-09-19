@@ -1,7 +1,7 @@
 require "active_support/concern"
-# The presets call String#squish / #titleize / #parameterize, which are
-# core_ext, not part of active_support/concern. Each concern file requires
-# what it uses so a direct require of this file still works.
+# The presets call String#squish / #parameterize, which are core_ext, not
+# part of active_support/concern. Each concern file requires what it uses so
+# a direct require of this file still works.
 require "active_support/core_ext/string/filters"
 require "active_support/core_ext/string/inflections"
 require "uri"
@@ -25,25 +25,52 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       LABEL = "ConcernsOnRails::Models::Normalizable".freeze
-      # "scheme:" — but a colon followed by a digit is a port ("localhost:3000"),
-      # not a scheme, so those still get https:// prepended.
-      URL_SCHEME = /\A[a-z][a-z0-9+.-]*:(?!\d)/i
+      # "scheme:" — but a colon followed by a port number is "host:port"
+      # ("localhost:3000"), not a scheme, so those still get https:// prepended.
+      # A longer digit run is no port, so "tel:14155551234" reads as a scheme.
+      URL_SCHEME = %r{\A([a-z][a-z0-9+.-]*):(?!\d{1,5}(?:[/?#]|\z))}i
+      # The only schemes `:url` canonicalizes. Anything else — "javascript:",
+      # "data:", "mailto:", "tel:" — comes back stripped but otherwise untouched:
+      # rewriting it would bless it as a normalized URL, and `link_to` renders
+      # whichever scheme it is handed.
+      URL_SCHEMES = %w[http https].freeze
+      # A `:titleize` word: a run of letters that starts one, so the tail of
+      # "3rd" or "O'Brien" keeps the case it was typed with. Capitalizing these
+      # in place is what String#titleize is mistaken for — that is
+      # humanize(underscore(v)), which rewrites "Jean-Luc" to "Jean Luc" and
+      # drops the suffix of "customer_id" outright.
+      TITLEIZE_WORD = /(?<![[:alnum:]'])[[:alpha:]]+/
 
       # `:url` — strip, default the scheme to https://, lowercase the scheme and
       # host (the case-insensitive parts) and leave path/query alone. Input that
-      # doesn't parse as a URI comes back stripped but otherwise untouched, so a
-      # format validator can still reject it.
+      # carries a non-http(s) scheme, or that doesn't parse as a URI, comes back
+      # stripped but otherwise untouched, so a format validator can reject it.
       def self.normalize_url(value)
         stripped = value.strip
         return stripped if stripped.empty?
 
-        uri = URI.parse(stripped.match?(URL_SCHEME) ? stripped : "https://#{stripped}")
+        scheme = stripped[URL_SCHEME, 1]
+        return stripped if scheme && !URL_SCHEMES.include?(scheme.downcase)
+
+        uri = URI.parse(scheme ? stripped : "https://#{stripped}")
         uri.scheme = uri.scheme.downcase
-        uri.host = uri.host.downcase if uri.host
+        downcase_host!(uri)
         uri.to_s
       rescue URI::InvalidURIError, URI::InvalidComponentError
         stripped
       end
+
+      # `host=` also clears the userinfo on uri >= 1.1 (Ruby 3.2's bundled
+      # uri 0.12.1 keeps it), so put it back — silently dropping credentials
+      # would leave the stored URL pointing somewhere else entirely.
+      def self.downcase_host!(uri)
+        return unless uri.host
+
+        userinfo = uri.userinfo
+        uri.host = uri.host.downcase
+        uri.userinfo = userinfo if userinfo
+      end
+      private_class_method :downcase_host!
 
       # Built-in normalization presets. Each is string-safe — non-string values
       # pass through unchanged so callers don't have to guard themselves.
@@ -56,7 +83,7 @@ module ConcernsOnRails
         downcase: ->(v) { v.is_a?(String) ? v.downcase : v },
         upcase: ->(v) { v.is_a?(String) ? v.upcase : v },
         capitalize: ->(v) { v.is_a?(String) ? v.capitalize : v },
-        titleize: ->(v) { v.is_a?(String) ? v.titleize : v },
+        titleize: ->(v) { v.is_a?(String) ? v.gsub(TITLEIZE_WORD, &:capitalize) : v },
         parameterize: ->(v) { v.is_a?(String) ? v.parameterize : v },
         nullify_blank: ->(v) { v.is_a?(String) && v.strip.empty? ? nil : v },
         url: ->(v) { v.is_a?(String) ? Normalizable.normalize_url(v) : v }

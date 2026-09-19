@@ -754,10 +754,11 @@ User.find_by(email: User.normalize(:email, params[:email]))
 | `:phone`        | digits only (`gsub(/\D/, "")`)                                       |
 | `:whitespace` / `:strip` | `strip`                                                     |
 | `:squish`       | `squish` (collapse inner whitespace)                                 |
-| `:downcase` / `:upcase` / `:capitalize` / `:titleize` | the String method of the same name |
+| `:downcase` / `:upcase` / `:capitalize` | the String method of the same name                   |
+| `:titleize`     | upcase each word's first letter and downcase the rest, **in place** — deliberately *not* `String#titleize` (that is `humanize(underscore(v))`, which splits `"Jean-Luc"` into `"Jean Luc"` and drops the `_id` of `"customer_id"`). No character is added or removed, so hyphens and underscores survive; only case changes, so `"DVD player"` → `"Dvd Player"` |
 | `:parameterize` | `parameterize` (URL slug)                                            |
 | `:nullify_blank`| `""` or whitespace-only → `nil` (content untouched)                  |
-| `:url`          | strip, default scheme to `https://` (`host:port` counts as schemeless), lowercase scheme + host, keep path/query; unparseable input comes back stripped for your format validator to reject |
+| `:url`          | strip, default scheme to `https://` (`host:port` counts as schemeless), lowercase scheme + host, keep userinfo/path/query, drop a redundant default port. Only `http`/`https` are canonicalized — any other scheme (`mailto:`, `tel:`, `javascript:`, `data:`) and unparseable input come back stripped for your format validator to reject |
 
 **Notes**
 - Runs in `before_validation`, so DB constraints and AR validations see the normalized value.
