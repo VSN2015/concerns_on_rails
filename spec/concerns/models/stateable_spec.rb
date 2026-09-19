@@ -367,6 +367,116 @@ describe ConcernsOnRails::Stateable do
       expect(ArchivableOrder.transition_all(:archive)).to eq(2)
       expect(ArchivableOrder.transition_all(:archive)).to eq(0)
     end
+
+    # `where.not(status: "archived")` compiles to NOT (status = 'archived'),
+    # which is NULL — never TRUE — for a NULL state, so those rows were
+    # silently skipped and left out of the count, even though may_archive? is
+    # true for them and record.archive! on the same row works.
+    context "with NULL-state rows and a transition declared without :from" do
+      before do
+        stub_const("NullableOrder", Class.new(TestModel) do
+          self.table_name = "batch_orders"
+          include ConcernsOnRails::Stateable
+
+          stateable_by :status, states: %i[draft archived],
+                                transitions: { archive: { to: :archived } }
+        end)
+        NullableOrder.create!(status: "draft")
+        NullableOrder.insert_all([{ status: nil }]) # legacy / imported row
+      end
+
+      it "includes them in the batch" do
+        expect(NullableOrder.transition_all(:archive)).to eq(2)
+        expect(NullableOrder.where(status: "archived").count).to eq(2)
+      end
+
+      it "agrees with the per-record path, which already accepted them" do
+        null_row = NullableOrder.find_by(status: nil)
+
+        expect(null_row.may_archive?).to be(true)
+      end
+
+      it "is still idempotent afterwards" do
+        NullableOrder.transition_all(:archive)
+
+        expect(NullableOrder.transition_all(:archive)).to eq(0)
+      end
+    end
+  end
+
+  describe "ActiveRecord::Rollback from after_transition" do
+    before do
+      class RollbackTicket < TestModel
+        include ConcernsOnRails::Stateable
+
+        self.table_name = "tickets"
+
+        stateable_by :status, states: %i[draft archived], default: :draft,
+                              transitions: { archive: { to: :archived } }
+
+        def after_transition(*)
+          raise ActiveRecord::Rollback
+        end
+      end
+    end
+
+    after { Object.send(:remove_const, :RollbackTicket) if defined?(RollbackTicket) }
+
+    it "rolls the state change back when called standalone" do
+      t = RollbackTicket.create!(title: "t")
+
+      t.archive!
+
+      expect(t.reload.status).to eq("draft")
+    end
+
+    # A bare `transaction` JOINS the caller's, and Rails then swallows
+    # ActiveRecord::Rollback without rolling anything back — the state change
+    # committed, exactly opposite to the documented contract.
+    it "rolls the state change back inside an enclosing transaction" do
+      t = RollbackTicket.create!(title: "t")
+
+      ActiveRecord::Base.transaction { t.archive! }
+
+      expect(t.reload.status).to eq("draft")
+    end
+
+    # Lockable's half of this same fix uses a `completed` flag for exactly this
+    # reason ("the caller must see false — not a fake success"). Stateable took
+    # its return value from update!, which runs BEFORE after_transition, so an
+    # aborted transition still reported success: `raise unless ticket.archive!`
+    # never fired and the caller carried on as though the state had changed.
+    it "returns false when the hook aborts the transition" do
+      t = RollbackTicket.create!(title: "t")
+
+      expect(t.archive!).to be(false)
+      expect(t.reload.status).to eq("draft")
+    end
+
+    # BatchOps tallies the block's return value, so the fake success also
+    # inflated the count — transition_all reported rows whose transition it had
+    # just rolled back. A falsey return is the documented "failed record"
+    # signal, so the batch now aborts loudly instead of lying about the count.
+    it "does not report a rolled-back record as transitioned by transition_all" do
+      RollbackTicket.create!(title: "t")
+
+      expect { RollbackTicket.transition_all(:archive) }
+        .to raise_error(ActiveRecord::RecordNotSaved, /failed to transition record/)
+      expect(RollbackTicket.pluck(:status)).to eq(["draft"])
+    end
+
+    it "leaves the caller's own writes in the enclosing transaction intact" do
+      t = RollbackTicket.create!(title: "t")
+      other = RollbackTicket.create!(title: "other")
+
+      ActiveRecord::Base.transaction do
+        other.update!(title: "renamed")
+        t.archive!
+      end
+
+      expect(other.reload.title).to eq("renamed")
+      expect(t.reload.status).to eq("draft")
+    end
   end
   describe "timestamps: (<state>_at stamping)" do
     before do

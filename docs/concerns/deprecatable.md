@@ -82,7 +82,7 @@ After the sunset instant with `after_sunset: :gone`, the action is halted with:
 { "success": false, "error": { "message": "This endpoint was sunset on Tue, 01 Sep 2026 00:00:00 GMT.", "code": "endpoint_sunset" } }
 ```
 
-(via `Respondable`'s `render_error` when included; the deprecation headers still ride the 410 so the failure self-documents).
+(via `Respondable`'s `render_error` when included; the deprecation headers still ride the 410 so the failure self-documents). The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`.
 
 ## Notes & gotchas
 
