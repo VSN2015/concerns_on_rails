@@ -173,7 +173,7 @@ account.email   # => "alice@example.com"
 - **`:url` only canonicalizes `http` and `https`.** A value that carries any other scheme comes back stripped but otherwise untouched rather than normalized, so `"javascript:alert(1)"` and `"data:text/html;base64,…"` are never handed back as a blessed URL for `link_to` to render. `"mailto:…"` and `"tel:…"` are left alone for the same reason.
 - **Unknown preset symbols raise immediately.** Passing an unrecognized symbol such as `with: :flarbgnarb` raises `ArgumentError: unknown preset '...'` and lists the valid preset names.
 - **`normalizable_rules` is a `class_attribute`.** It is inherited by subclasses. Rules defined on a parent class apply to all subclasses via normal Ruby inheritance; subclasses can add their own rules without affecting the parent.
-- **Works on Rails 5+.** The concern intentionally does not depend on Rails 7.1's built-in `normalizes` API, making it usable in projects that cannot upgrade to a recent Rails version.
+- **Works on Rails 6.0+.** The concern intentionally does not depend on Rails 7.1's built-in `normalizes` API, making it usable in projects that cannot upgrade to a recent Rails version.
 - **No external gem dependency.** Unlike `Sluggable` or `Sortable`, `Normalizable` requires only `active_support/concern` and the `squish` method available in ActiveSupport, which is already a Rails dependency.
 
 ## Changed in 1.22.0

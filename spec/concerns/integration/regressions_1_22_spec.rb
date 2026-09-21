@@ -120,7 +120,13 @@ RSpec.describe "1.22 regressions through real ActionController dispatch" do
     it "carries Cache-Control: no-store on the rescued error" do
       result = dispatch(no_store_controller, :show)
       expect(result.status).to eq(422)
-      expect(result.header("Cache-Control")).to eq("no-store")
+      # Rails 6.0's Cache-Control normaliser has NO no_store branch: it parses
+      # the header we set into :extras and the generic branch always appends
+      # `private`, so the wire value there is "private, no-store". The
+      # operative directive is emitted either way — 6.1 added the branch that
+      # emits it on its own.
+      expected = Gem::Version.new(ActionPack::VERSION::STRING) >= Gem::Version.new("6.1") ? "no-store" : "private, no-store"
+      expect(result.header("Cache-Control")).to eq(expected)
     end
 
     it "never emits the positive freshness policy on a rescued error" do

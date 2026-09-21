@@ -46,6 +46,13 @@ module ConcernsOnRails
     #     must match the name you joined under (same rule as stock Rails):
     #     joins(:sections).where(sections: {...}) works,
     #     joins(:chapters).where(sections: {...}) does not.
+    #   * THE QUERY SIDE NEEDS RAILS 6.1+. Resolving a where-hash key to an
+    #     ASSOCIATION rather than to a literal table name landed in 6.1, and
+    #     that resolution is what makes Rails alias the join to the
+    #     reflection name. On 6.0 the same call emits
+    #     INNER JOIN "chapters" ... WHERE "sections"... — a reference to an
+    #     alias that was never created, which the database rejects. Readers,
+    #     writers, build_/create_ and the ids pair all work on 6.0.
     #   * The belongs_to foreign-key attribute is NOT aliased — pair with
     #     Rails' alias_attribute (e.g. :writer_id, :author_id) if needed.
     #   * has_and_belongs_to_many cannot be aliased — use has_many :through.

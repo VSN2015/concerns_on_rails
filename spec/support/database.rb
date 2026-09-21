@@ -134,4 +134,18 @@ TestDatabase.drop_leftover_tables!
 # Base class for test models
 class TestModel < ActiveRecord::Base
   self.abstract_class = true
+
+  # Most spec models are `Class.new(TestModel)` — anonymous. On Rails 6.0 the
+  # first failing validation on such a class raises
+  # `ArgumentError: Class name cannot be blank. You need to supply a name
+  # argument when anonymous class given`, because ActiveModel::Name demands a
+  # name to build the error message from (6.1+ tolerates it). Derive one from
+  # the table the spec set, so an anonymous model behaves the same on every
+  # line in the matrix.
+  def self.model_name
+    return super if name
+
+    @model_name ||=
+      ActiveModel::Name.new(self, nil, (table_name.presence || "TestModel").classify)
+  end
 end

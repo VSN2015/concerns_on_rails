@@ -4,7 +4,7 @@ A store-agnostic, per-request rate limiter for Rails controllers. `Throttleable`
 
 - Protecting a public JSON API from abusive clients by capping requests per IP to a high global limit (e.g. 100 per minute), with a tighter per-authenticated-user limit on write actions.
 - Limiting expensive mutation endpoints (`create`, `update`) independently from cheap read endpoints without duplicating controller logic.
-- Adding standardized rate-limit headers to a Rails 5–7 app before Rails 7.2's built-in `rate_limit` is available.
+- Adding standardized rate-limit headers to a Rails 6–7 app before Rails 7.2's built-in `rate_limit` is available.
 - Applying per-user throttling in a multi-tenant SaaS API where the discriminator is `current_user.id` rather than client IP.
 - Preventing brute-force attempts on authentication endpoints by scoping a strict rule to `:create` on `SessionsController`.
 

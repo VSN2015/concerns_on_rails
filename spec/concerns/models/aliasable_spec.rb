@@ -263,8 +263,15 @@ describe ConcernsOnRails::Aliasable do
     end
   end
 
+  # min_rails 6.1 on every example that goes through joins/where/eager_load:
+  # resolving a where-hash key to an ASSOCIATION (rather than to a literal
+  # table name) landed in Rails 6.1, and that resolution is what makes Rails
+  # alias the joined table to the reflection name. On 6.0 the same query emits
+  # `INNER JOIN "books" ... WHERE "works"."title"` — a join with no such alias,
+  # which the database rejects. Aliasable's read/write side works on 6.0; its
+  # query side needs 6.1, and the concern's own docs say so.
   describe "query side" do
-    it "joins(:alias) joins the source table, aliased when the where-hash references the alias" do
+    it "joins(:alias) joins the source table, aliased when the where-hash references the alias", min_rails: "6.1" do
       books = TestDatabase.quoted_table("books")
       works = TestDatabase.quoted_table("works")
 
@@ -275,14 +282,14 @@ describe ConcernsOnRails::Aliasable do
         .to match(/INNER JOIN #{Regexp.escape(books)} (?:AS )?#{Regexp.escape(works)}/)
     end
 
-    it "joins(:alias).where(alias: {...}) finds matching rows" do
+    it "joins(:alias).where(alias: {...}) finds matching rows", min_rails: "6.1" do
       author = create_author_with_books(titles: ["Intro"])
       create_author_with_books(name: "Other", titles: ["Misc"])
 
       expect(Author.joins(:works).where(works: { title: "Intro" })).to eq([author])
     end
 
-    it "resolves a singular alias in joins + where" do
+    it "resolves a singular alias in joins + where", min_rails: "6.1" do
       author = Author.create!(name: "Jane")
       book = Book.create!(title: "Solo", author_id: author.id)
 
@@ -297,7 +304,7 @@ describe ConcernsOnRails::Aliasable do
       expect(loaded.books.loaded?).to be(true)
     end
 
-    it "supports preload and eager_load through the alias" do
+    it "supports preload and eager_load through the alias", min_rails: "6.1" do
       author = create_author_with_books(titles: ["Intro"])
 
       preloaded = Author.preload(:works).first
@@ -501,7 +508,7 @@ describe ConcernsOnRails::Aliasable do
       expect(reflection.options[:source]).to eq(:reviews)
     end
 
-    it "joins, filters, and includes through the alias" do
+    it "joins, filters, and includes through the alias", min_rails: "6.1" do
       author = create_reviewed_author
 
       expect(Author.joins(:critiques).where(critiques: { body: "great" })).to eq([author])
@@ -510,7 +517,7 @@ describe ConcernsOnRails::Aliasable do
       expect(loaded.critiques.loaded?).to be(true)
     end
 
-    it "declares safely in a class body before the through model's class is loaded" do
+    it "declares safely in a class body before the through model's class is loaded", min_rails: "6.1" do
       class LazyAuthor < TestModel
         self.table_name = "authors"
         include ConcernsOnRails::Aliasable
@@ -534,7 +541,7 @@ describe ConcernsOnRails::Aliasable do
       expect(LazyAuthor.joins(:critiques).where(critiques: { body: "deep" })).to eq([author])
     end
 
-    it "pins a singular-form source resolved from the loaded through model" do
+    it "pins a singular-form source resolved from the loaded through model", min_rails: "6.1" do
       Book.has_many :authors, through: :reviews
       Book.alias_association(:reviewers, :authors)
 
@@ -569,7 +576,7 @@ describe ConcernsOnRails::Aliasable do
       expect(subclass.joins(:works).to_sql).to include("INNER JOIN #{TestDatabase.quoted_table('books')}")
     end
 
-    it "allows declaring an alias in a subclass for a parent-defined association" do
+    it "allows declaring an alias in a subclass for a parent-defined association", min_rails: "6.1" do
       # Named subclass: the query side resolves the copy's klass through its
       # owning class, and anonymous classes cannot resolve class names
       # (stock Rails compute_type limitation, same as any association
@@ -673,7 +680,7 @@ describe ConcernsOnRails::Aliasable do
   end
 
   describe "method-map options (only:/except:)" do
-    it "only: :reader generates just the reader, query side intact" do
+    it "only: :reader generates just the reader, query side intact", min_rails: "6.1" do
       Book.alias_association(:penman, :author, only: :reader)
       author = Author.create!(name: "Jane")
       book = Book.create!(title: "Solo", author_id: author.id)

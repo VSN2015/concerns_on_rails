@@ -5,6 +5,19 @@ require "action_controller/metal/request_forgery_protection" # defines InvalidAu
 require "support/integration_harness"
 
 describe ConcernsOnRails::Controllers::ErrorHandleable do
+  # ActionDispatch::Http::Parameters::ParseError took NO constructor argument
+  # until Rails 7.0 — it wrapped `$!` instead. Raise-and-rescue a parser error
+  # so `$!` carries the message on those lines, and pass it directly on 7.0+.
+  def build_parse_error(message)
+    ActionDispatch::Http::Parameters::ParseError.new(message)
+  rescue ArgumentError
+    begin
+      raise JSON::ParserError, message
+    rescue JSON::ParserError
+      ActionDispatch::Http::Parameters::ParseError.new
+    end
+  end
+
   # The real ActionController already pulls in ActiveSupport::Rescuable, but
   # our FakeController is intentionally bare. Mixing in Rescuable here gives
   # us `rescue_from` + `rescue_with_handler` so we can exercise the dispatch.
@@ -199,7 +212,7 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
         unpermitted_parameters: -> { ActionController::UnpermittedParameters.new(%w[a]) },
         invalid_authenticity_token: -> { ActionController::InvalidAuthenticityToken.new },
         bad_request: -> { ActionController::BadRequest.new("x") },
-        parse_error: -> { ActionDispatch::Http::Parameters::ParseError.new("x") },
+        parse_error: -> { build_parse_error("x") },
         unknown_format: -> { ActionController::UnknownFormat.new }
       }
       expect(samples.keys).to match_array(described_class::HANDLERS.keys)
@@ -299,7 +312,7 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
     end
 
     it "ActionDispatch::Http::Parameters::ParseError → 400 parse_error without the parser message" do
-      rendered = rescue!(ActionDispatch::Http::Parameters::ParseError.new("unexpected token at '{\"a\":'"))
+      rendered = rescue!(build_parse_error("unexpected token at '{\"a\":'"))
       expect(rendered[:status]).to eq(:bad_request)
       expect(rendered[:json][:error]).to eq(message: "Malformed request body", code: "parse_error")
     end

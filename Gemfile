@@ -4,7 +4,7 @@ gemspec
 
 gem 'rake'
 
-gem "activerecord", ">= 5.0", "< 9"
+gem "activerecord", ">= 6.0", "< 9"
 gem 'acts_as_list', '>= 0.7.5', '< 2'
 gem "faker", "~> 3.8"
 gem "friendly_id", "~> 5.4"
@@ -16,7 +16,7 @@ gem "friendly_id", "~> 5.4"
 gem "json", "< 3"
 # Dev/test only — the gem itself does not depend on railties; the spec suite
 # exercises ConcernsOnRails::Railtie directly.
-gem "railties", ">= 5.0", "< 9"
+gem "railties", ">= 6.0", "< 9"
 gem "rspec", "~> 3.12"
 gem "simplecov", "~> 1.1"
 gem "sqlite3", "~> 2.9.6"

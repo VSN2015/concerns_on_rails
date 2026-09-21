@@ -54,7 +54,7 @@ llms = <<~TXT
 
   > Plug-and-play ActiveSupport concerns for Rails models and controllers — one `include`, one declarative macro. #{concerns.size} concerns covering slugs, soft delete, publishing, encryption, auditing, pagination, rate limiting, webhooks, params contracts, and more.
 
-  ConcernsOnRails is a Ruby gem (`gem "concerns_on_rails"`; Ruby >= 3.2, Rails 5.0–8.x). Current version: #{version}. Every link below is a standalone plain-Markdown document — fetch it directly, no JavaScript or HTML parsing required.
+  ConcernsOnRails is a Ruby gem (`gem "concerns_on_rails"`; Ruby >= 3.2, Rails 6.0–8.1). Current version: #{version}. Every link below is a standalone plain-Markdown document — fetch it directly, no JavaScript or HTML parsing required.
 
   ## Model concerns
 

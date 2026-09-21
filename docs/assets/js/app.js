@@ -194,7 +194,7 @@
     /* HERO */
     '<section class="hero"><div class="wrap"><div class="hero-grid">' +
       '<div class="reveal">' +
-        '<span class="pill">v' + esc(META.version) + ' · Rails 5–8</span>' +
+        '<span class="pill">v' + esc(META.version) + ' · Rails 6–8</span>' +
         '<h1>Reusable concerns,<br><span class="ruby">batteries included.</span></h1>' +
         '<p class="lede">A plug-and-play collection of ' + CONCERNS.length + ' reusable ActiveSupport concerns for your Rails models and controllers. Drop one in, skip the boilerplate.</p>' +
         copybar('<span class="tg">$</span> bundle add concerns_on_rails', 'bundle add concerns_on_rails') +
