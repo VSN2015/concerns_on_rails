@@ -130,17 +130,22 @@ module ConcernsOnRails
         return {} unless raw.respond_to?(:each_pair)
 
         allowed = self.class.includable_fields
-        # Iterate via each_pair: in a real controller `raw` is an
+        # Iterate via each_pair WITH A BLOCK: in a real controller `raw` is an
         # ActionController::Parameters, which has each_pair but no Enumerable —
         # calling each_with_object directly on it was a guaranteed
-        # NoMethodError 500 for every ?fields[...]= request.
-        raw.each_pair.with_object({}) do |(table, cols), memo|
+        # NoMethodError 500 for every ?fields[...]= request. Its block-less
+        # form is no good either: Parameters#each_pair only started returning
+        # an Enumerator in Rails 6.1, so `raw.each_pair.with_object` raised
+        # LocalJumpError ("no block given") on 6.0.
+        memo = {}
+        raw.each_pair do |table, cols|
           key = table.to_sym
           next unless allowed.key?(key)
 
           permitted = split_field_list(cols) & allowed[key]
           memo[key] = permitted unless permitted.empty?
         end
+        memo
       end
 
       private

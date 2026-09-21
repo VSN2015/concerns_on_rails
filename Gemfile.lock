@@ -2,9 +2,9 @@ PATH
   remote: .
   specs:
     concerns_on_rails (1.28.9)
-      actionpack (>= 5.0, < 9)
-      activerecord (>= 5.0, < 9)
-      activesupport (>= 5.0, < 9)
+      actionpack (>= 6.0, < 9)
+      activerecord (>= 6.0, < 9)
+      activesupport (>= 6.0, < 9)
       acts_as_list (>= 0.7.5, < 2)
       friendly_id (~> 5.4)
       permittable (~> 0.1)
@@ -186,13 +186,13 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
-  activerecord (>= 5.0, < 9)
+  activerecord (>= 6.0, < 9)
   acts_as_list (>= 0.7.5, < 2)
   concerns_on_rails!
   faker (~> 3.8)
   friendly_id (~> 5.4)
   json (< 3)
-  railties (>= 5.0, < 9)
+  railties (>= 6.0, < 9)
   rake
   rspec (~> 3.12)
   rubocop (~> 1.89)

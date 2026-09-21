@@ -156,7 +156,9 @@ describe ConcernsOnRails::Controllers::Sortable do
     result = controller.sorted(Article.where(title: "Same")).to_a
     expect(result).to eq([b, a])
   end
-  describe "per-column directions, association columns and NULL ordering" do
+  # `nulls:` needs Arel::Nodes::Ascending#nulls_last, which arrived in Rails
+  # 6.1 — below that the macro raises by design (see sortable_check_nulls_support!).
+  describe "per-column directions, association columns and NULL ordering", min_rails: "6.1" do
     before do
       ActiveRecord::Schema.define do
         create_table :sort_authors, force: true do |t|
@@ -271,7 +273,11 @@ describe ConcernsOnRails::Controllers::Sortable do
       end
     end
 
-    it "uses the native NULLS syntax on PostgreSQL" do
+    # min_rails 7.0: on 6.1 the NULLS visitor methods live ONLY in
+    # Arel::Visitors::PostgreSQL, so stubbing `adapter_name` on a SQLite
+    # connection cannot render the node (7.0 moved them to the shared ToSql
+    # visitor). The real behaviour on 6.1 is covered by the PostgreSQL CI leg.
+    it "uses the native NULLS syntax on PostgreSQL", min_rails: "7.0" do
       relation = SortPost.all
       allow(relation.model.connection).to receive(:adapter_name).and_return("PostgreSQL")
       sql = klass.new(params: { sort: "+price" }).sorted(relation).to_sql

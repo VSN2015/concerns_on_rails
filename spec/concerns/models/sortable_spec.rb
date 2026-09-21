@@ -343,12 +343,17 @@ describe ConcernsOnRails::Sortable do
           t.integer :position
         end
       end
-      klass = Class.new(TestModel) do
-        self.table_name = "scoped_tasks"
-        include ConcernsOnRails::Sortable
-
-        sortable_by :position, scope: :list_id
-      end
+      # NAMED (not Class.new(...)): acts_as_list calls
+      # `delegate :connection, to: self`, and on Rails 6.0 that generates a
+      # method body carrying the class's own to_s — which for an anonymous
+      # class produces source Ruby cannot parse (SyntaxError at macro time).
+      # Every real model is named, so this only ever bit the suite.
+      stub_const("ScopedTask", Class.new(TestModel) { self.table_name = "scoped_tasks" })
+      # sortable_by runs AFTER the constant assignment, so the class already
+      # has a name by the time acts_as_list reaches it.
+      ScopedTask.include ConcernsOnRails::Sortable
+      ScopedTask.sortable_by :position, scope: :list_id
+      klass = ScopedTask
       l1 = %w[x y z].map { |n| klass.create!(name: n, list_id: 1) }
       l2 = klass.create!(name: "other", list_id: 2)
 

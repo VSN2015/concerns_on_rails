@@ -23,9 +23,16 @@ Gem::Specification.new do |spec|
   # Support — pulling in Action Cable/Mailbox/Text for every host contradicts
   # the lean-deps promise. (railties is NOT required: the Railtie only loads
   # when the host app already has it.)
-  spec.add_runtime_dependency 'actionpack', '>= 5.0', '< 9'
-  spec.add_runtime_dependency 'activerecord', '>= 5.0', '< 9'
-  spec.add_runtime_dependency 'activesupport', '>= 5.0', '< 9'
+  #
+  # The floor is 6.0, not 5.0. Rails 5.x cannot run on ANY Ruby this gem
+  # supports: Ruby 3's keyword-argument separation breaks Active Record 5.2's
+  # own create_table (schema_statements.rb:290), and required_ruby_version is
+  # ">= 3.2.0" above — so a ">= 5.0" claim was unreachable by construction,
+  # and nobody could ever have installed this gem alongside Rails 5. Every
+  # line from 6.0 up is exercised by the CI matrix (see .github/workflows/ci.yml).
+  spec.add_runtime_dependency 'actionpack', '>= 6.0', '< 9'
+  spec.add_runtime_dependency 'activerecord', '>= 6.0', '< 9'
+  spec.add_runtime_dependency 'activesupport', '>= 6.0', '< 9'
   # Open-ended (not ~>): a ~> 0.7.5 pin was a hard Bundler conflict for any
   # host app already on acts_as_list 1.x. Both gems load lazily — only when
   # Sortable / Sluggable is actually used (see lib/concerns_on_rails.rb).

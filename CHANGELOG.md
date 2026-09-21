@@ -1,5 +1,51 @@
 <!-- CHANGELOG.md -->
 
+## Unreleased
+
+CI now runs **every Rails line the gemspec admits** — 6.0, 6.1, 7.0, 7.1, 7.2, 8.0 and 8.1 —
+where it previously ran 7.0 through 8.0. Extending the matrix downwards found 201 failures
+on the two new old lines and 0 on the new top line; all of them are fixed, and all seven
+legs are green and blocking.
+
+### Changed
+- **Rails 5.x is no longer declared.** The `actionpack` / `activerecord` / `activesupport`
+  floor moves from `>= 5.0` to `>= 6.0`. This drops nothing that ever worked: with
+  `required_ruby_version = ">= 3.2.0"`, the `>= 5.0` half was unreachable by construction —
+  Ruby 3's keyword-argument separation breaks Active Record 5.2's own `create_table`
+  (`schema_statements.rb:290`), so no bundle could satisfy both. Verified rather than
+  assumed: on Ruby 3.2 the suite fails 1,302 examples on Rails 5.2, every one of them
+  inside the framework.
+
+### Fixed
+- **Controllers::Includable**: `?fields[table]=...` raised `LocalJumpError` ("no block
+  given") on Rails 6.0. `requested_fields` called the block-less `params[:fields].each_pair`
+  and chained `with_object`, but `ActionController::Parameters#each_pair` only began
+  returning an Enumerator in 6.1. It now iterates with a block, which behaves the same on
+  every line.
+- **Models::Searchable**: the generated `search` scope raised
+  `ArgumentError: wrong number of arguments (given 2, expected 1)` for every call on Rails
+  6.0. Rails 6.0 forwards a scope's arguments through `define_method(name) { |*args| }`
+  with no `ruby2_keywords`, so under Ruby 3 the `ranked:` keyword reaches the body as a
+  trailing positional Hash. The scope now takes its options positionally and splats them
+  back out — same call signature, and an unknown key still raises.
+
+### Documented
+- Two features need a line newer than the 6.0 floor, and both now say so in the README's
+  compatibility table and in their own docs: `Controllers::Sortable`'s `nulls:` ordering
+  (Rails 6.1+, already raised at macro time) and `Models::Aliasable`'s **query side**
+  (Rails 6.1+ — resolving a `where`-hash key to an association, which is what makes Rails
+  alias the join, landed in 6.1; Aliasable's read/write side works on 6.0).
+
+### Internal
+- `gemfiles/rails_6.0.gemfile`, `rails_6.1.gemfile` and `rails_8.1.gemfile`; every gemfile
+  below 7.1 now pins `concurrent-ruby < 1.3.5`, which dropped its own `require "logger"`
+  that Active Support only started doing for itself in 7.1.
+- The spec harness clears Active Record's schema cache and (on <= 6.1)
+  `ActiveSupport::Dependencies::Reference` between examples, gives anonymous spec models a
+  `model_name`, and gains a `min_rails:` metadata tag for examples whose feature is version
+  gated. Without the first two, specs that reuse table and model names across files saw the
+  PREVIOUS file's columns and classes on 6.0/6.1.
+
 ## 1.28.9 (2026-09-19)
 
 CI now runs the matrix the gemspec actually claims: Rails 7.0–8.0 across Ruby 3.2/3.3/3.4,

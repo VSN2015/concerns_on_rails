@@ -143,7 +143,12 @@ describe ConcernsOnRails::Controllers::Localizable do
       expect(c.response.headers["Vary"]).to eq("Accept-Language")
     end
 
-    it "keeps Rails' own Vary: Accept on a real content-negotiated response" do
+    # min_rails 6.1: Rails only learned to set its own `Vary: Accept` during
+    # render in 6.1 (ActionController::Rendering#_set_vary_header). Support::VaryHeader
+    # deliberately mirrors that — it seeds Accept only when
+    # `request.should_apply_vary_header?` exists and says so — so on 6.0 there
+    # is no Accept to preserve and nothing to assert.
+    it "keeps Rails' own Vary: Accept on a real content-negotiated response", min_rails: "6.1" do
       # Rails adds Vary: Accept during render, but only while the header is
       # blank, so a pre-action write of ours would silently drop that cache
       # dimension. Only a real dispatch can catch it.

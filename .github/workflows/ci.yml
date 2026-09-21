@@ -13,6 +13,13 @@ on:
 # the select list, which Postgres rejects; it has no NULLS FIRST/LAST
 # semantics; it folds LIKE differently; it has no native JSON operators), so a
 # green run proved very little. Every axis below has already caught a real bug.
+#
+# The Rails axis runs the WHOLE range the gemspec admits: 6.0 (its floor)
+# through 8.1 (the newest under its "< 9" ceiling). Rails 5.x is deliberately
+# absent and is NOT supported — it cannot run on any Ruby this gem supports.
+# Ruby 3's keyword-argument separation breaks Active Record 5.2's own
+# `create_table` (schema_statements.rb:290 — 1300+ failures, all inside the
+# framework), and required_ruby_version is ">= 3.2.0". See the gemspec.
 
 jobs:
   lint:
@@ -31,8 +38,10 @@ jobs:
       run: bundle exec rubocop --format github
 
   # Rails-version axis, on SQLite. gemfiles/rails_*.gemfile pins the Rails
-  # component gems and the sqlite3 version each line accepts (7.0 wants
-  # sqlite3 ~> 1.4; 7.2+ needs >= 2.1).
+  # component gems and the sqlite3 version each line accepts (6.0/6.1/7.0 want
+  # sqlite3 ~> 1.4; 7.2+ needs >= 2.1), plus `concurrent-ruby < 1.3.5` on
+  # everything below 7.1 — 1.3.5 dropped its own `require "logger"`, which
+  # Active Support only started doing for itself in 7.1.
   test:
     name: RSpec (Rails ${{ matrix.rails }}, Ruby ${{ matrix.ruby }})
     runs-on: ubuntu-latest
@@ -40,14 +49,18 @@ jobs:
       fail-fast: false
       matrix:
         ruby: ['3.2']
-        rails: ['7.0', '7.1', '7.2', '8.0']
+        rails: ['6.0', '6.1', '7.0', '7.1', '7.2', '8.0', '8.1']
         include:
-          # Newer Rubies against the current Rails line. required_ruby_version
+          # Newer Rubies against the current Rails lines. required_ruby_version
           # is ">= 3.2.0" with no ceiling, so these are claimed as supported.
+          # The old lines stay on 3.2 on purpose: 6.0/6.1 predate 3.3 and are
+          # not claimed to work there.
           - ruby: '3.3'
             rails: '8.0'
           - ruby: '3.4'
             rails: '8.0'
+          - ruby: '3.4'
+            rails: '8.1'
     env:
       BUNDLE_GEMFILE: gemfiles/rails_${{ matrix.rails }}.gemfile
 

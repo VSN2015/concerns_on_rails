@@ -1,0 +1,23 @@
+# Rails 6.0 on SQLite — the OLDEST line this gem supports. Rails 5.x is not in
+# the matrix because it cannot run on any Ruby this gem supports: Ruby 3's
+# keyword-argument separation breaks Active Record 5.2's own
+# `create_table` (schema_statements.rb:290), and required_ruby_version is
+# ">= 3.2.0". See the gemspec comment on the actionpack/activerecord pins.
+source "https://rubygems.org"
+
+gem "actionpack", "~> 6.0.6"
+gem "activerecord", "~> 6.0.6"
+gem "activesupport", "~> 6.0.6"
+# Dev/test only: the gem does not depend on railties, but the suite exercises
+# ConcernsOnRails::Railtie directly.
+gem "railties", "~> 6.0.6"
+gem "sqlite3", "~> 1.4"
+# concurrent-ruby 1.3.5 dropped its own `require "logger"`, which Active
+# Support only started doing for itself in 7.1 — without this pin every Rails
+# line below 7.1 dies at boot with
+# `uninitialized constant ActiveSupport::LoggerThreadSafeLevel::Logger`.
+gem "concurrent-ruby", "< 1.3.5"
+
+eval_gemfile File.expand_path("shared.rb", __dir__)
+
+gemspec path: ".."

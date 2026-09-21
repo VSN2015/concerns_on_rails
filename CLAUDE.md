@@ -14,6 +14,9 @@ ASDF_RUBY_VERSION=3.2.2 bundle exec rspec spec/concerns/models/publishable_spec.
 # Run a single example by line number
 ASDF_RUBY_VERSION=3.2.2 bundle exec rspec spec/concerns/models/publishable_spec.rb:28
 
+# Run against one Rails line from the CI matrix (6.0, 6.1, 7.0, 7.1, 7.2, 8.0, 8.1)
+ASDF_RUBY_VERSION=3.2.2 BUNDLE_GEMFILE=gemfiles/rails_6.0.gemfile bundle exec rspec
+
 # Build the gem
 gem build concerns_on_rails.gemspec
 
@@ -292,10 +295,19 @@ actions via `Metal.action` + `Rack::MockRequest` (see
 `spec/concerns/integration/regressions_1_22_spec.rb`). SimpleCov writes coverage to
 `coverage/`.
 
+Three harness rules exist because the suite reuses table and model names across files, and
+older Rails lines cache both: `spec_helper` clears the AR schema cache and (on <= 6.1)
+`ActiveSupport::Dependencies::Reference` before every example and after every `stub_const`,
+and `TestModel.model_name` falls back to the table name so an anonymous `Class.new(TestModel)`
+can render a validation error on 6.0. Tag an example/context `min_rails: "6.1"` when the
+FEATURE is version gated (Sortable's `nulls:`, Aliasable's query side) — not to hide a bug.
+
 ### Runtime dependencies
 
-- `actionpack` / `activerecord` / `activesupport` `>= 5.0, < 9` (component gems, not the
-  full `rails` meta-gem; railties is dev-only for the Railtie spec)
+- `actionpack` / `activerecord` / `activesupport` `>= 6.0, < 9` (component gems, not the
+  full `rails` meta-gem; railties is dev-only for the Railtie spec). The floor was `>= 5.0`
+  until the 6.0–8.1 CI matrix landed; Rails 5 cannot run on Ruby 3.2 (AR 5.2's own
+  `create_table` breaks on Ruby 3 kwargs), so that claim was unreachable.
 - `acts_as_list >= 0.7.5, < 2` (lazy-loaded with Sortable)
 - `friendly_id ~> 5.4` (lazy-loaded with Sluggable)
 - `permittable ~> 0.1` (the extracted Permittable concern, resolved from rubygems.org)

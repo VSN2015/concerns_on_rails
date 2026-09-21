@@ -1,11 +1,11 @@
-The `Encryptable` concern adds **transparent field-level encryption** to any ActiveRecord model — encrypt sensitive columns (SSN, date of birth, card numbers, notes) at rest with authenticated **AES-256-GCM**, using only Ruby's stdlib OpenSSL (no new dependency). Reads and writes stay plaintext; the column stores a versioned, tamper-evident ciphertext envelope. It is implemented as a custom `ActiveModel::Type`, so encryption is invisible to the rest of the stack and composes with sibling concerns like Maskable and Normalizable. On Rails 7.1+ you may prefer the framework-native `encrypts`; this concern gives you the same transparent encryption on Rails 5.0–7.0 with no app config.
+The `Encryptable` concern adds **transparent field-level encryption** to any ActiveRecord model — encrypt sensitive columns (SSN, date of birth, card numbers, notes) at rest with authenticated **AES-256-GCM**, using only Ruby's stdlib OpenSSL (no new dependency). Reads and writes stay plaintext; the column stores a versioned, tamper-evident ciphertext envelope. It is implemented as a custom `ActiveModel::Type`, so encryption is invisible to the rest of the stack and composes with sibling concerns like Maskable and Normalizable. On Rails 7.1+ you may prefer the framework-native `encrypts`; this concern gives you the same transparent encryption on Rails 6.0–7.0 with no app config.
 
 ## When to use it
 
 - Store regulated / sensitive fields — SSN, DOB, government IDs, card numbers — encrypted at rest.
 - Keep the model API ergonomic: `patient.ssn` reads and writes plaintext; the database never sees it.
 - Combine with `Maskable` (show `***6789`) and `Normalizable` (strip before encrypting) on the same field.
-- You target Rails 5.0–7.0 and want the transparency of Rails 7.1's `encrypts` without upgrading.
+- You target Rails 6.0–7.0 and want the transparency of Rails 7.1's `encrypts` without upgrading.
 
 ## Configure a key
 

@@ -11,7 +11,7 @@ One `include`, one declarative macro — done.
 [![CI](https://github.com/VSN2015/concerns_on_rails/actions/workflows/ci.yml/badge.svg)](https://github.com/VSN2015/concerns_on_rails/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-vsn2015.github.io-6f42c1?logo=readthedocs&logoColor=white)](https://vsn2015.github.io/concerns_on_rails)
 [![Ruby](https://img.shields.io/badge/ruby-%3E%3D%203.2-CC342D?logo=ruby&logoColor=white)](https://www.ruby-lang.org)
-[![Rails](https://img.shields.io/badge/rails-5.0--8.x-CC0000?logo=rubyonrails&logoColor=white)](https://rubyonrails.org)
+[![Rails](https://img.shields.io/badge/rails-6.0--8.1-CC0000?logo=rubyonrails&logoColor=white)](https://rubyonrails.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3fb950.svg)](#-license)
 
 ### [📖 **Documentation**](https://vsn2015.github.io/concerns_on_rails) &nbsp;·&nbsp; [💎 **RubyGems**](https://rubygems.org/gems/concerns_on_rails) &nbsp;·&nbsp; [📝 **Changelog**](CHANGELOG.md) &nbsp;·&nbsp; [🐛 **Issues**](https://github.com/VSN2015/concerns_on_rails/issues)
@@ -200,7 +200,25 @@ still wins over the gem-wide fallback.
 ## 🧪 Compatibility
 
 - **Ruby**: 3.2+
-- **Rails**: declared 5.0 through 8.x — in practice the Ruby 3.2 requirement means Rails 7.0.4+ is what can actually install the gem; the test suite runs against Rails 7.1
+- **Rails**: 6.0 through 8.1
+
+Every one of those lines runs the full suite on every push — Rails 6.0, 6.1, 7.0, 7.1, 7.2,
+8.0 and 8.1 on SQLite, plus PostgreSQL and MySQL, and Ruby 3.3/3.4 against the current
+lines. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+**Rails 5.x is not supported**, despite what older versions of this gem declared. Rails 5
+cannot run on any Ruby this gem supports: Ruby 3 separated keyword arguments, which breaks
+Active Record 5.2's own `create_table`, and `required_ruby_version` here is `>= 3.2.0`. The
+old `>= 5.0` dependency was therefore unreachable — no bundle could ever have satisfied
+both halves of it.
+
+Two things need a Rails line newer than the 6.0 floor. Both raise or are documented where
+they apply, and nothing else in the gem is affected:
+
+| Feature | Needs | Below that |
+|---|---|---|
+| `Controllers::Sortable` — `nulls:` ordering | Rails 6.1 | Raises `ArgumentError` at macro time (Arel gained the ordering nodes in 6.1) |
+| `Models::Aliasable` — query side (`joins`/`where`/`eager_load` through an alias) | Rails 6.1 | Rails resolves a `where`-hash key to a table name, not an association, so the alias is not applied to the join. Readers, writers and `build_`/`create_` work on 6.0 |
 
 ---
 
@@ -765,7 +783,7 @@ User.find_by(email: User.normalize(:email, params[:email]))
 - `with:` takes a preset, a Proc, or an Array of them (applied in order); every entry is validated at class load.
 - `nil` values are skipped — no `nil → ""` coercion (use `:nullify_blank` for the opposite direction).
 - Preset normalizers pass non-string values through unchanged.
-- Works on Rails 5+ (no dependency on Rails 7.1's built-in `normalizes`).
+- Works on Rails 6.0+ (no dependency on Rails 7.1's built-in `normalizes`).
 
 ---
 
@@ -1428,6 +1446,10 @@ unlike Publishable/Expirable/Activatable, this one has no validators gate.
 ---
 
 ## 🪞 Aliasable
+
+> **Rails 6.1+ for the query side.** `joins` / `where` / `eager_load` through an alias
+> needs Rails to resolve a `where`-hash key to an association, which landed in 6.1. The
+> read/write side (readers, writers, `build_`/`create_`, the ids pair) works on 6.0.
 
 Alias an existing association under a second name with **full** semantics — read, write/assign, build/create, and the query side (`joins` / `includes` / `where`-hash) — not just a delegated reader. (`alias_attribute` covers columns only; Rails has no built-in association aliasing.)
 
@@ -2209,7 +2231,7 @@ When several rules apply to one request the `X-RateLimit-*` headers describe the
 - The store MUST support **atomic increment-with-expiry** (`Rails.cache` with `#increment`, or Redis) — a non-atomic store under-counts under concurrency.
 - There is **no in-process default store** on purpose: the first throttled request raises `ArgumentError` until you set `throttleable_store` (or the gem-wide fallback `ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } }`), so you never silently rate-limit per-process.
 - When `Respondable` is included, the 429 body delegates to `render_error` (`code: "rate_limited"`).
-- Backports the essentials of Rails 7.2's `rate_limit` (with standardized headers) to Rails 5.0+. For richer rules (fail2ban, allow/deny lists, exponential backoff) reach for [`rack-attack`](https://github.com/rack/rack-attack).
+- Backports the essentials of Rails 7.2's `rate_limit` (with standardized headers) to Rails 6.0+. For richer rules (fail2ban, allow/deny lists, exponential backoff) reach for [`rack-attack`](https://github.com/rack/rack-attack).
 
 ---
 

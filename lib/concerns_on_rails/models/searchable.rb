@@ -74,7 +74,14 @@ module ConcernsOnRails
           self.searchable_case_sensitive = case_sensitive
           self.searchable_ranked = ranked
 
-          scope :search, ->(query, ranked: nil) { search_relation(query, ranked: ranked) }
+          # Options are taken POSITIONALLY, not as keywords. Rails 6.0 forwards a
+          # scope's arguments through `define_method(name) { |*args| ... }` with no
+          # `ruby2_keywords`, so under Ruby 3 a `ranked:` keyword reaches the body as
+          # a trailing positional Hash and a kwarg-taking lambda dies with
+          # `wrong number of arguments (given 2, expected 1)`. Splatting an options
+          # hash back out here behaves identically on 6.0 through 8.1 — and still
+          # raises on an unknown key, because `search_relation` names its keywords.
+          scope :search, ->(query, opts = {}) { search_relation(query, **opts) }
         end
 
         # `ranked:` nil defers to the macro's setting; true/false override it.

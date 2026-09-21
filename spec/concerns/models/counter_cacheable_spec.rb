@@ -3,6 +3,14 @@
 require "spec_helper"
 
 describe ConcernsOnRails::Models::CounterCacheable do
+  # ActiveRecord#values_at (ActiveModel::Access) only exists from Rails 6.1;
+  # read the two counters directly so the assertion means the same thing on
+  # every line in the matrix.
+  def reload_counts(record)
+    fresh = record.reload
+    [fresh.comments_count, fresh.approved_comments_count]
+  end
+
   before(:each) do
     ActiveRecord::Schema.define do
       create_table :posts, force: true do |t|
@@ -329,12 +337,12 @@ describe ConcernsOnRails::Models::CounterCacheable do
     it "repairs only the given parents — ids, records or a relation — and leaves the rest alone" do
       result = Comment.recount_counter_caches!(:post, parents: [post.id, other])
       expect(result).to eq(comments_count: 2, approved_comments_count: 1)
-      expect(post.reload.values_at(:comments_count, :approved_comments_count)).to eq([2, 1])
-      expect(other.reload.values_at(:comments_count, :approved_comments_count)).to eq([1, 0])
-      expect(third.reload.values_at(:comments_count, :approved_comments_count)).to eq([99, 99])
+      expect(reload_counts(post)).to eq([2, 1])
+      expect(reload_counts(other)).to eq([1, 0])
+      expect(reload_counts(third)).to eq([99, 99])
 
       Comment.recount_counter_caches!(:post, parents: Post.where(id: third.id))
-      expect(third.reload.values_at(:comments_count, :approved_comments_count)).to eq([3, 0])
+      expect(reload_counts(third)).to eq([3, 0])
       expect(post.reload.comments_count).to eq(2)
     end
 

@@ -1,0 +1,15 @@
+# Rails 8.1 on SQLite — the NEWEST line the gemspec's "< 9" admits. Generated
+# half of the CI matrix — see .github/workflows/ci.yml and gemfiles/shared.rb.
+source "https://rubygems.org"
+
+gem "actionpack", "~> 8.1.0"
+gem "activerecord", "~> 8.1.0"
+gem "activesupport", "~> 8.1.0"
+# Dev/test only: the gem does not depend on railties, but the suite exercises
+# ConcernsOnRails::Railtie directly.
+gem "railties", "~> 8.1.0"
+gem "sqlite3", ">= 2.1"
+
+eval_gemfile File.expand_path("shared.rb", __dir__)
+
+gemspec path: ".."

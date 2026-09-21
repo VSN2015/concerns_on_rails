@@ -279,7 +279,7 @@ Location.find_each(&:save)   # backfill: existing rows keep a NULL fingerprint u
 
 - **The digest is unkeyed.** An address space is small enough to enumerate, so treat the fingerprint column as revealing the address. If a mapped column is also `encryptable`, storing this alongside it defeats that encryption; Encryptable's own blind index uses a keyed HMAC for exactly that reason.
 
-- **The concern has no runtime gem dependencies beyond ActiveSupport.** `friendly_id` and `acts_as_list` are not used here. The only requirement is Rails 5.0+ (for `class_attribute` and `before_validation`).
+- **The concern has no runtime gem dependencies beyond ActiveSupport.** `friendly_id` and `acts_as_list` are not used here. The only requirement is Rails 6.0+ (for `class_attribute` and `before_validation`).
 
 ## Changed in 1.22.0
 
