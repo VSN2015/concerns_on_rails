@@ -128,17 +128,19 @@ module ConcernsOnRails
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
 
-          # The boolean predicate is an Arel IN node, never an equality: Rails'
+          # The boolean predicate is `<> FALSE`, never an equality: Rails'
           # scope_for_create copies every `Arel::Nodes::Equality` in the where
-          # clause (hash condition or `arel_table[f].eq`) onto records built
-          # through the scope, so under `default_scope: true` the old
+          # clause (hash condition or `arel_table[f].eq`; on Rails 6.0 also
+          # `In`, which subclasses Equality there) onto records built through
+          # the scope, so under `default_scope: true` the old
           # `where(field => true)` made every NEW record start out published.
-          # IN (TRUE) selects the same rows, is never copied, and is still
-          # peeled by `unscope(where: field)`. (The timestamp branch was
-          # already an Arel `<=`, which is never copied either.)
+          # `<> FALSE` selects the same rows (NULL <> FALSE is NULL, so NULL
+          # rows stay out), is copied on no Rails line, and is still peeled by
+          # `unscope(where: field)`. (The timestamp branch was already an Arel
+          # `<=`, which is never copied either.)
           scope publishable_scope_names[:published], lambda {
             if publishable_boolean_column?
-              where(arel_table[publishable_field].in([true]))
+              where(arel_table[publishable_field].not_eq(false))
             else
               where(arel_table[publishable_field].lteq(Time.zone.now))
             end

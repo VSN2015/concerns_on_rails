@@ -556,8 +556,10 @@ describe ConcernsOnRails::SoftDeletable do
   # `update` returning false (validation) used to leave the before hook's own
   # writes committed — they ran in a transaction nothing rolled back.
   describe 'a failed write rolls the before hook side effects back' do
+    # TestModel, not ActiveRecord::Base: an anonymous class needs its
+    # model_name fallback to render a validation error on Rails 6.0.
     let(:guarded_class) do
-      Class.new(ActiveRecord::Base) do
+      Class.new(TestModel) do
         self.table_name = 'dummy_soft_deletables'
         include ConcernsOnRails::SoftDeletable
 

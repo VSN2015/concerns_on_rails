@@ -44,7 +44,10 @@ describe ConcernsOnRails::Support::HookedWrite do
     described_class.run(item, before: :before_write, after: :after_write, restore: [:state], **options, &write)
   end
 
-  let(:item) { HookedItem.create!(state: "old") }
+  # Eager: a lazy `let` would first create the record INSIDE the caller's
+  # transaction in the example below, and Rails 6.0's savepoint rollback then
+  # resets that brand-new record's id.
+  let!(:item) { HookedItem.create!(state: "old") }
 
   it "runs before, write, after (private hooks included) and returns true" do
     expect(run(item) { item.update(state: "new") }).to be(true)
