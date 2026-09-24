@@ -140,12 +140,32 @@ module ConcernsOnRails
       # into: string, save!d when the record is persisted and left for the
       # caller's save when new. false (nothing rewritten) when already
       # numbered, so a "finalize" action can be retried safely.
+      #
+      # A failed save! (RecordNotUnique from a concurrent writer, a failed
+      # validation) puts the field and the into: column back before
+      # re-raising: otherwise the drawn number stays in memory, and a retry —
+      # UniqueRetry.with_retries { invoice.assign_sequence! } — would see it
+      # "already numbered" and return false with nothing saved. The save runs
+      # in its own savepoint (requires_new) so a failed UPDATE inside a
+      # caller's transaction does not poison it on PostgreSQL.
       def sequenceable_assign!(field)
         return false if self[field].present?
 
+        cfg = self.class.sequenceable_config.fetch(field)
+        # created_at: sequenceable_pin_created_at may stamp it (reset: periods).
+        written = [field, cfg[:into], (:created_at unless cfg[:reset] == :never)].compact
+        previous = written.to_h { |column| [column, self[column]] }
         assign_sequenceable_value(field)
-        save! unless new_record?
-        true
+        return true if new_record?
+
+        saved = false
+        begin
+          self.class.transaction(requires_new: true) { saved = save! }
+        ensure
+          # Also covers an ActiveRecord::Rollback the savepoint swallowed.
+          previous.each { |column, value| self[column] = value } unless saved
+        end
+        saved ? true : false
       end
       private :sequenceable_assign!
 

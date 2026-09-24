@@ -17,10 +17,13 @@ module ConcernsOnRails
 
       # Relation of existing rows that share this record's scope (and period, when
       # reset is enabled). Reads from `unscoped` so a model's default_scope never
-      # hides rows the counter must account for.
+      # hides rows the counter must account for — and from the STI BASE class,
+      # because a subclass's own `unscoped` still carries its `type = 'Sub'`
+      # condition: sibling subclasses sharing the column would each start at 1
+      # and collide on the unique index. Per-type numbering is `scope: :type`.
       def sequence_relation(field, record, scope_attrs)
         cfg = sequenceable_config.fetch(field)
-        rel = unscoped
+        rel = base_class.unscoped
 
         cfg[:scope].each do |col|
           value = record ? record[col] : (scope_attrs[col] || scope_attrs[col.to_s])
