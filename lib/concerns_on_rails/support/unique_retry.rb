@@ -19,13 +19,23 @@ module ConcernsOnRails
     # create from outside any transaction):
     #
     #   ConcernsOnRails::Support::UniqueRetry.with_retries { Invoice.create!(attrs) }
+    #
+    # Inside a caller's transaction, pass `savepoint:` (a model class, or
+    # anything answering `transaction(requires_new: true)`): each attempt then
+    # runs in its own SAVEPOINT, so a rejected write is rolled back to it and
+    # the next attempt — and the rest of the caller's transaction — can still
+    # run on PostgreSQL:
+    #
+    #   ApplicationRecord.transaction do
+    #     UniqueRetry.with_retries(savepoint: Invoice) { Invoice.create!(attrs) }
+    #   end
     module UniqueRetry
       module_function
 
-      def with_retries(limit: 3)
+      def with_retries(limit: 3, savepoint: nil)
         attempts = 0
         begin
-          yield
+          savepoint ? savepoint.transaction(requires_new: true) { yield } : yield
         rescue ActiveRecord::RecordNotUnique
           attempts += 1
           raise if attempts >= limit

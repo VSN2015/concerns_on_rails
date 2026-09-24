@@ -79,4 +79,41 @@ RSpec.describe ConcernsOnRails::Support::UniqueRetry do
       expect(record.reload.api_token).to eq("cccccccc")
     end
   end
+
+  describe "savepoint: (1.29 audit)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :unique_retry_codes, force: true do |t|
+          t.string :code
+        end
+        add_index :unique_retry_codes, :code, unique: true
+      end
+    end
+
+    after { ActiveRecord::Base.connection.drop_table(:unique_retry_codes) }
+
+    let(:klass) { Class.new(TestModel) { self.table_name = "unique_retry_codes" } }
+
+    it "runs each attempt in its own savepoint so a caller's transaction survives the rejected write" do
+      klass.create!(code: "taken")
+      candidates = %w[taken fresh]
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") { |*args| statements << args.last[:sql].to_s }
+
+      begin
+        ActiveRecord::Base.transaction do
+          # A write first, so the outer transaction is materialized (Rails 7.1+
+          # otherwise restarts a still-empty parent instead of using a savepoint).
+          klass.create!(code: "before")
+          described_class.with_retries(savepoint: klass) { klass.create!(code: candidates.shift) }
+          klass.create!(code: "after") # the outer transaction is still usable
+        end
+      ensure
+        ActiveSupport::Notifications.unsubscribe(subscriber)
+      end
+
+      expect(klass.order(:id).pluck(:code)).to eq(%w[taken before fresh after])
+      expect(statements.grep(/\AROLLBACK TO SAVEPOINT/i).size).to eq(1)
+    end
+  end
 end

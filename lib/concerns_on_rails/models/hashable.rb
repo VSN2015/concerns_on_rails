@@ -56,10 +56,12 @@ module ConcernsOnRails
 
           # Same uniqueness handling as create-time assignment (pre-1.22 this
           # wrote one blind candidate: no `unique:` precheck, no retry when the
-          # unique DB index rejected it).
+          # unique DB index rejected it). Each attempt runs in its own
+          # savepoint: inside a caller's transaction a rejected UPDATE would
+          # otherwise abort it on PostgreSQL and every retry would fail too.
           define_method("regenerate_#{hashable_field}!") do
             field = self.class.hashable_field
-            ConcernsOnRails::Support::UniqueRetry.with_retries(limit: MAX_GENERATION_ATTEMPTS) do
+            ConcernsOnRails::Support::UniqueRetry.with_retries(limit: MAX_GENERATION_ATTEMPTS, savepoint: self.class) do
               value = self.class.hashable_unique ? unique_hashable_value(field) : self.class.generate_hashable_value
               update!(field => value)
             end
@@ -106,7 +108,24 @@ module ConcernsOnRails
             raise ArgumentError, "ConcernsOnRails::Models::Hashable: type :custom requires a non-empty alphabet: String"
           end
 
+          validate_hashable_alphabet! if hashable_type == :custom
           validate_hashable_extras!
+        end
+
+        # Sampling is uniform over the alphabet's POSITIONS, so a repeated
+        # character is silently drawn more often ("AAB" yields A two times in
+        # three) — a quiet loss of entropy. One distinct character is a
+        # constant, not an identifier.
+        def validate_hashable_alphabet!
+          duplicates = hashable_alphabet.each_char.tally.select { |_char, n| n > 1 }.keys
+          unless duplicates.empty?
+            raise ArgumentError,
+                  "#{LABEL}: alphabet has duplicate character(s): #{duplicates.map(&:inspect).join(', ')} " \
+                  "— they would bias the generated values"
+          end
+          return if hashable_alphabet.length >= 2
+
+          raise ArgumentError, "#{LABEL}: alphabet needs at least 2 distinct characters"
         end
 
         # prefix: is a literal String prepended to string-typed values only —
@@ -169,10 +188,12 @@ module ConcernsOnRails
 
       # Best-effort uniqueness: retry on an in-Ruby collision before insert. Pair
       # with a unique DB index for the real guarantee (mirrors Tokenizable).
+      # Checked against the STI base class: a subclass's own relation carries
+      # its type condition and would miss a sibling subclass's value.
       def unique_hashable_value(field)
         ConcernsOnRails::Models::Hashable::MAX_GENERATION_ATTEMPTS.times do
           candidate = self.class.generate_hashable_value
-          return candidate unless self.class.unscoped.exists?(field => candidate)
+          return candidate unless self.class.base_class.unscoped.exists?(field => candidate)
         end
         raise "ConcernsOnRails::Models::Hashable: could not generate a unique value for '#{field}' " \
               "after #{ConcernsOnRails::Models::Hashable::MAX_GENERATION_ATTEMPTS} attempts"
