@@ -265,13 +265,51 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
       expect(record.reload.name).to eq("Jane")
     end
 
-    it "anonymize_all! raises RecordNotSaved and commits nothing" do
+    it "anonymize_all! counts nothing when every record vetoes" do
       vetoing.create!(name: "a")
       vetoing.create!(name: "b")
 
-      expect { vetoing.anonymize_all! }.to raise_error(ActiveRecord::RecordNotSaved, /failed to anonymize/)
+      expect(vetoing.anonymize_all!).to eq(0)
       expect(vetoing.pluck(:name)).to match_array(%w[a b])
       expect(vetoing.anonymized.count).to eq(0)
+    end
+  end
+
+  # Erasure batches maximise progress: one record under a legal hold must
+  # not block everyone else's erasure (an aborting batch erased 0), and the
+  # count reports only the records ACTUALLY erased (master counted vetoed
+  # ones too).
+  describe ".anonymize_all! with a vetoing record" do
+    let(:held) do
+      model_class do
+        anonymizable :name, with: :redact
+
+        def before_anonymize
+          raise ActiveRecord::Rollback if email == "hold@example.com"
+        end
+      end
+    end
+
+    it "erases every other record, skips the vetoed one, and returns the real count" do
+      held.create!(name: "a")
+      on_hold = held.create!(name: "held", email: "hold@example.com")
+      held.create!(name: "c")
+
+      expect(held.anonymize_all!).to eq(2)
+      expect(on_hold.reload.name).to eq("held")
+      expect(on_hold.anonymized?).to be(false)
+      expect(held.anonymized.count).to eq(2)
+      expect(held.where(name: "[REDACTED]").count).to eq(2)
+    end
+
+    it "keeps its progress inside a caller's transaction" do
+      held.create!(name: "a")
+      held.create!(name: "held", email: "hold@example.com")
+
+      count = ActiveRecord::Base.transaction { held.anonymize_all! }
+
+      expect(count).to eq(1)
+      expect(held.anonymized.count).to eq(1)
     end
   end
 

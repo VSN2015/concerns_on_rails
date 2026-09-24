@@ -1,7 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
-require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
 require "digest"
 require "securerandom"
@@ -110,14 +109,20 @@ module ConcernsOnRails
         # Streams in PK batches (find_each) rather than loading the relation,
         # filters stamped rows DB-side, and skips the per-record reload —
         # the batch discards its instances, so reloading each one would cost
-        # a wasted SELECT per row. Runs through Support::BatchOps, so a record
-        # whose hook vetoes with ActiveRecord::Rollback raises
-        # ActiveRecord::RecordNotSaved and rolls the whole batch back instead
-        # of being counted (and committed) as anonymized.
+        # a wasted SELECT per row. Deliberately NOT Support::BatchOps: an
+        # erasure batch maximises progress. Each record runs in its own
+        # savepoint, so one whose hook vetoes (a legal hold) is skipped
+        # without undoing the others, and only records actually erased count.
         def anonymize_all!
           relation = anonymizable_stamp ? all.where(anonymizable_stamp => nil) : all
-          ConcernsOnRails::Support::BatchOps.run(relation, label: LABEL, message: "failed to anonymize record") do |record|
-            record.anonymized? ? :skip : record.send(:anonymize_record!)
+          transaction do
+            count = 0
+            relation.find_each do |record|
+              next if record.anonymized?
+
+              count += 1 if record.send(:anonymize_record!)
+            end
+            count
           end
         end
 
