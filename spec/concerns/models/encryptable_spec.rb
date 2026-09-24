@@ -122,6 +122,64 @@ describe ConcernsOnRails::Models::Encryptable do
       expect(record.ssn_encrypted?).to be(true)
     end
 
+    # Rails 6.0-7.0 do not memoize Attribute#value_for_database: after a save
+    # the in-memory "raw" value is a SECOND serialize (fresh IV), so the reader
+    # returned ciphertext that was never written, and reencrypt! on the
+    # just-saved instance failed its own guard.
+    describe "matches what is actually stored after a write" do
+      def stored_ssn(id)
+        klass.connection.select_value(
+          "SELECT #{TestDatabase.quoted_column('ssn')} FROM #{TestDatabase.quoted_table('encryptable_records')} " \
+          "WHERE #{TestDatabase.quoted_column('id')} = #{Integer(id)}"
+        )
+      end
+
+      it "after create" do
+        record = klass.create!(ssn: "111-22-3333")
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+        expect(record.ssn).to eq("111-22-3333")
+      end
+
+      it "after an update of the encrypted field" do
+        record = klass.create!(ssn: "111-22-3333")
+        record.update!(ssn: "999-88-7777")
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+        expect(record.ssn).to eq("999-88-7777")
+      end
+
+      it "after a save that changed only another column" do
+        record = klass.create!(ssn: "111-22-3333").reload
+        record.update!(name: "renamed")
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+      end
+
+      it "after touch" do
+        record = klass.create!(ssn: "111-22-3333").reload
+        record.touch
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+      end
+
+      it "after update_columns" do
+        record = klass.create!(ssn: "111-22-3333").reload
+        record.update_columns(ssn: "444-55-6666")
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+        expect(record.ssn).to eq("444-55-6666")
+      end
+
+      it "lets reencrypt! rotate the instance that was just saved" do
+        record = klass.create!(ssn: "111-22-3333")
+        ConcernsOnRails.configure_encryption do |c|
+          c.key = "concerns-on-rails-encryptable-rotated-key"
+          c.key_id = 1
+          c.previous_keys = { 0 => TEST_KEY }
+        end
+
+        expect(record.reencrypt!).to be(true)
+        expect(record.ssn_key_id).to eq(1)
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+      end
+    end
+
     it "is nil for a persisted record whose value was never set" do
       record = klass.create!.reload
 

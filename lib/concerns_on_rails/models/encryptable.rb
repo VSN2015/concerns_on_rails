@@ -91,6 +91,17 @@ module ConcernsOnRails
         before_save :encryptable_refresh_blind_indexes
       end
 
+      # Rails < 7.1 does not memoize ActiveModel::Attribute#value_for_database,
+      # so every write path re-serializes an encrypted value a second time
+      # (fresh IV) when it "forgets" the assignment: the in-memory raw value is
+      # then ciphertext that was never written. 7.1 introduced the memo (and
+      # the private _value_for_database it wraps), which is what is detected.
+      def self.stale_raw_after_write?
+        return @stale_raw_after_write if defined?(@stale_raw_after_write)
+
+        @stale_raw_after_write = !ActiveModel::Attribute.private_method_defined?(:_value_for_database)
+      end
+
       # Deterministic blind-index fingerprint for a field's value under the
       # CURRENT key, applying the field's normalization `expression:` — what
       # the before_save refresh (and reencrypt!) writes. nil for a nil value.
@@ -516,7 +527,52 @@ module ConcernsOnRails
         true
       end
 
+      # Every save/create/touch ends in changes_applied; on Rails < 7.1 that is
+      # where the encrypted attributes are re-serialized with a new IV (see
+      # Encryptable.stale_raw_after_write?), so re-read what was really stored.
+      def changes_applied(...)
+        result = super
+        encryptable_sync_stored_ciphertext!
+        result
+      end
+
+      # update_columns / update_column write their own serialization and keep
+      # yet another in memory — same staleness, same repair.
+      def update_columns(attributes)
+        result = super
+        written = attributes.keys.map(&:to_s) & self.class.encryptable_rules.keys.map(&:to_s)
+        encryptable_sync_stored_ciphertext!(written) if written.any?
+        result
+      end
+
       private
+
+      # Replace the in-memory raw value of each encrypted field with the
+      # ciphertext actually at rest — one SELECT, raw adapter values (never
+      # pluck, which would decrypt through the attribute type). Only Rails
+      # < 7.1 needs it; fields not loaded (a partial `select`) or NULL are
+      # skipped, as NULL serializes to NULL and is never stale.
+      def encryptable_sync_stored_ciphertext!(fields = nil)
+        return unless encryptable_stored_ciphertext_syncable?
+
+        names = encryptable_stored_field_names(fields)
+        return if names.empty?
+
+        sql = self.class.unscoped.where(self.class.primary_key => id_in_database).select(*names).to_sql
+        row = self.class.connection.select_rows(sql).first
+        names.each_with_index { |name, index| @attributes.write_from_database(name, row[index]) } if row
+      end
+
+      def encryptable_stored_ciphertext_syncable?
+        ConcernsOnRails::Models::Encryptable.stale_raw_after_write? &&
+          !new_record? && !destroyed? && !self.class.primary_key.nil?
+      end
+
+      def encryptable_stored_field_names(fields)
+        (fields || self.class.encryptable_rules.keys.map(&:to_s)).select do |name|
+          has_attribute?(name) && !read_attribute_before_type_cast(name).nil?
+        end
+      end
 
       # What reencrypt! would write: the new values (plus their refreshed blind
       # indexes) and the ciphertext each one was read with, as guard predicates.
