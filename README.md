@@ -452,7 +452,7 @@ in memory.
 **Notes**
 - "Published" means `published_at` is set **and** in the past — so future-dated posts stay unpublished until their time arrives.
 - No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`).
-- A boolean publishable column works too (`publishable_by :is_published`). Its `.published` scope is `is_published <> FALSE` rather than `= TRUE`, because Rails copies an equality condition onto new records built through a scope. So with `default_scope: true` a new record still starts unpublished, and so does `Post.published.new`.
+- A boolean publishable column works too (`publishable_by :is_published`). Its `.published` scope is `(is_published = TRUE)`, wrapped in parentheses (an Arel Grouping) so that Rails does not copy the condition onto new records built through the scope. So with `default_scope: true` a new record still starts unpublished, and so does `Post.published.new`. The predicate stays in the index-friendly `= TRUE` form, so a partial index `WHERE published = true` still matches. On Rails 6.0, which cannot `unscope` a Grouping, the scope uses `is_published <> FALSE` instead; it selects the same rows.
 
 ---
 
@@ -757,6 +757,14 @@ expirable_by :expires_at, prefix: :term   # => .term_active / .term_expired / .t
 `prefix:`/`suffix:` rename the scopes and also define affixed predicates. `active?` / `expired?` keep their
 plain names, but Activatable (`active?`) and Schedulable (`expired?`) define the same names. On a model
 that combines them, the concern included last owns the plain name, so use the affixed predicates.
+The plain predicates keep their old relationship: `active?` is `!expired?`, so overriding `expired?` changes both.
+The affixed predicates always give Expirable's own answer.
+
+The same rules apply to every concern with affixed predicates (Expirable, Activatable, Schedulable):
+- The macro raises `ArgumentError` if an affixed predicate would shadow a column's query method. For
+  example, `activatable_by :active, prefix: :flag` on a table that has a `flag_active` column is refused.
+- Re-declaring the macro with a different affix (or none) removes the previous affix's predicates. On a
+  subclass, the inherited ones are hidden and the parent keeps its own.
 
 **Bulk operations**
 
@@ -1115,6 +1123,10 @@ def after_publish   = notify_subscribers      # same transaction: before_transit
 **not** affixed, and one Rails owns (`created_at` / `updated_at`) is refused. Per-event hooks follow the affixed
 event name (`before_status_publish` with `prefix: true`), may be private, and — like the generic hooks — fire only
 for guarded `<event>!` transitions. `Model.stateable_timestamps` lists the stamped states.
+
+A hook that vetoes with `raise ActiveRecord::Rollback` rolls the transition back, and `<event>!` returns `false`,
+even inside your own transaction. After an aborted transition, the state and its `<state>_at` stamp go back to
+their previous in-memory values, so a retry is guarded against the real state.
 
 **Prefix / suffix** — avoid clashes when the state names overlap with other concerns or scopes:
 
@@ -1677,7 +1689,8 @@ User.where(...).anonymize_all!     # batch; returns the count, skips stamped rec
 
 **Notes**
 - Deliberately `update_columns`: erasure is never blocked by validations and never runs callbacks that could copy old values elsewhere. Values still serialize through the attribute types, so an `encryptable` field stores a fresh ciphertext envelope — never plaintext.
-- `before_anonymize`/`after_anonymize` hooks run inside the write's own savepoint; the record reloads afterwards (erasure is terminal for the instance). A hook that raises, or vetoes with `raise ActiveRecord::Rollback`, undoes the erasure and restores the in-memory values. `anonymize!` then returns `false`, even inside your own transaction, and `anonymize_all!` raises `ActiveRecord::RecordNotSaved` and rolls the batch back.
+- `before_anonymize`/`after_anonymize` hooks run inside the write's own savepoint; the record reloads afterwards (erasure is terminal for the instance). A hook that raises, or vetoes with `raise ActiveRecord::Rollback`, undoes the erasure and restores the in-memory values. `anonymize!` then returns `false`, even inside your own transaction.
+- `anonymize_all!` makes as much progress as it can. Each record is erased in its own savepoint, so a record whose hook vetoes (for example, one under a legal hold) is skipped and the others are still erased. The return value counts only the records actually erased. A hook that *raises* an exception is still an error: it propagates and rolls the batch back.
 - `:hash` is pseudonymization — use `:nullify`/`:random_hex` for true erasure. Backups/replicas/logs are out of scope.
 
 ---
