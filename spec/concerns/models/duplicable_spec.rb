@@ -508,4 +508,70 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
       expect(copy.cc_comments.map { |c| c.reload.replies_count }).to eq([0, 0])
     end
   end
+
+  describe "native counter_cache on a scoped has_many, partial inserts off (review of #111)" do
+    # A scoped has_many has no automatic inverse, so Rails' has_many bumps the
+    # OWNER's in-memory counter as children are added (and clears the change);
+    # with partial inserts off that in-memory value was INSERTed and then the
+    # children incremented it again.
+    before do
+      ActiveRecord::Schema.define do
+        create_table :pi_posts, force: true do |t|
+          t.integer :pi_reviews_count, default: 0
+        end
+        create_table :pi_reviews, force: true do |t|
+          t.integer :pi_post_id
+        end
+      end
+
+      Object.const_set(:PiPost, Class.new(TestModel) { self.table_name = "pi_posts" })
+      Object.const_set(:PiReview, Class.new(TestModel) { self.table_name = "pi_reviews" })
+      PiReview.belongs_to :pi_post, counter_cache: true
+      PiPost.class_eval do
+        include ConcernsOnRails::Models::Duplicable
+
+        has_many :pi_reviews, -> { order(:id) }
+        duplicable_by associations: %i[pi_reviews]
+      end
+    end
+
+    after do
+      %i[PiPost PiReview].each { |name| Object.send(:remove_const, name) if Object.const_defined?(name) }
+      %i[pi_posts pi_reviews].each { |table| ActiveRecord::Base.connection.drop_table(table) }
+    end
+
+    def partial_inserts!(model, value)
+      if model.respond_to?(:partial_inserts=)
+        model.partial_inserts = value
+      else
+        model.partial_writes = value # Rails 6.x
+      end
+    end
+
+    [false, true].each do |partial|
+      it "ends with the counter equal to the children copied (partial inserts #{partial ? 'on' : 'off'})" do
+        partial_inserts!(PiPost, partial)
+        post = PiPost.create!
+        2.times { PiReview.create!(pi_post: post) }
+        post.reload
+
+        copy = post.duplicate!
+        expect(PiPost.find(copy.id).pi_reviews_count).to eq(2)
+        expect(copy.pi_reviews_count).to eq(2) # in memory too, after duplicate!
+
+        shallow = post.duplicate!(only: [])
+        expect(PiPost.find(shallow.id).pi_reviews_count).to eq(0)
+
+        unsaved = post.duplicate
+        unsaved.save!
+        expect(PiPost.find(unsaved.id).pi_reviews_count).to eq(2)
+      end
+    end
+
+    it "leaves an explicit counter override alone" do
+      post = PiPost.create!
+      copy = post.duplicate(pi_reviews_count: 7)
+      expect(copy.pi_reviews_count).to eq(7)
+    end
+  end
 end

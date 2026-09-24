@@ -139,16 +139,18 @@ module ConcernsOnRails
         duplicable_reset_attributes(copy)
         duplicable_apply_suffixes(copy)
         overrides.each { |attribute, value| copy.public_send("#{attribute}=", value) }
-        duplicable_copy_associations(copy, associations)
+        Duplicable.keeping_counter_cache_columns(copy) { duplicable_copy_associations(copy, associations) }
         on_duplicate(copy)
         copy
       end
 
       # Persisted deep copy — the copy and its copied children save together
-      # (autosave) inside one transaction. Returns the saved copy.
+      # (autosave) inside one transaction. Returns the saved copy, its counter
+      # columns re-read from the row the children's saves incremented.
       def duplicate!(overrides = {}, **)
         copy = duplicate(overrides, **)
         transaction { copy.save! }
+        Duplicable.refresh_counter_cache_columns(copy)
         copy
       end
 
@@ -271,6 +273,30 @@ module ConcernsOnRails
         # docs): the copy's children re-increment it on save.
         def zero_counter_cache_columns(record)
           counter_cache_columns(record.class).each { |column| record[column] = 0 }
+        end
+
+        # Adding children to a has_many with no inverse (a scoped one, say)
+        # makes Rails bump the OWNER's in-memory counter and clear the change.
+        # The copy would then INSERT that bumped value (partial inserts off)
+        # and each child's save would increment it again — 2 children, 4.
+        # Put the pre-association values back so the INSERT carries them.
+        def keeping_counter_cache_columns(record)
+          before = counter_cache_columns(record.class).to_h { |column| [column, record[column]] }
+          yield
+          before.each { |column, value| record[column] = value }
+        end
+
+        # After the save the database holds the true counts (each child's
+        # create incremented them); mirror them into the saved copy.
+        def refresh_counter_cache_columns(record)
+          columns = counter_cache_columns(record.class)
+          return if columns.empty? || !record.persisted?
+
+          values = record.class.unscoped.where(record.class.primary_key => record.id).pluck(*columns).first
+          return if values.nil?
+
+          columns.zip(Array(values)).each { |column, value| record[column] = value }
+          record.send(:clear_attribute_changes, columns)
         end
 
         # Columns of `klass` maintained by a child's counter — CounterCacheable
