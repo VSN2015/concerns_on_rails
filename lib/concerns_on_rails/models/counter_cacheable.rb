@@ -325,9 +325,12 @@ module ConcernsOnRails
       # key: that parent row is about to be deleted, and bumping it first (the
       # UPDATE also increments lock_version) makes the parent's own DELETE fail
       # with StaleObjectError. Counters on other associations still decrement.
+      # Only a has_many marks the parent as going away: a has_one sets
+      # destroyed_by_association when a REPLACEMENT destroys the old record,
+      # and there the parent survives and must be decremented.
       def counter_cacheable_destroyed_by_parent?(rule)
         by = destroyed_by_association
-        return false unless by
+        return false unless by && by.macro == :has_many
 
         Array(by.foreign_key).map(&:to_s) == Array(counter_cacheable_reflection(rule).foreign_key).map(&:to_s)
       end

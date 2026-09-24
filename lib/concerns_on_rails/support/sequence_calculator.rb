@@ -22,10 +22,12 @@ module ConcernsOnRails
       # base, every subclass draws from one table-wide counter (a subclass's own
       # relation would filter on its type and siblings would collide); declared
       # on each subclass, each keeps its own gap-free sequence. A subclass that
-      # merely inherits the config shares its declaring parent's counter.
+      # merely inherits the config shares its declaring parent's counter, and
+      # the rows of a descendant that re-declared its own sequence are left out.
       def sequence_relation(field, record, scope_attrs)
         cfg = sequenceable_config.fetch(field)
-        rel = (cfg[:owner] || self).unscoped
+        numbering = sequence_numbering_class(cfg)
+        rel = sequence_exclude_redeclared(numbering.unscoped, numbering, field, cfg)
 
         cfg[:scope].each do |col|
           value = record ? record[col] : sequence_preview_scope_value(col, scope_attrs)
@@ -35,6 +37,51 @@ module ConcernsOnRails
         return rel if cfg[:reset] == :never
 
         rel.where(created_at: period_range(cfg[:reset], base_time(record)))
+      end
+
+      # The declaring class, when it owns this receiver's table. An abstract
+      # declarer (or one on another table) has no rows of its own, so fall back
+      # to the receiver's first concrete ancestor on the same table — its STI
+      # base (numbering over the abstract class raised TableNotSpecified).
+      def sequence_numbering_class(cfg)
+        owner = cfg[:owner] || self
+        return owner if !owner.abstract_class? && owner.table_name == table_name
+
+        klass = self
+        klass = klass.superclass while sequence_same_table_parent?(klass)
+        klass
+      end
+
+      def sequence_same_table_parent?(klass)
+        parent = klass.superclass
+        parent < ActiveRecord::Base && !parent.abstract_class? && parent.table_name == klass.table_name
+      end
+
+      # A descendant that called sequenceable_by itself numbers its own series
+      # (it owns a different config), so its rows — and its subtree's — must
+      # not raise this series' MAX. Rows with a NULL type (base records) stay.
+      # NOTE: relies on `descendants`, which is complete only once the classes
+      # are loaded (eager loading); prefer scope: :type for per-type series.
+      def sequence_exclude_redeclared(rel, numbering, field, cfg)
+        column = numbering.inheritance_column.to_s
+        return rel unless numbering.column_names.include?(column)
+
+        types = numbering.descendants.filter_map do |klass|
+          klass.sti_name if sequence_redeclared_by?(klass, numbering, field, cfg)
+        end
+        return rel if types.empty?
+
+        attribute = numbering.arel_table[column]
+        rel.where(attribute.eq(nil).or(attribute.not_in(types)))
+      end
+
+      # A named, concrete STI descendant on the same table whose own config
+      # for `field` came from a different sequenceable_by call.
+      def sequence_redeclared_by?(klass, numbering, field, cfg)
+        return false if klass.name.nil? || klass.abstract_class? || klass.table_name != numbering.table_name
+
+        own = klass.sequenceable_config[field]
+        own ? !own[:owner].equal?(cfg[:owner]) : false
       end
 
       # next_<field> has no record to read the scope from. An omitted STI type

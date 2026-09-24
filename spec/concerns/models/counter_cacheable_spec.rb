@@ -608,4 +608,40 @@ describe ConcernsOnRails::Models::CounterCacheable do
       expect(post.reload.lk_notes_count).to eq(0)
     end
   end
+
+  describe "has_one replacement with dependent: :destroy (re-review of #111)" do
+    before(:each) do
+      ActiveRecord::Schema.define do
+        create_table :ho_profiles, force: true do |t|
+          t.integer :ho_avatars_count, default: 0
+        end
+        create_table :ho_avatars, force: true do |t|
+          t.integer :ho_profile_id
+        end
+      end
+
+      Object.const_set(:HoProfile, Class.new(TestModel) { self.table_name = "ho_profiles" })
+      Object.const_set(:HoAvatar, Class.new(TestModel) { self.table_name = "ho_avatars" })
+      HoProfile.has_one :ho_avatar, dependent: :destroy
+      HoAvatar.class_eval do
+        include ConcernsOnRails::CounterCacheable
+
+        belongs_to :ho_profile
+        counter_cacheable_by :ho_profile
+      end
+    end
+
+    after(:each) do
+      %i[HoAvatar HoProfile].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    it "decrements for the replaced record — the parent survives" do
+      profile = HoProfile.create!
+      profile.create_ho_avatar!
+      profile.create_ho_avatar! # destroys the old one through the has_one
+
+      expect(HoAvatar.count).to eq(1)
+      expect(profile.reload.ho_avatars_count).to eq(1)
+    end
+  end
 end

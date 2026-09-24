@@ -591,4 +591,64 @@ describe ConcernsOnRails::Sequenceable do
       Object.send(:remove_const, :XInvoiceProforma) if Object.const_defined?(:XInvoiceProforma)
     end
   end
+
+  describe "numbering class edge cases (re-review of #111)" do
+    after do
+      %i[AbInvSub AbInv AbQuote AbDoc RdInv RdCn RdCnSub RdBase].each do |c|
+        Object.send(:remove_const, c) if Object.const_defined?(c)
+      end
+    end
+
+    it "numbers over the concrete table when the macro is declared on an abstract class" do
+      ActiveRecord::Schema.define do
+        create_table :ab_invs, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+        end
+        create_table :ab_quotes, force: true do |t|
+          t.integer :sequence
+        end
+      end
+      Object.const_set(:AbDoc, Class.new(TestModel) do
+        self.abstract_class = true
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence
+      end)
+      Object.const_set(:AbInv, Class.new(AbDoc) { self.table_name = "ab_invs" })
+      Object.const_set(:AbInvSub, Class.new(AbInv))
+      Object.const_set(:AbQuote, Class.new(AbDoc) { self.table_name = "ab_quotes" })
+
+      expect([AbInv.create!, AbInvSub.create!, AbInv.create!].map(&:sequence)).to eq([1, 2, 3])
+      expect(AbQuote.create!.sequence).to eq(1) # its own table, its own counter
+      expect(AbInvSub.next_sequence).to eq(4)
+      expect(AbInv.next_sequence).to eq(4)
+      expect(AbQuote.next_sequence).to eq(2)
+    end
+
+    it "leaves out the rows of a subclass that re-declared its own sequence" do
+      ActiveRecord::Schema.define do
+        create_table :rd_docs, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+          t.string  :number
+        end
+      end
+      Object.const_set(:RdBase, Class.new(TestModel) do
+        self.table_name = "rd_docs"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", padding: 4
+      end)
+      Object.const_set(:RdInv, Class.new(RdBase)) # inherits INV-
+      Object.const_set(:RdCn, Class.new(RdBase) { sequenceable_by :sequence, into: :number, prefix: "CN-", padding: 4 })
+      Object.const_set(:RdCnSub, Class.new(RdCn)) # inherits CN-
+
+      numbers = [RdInv.create!, RdCn.create!, RdCnSub.create!, RdCn.create!, RdInv.create!, RdBase.create!].map(&:number)
+      expect(numbers).to eq(%w[INV-0001 CN-0001 CN-0002 CN-0003 INV-0002 INV-0003])
+      expect(RdInv.next_sequence).to eq(4)
+      expect(RdBase.next_sequence).to eq(4)
+      expect(RdCnSub.next_sequence).to eq(4)
+    end
+  end
 end
