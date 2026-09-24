@@ -1,4 +1,5 @@
 require "spec_helper"
+require "support/integration_harness"
 
 describe ConcernsOnRails::Controllers::Cacheable do
   # A minimal resource that quacks like an ActiveRecord model for ETag /
@@ -87,6 +88,70 @@ describe ConcernsOnRails::Controllers::Cacheable do
       c.apply_http_cache_headers
 
       expect(c.response.headers["Vary"]).to eq("Origin, Accept, Accept-Language")
+    end
+
+    # Pre-fix the positive policy was emitted for every method and status, so a
+    # catch-all `visibility: :public, max_age:` told shared caches to store a
+    # POST's 201, an action-rendered 500, or a redirect for the full max-age.
+    context "positive freshness is limited to GET/HEAD with a cacheable status" do
+      let(:klass) { cacheable_class { http_cache_actions visibility: :public, max_age: 300, stale_while_revalidate: 60 } }
+
+      it "is not emitted for unsafe methods" do
+        %w[POST PUT PATCH DELETE].each do |method|
+          c = instance(klass, method: method)
+          c.apply_http_cache_headers
+          expect(c.response.headers["Cache-Control"]).to be_nil, "#{method} got #{c.response.headers['Cache-Control']}"
+        end
+      end
+
+      it "is not emitted for error, redirect or otherwise non-cacheable statuses the action rendered itself" do
+        [201, 202, 301, 302, 400, 401, 403, 404, 410, 422, 500, 503].each do |status|
+          c = instance(klass)
+          c.response.status = status
+          c.apply_http_cache_headers
+          expect(c.response.headers["Cache-Control"]).to be_nil, "#{status} got #{c.response.headers['Cache-Control']}"
+        end
+      end
+
+      it "is emitted for GET and HEAD with 200, 203, 204, 206 and 304" do
+        %w[GET HEAD].product([200, 203, 204, 206, 304]).each do |method, status|
+          c = instance(klass, method: method)
+          c.response.status = status
+          c.apply_http_cache_headers
+          expect(c.response.headers["Cache-Control"]).to eq("public, max-age=300, stale-while-revalidate=60")
+        end
+      end
+
+      it "keeps no-store unconditional" do
+        klass = cacheable_class { http_cache_actions no_store: true }
+        [["POST", 201], ["GET", 500], ["DELETE", 404]].each do |method, status|
+          c = instance(klass, method: method)
+          c.response.status = status
+          c.apply_http_cache_headers
+          expect(c.response.headers["Cache-Control"]).to eq("no-store")
+        end
+      end
+    end
+
+    it "de-duplicates Vary case-insensitively, keeping the first spelling" do
+      c = instance(cacheable_class { http_cache_actions :show, vary: %w[Accept Accept-Language] })
+      c.response.set_header("Vary", "accept")
+      c.apply_http_cache_headers
+
+      expect(c.response.headers["Vary"]).to eq("accept, Accept-Language")
+    end
+
+    it "leaves Vary: * alone" do
+      klass = cacheable_class do
+        http_cache_actions :show, vary: "Accept"
+        etag_with :locale
+      end
+      c = instance(klass)
+      c.response.set_header("Vary", "*")
+      c.stale_resource?(resource)
+      c.apply_http_cache_headers
+
+      expect(c.response.headers["Vary"]).to eq("*")
     end
 
     it "assembles must-revalidate and stale-while-revalidate" do
@@ -442,6 +507,73 @@ describe ConcernsOnRails::Controllers::Cacheable do
       c.apply_http_cache_headers
 
       expect(c.response.headers["Cache-Control"]).to eq("no-store")
+    end
+  end
+
+  describe "through real ActionController dispatch" do
+    let(:controller) do
+      IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Cacheable
+
+        http_cache_actions visibility: :public, max_age: 300
+
+        def show
+          render json: { ok: true }
+        end
+
+        def create
+          render json: { id: 1 }, status: :created
+        end
+
+        def missing
+          render json: { error: "nope" }, status: :not_found
+        end
+
+        def failing
+          render json: { error: "boom" }, status: :internal_server_error
+        end
+
+        def moved
+          redirect_to "/elsewhere"
+        end
+      end
+    end
+
+    def cache_control(action, method: "GET")
+      IntegrationHarness.dispatch(controller, action, method: method).header("Cache-Control").to_s
+    end
+
+    it "emits the public policy on a GET 200" do
+      expect(cache_control(:show)).to include("public").and include("max-age=300")
+    end
+
+    it "does not hand shared caches a POST 201, or a 404/500/302 the action rendered itself" do
+      [[:create, "POST"], [:missing, "GET"], [:failing, "GET"], [:moved, "GET"]].each do |action, method|
+        value = cache_control(action, method: method)
+        expect(value).not_to include("public"), "#{method} #{action}: #{value}"
+        expect(value).not_to include("max-age=300"), "#{method} #{action}: #{value}"
+      end
+    end
+
+    # set_cache_validators runs BEFORE render, and Rails only adds its own
+    # `Vary: Accept` while the header is still blank — so writing
+    # `Vary: Accept-Language` first used to strip the Accept dimension from a
+    # content-negotiated response. (Rails 6.0 never emits Vary: Accept.)
+    it "keeps Rails' own Vary: Accept when validators are written before render", min_rails: "6.1" do
+      negotiating = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Cacheable
+
+        etag_with :locale
+
+        def show
+          return unless stale_resource?("article-1")
+
+          render json: { ok: true }
+        end
+      end
+      result = IntegrationHarness.dispatch(negotiating, :show, headers: { "Accept" => "application/json" })
+      dimensions = result.header("Vary").to_s.split(",").map(&:strip)
+      expect(dimensions).to include("Accept", "Accept-Language")
     end
   end
 end

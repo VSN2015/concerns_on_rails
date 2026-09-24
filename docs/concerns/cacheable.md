@@ -38,7 +38,7 @@ Last-Modified: Thu, 01 Jan 2026 12:00:00 GMT
 
 ### `http_cache_actions(*actions, visibility: :private, max_age: nil, must_revalidate: false, no_store: false, stale_while_revalidate: nil, vary: nil)`
 
-Declares the policy emitted via `after_action`. Repeatable; rules are inherited by subclasses. **No positional actions = catch-all** for the whole controller, and **the last matching rule wins** (the Deprecatable convention — caching policy is an override).
+Declares the policy emitted via `after_action`. Repeatable; rules are inherited by subclasses. **Only `no_store` is emitted unconditionally**; every other policy (visibility, `max-age`, `must-revalidate`, `stale-while-revalidate`) is emitted only on a **GET/HEAD** whose status is one of `FRESHNESS_STATUSES` — **200, 203, 204, 206, 304** (the 304 from `stale_resource?` carries it on purpose). A POST/PUT/PATCH/DELETE, and a 201 / 3xx redirect / 4xx / 5xx the action rendered itself, keep Rails' default `Cache-Control`. RFC 9111 allows caches to store more statuses heuristically (301, 404, 410, …), but an explicit freshness lifetime on an error or a redirect is almost never what a catch-all rule meant, so the set is deliberately conservative. **No positional actions = catch-all** for the whole controller, and **the last matching rule wins** (the Deprecatable convention — caching policy is an override).
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -48,7 +48,7 @@ Declares the policy emitted via `after_action`. Repeatable; rules are inherited 
 | `must_revalidate:` | `false` | Append `must-revalidate` |
 | `no_store:` | `false` | Emit the lone `no-store` — **overrides everything else** |
 | `stale_while_revalidate:` | `nil` | Append `stale-while-revalidate=<seconds>` |
-| `vary:` | `nil` | `String` or `Array` of header names, **appended** (de-duplicated) to any existing `Vary` |
+| `vary:` | `nil` | `String` or `Array` of header names, **appended** to any existing `Vary` (de-duplicated case-insensitively; a `Vary: *` response is left alone) |
 
 ### `etag_with(*sources, vary: nil, &block)`
 
@@ -115,9 +115,14 @@ end
 - The method names are deliberately distinct from `ActionController::ConditionalGet`, so this concern coexists with Rails' own `fresh_when`/`stale?`.
 - **Weak validators** signal semantic (not byte-for-byte) equivalence — the right choice for serialized representations that may differ in whitespace/ordering.
 - `no_store: true` overrides `max_age`/`visibility`; pair `:public` caching with care behind shared CDNs and proxies — and note that a user-scoped `etag_with` source (a method, a block, `vary: false`) downgrades the whole controller to `private`, because a CDN keying only on the URL would otherwise hand one caller's body to the next.
-- `Vary` is **appended**, never clobbered — coordinate with pagination/CORS headers that may also set it.
+- `Vary` is **appended**, never clobbered — through the same `Support::VaryHeader` helper Localizable and Timezoneable use: case-insensitive de-duplication, `Vary: *` left alone, and Rails' own `Vary: Accept` preserved even though `stale_resource?` writes `Vary` before `render` (Rails only adds it while the header is still blank).
 - Every `request`/`response` touch is guarded, so the concern runs on bare objects and is testable without the full Rails stack.
 - For **write-side** preconditions (`If-Match` / `If-Unmodified-Since` → `412 Precondition Failed`), reach for Rails' own conditional-GET helpers; this concern covers the read path.
+
+## Changed (unreleased)
+
+- **Positive freshness is limited to GET/HEAD with a 200/203/204/206/304.** It used to be emitted on every method and status, so a catch-all `visibility: :public, max_age:` rule let shared caches store a POST's 201 or an action-rendered 404/500/redirect. `no_store` is unchanged (unconditional).
+- **`Vary` merging goes through `Support::VaryHeader`.** Duplicates are now detected case-insensitively (`accept` + `Accept` → one entry), `Vary: *` is no longer appended to, and a `Vary` written by `stale_resource?` before `render` no longer suppresses Rails' own `Vary: Accept` (Rails 6.1+).
 
 ## Changed in 1.22.0
 
