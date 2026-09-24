@@ -40,16 +40,18 @@ ConcernsOnRails.configure_encryption do |c|
 end
 
 # 2. See what's left under old keys — a compare against the fixed 4-char Base64 header prefix, no decryption
-Patient.needs_reencryption.count           # every gem-keyed encrypted field
+Patient.needs_reencryption.count           # every gem-keyed encrypted field — EVERY row, default_scope ignored
 Patient.needs_reencryption(:ssn).count     # one field
 
 # 3. Rewrite them under the current key (blind indexes refreshed) — idempotent, streams with find_each
-Patient.reencrypt_all!                     # => 12_034 rows
+Patient.reencrypt_all!                     # => 12_034 rows — soft-deleted / unpublished rows included
 patient.ssn_key_id                         # => 1   (nil before anything is stored)
 patient.reencrypt!                         # one record
 
-# 4. Once needs_reencryption is empty everywhere, drop `0 =>` from previous_keys
+# 4. Once Patient.needs_reencryption is empty for every model, drop `0 =>` from previous_keys
 ```
+
+- **The sweep covers the whole table.** Called on the model itself, `needs_reencryption` and `reencrypt_all!` bypass the `default_scope`: rows hidden by SoftDeletable or Publishable's `default_scope: true` still hold ciphertext under the old key, and once that key leaves `previous_keys` they could never be decrypted again — a `restore!` would bring back an unreadable record. Called on a **relation** (`Patient.where(org_id: 1).reencrypt_all!`, an association, a `scoping` block) they cover exactly that relation, default scope included like any other chain; start from `unscoped` (`Patient.unscoped.where(org_id: 1).reencrypt_all!`) to include hidden rows in a subset. Run step 4's check on the model, not on a relation.
 
 - **Blind indexes during the window.** `find_by_<field>` / `where_<field>` match the digest under the current key **and** every previous key, so a row indexed under key 0 is still found before it is re-encrypted; `<field>_fingerprint` returns the current-key digest (what gets written). `reencrypt_all!` rewrites the index column too.
 - **`reencrypt_all!` writes one UPDATE per row** — no validations, no callbacks, no `updated_at` bump: the values do not change, only their ciphertext, and an Auditable capture or webhook must not fire for a key rotation. Each row is valid before and after, so there is no wrapping transaction to hold. This is the one `*_all` verb that does NOT go through `Support::BatchOps`: it is re-runnable rather than atomic, so a row that raises mid-stream leaves the rows before it already rotated, and re-running picks up the rest.
@@ -115,7 +117,7 @@ Repeatable — each call declares more encrypted fields. Rules accumulate (reass
 ## Accessor surface
 
 - `field` / `field=` — plaintext in, plaintext out (crypto happens at the DB boundary).
-- `field_ciphertext` — the raw stored envelope once persisted (for migrations, debugging, and asserting no plaintext is at rest). `nil` while the field carries an unsaved change (a new record, or any pending assignment), so it can never hand back the plaintext you just assigned.
+- `field_ciphertext` — the raw stored envelope once persisted (for migrations, debugging, and asserting no plaintext is at rest). `nil` while the field carries an unsaved change (a new record, or any pending assignment), so it can never hand back the plaintext you just assigned. After a save or `update_columns` it is exactly what was written: Rails 6.0–7.0 re-serialize the value in memory with a fresh IV after every write, so on those versions the concern re-reads the stored ciphertext (one extra raw `SELECT` of the encrypted columns per write) — which is also what lets `reencrypt!` rotate an instance that was just saved.
 - `field_encrypted?` — whether what is stored really is an encryption envelope (not merely whether a value is present). Honestly `false` under `on_missing_key: :passthrough`, where plaintext at rest is the opted-into behaviour.
 
 ## Querying encrypted fields (blind index)

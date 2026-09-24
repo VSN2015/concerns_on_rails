@@ -326,12 +326,6 @@ module ConcernsOnRails
           base.where(clauses.join(" OR "), *Array.new(columns.size, prefix))
         end
 
-        # The relation a rotation sweeps: the caller's explicit relation when
-        # there is one (relation delegation and `scoping` set current_scope),
-        # otherwise every row of the table, default_scope bypassed.
-        def encryptable_rotation_base
-          current_scope ? all : unscoped
-        end
 
         # Case-exact "the first 4 characters are not this prefix", per adapter.
         # The MySQL family is matched the way Models::Storable matches it —
@@ -381,6 +375,13 @@ module ConcernsOnRails
         end
 
         private
+
+        # The relation a rotation sweeps: the caller's explicit relation when
+        # there is one (relation delegation and `scoping` set current_scope),
+        # otherwise every row of the table, default_scope bypassed.
+        def encryptable_rotation_base
+          current_scope ? all : unscoped
+        end
 
         def encryptable_validate!(fields, type, blind_index)
           raise ArgumentError, "#{LABEL}: at least one field is required" if fields.empty?
