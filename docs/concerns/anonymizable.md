@@ -86,10 +86,10 @@ Not defined when `stamp: false`. Names honor `prefix:`/`suffix:`.
 
 | Signature | Description |
 |---|---|
-| `anonymize!` | Erases all configured fields + stamps, in one transaction (single UPDATE). Raises `ArgumentError` on a new record. Returns `true`. Terminal: unsaved changes are discarded by the post-write reload. |
+| `anonymize!` | Erases all configured fields + stamps, in the write's own savepoint (single UPDATE). Raises `ArgumentError` on a new record. Returns `true`, or `false` when a hook vetoed the erasure with `ActiveRecord::Rollback`. Terminal: unsaved changes are discarded by the post-write reload. |
 | `anonymized?` | `true` when the stamp column is present; always `false` with `stamp: false`. |
-| `before_anonymize` / `after_anonymize` | Hook methods (no-op defaults) run inside the transaction — a raising hook rolls the erasure back. |
-| `.anonymize_all!` | Anonymizes every matching record that isn't already stamped, in one transaction. Returns the Integer count of newly anonymized records. |
+| `before_anonymize` / `after_anonymize` | Hook methods (no-op defaults) run inside the savepoint. A hook that raises, or calls `raise ActiveRecord::Rollback`, rolls the erasure back, even inside a caller's transaction, and the in-memory values are restored. |
+| `.anonymize_all!` | Anonymizes every matching record that isn't already stamped, in one transaction. Returns the Integer count of newly anonymized records. A record whose hook vetoes raises `ActiveRecord::RecordNotSaved` and rolls the whole batch back. |
 
 ## Examples
 

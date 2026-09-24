@@ -440,9 +440,19 @@ Passing `true` for a scope- or accessor-name affix means "use the configured fie
 Unrelated to all three: Searchable's `match: :prefix` is a LIKE-match mode (`term%`), not a
 naming affix.
 
+**Lifecycle hooks** — override `before_publish` / `after_publish` / `before_unpublish` /
+`after_unpublish`. They and the write share their own savepoint, so a hook that raises — or
+vetoes with `raise ActiveRecord::Rollback` — undoes the write: `publish!` / `unpublish!` /
+`publish_at!` return `false` and nothing is written, even inside your own transaction, and
+`publish_all` / `unpublish_all` raise `ActiveRecord::RecordNotSaved` and roll the whole batch
+back. A write that fails validation returns `false` and rolls back the before-hook's side
+effects too. After an aborted write the record's `published_at` goes back to its previous value
+in memory.
+
 **Notes**
 - "Published" means `published_at` is set **and** in the past — so future-dated posts stay unpublished until their time arrives.
 - No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`).
+- A boolean publishable column works too (`publishable_by :is_published`). Its `.published` scope is `is_published <> FALSE` rather than `= TRUE`, because Rails copies an equality condition onto new records built through a scope. So with `default_scope: true` a new record still starts unpublished, and so does `Post.published.new`.
 
 ---
 
@@ -554,6 +564,14 @@ class User < ApplicationRecord
 end
 ```
 
+The hooks, the write and any cascade share their own savepoint. A hook that raises, or vetoes
+with `raise ActiveRecord::Rollback`, undoes all of it. In that case `soft_delete!` / `restore!`
+return `false` and nothing is written, even inside your own transaction. `soft_delete_all` /
+`restore_all` raise `ActiveRecord::RecordNotSaved` and roll the batch back. The in-memory
+`deleted_at` also goes back to its old value, so a retry really writes: it is not skipped by the
+`deleted?` guard. A write that fails validation (`touch: true`) rolls back the before-hook's
+side effects too.
+
 **Aliases**: `soft_deleted?` and `is_soft_deleted?` both delegate to `deleted?`.
 
 ---
@@ -664,8 +682,13 @@ schedulable_by prefix: true      # => .starts_at_current / ... (the configured s
 ```
 
 `prefix:`/`suffix:` rename every scope `schedulable_by` generates (`active_at`, `current`,
-`upcoming`, `expired`). With no affix passed, scope names and the emitted SQL are unchanged.
+`upcoming`, `expired`, `overlapping`). With no affix passed, scope names and the emitted SQL are unchanged.
 See the Publishable section above for how `prefix:`/`suffix:` differ across the gem.
+
+An affix also defines affixed predicates: `promo_current?`, `promo_upcoming?`,
+`promo_expired?`, `promo_active_at?(time)` and `promo_overlaps?(from, to)`. These always give
+Schedulable's answer. The plain predicates stay, but a shared name (`expired?`, which
+Expirable also defines) belongs to whichever concern is included last.
 
 **Notes**
 - Boundary semantics: **inclusive start, exclusive end** — active at exactly `starts_at`, not at exactly `ends_at`.
@@ -698,8 +721,9 @@ ApiToken.expiring_within(1.day)  # future expiry within the next 1 day
 **Mutators**
 
 ```ruby
-token.expire!                       # expires_at = now
-token.expire!(2.hours.from_now)     # explicit time
+token.expire!                       # expires_at = now (nil or "" also mean now)
+token.expire!(2.hours.from_now)     # explicit time (a Time, or a parseable String)
+token.expire!("garbage")            # ArgumentError, raised before any hook runs
 token.expire_in!(15.minutes)        # absolute lifetime from now, whatever the current expiry
 token.extend_expiry!(by: 1.day)     # pushes expiry forward
 token.clear_expiry!                 # never expires (nil)
@@ -710,10 +734,29 @@ token.clear_expiry!                 # never expires (nil)
 - If `expires_at` is still in the future → `by` is added to the existing value
 
 **Lifecycle hooks** — override `before_expire` / `after_expire` on the model; they fire around a write that
-actually expires the record (`expire!` with a past-or-now time, and `expire_all`) inside one transaction, so
-a raising `after_expire` rolls the expiry back. A future time only *schedules* expiry, so `expire_in!(14.days)`
+actually expires the record (`expire!` with a past-or-now time, and `expire_all`). They and the write share
+their own savepoint. A hook that raises, or vetoes with `raise ActiveRecord::Rollback`, undoes the expiry:
+`expire!` returns `false` even inside your own transaction, and `expire_all` raises
+`ActiveRecord::RecordNotSaved` and rolls back. A write that fails validation also rolls back `before_expire`'s
+side effects. A future time only *schedules* expiry, so `expire_in!(14.days)`
 fires nothing — as with renewals (`extend_expiry!`) and `clear_expiry!`. Overriding either hook moves
 `expire_all` from its single `UPDATE` to the per-record path so the hooks run for every row.
+
+**Degenerate times** — `expire!` and `expire_all` treat `nil` or a blank value (`""`, `false`, `[]`) as
+*now*. They never write the raw value, which Active Record would cast to `nil`, meaning *never expires*.
+A value that cannot be cast to a time (`"garbage"`, an Integer, a Duration) raises `ArgumentError` before any
+hook runs or any row is written. This applies to both the fast path and the per-record path of `expire_all`.
+
+**Scope- and predicate-name collisions**
+
+```ruby
+expirable_by :expires_at, prefix: :term   # => .term_active / .term_expired / .term_expiring_within
+                                          #    and #term_active? / #term_expired?
+```
+
+`prefix:`/`suffix:` rename the scopes and also define affixed predicates. `active?` / `expired?` keep their
+plain names, but Activatable (`active?`) and Schedulable (`expired?`) define the same names. On a model
+that combines them, the concern included last owns the plain name, so use the affixed predicates.
 
 **Bulk operations**
 
@@ -884,10 +927,10 @@ no batch analogue.
 
 **Notes**
 - `NULL` is treated as inactive (same convention as most apps' "unset = off").
-- Hooks (`before_activate` / `after_activate` / `before_deactivate` / `after_deactivate`) share one transaction with the write: a raising after-hook rolls the flip back, a failed `update` (validation) skips the after-hook and returns `false`. `toggle_active!` and the batch verbs go through the same path.
+- Hooks (`before_activate` / `after_activate` / `before_deactivate` / `after_deactivate`) share their own savepoint with the write. A hook that raises, or vetoes with `raise ActiveRecord::Rollback`, rolls the flip back and the verb returns `false`, even inside your own transaction. `activate_all` / `deactivate_all` then raise `ActiveRecord::RecordNotSaved` and roll back. A failed `update` (validation) skips the after-hook, returns `false`, and rolls back the before-hook's side effects. `toggle_active!` and the batch verbs go through the same path.
 - `timestamps: true` stamps `activated_at` on activate and `deactivated_at` on deactivate (the other column keeps its last value, so you can see both the last activation and the last deactivation); a Hash renames either column or drops a side with `nil`. The stamp columns must already exist — `activatable_by` checks that at declaration and raises `ArgumentError` otherwise; the `datetime` type itself is not enforced, it only types the migration hint in that error.
 - The configured column must exist; `activatable_by` raises `ArgumentError` otherwise.
-- `SoftDeletable` also defines a `.active` scope (alias of `.without_deleted`). If both concerns are included on the same model, the later one wins — include the one whose `.active` semantics you want last, or stick to one of them.
+- `SoftDeletable` and `Expirable` also define a `.active` scope, and `Expirable` also defines an `active?` predicate. On a model that combines them, pass `prefix:`/`suffix:` (`activatable_by :active, prefix: :flag`). This renames the scopes (`.flag_active` / `.flag_inactive`) and defines affixed predicates (`flag_active?` / `flag_inactive?`) that always give Activatable's answer. The plain `active?` / `inactive?` stay for compatibility and belong to the concern included last. `toggle_active!` reads the flag itself, so it flips the right way whichever concern owns `active?`.
 
 ---
 
@@ -1634,7 +1677,7 @@ User.where(...).anonymize_all!     # batch; returns the count, skips stamped rec
 
 **Notes**
 - Deliberately `update_columns`: erasure is never blocked by validations and never runs callbacks that could copy old values elsewhere. Values still serialize through the attribute types, so an `encryptable` field stores a fresh ciphertext envelope — never plaintext.
-- `before_anonymize`/`after_anonymize` hooks run inside the transaction; the record reloads afterwards (erasure is terminal for the instance).
+- `before_anonymize`/`after_anonymize` hooks run inside the write's own savepoint; the record reloads afterwards (erasure is terminal for the instance). A hook that raises, or vetoes with `raise ActiveRecord::Rollback`, undoes the erasure and restores the in-memory values. `anonymize!` then returns `false`, even inside your own transaction, and `anonymize_all!` raises `ActiveRecord::RecordNotSaved` and rolls the batch back.
 - `:hash` is pseudonymization — use `:nullify`/`:random_hex` for true erasure. Backups/replicas/logs are out of scope.
 
 ---

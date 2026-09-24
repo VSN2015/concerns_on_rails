@@ -189,9 +189,9 @@ order.restore!       # raises if fulfilled?, deleted_at stays set
 
 - **Hook callback order is guaranteed.** `before_soft_delete` fires before the write; `after_soft_delete` fires only if the update succeeds. The same applies to `before_restore` / `after_restore`. The spec asserts the exact order `[:before_soft_delete, :after_soft_delete]` and `[:before_restore, :after_restore]`.
 
-- **A raising hook rolls back the timestamp.** Both `soft_delete!` and `restore!` wrap their work — hook calls and the `update`/`update_column` call — in a `transaction` block. If `after_soft_delete` raises, `deleted_at` is never committed.
+- **A raising or vetoing hook rolls back the timestamp.** `soft_delete!` and `restore!` run the hooks, the `update`/`update_column` call and any cascade in their own savepoint (`Support::HookedWrite`). If a hook raises, or calls `raise ActiveRecord::Rollback`, `deleted_at` is never committed. For a Rollback veto the method returns `false`. This holds inside a caller's transaction too, and `soft_delete_all` / `restore_all` then raise `ActiveRecord::RecordNotSaved` and roll back the batch. The in-memory `deleted_at` is restored, so a retry is not skipped by the `deleted?` idempotency guard.
 
-- **`after_soft_delete` is not called on a failed update.** If `update` returns `false` (e.g. because a validation fails), `after_soft_delete` is skipped and `soft_delete!` returns `false`.
+- **`after_soft_delete` is not called on a failed update.** If `update` returns `false` (e.g. because a validation fails), `after_soft_delete` is skipped and `soft_delete!` returns `false`. Any side effects of `before_soft_delete` are rolled back too.
 
 - **`soft_delete!` and `restore!` are idempotent.** Calling `soft_delete!` on an already-deleted record returns `true` immediately without writing to the database or running hooks. Calling `restore!` on a non-deleted record does the same.
 
@@ -207,7 +207,7 @@ order.restore!       # raises if fulfilled?, deleted_at stays set
 
 - **Column must exist at class-load time.** `soft_deletable_by` validates the column via `ConcernsOnRails::Support::ColumnGuard#ensure_columns!` and raises `ArgumentError` with the message `"does not exist in the database"` if the column is missing. This means running the model before running migrations will fail fast rather than silently.
 
-- **`.active` scope conflict.** If `Activatable` and `SoftDeletable` are both included in the same model, both define an `.active` scope. The last `include` statement wins. Stick to one concern or rely on `.without_deleted` to avoid ambiguity.
+- **`.active` scope conflict.** `Activatable`, `Expirable` and `SoftDeletable` all define an `.active` scope. On a model that combines them, pass `prefix:`/`suffix:` to rename the scopes, or rely on `.without_deleted`.
 
 ## Changed in 1.22.0
 
