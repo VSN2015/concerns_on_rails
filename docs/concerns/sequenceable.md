@@ -222,7 +222,14 @@ draft.number                             # => "INV-00001"
 
 **Sequence queries bypass `default_scope`.** The `MAX` and existence-check queries run through `unscoped`, so soft-deleted records (or any other default-scoped-out rows) are still counted when computing the next value. This prevents gaps from soft-deleted records causing the counter to reuse numbers.
 
-**STI subclasses share one sequence.** The `MAX` is read from the STI **base** class, so `Credit` and `Debit` rows sharing an `invoices.sequence` column draw from one counter (a subclass's own relation would filter on its `type` and let siblings collide on the unique index). For a separate counter per subclass, pass `scope: :type`.
+**With STI, the declaring class owns the counter.** The `MAX` is read over the class that called `sequenceable_by` (and its descendants):
+
+- Declared on the STI **base** — every subclass draws from one table-wide counter, so `Credit` and `Debit` rows sharing a unique `sequence` column never collide.
+- Declared on **each subclass** (`Invoice` with `prefix: "INV-"`, `CreditNote` with `prefix: "CN-"`) — each keeps its own gap-free sequence, INV-0001, INV-0002, CN-0001.
+- A subclass that merely inherits a parent's declaration shares the parent's counter.
+- `scope: :type` on the base partitions one declaration per type.
+
+`next_<field>` previews exactly what the receiving class's next `create!` gets in every one of these setups — under `scope: :type`, an omitted `type:` resolves to the receiver's own STI name (NULL for the base).
 
 **Column validation runs at class load time.** `sequenceable_by` calls `ensure_columns!` for `field`, `into:`, all `scope:` columns, and `created_at` (when `reset:` is not `:never`). A missing column raises `ArgumentError` with the message `"does not exist in the database"` before any records are created.
 
