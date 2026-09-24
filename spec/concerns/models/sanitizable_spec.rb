@@ -216,6 +216,30 @@ describe ConcernsOnRails::Models::Sanitizable do
         expect(SanitizableArticle.first.title).to eq("Tom & Jerry &lt; 3")
       end
 
+      it "keeps semicolon-less legacy and numeric references encoded, so they never drift" do
+        {
+          "&amp;notit" => "&amp;notit", "&amp;copyright" => "&amp;copyright", "&amp;lt 3" => "&amp;lt 3",
+          "&amp;#x3c" => "&amp;#x3c", "&amp;#60" => "&amp;#60", "&amp;Dagger;" => "&amp;Dagger;",
+          "&amp;D; & &amp;#; &amp;x" => "&D; & &amp;#; &x", "a&#13;b&#13;&#10;c" => "a\nb\nc"
+        }.each do |input, expected|
+          expect(stored(input)).to eq(expected), input.inspect
+          expect(ConcernsOnRails::Support::HtmlSanitizers.plain_text(expected)).to eq(expected), "#{input.inspect} drifted"
+        end
+      end
+
+      # Deciding whether an "&" starts a character reference used to run a
+      # full HTML parse PER ampersand: 100 KB of "&a" took ~24 s inside
+      # before_validation. It is now a static, linear-time rule.
+      it "sanitizes ampersand-heavy input in linear time" do
+        payload = "&a" * 50_000 # 100 KB
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        result = ConcernsOnRails::Support::HtmlSanitizers.plain_text(payload)
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+        expect(result).to eq(payload)
+        expect(elapsed).to be < 1.0
+      end
+
       it "sanitize_all! stores the same plain text and repairs rows written double-escaped" do
         legacy = SanitizableArticle.create!(title: "x")
         legacy.update_columns(title: "Tom &amp; Jerry")

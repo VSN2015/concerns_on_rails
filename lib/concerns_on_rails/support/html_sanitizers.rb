@@ -61,10 +61,32 @@ module ConcernsOnRails
 
       # The entities FullSanitizer's text serializer emits, besides &lt; / &gt;
       # (HTML5 emits &amp; and &nbsp;; the quote forms cover the HTML4 path).
-      PLAIN_TEXT_ENTITY = /&(amp|nbsp|quot|apos|#39|#34);/
       PLAIN_TEXT_DECODED = { "nbsp" => " ", "quot" => '"', "#34" => '"', "apos" => "'", "#39" => "'" }.freeze
-      # What may follow a bare "&" and be read back as a character reference.
-      CHARACTER_REFERENCE_TAIL = /\A[#A-Za-z0-9]+;?/
+
+      # The HTML5 named references a parser decodes WITHOUT a trailing ";"
+      # (WHATWG's legacy list): "&copyright" reads back as "©right".
+      LEGACY_REFERENCES = %w[
+        AElig AMP Aacute Acirc Agrave Aring Atilde Auml COPY Ccedil ETH Eacute Ecirc Egrave Euml GT Iacute Icirc
+        Igrave Iuml LT Ntilde Oacute Ocirc Ograve Oslash Otilde Ouml QUOT REG THORN Uacute Ucirc Ugrave Uuml Yacute
+        aacute acirc acute aelig agrave amp aring atilde auml brvbar ccedil cedil cent copy curren deg divide eacute
+        ecirc egrave eth euml frac12 frac14 frac34 gt iacute icirc iexcl igrave iquest iuml laquo lt macr micro middot
+        nbsp not ntilde oacute ocirc ograve ordf ordm oslash otilde ouml para plusmn pound quot raquo reg sect shy
+        sup1 sup2 sup3 szlig thorn times uacute ucirc ugrave uml uuml yacute yen yuml
+      ].freeze
+
+      # What, after a bare "&", a parser may read back as a character
+      # reference: anything numeric-looking ("#" — the HTML4/libxml2 parser
+      # swallows even a digitless "&#"), any well-formed named one (the
+      # longest HTML5 name is 31 characters), or a legacy semicolon-less
+      # name. A static, bounded lookahead and deliberately an
+      # over-approximation: calling a literal "&" a reference only keeps its
+      # "&amp;" encoded, which is still stable, whereas the reverse would let
+      # the stored value change on the next save.
+      CHARACTER_REFERENCE = /#|[A-Za-z][A-Za-z0-9]{1,31};|#{Regexp.union(LEGACY_REFERENCES).source}/
+
+      # One linear pass: the decodable entities, plus an "&amp;" only when
+      # what follows could not turn the bare "&" back into a reference.
+      PLAIN_TEXT_ENTITY = /&(nbsp|quot|apos|#39|#34);|&amp;(?!#{CHARACTER_REFERENCE.source})/
 
       # Removes every tag like #full, but returns PLAIN TEXT to store rather
       # than HTML-escaped text: "<b>Tom</b> & Jerry" => "Tom & Jerry", where
@@ -76,23 +98,16 @@ module ConcernsOnRails
       # sanitize_all!): an "&amp;" is only decoded when the bare "&" could not
       # be read back as a character reference — "R&amp;D" => "R&D", but a
       # literal "&amp;copy" stays encoded rather than becoming "©" next save.
+      # Linear time: one parse, then one regex pass with a bounded lookahead
+      # (this used to re-parse per ampersand, a DoS on "&a" * N). A carriage
+      # return (only reachable through "&#13;") is normalized to "\n" up front,
+      # as the parser would do to it on the next save.
       def plain_text(value)
         full.sanitize(value).to_s.gsub(PLAIN_TEXT_ENTITY) do
-          match = Regexp.last_match
-          next PLAIN_TEXT_DECODED.fetch(match[1]) unless match[1] == "amp"
-
-          literal_ampersand?(match.post_match) ? "&" : "&amp;"
-        end
+          entity = Regexp.last_match(1)
+          entity ? PLAIN_TEXT_DECODED.fetch(entity) : "&"
+        end.gsub(/\r\n?/, "\n")
       end
-
-      # True when "&" followed by `rest` parses back as a literal ampersand.
-      def literal_ampersand?(rest)
-        tail = rest[CHARACTER_REFERENCE_TAIL]
-        return true unless tail
-
-        full.sanitize("&#{tail}").to_s == "&amp;#{tail}"
-      end
-      private_class_method :literal_ampersand?
     end
   end
 end
