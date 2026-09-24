@@ -99,6 +99,8 @@ Computes and assigns the next sequence value and, when `into:` is configured, th
 
 Numbers the record now: computes the next value for its scope (and period), writes the integer and the `into:` string, and — when the record is persisted — `save!`s. On a new record the attributes are set and left for your own save. Returns `true` when a number was assigned and `false` when the record already had one (nothing is rewritten), so a "finalize" action can be retried safely. Available in both modes; it is the only way to number a record under `assign: :manual`.
 
+The `save!` runs in its own savepoint, and when it fails — `ActiveRecord::RecordNotUnique` from a concurrent writer that took the same number, a failed validation — the integer and `into:` columns are put back before the error propagates. So `ConcernsOnRails::Support::UniqueRetry.with_retries { invoice.assign_sequence! }` retries with a freshly drawn number instead of finding the record "already numbered", and a failure inside your own transaction does not abort it on PostgreSQL.
+
 **`<field>_assigned?`**
 
 `true` when the integer column has a value.
@@ -219,6 +221,8 @@ draft.number                             # => "INV-00001"
 **`start_at:` applies per scope+period bucket.** When `scope:` and `reset:` are both configured, each combination of scope values *and* period starts fresh at `start_at` independently.
 
 **Sequence queries bypass `default_scope`.** The `MAX` and existence-check queries run through `unscoped`, so soft-deleted records (or any other default-scoped-out rows) are still counted when computing the next value. This prevents gaps from soft-deleted records causing the counter to reuse numbers.
+
+**STI subclasses share one sequence.** The `MAX` is read from the STI **base** class, so `Credit` and `Debit` rows sharing an `invoices.sequence` column draw from one counter (a subclass's own relation would filter on its `type` and let siblings collide on the unique index). For a separate counter per subclass, pass `scope: :type`.
 
 **Column validation runs at class load time.** `sequenceable_by` calls `ensure_columns!` for `field`, `into:`, all `scope:` columns, and `created_at` (when `reset:` is not `:never`). A missing column raises `ArgumentError` with the message `"does not exist in the database"` before any records are created.
 

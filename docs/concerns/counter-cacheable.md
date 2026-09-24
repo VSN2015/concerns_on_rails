@@ -66,12 +66,17 @@ The repair runs in one transaction, and a scoped one **locks the listed parent r
 
 ## How updates are handled
 
-Counters are adjusted with `update_counters` — a single atomic SQL `COALESCE(col, 0) ± 1` — in `after_create` / `after_update` / `after_destroy`, inside the record's own save transaction. On update, the full matrix is resolved:
+Counters are adjusted with `update_counters` — a single atomic SQL `COALESCE(col, 0) ± 1` — in `after_create` / `after_update` and, for a destroy, right after the `DELETE` (as Rails' native counter cache does), inside the record's own transaction. On update, the full matrix is resolved:
 
 - **Foreign-key reparent** (`post_id` changed): the old parent is decremented, the new parent incremented.
 - **Condition flip** (`if:` result changed): incremented or decremented in place.
 - **Both at once**: composed (old parent loses it if it counted, new parent gains it if it counts now).
 - **No-op save**: nothing is written.
+
+On destroy:
+
+- **Only a row that was actually deleted is decremented.** Destroying a stale second instance of an already-destroyed row (the `DELETE` matched 0 rows), or a never-saved record, writes nothing.
+- **The persisted values decide.** The parent and the `if:` verdict come from the database values, so an unsaved reparent (`comment.post = other; comment.destroy`) or condition flip can't redirect the decrement.
 
 ## Examples
 
@@ -109,7 +114,7 @@ Comment.recount_counter_caches!(:post, parents: Post.where(author: me))
 - **Transaction-consistent.** Because the adjustment runs inside the save transaction, a rolled-back save rolls back the counter too.
 - **`if:` should read the record's own columns.** The previous-state reconstruction restores the changed attributes, not the associations.
 - **Bare `recount_counter_caches!` rewrites every parent** (zeroes the column, then applies the tally) and scans children in Ruby for conditional counters — portable, but O(n). Treat it as a maintenance task, not a request-path call. **`parents:` scopes both the zeroing and the tally** to the listed ids and locks those rows first, so it is proportional to their children and fine to run inline after a bulk write.
-- **Standard primary keys assumed.** Custom-`primary_key` parents and `has_many :through` rollups are out of scope — reach for [`counter_culture`](https://github.com/magnusvk/counter_culture) when you need multi-level rollups, delta columns, or after-commit execution.
+- **`belongs_to ..., primary_key:` is honoured.** Parents are addressed by the association key (`primary_key: :code` → `WHERE code = ?`), never by `id` — by the live adjustments and by `recount_counter_caches!` alike. `parents:` still takes records, relations or primary-key ids. `has_many :through` rollups are out of scope — reach for [`counter_culture`](https://github.com/magnusvk/counter_culture) when you need multi-level rollups, delta columns, or after-commit execution.
 
 ## Changed in 1.22.0
 

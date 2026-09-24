@@ -157,10 +157,10 @@ module ConcernsOnRails
 
       # Entries recorded at or after `time`, oldest first. Entries whose "at"
       # is missing or unparseable are excluded. "at" carries microseconds
-      # (1.29+), so two edits in the same second are told apart. An entry
-      # written before 1.29 has second precision — it only says "during that
-      # second" — so it is compared against `time` truncated to the second
-      # rather than silently dropped by a sub-second cutoff.
+      # (after 1.29.0), so two edits in the same second are told apart. An
+      # entry written by 1.29.0 or earlier has second precision — it only says
+      # "during that second" — so it is compared against `time` truncated to
+      # the second rather than silently dropped by a sub-second cutoff.
       def audited_changes_since(time)
         cutoff = time.to_time
         whole_second = Time.at(cutoff.to_i).utc
@@ -301,7 +301,7 @@ module ConcernsOnRails
         nil
       end
 
-      # "…T12:00:00.123456Z" vs a pre-1.29 "…T12:00:00Z".
+      # "…T12:00:00.123456Z" vs an older (<= 1.29.0) "…T12:00:00Z".
       def auditable_fractional_stamp?(raw)
         raw.to_s.match?(/T\d{2}:\d{2}:\d{2}\.\d/)
       end
