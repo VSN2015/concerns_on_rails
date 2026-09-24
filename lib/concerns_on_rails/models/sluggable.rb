@@ -107,6 +107,7 @@ module ConcernsOnRails
           ensure_columns!("ConcernsOnRails::Models::Sluggable",
                           [sluggable_field, friendly_id_config.slug_column, scope_column].compact,
                           types: { friendly_id_config.slug_column.to_sym => "string:uniq" })
+          sluggable_revalidate_anonymized_slug!
           return unless history || scope || reserved_words || finders
 
           reconfigure_friendly_id(history: history, scope: scope,
@@ -125,6 +126,12 @@ module ConcernsOnRails
                 "#{LABEL}: Sluggable/friendly_id overrides to_param, which conflicts with " \
                 "Hashable's `to_param: true` on ':#{hashable_field}' (the winner would depend on include order). " \
                 "Drop one, or override to_param on the model yourself."
+        end
+
+        # Anonymizable declared first: its slug-length guard must see this
+        # macro's max_length: / slug column too.
+        def sluggable_revalidate_anonymized_slug!
+          anonymizable_validate_slug_room! if respond_to?(:anonymizable_validate_slug_room!)
         end
 
         # friendly_id's candidate shapes: a Symbol/String (method), a Proc, or an

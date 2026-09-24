@@ -83,19 +83,30 @@ module ConcernsOnRails
       PRESENCE_ONLY_PRESETS = %i[redact email random_hex].map { |name| PRESETS.fetch(name) }.freeze
       # Stands in for the old value of a presence-only preset; never persisted.
       PRESENT = Object.new.freeze
-      # What a value-dependent strategy (:hash, a callable) writes when the old
-      # value cannot be read — ciphertext that will not decrypt. Erasure must
-      # still happen, and a digest or callable output of a value we never saw
-      # is impossible, so the field is redacted.
-      UNREADABLE_FALLBACK = "[REDACTED]".freeze
-      # The slug that replaces one generated from an erased field.
+      # A value-dependent strategy (:hash, a callable) whose old value cannot
+      # be read — ciphertext that will not decrypt — gets a fresh random value
+      # of this many bytes (64 hex chars, the shape of the SHA-256 digest :hash
+      # writes). Random per row, never a constant: a constant would give every
+      # unreadable row the same blind-index fingerprint and trip a unique index.
+      UNREADABLE_FALLBACK_BYTES = 32
+      # `slug:` — :auto rewrites a slug only when its source columns are
+      # anonymized; true always; false never.
+      SLUG_MODES = [:auto, true, false].freeze
+      # The slug that replaces one generated from an erased field:
+      # "anon-<32 hex>", shortened to fit the slug column / max_length. The
+      # prefix is kept only while PREFIXED_SLUG_MIN_RANDOM random characters
+      # still fit; below MIN_SLUG_RANDOM the limit is rejected at macro time.
       ANONYMIZED_SLUG_PREFIX = "anon-".freeze
+      FULL_SLUG_RANDOM = 32
+      PREFIXED_SLUG_MIN_RANDOM = 16
+      MIN_SLUG_RANDOM = 8
 
       included do
         class_attribute :anonymizable_rules, instance_accessor: false, default: {}
         class_attribute :anonymizable_stamp, instance_accessor: false, default: DEFAULT_STAMP
         class_attribute :anonymizable_clear_audit, instance_accessor: false, default: true
         class_attribute :anonymizable_scopes_defined, instance_accessor: false, default: false
+        class_attribute :anonymizable_slug, instance_accessor: false, default: :auto
       end
 
       module ClassMethods
@@ -104,10 +115,11 @@ module ConcernsOnRails
         # Declare fields and their erasure strategy. Repeatable — field rules
         # merge across calls; stamp:/clear_audit_trail:/prefix:/suffix: apply
         # only when explicitly passed (last explicit value wins).
-        def anonymizable(*fields, with:, stamp: UNSET, clear_audit_trail: UNSET, prefix: nil, suffix: nil)
+        def anonymizable(*fields, with:, stamp: UNSET, clear_audit_trail: UNSET, slug: UNSET, prefix: nil, suffix: nil)
           raise ArgumentError, "#{LABEL}: at least one field is required" if fields.empty?
 
           strategy = anonymizable_resolve_strategy(with)
+          anonymizable_apply_slug_option(slug)
           anonymizable_apply_options(stamp, clear_audit_trail)
 
           ensure_columns!(LABEL, fields)
@@ -115,6 +127,53 @@ module ConcernsOnRails
           self.anonymizable_rules = anonymizable_rules.merge(fields.to_h { |f| [f.to_sym, strategy] })
 
           anonymizable_define_scopes(prefix, suffix)
+          anonymizable_validate_slug_room!
+        end
+
+        # Whether anonymize! replaces the friendly_id slug (see the module
+        # docs). Only :slugged friendly_id models have one. :auto compares
+        # the slug's SOURCE COLUMNS with the anonymized fields; a slug built
+        # through a method or Proc is not guessed at — declare `slug: true`.
+        def anonymizable_rewrites_slug?
+          return false unless respond_to?(:friendly_id_config) && friendly_id_config.uses?(:slugged)
+          return anonymizable_slug unless anonymizable_slug == :auto
+
+          anonymizable_slug_source_columns.intersect?(anonymizable_rules.keys)
+        end
+
+        # The slug's source columns. The gem's Sluggable: the `candidates:`
+        # entries that are columns (nested arrays flattened) when given — they
+        # replace the sluggable field — else the sluggable field. A bare
+        # friendly_id model: its base, when that is a column.
+        def anonymizable_slug_source_columns
+          columns = column_names
+          anonymizable_slug_sources.filter_map do |source|
+            source.to_sym if (source.is_a?(Symbol) || source.is_a?(String)) && columns.include?(source.to_s)
+          end
+        rescue StandardError
+          [] # schema unreachable (db:create, assets:precompile)
+        end
+
+        # A random, non-identifying replacement slug that fits the column's
+        # `limit` and Sluggable's `max_length:`.
+        def anonymizable_random_slug
+          room = anonymizable_slug_room
+          prefix = ANONYMIZED_SLUG_PREFIX
+          return "#{prefix}#{anonymizable_random_hex(FULL_SLUG_RANDOM)}" if room.nil? || room >= prefix.length + FULL_SLUG_RANDOM
+          return "#{prefix}#{anonymizable_random_hex(room - prefix.length)}" if room >= prefix.length + PREFIXED_SLUG_MIN_RANDOM
+          return anonymizable_random_hex(room) if room >= MIN_SLUG_RANDOM
+
+          raise ArgumentError, anonymizable_slug_room_message(room)
+        end
+
+        # Macro-time guard, re-run by Sluggable's sluggable_by so either
+        # declaration order is covered: a slug limit too short for a random
+        # replacement would otherwise only surface when erasure is attempted.
+        def anonymizable_validate_slug_room!
+          return unless anonymizable_rewrites_slug?
+
+          room = anonymizable_slug_room
+          raise ArgumentError, anonymizable_slug_room_message(room) if room && room < MIN_SLUG_RANDOM
         end
 
         # Anonymize every matching record that isn't already stamped, in one
@@ -139,6 +198,49 @@ module ConcernsOnRails
         end
 
         private
+
+        # nil is rejected rather than read as :auto — omit the option for the
+        # default. Explicit values persist across later calls that omit it.
+        def anonymizable_apply_slug_option(slug)
+          return if slug.equal?(UNSET)
+          unless SLUG_MODES.any? { |mode| mode.equal?(slug) }
+            raise ArgumentError, "#{LABEL}: slug: must be :auto, true or false (got #{slug.inspect})"
+          end
+
+          self.anonymizable_slug = slug
+        end
+
+        # Every declared slug source, columns or not (see
+        # anonymizable_slug_source_columns).
+        def anonymizable_slug_sources
+          return Array(friendly_id_config.base).flatten unless respond_to?(:sluggable_field)
+
+          sluggable_candidates ? Array(sluggable_candidates).flatten : [sluggable_field]
+        end
+
+        def anonymizable_random_hex(length)
+          SecureRandom.hex((length + 1) / 2)[0, length]
+        end
+
+        # The tighter of the slug column's `limit` and Sluggable's max_length.
+        def anonymizable_slug_room
+          limits = []
+          limits << sluggable_max_length if respond_to?(:sluggable_max_length)
+          limits << anonymizable_slug_column_limit
+          limits.compact.min
+        end
+
+        def anonymizable_slug_column_limit
+          columns_hash[friendly_id_config.slug_column.to_s]&.limit
+        rescue StandardError
+          nil
+        end
+
+        def anonymizable_slug_room_message(room)
+          "#{LABEL}: the slug allows only #{room} characters, but an anonymized slug needs at least " \
+            "#{MIN_SLUG_RANDOM} characters to stay random and unique — widen the slug column / max_length:, " \
+            "or pass slug: false"
+        end
 
         def anonymizable_apply_options(stamp, clear_audit_trail)
           # `.presence` (not `&.`): `stamp: false` must resolve to nil, and
@@ -259,15 +361,16 @@ module ConcernsOnRails
       # presets learn only nil-or-not (for an encrypted field, from the stored
       # ciphertext — nothing is decrypted), and only :hash / callables read the
       # value itself. When that value is ciphertext that will not decrypt, the
-      # field falls back to UNREADABLE_FALLBACK rather than blocking erasure
-      # (or rolling back an anonymize_all! batch). The DecryptionError is
+      # field falls back to a fresh random value (UNREADABLE_FALLBACK_BYTES)
+      # rather than blocking erasure (or rolling back an anonymize_all! batch). The DecryptionError is
       # swallowed deliberately and never re-raised with the value in it.
       def anonymizable_erased_value(field, strategy)
         return nil if strategy.equal?(PRESETS[:nullify])
         return strategy.call(anonymizable_value_present?(field) ? PRESENT : nil) if PRESENCE_ONLY_PRESETS.include?(strategy)
 
         value, readable = anonymizable_read_old_value(field)
-        return UNREADABLE_FALLBACK unless readable
+        # Cast through the field's type like any strategy output.
+        return SecureRandom.hex(UNREADABLE_FALLBACK_BYTES) unless readable
 
         anonymizable_apply_strategy(strategy, value)
       end
@@ -303,37 +406,20 @@ module ConcernsOnRails
         self.class.respond_to?(:encryptable_rules) && self.class.encryptable_rules.key?(field.to_sym)
       end
 
-      # Sluggable: a slug generated from an erased field IS that field's PII
+      # A slug generated from an erased field IS that field's PII
       # ("jane-smith"), and update_columns skips the callbacks that would
-      # regenerate it. When the slug may derive from an anonymized field, add a
-      # random, non-identifying (and, at 128 bits, unique) slug to the same
-      # UPDATE. Returns true when friendly_id history rows must go too.
+      # regenerate it. When the slug is rewritten (see the class method
+      # anonymizable_rewrites_slug?), a random non-identifying slug joins the
+      # same UPDATE. Returns true when friendly_id history rows must go too.
       def anonymizable_slug_payload!(payload)
-        return false unless anonymizable_slug_from_erased_field?
+        klass = self.class
+        return false unless klass.anonymizable_rewrites_slug?
 
-        config = self.class.friendly_id_config
+        config = klass.friendly_id_config
         slug_column = config.slug_column.to_sym
         # An explicit `anonymizable :slug, with: ...` rule wins.
-        payload[slug_column] = "#{ANONYMIZED_SLUG_PREFIX}#{SecureRandom.hex(16)}" unless payload.key?(slug_column)
+        payload[slug_column] = klass.anonymizable_random_slug unless payload.key?(slug_column)
         config.uses?(:history) && respond_to?(:slugs)
-      end
-
-      # The slug's sources: the sluggable field plus every candidate. A
-      # candidate that is a Proc or a method (not a column) could read any
-      # field, so it counts as derived — erring toward a rewritten URL over a
-      # URL that still spells the erased name.
-      def anonymizable_slug_from_erased_field?
-        klass = self.class
-        return false unless klass.respond_to?(:sluggable_field) && klass.respond_to?(:friendly_id_config)
-
-        erased = klass.anonymizable_rules.keys
-        sources = [klass.sluggable_field, *Array(klass.sluggable_candidates).flatten]
-        sources.any? do |source|
-          next true unless source.is_a?(Symbol) || source.is_a?(String)
-
-          name = source.to_sym
-          erased.include?(name) || !klass.column_names.include?(name.to_s)
-        end
       end
 
       # friendly_id's history table keeps every earlier slug — each one as

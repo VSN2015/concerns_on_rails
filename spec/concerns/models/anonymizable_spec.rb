@@ -378,7 +378,7 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
         expect(record.secret).to be_nil
       end
 
-      it "falls back to [REDACTED] for a value-dependent strategy (:hash, a callable)" do
+      it "falls back to a fresh random 64-hex value for a value-dependent strategy (:hash, a callable)" do
         seen = []
         recorder = lambda do |value|
           seen << value
@@ -389,7 +389,7 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
           record = eraser(strategy).find(id)
 
           expect { record.anonymize! }.not_to raise_error
-          expect(record.secret).to eq("[REDACTED]")
+          expect(record.secret).to match(/\A\h{64}\z/)
           expect(record.anonymized?).to be(true)
         end
         # The callable is never handed a value it cannot have read.
@@ -402,9 +402,35 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
         record = eraser(:hash).find(id)
 
         record.anonymize!
-        expect(record.secret).to eq("[REDACTED]")
+        expect(record.secret).to match(/\A\h{64}\z/)
       ensure
         ConcernsOnRails.encryption.raise_on_decrypt_error = true
+      end
+
+      it "gives each unreadable row its own random fallback, so a unique blind index survives anonymize_all!" do
+        ActiveRecord::Base.connection.add_index :anon_users, :email_bidx, unique: true
+        bidx_writer = model_class do
+          include ConcernsOnRails::Models::Encryptable
+
+          encryptable :email, key: "the-key-that-wrote-the-row", blind_index: true
+        end
+        bidx_eraser = model_class do
+          include ConcernsOnRails::Models::Encryptable
+
+          encryptable :email, key: "a-different-key-that-cannot-read-it", blind_index: true
+          anonymizable :email, with: :hash
+        end
+        bidx_writer.create!(email: "one@real.example")
+        bidx_writer.create!(email: "two@real.example")
+        readable = bidx_eraser.create!(email: "three@real.example")
+
+        expect(bidx_eraser.anonymize_all!).to eq(3)
+        expect(bidx_eraser.not_anonymized.count).to eq(0)
+        expect(bidx_eraser.find(readable.id).email).to eq(Digest::SHA256.hexdigest("three@real.example"))
+        fallbacks = bidx_eraser.where.not(id: readable.id).map(&:email)
+        expect(fallbacks).to all(match(/\A\h{64}\z/))
+        expect(fallbacks.uniq.size).to eq(2)
+        expect(bidx_eraser.pluck(:email_bidx).uniq.size).to eq(3)
       end
 
       it "does not let one undecryptable row roll back anonymize_all!" do
@@ -414,7 +440,7 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
 
         expect(eraser(:hash).anonymize_all!).to eq(2)
         expect(good_writer.find(good.id).secret).to eq(Digest::SHA256.hexdigest("readable"))
-        expect(good_writer.find(bad.id).secret).to eq("[REDACTED]")
+        expect(good_writer.find(bad.id).secret).to match(/\A\h{64}\z/)
       end
     end
 
@@ -579,6 +605,162 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
       expect(slugs).to all(match(/\Aanon-\h{32}\z/))
       expect(slugs.uniq.size).to eq(2)
       expect(FriendlyId::Slug.where(sluggable_id: [a.id, b.id])).to be_empty
+    end
+
+    describe "slug: option" do
+      it "defaults to :auto, which follows the candidates' columns rather than the sluggable field" do
+        # candidates: replace the sluggable field as the slug's source, so an
+        # erased :name does not make the email-derived slug PII.
+        klass = slugged_class(sluggable: [:name, { candidates: [:email] }]) { anonymizable :name, with: :redact }
+        record = klass.create!(name: "Jane Smith", email: "public-handle")
+        expect(record.slug).to eq("public-handle")
+
+        record.anonymize!
+        expect(record.slug).to eq("public-handle")
+      end
+
+      it ":auto does not guess through a Proc or a method candidate" do
+        klass = slugged_class(sluggable: [:name, { candidates: [:public_title, -> { "fixed-title" }] }]) do
+          anonymizable :name, with: :redact
+          define_method(:public_title) { "product-page" }
+        end
+        record = klass.create!(name: "Jane Smith")
+        expect(record.slug).to eq("product-page")
+
+        record.anonymize!
+        expect(record.slug).to eq("product-page")
+      end
+
+      it "slug: true always rewrites — the switch for slugs derived from PII through a method or Proc" do
+        klass = slugged_class(sluggable: [:name, { candidates: [:full_name], history: true }]) do
+          anonymizable :name, with: :redact, slug: true
+          define_method(:full_name) { name }
+        end
+        record = klass.create!(name: "Jane Smith")
+        expect(record.slug).to eq("jane-smith")
+
+        record.anonymize!
+        expect(record.slug).to match(/\Aanon-\h{32}\z/)
+        expect(FriendlyId::Slug.where(sluggable_id: record.id)).to be_empty
+      end
+
+      it "slug: false never rewrites, even when the source column is erased" do
+        klass = slugged_class { anonymizable :name, with: :redact, slug: false }
+        record = klass.create!(name: "Jane Smith")
+        record.anonymize!
+        expect(record.slug).to eq("jane-smith")
+      end
+
+      it "keeps an explicit slug: across later macro calls that omit it" do
+        klass = slugged_class do
+          anonymizable :name, with: :redact, slug: false
+          anonymizable :email, with: :email
+        end
+        record = klass.create!(name: "Jane Smith", email: "jane@example.com")
+        record.anonymize!
+        expect(record.slug).to eq("jane-smith")
+      end
+
+      it "rejects anything but :auto, true or false at macro time (nil included)" do
+        [nil, "", :yes, "true", 1].each do |bad|
+          expect { model_class { anonymizable :name, with: :redact, slug: bad } }
+            .to raise_error(ArgumentError, /slug: must be :auto, true or false/)
+        end
+      end
+    end
+
+    describe "slug length" do
+      it "fits sluggable_by max_length:, dropping the prefix when it will not fit" do
+        klass = slugged_class(sluggable: [:name, { max_length: 12 }]) { anonymizable :name, with: :redact }
+        a = klass.create!(name: "Jane Smith")
+        b = klass.create!(name: "John Doe")
+        a.anonymize!
+        b.anonymize!
+
+        expect(a.slug).to match(/\A\h{12}\z/)
+        expect(b.slug).to match(/\A\h{12}\z/)
+        expect(a.slug).not_to eq(b.slug)
+      end
+
+      it "fits the slug column's limit (asserted explicitly — SQLite does not enforce it)" do
+        ActiveRecord::Base.connection.change_column :anon_users, :slug, :string, limit: 16
+        klass = slugged_class { anonymizable :name, with: :redact }
+        record = klass.create!(name: "Jane Smith")
+        record.anonymize!
+
+        # Too tight for the prefix plus 16 random characters: all 16 are random.
+        expect(record.slug.length).to be <= 16
+        expect(record.slug).to match(/\A\h{16}\z/)
+      end
+
+      it "keeps the anon- prefix while at least 16 random characters still fit" do
+        ActiveRecord::Base.connection.change_column :anon_users, :slug, :string, limit: 24
+        klass = slugged_class { anonymizable :name, with: :redact }
+        record = klass.create!(name: "Jane Smith")
+        record.anonymize!
+
+        expect(record.slug).to match(/\Aanon-\h{19}\z/)
+      end
+
+      it "raises at macro time when the limit leaves room for fewer than 8 random characters" do
+        ActiveRecord::Base.connection.change_column :anon_users, :slug, :string, limit: 7
+        expect { slugged_class { anonymizable :name, with: :redact } }
+          .to raise_error(ArgumentError, /allows only 7 characters.*at least 8 characters/)
+      end
+
+      it "raises from sluggable_by when anonymizable was declared first" do
+        klass = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          anonymizable :name, with: :redact # fine so far: no limit on the column
+        end
+        stub_const("AnonLateSlugged", klass)
+
+        expect { klass.sluggable_by :name, max_length: 5 }
+          .to raise_error(ArgumentError, /allows only 5 characters.*at least 8 characters/)
+      end
+
+      it "does not check the length when the slug is never rewritten (slug: false)" do
+        ActiveRecord::Base.connection.change_column :anon_users, :slug, :string, limit: 7
+        expect { slugged_class { anonymizable :name, with: :redact, slug: false } }.not_to raise_error
+      end
+    end
+
+    describe "a friendly_id model without the gem's Sluggable" do
+      def plain_friendly_class(name = "AnonPlainFriendly", history: false, &block)
+        klass = model_class do
+          extend FriendlyId
+
+          friendly_id :name, use: history ? %i[slugged history] : :slugged
+        end
+        stub_const(name, klass)
+        klass.class_eval(&block) if block
+        klass
+      end
+
+      it ":auto rewrites when friendly_id's base is an anonymized column, history included" do
+        klass = plain_friendly_class(history: true) { anonymizable :name, with: :redact }
+        record = klass.create!(name: "Jane Smith")
+        expect(record.slug).to eq("jane-smith")
+
+        record.anonymize!
+        expect(record.slug).to match(/\Aanon-\h{32}\z/)
+        expect(FriendlyId::Slug.where(sluggable_id: record.id)).to be_empty
+      end
+
+      it "slug: true rewrites a base that is a method" do
+        klass = model_class do
+          extend FriendlyId
+
+          friendly_id :display_name, use: :slugged
+          define_method(:display_name) { name }
+          anonymizable :name, with: :redact, slug: true
+        end
+        stub_const("AnonPlainMethodFriendly", klass)
+        record = klass.create!(name: "Jane Smith")
+        record.anonymize!
+        expect(record.slug).to match(/\Aanon-\h{32}\z/)
+      end
     end
   end
 end
