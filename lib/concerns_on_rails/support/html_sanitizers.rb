@@ -1,3 +1,4 @@
+require "cgi/escape"
 require "active_support/concern"
 
 begin
@@ -59,10 +60,6 @@ module ConcernsOnRails
         @link ||= namespace::LinkSanitizer.new
       end
 
-      # The entities FullSanitizer's text serializer emits, besides &lt; / &gt;
-      # (HTML5 emits &amp; and &nbsp;; the quote forms cover the HTML4 path).
-      PLAIN_TEXT_DECODED = { "nbsp" => " ", "quot" => '"', "#34" => '"', "apos" => "'", "#39" => "'" }.freeze
-
       # The HTML5 named references a parser decodes WITHOUT a trailing ";"
       # (WHATWG's legacy list): "&copyright" reads back as "©right".
       LEGACY_REFERENCES = %w[
@@ -74,19 +71,26 @@ module ConcernsOnRails
         sup1 sup2 sup3 szlig thorn times uacute ucirc ugrave uml uuml yacute yen yuml
       ].freeze
 
-      # What, after a bare "&", a parser may read back as a character
-      # reference: anything numeric-looking ("#" — the HTML4/libxml2 parser
-      # swallows even a digitless "&#"), any well-formed named one (the
-      # longest HTML5 name is 31 characters), or a legacy semicolon-less
-      # name. A static, bounded lookahead and deliberately an
-      # over-approximation: calling a literal "&" a reference only keeps its
-      # "&amp;" encoded, which is still stable, whereas the reverse would let
-      # the stored value change on the next save.
-      CHARACTER_REFERENCE = /#|[A-Za-z][A-Za-z0-9]{1,31};|#{Regexp.union(LEGACY_REFERENCES).source}/
+      # LEGACY_REFERENCES as one regex trie, grouped by first letter so the
+      # engine rejects a non-candidate on its first character instead of
+      # trying 106 alternatives in turn (a flat Regexp.union made each "&"
+      # slow: 1 MB of "&" took ~7 s). Longest alternatives first, since the
+      # names are matched as a PREFIX ("&copyright" reads back as "©right").
+      LEGACY_REFERENCE_TRIE = LEGACY_REFERENCES.group_by { |name| name[0] }.sort.map do |first, names|
+        rests = names.map { |name| Regexp.escape(name[1..]) }.sort_by { |rest| -rest.length }
+        "#{first}(?:#{rests.join('|')})"
+      end.join("|").freeze
 
-      # One linear pass: the decodable entities, plus an "&amp;" only when
-      # what follows could not turn the bare "&" back into a reference.
-      PLAIN_TEXT_ENTITY = /&(nbsp|quot|apos|#39|#34);|&amp;(?!#{CHARACTER_REFERENCE.source})/
+      # An "&" in the plain text that a parser could read back as a character
+      # reference, so it must be stored as "&amp;": followed by "#" (the
+      # HTML4/libxml2 parser swallows even a digitless "&#"), by a
+      # well-formed "name;" (the longest HTML5 name is 31 characters), or by
+      # a semicolon-less legacy name. The leading [#A-Za-z] lookahead rejects
+      # every other "&" on one character. Static and bounded, and
+      # deliberately an over-approximation: calling a literal "&" a
+      # reference only keeps it encoded, which is still stable, whereas the
+      # reverse would let the stored value change on the next save.
+      REFERENCE_AMPERSAND = /&(?=[#A-Za-z])(?=#|[A-Za-z][A-Za-z0-9]{1,31};|#{LEGACY_REFERENCE_TRIE})/
 
       # Removes every tag like #full, but returns PLAIN TEXT to store rather
       # than HTML-escaped text: "<b>Tom</b> & Jerry" => "Tom & Jerry", where
@@ -95,19 +99,31 @@ module ConcernsOnRails
       # so the value can never turn into markup, even when rendered with raw.
       #
       # The result re-sanitizes to itself (idempotent on re-save and in
-      # sanitize_all!): an "&amp;" is only decoded when the bare "&" could not
-      # be read back as a character reference — "R&amp;D" => "R&D", but a
-      # literal "&amp;copy" stays encoded rather than becoming "©" next save.
-      # Linear time: one parse, then one regex pass with a bounded lookahead
-      # (this used to re-parse per ampersand, a DoS on "&a" * N). A carriage
-      # return (only reachable through "&#13;") is normalized to "\n" up front,
-      # as the parser would do to it on the next save.
+      # sanitize_all!): an "&" is only re-encoded when it could be read back
+      # as a character reference — "R&amp;D" => "R&D", but a literal
+      # "&amp;copy" stays encoded rather than becoming "©" next save.
+      #
+      # Linear, and cheap per character: one parse, then the sanitizer's
+      # escaping is undone in C (CGI.unescapeHTML, after &nbsp;, which it
+      # does not know) and only what must stay encoded is re-encoded — "<",
+      # ">" and REFERENCE_AMPERSAND, via plain substitutions (no Ruby block
+      # per match). Text without "&" takes String#encode's C escaper. A
+      # carriage return is normalized to "\n", as the parser would do to it
+      # on the next save.
       def plain_text(value)
-        full.sanitize(value).to_s.gsub(PLAIN_TEXT_ENTITY) do
-          entity = Regexp.last_match(1)
-          entity ? PLAIN_TEXT_DECODED.fetch(entity) : "&"
-        end.gsub(/\r\n?/, "\n")
+        escaped = full.sanitize(value).to_s
+        escaped = escaped.gsub("&nbsp;", " ") if escaped.include?("&nbsp;")
+        text = CGI.unescapeHTML(escaped)
+        text = text.include?("&") ? reencode(text) : text.encode(xml: :text)
+        text.include?("\r") ? text.gsub(/\r\n?/, "\n") : text
       end
+
+      def reencode(text)
+        text = text.gsub(REFERENCE_AMPERSAND, "&amp;")
+        text = text.gsub("<", "&lt;") if text.include?("<")
+        text.include?(">") ? text.gsub(">", "&gt;") : text
+      end
+      private_class_method :reencode
     end
   end
 end

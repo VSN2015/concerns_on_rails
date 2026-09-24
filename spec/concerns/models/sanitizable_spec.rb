@@ -240,6 +240,18 @@ describe ConcernsOnRails::Models::Sanitizable do
         expect(elapsed).to be < 1.0
       end
 
+      # The legacy-name alternation in the lookahead made each "&" slow even
+      # though the pass was linear: 1 MB of "&" took ~7 s.
+      it "sanitizes a megabyte of bare ampersands quickly" do
+        payload = "&" * 1_000_000
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        result = ConcernsOnRails::Support::HtmlSanitizers.plain_text(payload)
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+        expect(result).to eq(payload)
+        expect(elapsed).to be < 2.0
+      end
+
       it "sanitize_all! stores the same plain text and repairs rows written double-escaped" do
         legacy = SanitizableArticle.create!(title: "x")
         legacy.update_columns(title: "Tom &amp; Jerry")
