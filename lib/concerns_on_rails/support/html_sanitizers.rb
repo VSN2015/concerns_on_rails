@@ -58,6 +58,41 @@ module ConcernsOnRails
       def link
         @link ||= namespace::LinkSanitizer.new
       end
+
+      # The entities FullSanitizer's text serializer emits, besides &lt; / &gt;
+      # (HTML5 emits &amp; and &nbsp;; the quote forms cover the HTML4 path).
+      PLAIN_TEXT_ENTITY = /&(amp|nbsp|quot|apos|#39|#34);/
+      PLAIN_TEXT_DECODED = { "nbsp" => " ", "quot" => '"', "#34" => '"', "apos" => "'", "#39" => "'" }.freeze
+      # What may follow a bare "&" and be read back as a character reference.
+      CHARACTER_REFERENCE_TAIL = /\A[#A-Za-z0-9]+;?/
+
+      # Removes every tag like #full, but returns PLAIN TEXT to store rather
+      # than HTML-escaped text: "<b>Tom</b> & Jerry" => "Tom & Jerry", where
+      # #full gives "Tom &amp; Jerry" (which output escaping would show as
+      # "Tom &amp;amp; Jerry"). &lt; and &gt; are deliberately KEPT encoded,
+      # so the value can never turn into markup, even when rendered with raw.
+      #
+      # The result re-sanitizes to itself (idempotent on re-save and in
+      # sanitize_all!): an "&amp;" is only decoded when the bare "&" could not
+      # be read back as a character reference — "R&amp;D" => "R&D", but a
+      # literal "&amp;copy" stays encoded rather than becoming "©" next save.
+      def plain_text(value)
+        full.sanitize(value).to_s.gsub(PLAIN_TEXT_ENTITY) do
+          match = Regexp.last_match
+          next PLAIN_TEXT_DECODED.fetch(match[1]) unless match[1] == "amp"
+
+          literal_ampersand?(match.post_match) ? "&" : "&amp;"
+        end
+      end
+
+      # True when "&" followed by `rest` parses back as a literal ampersand.
+      def literal_ampersand?(rest)
+        tail = rest[CHARACTER_REFERENCE_TAIL]
+        return true unless tail
+
+        full.sanitize("&#{tail}").to_s == "&amp;#{tail}"
+      end
+      private_class_method :literal_ampersand?
     end
   end
 end

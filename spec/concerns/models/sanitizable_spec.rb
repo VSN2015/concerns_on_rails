@@ -157,6 +157,84 @@ describe ConcernsOnRails::Models::Sanitizable do
 
       expect(article.title).to be_nil
     end
+
+    # FullSanitizer returns HTML-escaped text, so `:strip, on: :write` used to
+    # STORE "Tom &amp; Jerry" — which Rails' output escaping then turned into
+    # "Tom &amp;amp; Jerry" on the page. The write-mode value is plain text:
+    # entities are decoded, EXCEPT &lt; / &gt;, which stay encoded so a later
+    # `raw` render can never produce markup.
+    context "when :strip stores plain text" do
+      before do
+        class SanitizableArticle < TestModel
+          self.table_name = "sanitizable_articles"
+          include ConcernsOnRails::Models::Sanitizable
+
+          sanitizable :title, with: :strip, on: :write
+          sanitizable :summary, with: :strip
+        end
+      end
+
+      def stored(value)
+        SanitizableArticle.create!(title: value).reload.title
+      end
+
+      it "decodes entities the sanitizer introduced" do
+        expect(stored("<b>Tom</b> & Jerry")).to eq("Tom & Jerry")
+        expect(stored("Tom &amp; Jerry")).to eq("Tom & Jerry")
+        expect(stored("say \"hi\" it's")).to eq("say \"hi\" it's")
+        expect(stored("a&nbsp;b &eacute;")).to eq("a b é")
+      end
+
+      it "keeps angle brackets encoded so the stored value can never become markup" do
+        expect(stored("a < b > c")).to eq("a &lt; b &gt; c")
+        expect(stored("&lt;script&gt;alert(1)&lt;/script&gt;")).to eq("&lt;script&gt;alert(1)&lt;/script&gt;")
+        expect(stored("&#60;img src=x onerror=alert(1)&#x3E;")).to eq("&lt;img src=x onerror=alert(1)&gt;")
+        expect(stored("<scr<script>ipt>alert(1)</script>")).not_to match(/[<>]/)
+      end
+
+      it "decodes a bare ampersand but keeps one that would read back as a character reference" do
+        expect(stored("R&amp;D, AT&T")).to eq("R&D, AT&T")
+        # The text is literally "&copy;" / "&lt;b&gt;": decoding the &amp; would
+        # turn it into "©" / markup-looking text on the next save.
+        expect(stored("&amp;copy; 2024")).to eq("&amp;copy; 2024")
+        expect(stored("&amp;lt;b&amp;gt;")).to eq("&amp;lt;b&amp;gt;")
+      end
+
+      it "is idempotent across re-saves" do
+        inputs = ["<i>Tom</i> & Jerry < 3", "R&D", "&amp;copy2024", "&amp;amp;", "x&nbsp;y", "&amp;#60;"]
+        inputs.each do |input|
+          article = SanitizableArticle.create!(title: input)
+          first = article.reload.title
+
+          article.title = "#{first} "
+          article.title = first
+          article.save!
+
+          expect(article.reload.title).to eq(first), "#{input.inspect} drifted"
+          expect(SanitizableArticle.sanitize_all!).to eq(0), "#{input.inspect} drifted in sanitize_all!"
+        end
+        expect(SanitizableArticle.first.title).to eq("Tom & Jerry &lt; 3")
+      end
+
+      it "sanitize_all! stores the same plain text and repairs rows written double-escaped" do
+        legacy = SanitizableArticle.create!(title: "x")
+        legacy.update_columns(title: "Tom &amp; Jerry")
+        raw = SanitizableArticle.create!(title: "y")
+        raw.update_columns(title: "<b>Tom</b> & Jerry")
+
+        expect(SanitizableArticle.sanitize_all!).to eq(2)
+        expect(legacy.reload.title).to eq("Tom & Jerry")
+        expect(raw.reload.title).to eq("Tom & Jerry")
+        expect(SanitizableArticle.sanitize_all!).to eq(0)
+      end
+
+      it "leaves the on: :read reader's HTML output unchanged" do
+        article = SanitizableArticle.new(summary: "<b>Tom</b> & Jerry")
+
+        expect(article.sanitized_summary).to eq("Tom &amp; Jerry")
+        expect(article.sanitized_attributes["summary"]).to eq("Tom &amp; Jerry")
+      end
+    end
   end
 
   describe "non-string handling" do

@@ -31,6 +31,9 @@ module ConcernsOnRails
     # Markdown, math, or anything where `<` / `>` are legitimate. It is also
     # bypassed by `update_column` / `update_all` / raw SQL, which skip
     # callbacks. The non-destructive `on: :read` default is preferred.
+    # `:strip` on write stores PLAIN TEXT ("Tom & Jerry", not "Tom &amp;
+    # Jerry"), except that &lt; / &gt; stay encoded so the value can never
+    # become markup — see Support::HtmlSanitizers.plain_text.
     #
     # Presets (the `with:` argument):
     #   :strip      — remove all tags, keep inner text (the default)
@@ -55,12 +58,21 @@ module ConcernsOnRails
         none: ->(v) { v }
       }.freeze
 
+      # What a STORED rewrite (on: :write, sanitize_all!) runs for :strip: the
+      # value becomes plain text — entities decoded, except &lt; / &gt;, which
+      # stay encoded so a later `raw` render cannot produce markup. PRESETS[:strip]
+      # (HTML-escaped text) is still what the on: :read reader and sanitized
+      # serialization return.
+      STRIP_PLAIN_TEXT = ->(v) { v.is_a?(String) ? ConcernsOnRails::Support::HtmlSanitizers.plain_text(v) : v }
+
       LABEL = "ConcernsOnRails::Models::Sanitizable".freeze
       # What `sanitized:` accepts besides `true` — a field or a list of them.
       SANITIZED_OPTION_TYPES = [Symbol, String, Array].freeze
 
       included do
-        # field => { sanitizer: <lambda>, on: :read|:write }
+        # field => { sanitizer: <lambda>, writer: <lambda>, on: :read|:write } —
+        # :sanitizer feeds the reader and sanitized serialization, :writer every
+        # stored rewrite (on: :write, sanitize_all!).
         class_attribute :sanitizable_rules, instance_accessor: false, default: {}
         before_validation :apply_sanitizations
       end
@@ -80,11 +92,12 @@ module ConcernsOnRails
           end
 
           sanitizer = resolve_sanitizer(with)
+          writer = with == :strip ? STRIP_PLAIN_TEXT : sanitizer
           ensure_columns!("ConcernsOnRails::Models::Sanitizable", fields)
 
           fields.each do |field|
             key = field.to_sym
-            self.sanitizable_rules = sanitizable_rules.merge(key => { sanitizer: sanitizer, on: on })
+            self.sanitizable_rules = sanitizable_rules.merge(key => { sanitizer: sanitizer, writer: writer, on: on })
 
             # Non-destructive default: a clean reader, with the raw column intact.
             define_method("sanitized_#{field}") { sanitizer.call(self[key]) } if on == :read
@@ -254,7 +267,7 @@ module ConcernsOnRails
           value = self[field]
           next if value.nil?
 
-          self[field] = rule[:sanitizer].call(value) # plain String, never a SafeBuffer
+          self[field] = rule[:writer].call(value) # plain String, never a SafeBuffer
         end
       end
 
@@ -265,7 +278,7 @@ module ConcernsOnRails
           value = self[field]
           next if value.nil?
 
-          sanitized = self.class.sanitizable_rules.fetch(field)[:sanitizer].call(value)
+          sanitized = self.class.sanitizable_rules.fetch(field)[:writer].call(value)
           next if sanitized == value
 
           changes[field] = sanitized
