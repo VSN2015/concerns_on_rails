@@ -50,8 +50,8 @@ maskable :field_one, :field_two, with: :last4, mask: "•"
 | Preset | Example input | Example output | Notes |
 |--------|---------------|----------------|-------|
 | `:all` | `"secret"` | `"******"` | Replaces every character. This is the default when `with:` is omitted. |
-| `:email` | `"john.doe@example.com"` | `"j*******@example.com"` | Keeps the first character of the local part and the full domain. Strings without `@` are returned unchanged. |
-| `:phone` | `"+1 (415) 555-2671"` | `"***-2671"` | Extracts all digits, keeps the last four. Returns the value unchanged if no digits are found. |
+| `:email` | `"john.doe@example.com"` | `"j*******@example.com"` | Keeps the first character of the local part and the full domain. Fails closed: a string without `@` gets the full `:all` mask. |
+| `:phone` | `"+1 (415) 555-2671"` | `"***-2671"` | Extracts all (ASCII) digits, keeps the last four. Fails closed: with four or fewer digits (including none) the whole value gets the `:all` mask, since keeping four would reveal it. |
 | `:credit_card` | `"4242424242424242"` | `"**** **** **** 4242"` | Extracts all digits, keeps the last four. Falls back to `:all` masking when four or fewer digits are present. |
 | `:last4` | `"123456789"` | `"*****6789"` | Keeps the last four characters; fully masks values of four characters or fewer. |
 
