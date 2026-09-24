@@ -538,6 +538,40 @@ describe ConcernsOnRails::Controllers::Idempotentable do
       expect(c.response.status).to eq(201)
     end
 
+    # A holds the key -> B's claim fails -> A releases (B reads nil) -> C
+    # claims -> B's retry fails. That is a live store with a request in
+    # flight, not an outage: B must read again and answer 409.
+    it "reads again after a failed retry, so a key re-claimed in between answers 409, not 503" do
+      c_claim = { "state" => "in_flight", "fingerprint" => "c-fingerprint", "claimed_at" => Time.now.to_i }
+      scripted = Class.new do
+        def initialize(second_read)
+          @reads = [nil, second_read]
+        end
+
+        def write(_key, _value, options = {})
+          options[:unless_exist] ? nil : true # both of B's claims lose
+        end
+
+        def read(_key)
+          @reads.shift
+        end
+
+        def delete(_key)
+          nil
+        end
+      end.new(c_claim)
+      klass = idempotent_class(scripted) do
+        idempotent_actions :create
+
+        def idempotency_fingerprint = "c-fingerprint"
+      end
+      b = instance(klass, key: "k1")
+
+      expect(perform(b)).to eq(0)
+      expect(b.rendered[:status]).to eq(:conflict)
+      expect(b.rendered[:json][:error][:code]).to eq("idempotency_conflict")
+    end
+
     it "retries the claim once, so a lock that expired between write and read is not mistaken for an outage" do
       racing = ExpiredBetweenStore.new
       klass = idempotent_class(racing) { idempotent_actions :create }

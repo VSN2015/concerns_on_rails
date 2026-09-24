@@ -252,6 +252,14 @@ module ConcernsOnRails
           return idempotency_execute_and_store(store, cache_key, rule, fingerprint, &)
         end
 
+        # ...unless someone else re-claimed the freed key in between: read
+        # again, and only nil on BOTH reads counts as an outage. Residual
+        # window: a key claimed AND released again between our two reads
+        # still reads as an outage — a spurious, retry-safe 503 under
+        # :reject, a run without a claim under :proceed.
+        record = store.read(cache_key)
+        return idempotency_resolve_existing(record, rule, fingerprint) unless record.nil?
+
         idempotency_store_unavailable(rule, &)
       end
 
