@@ -136,6 +136,73 @@ describe ConcernsOnRails::Support::HookedWrite do
     expect(item.state_changed?).to be(true)
   end
 
+  # The restore: snapshot used to read every attribute through its type, which
+  # decrypts an Encryptable field — so a row whose ciphertext no longer
+  # decrypts (rotated-away key) could not be written at all, not even erased
+  # by Anonymizable. The snapshot must never abort the write.
+  describe "an Encryptable field that cannot be decrypted" do
+    before do
+      ConcernsOnRails.encryption.key = "hooked-write-original-key"
+      ConcernsOnRails.encryption.raise_on_decrypt_error = true
+      ActiveRecord::Schema.define do
+        create_table :sealed_items, force: true do |t|
+          t.text :ssn
+          t.string :note
+        end
+      end
+      stub_const("SealedItem", Class.new(TestModel) do
+        self.table_name = "sealed_items"
+        include ConcernsOnRails::Models::Encryptable
+
+        encryptable :ssn
+
+        cattr_accessor :veto
+
+        def after_write
+          raise ActiveRecord::Rollback if self.class.veto
+        end
+      end)
+    end
+
+    after do
+      ConcernsOnRails.encryption.key = nil
+      ConcernsOnRails.encryption.raise_on_decrypt_error = true
+    end
+
+    def undecryptable_record
+      id = SealedItem.create!(ssn: "123-45-6789").id
+      ConcernsOnRails.encryption.key = "a-rotated-away-key"
+      SealedItem.find(id)
+    end
+
+    it "does not raise when the write succeeds" do
+      record = undecryptable_record
+
+      result = described_class.run(record, after: :after_write, restore: [:ssn]) do
+        record.update_columns(ssn: nil, note: "erased")
+      end
+
+      expect(result).to be(true)
+      expect(SealedItem.find(record.id).read_attribute_before_type_cast(:ssn)).to be_nil
+    end
+
+    it "does not raise on an aborted write and leaves the raw value exactly as loaded" do
+      record = undecryptable_record
+      raw = record.read_attribute_before_type_cast(:ssn)
+      SealedItem.veto = true
+
+      result = described_class.run(record, after: :after_write, restore: [:ssn]) do
+        record.update_columns(ssn: nil, note: "erased")
+      end
+
+      expect(result).to be(false)
+      expect(record.read_attribute_before_type_cast(:ssn)).to eq(raw)
+      expect(record.changed).not_to include("ssn")
+      expect(SealedItem.find(record.id).read_attribute_before_type_cast(:ssn)).to eq(raw)
+      expect { record.ssn }.to raise_error(ConcernsOnRails::Encryption::DecryptionError)
+    end
+  end
+
   it "skips a hook passed as nil" do
     expect(described_class.run(item, restore: [:state]) { item.update(state: "new") }).to be(true)
     expect(item.log).to be_nil

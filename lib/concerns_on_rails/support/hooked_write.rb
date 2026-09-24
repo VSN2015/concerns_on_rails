@@ -84,11 +84,20 @@ module ConcernsOnRails
       end
 
       # [name, value, dirty?, database value] per attribute, taken before
-      # anything is written.
+      # anything is written. Reading an attribute runs its type's
+      # deserializer, which can itself fail — an Encryptable field whose
+      # ciphertext no longer decrypts raises DecryptionError — and the
+      # snapshot must never abort the write (Anonymizable exists to erase
+      # exactly such a field). So a value that cannot be read is snapshotted
+      # RAW instead: [name, :raw, value_before_type_cast].
       def snapshot(record, names)
         names.map do |name|
           name = name.to_s
-          [name, record[name], record.attribute_changed?(name), record.attribute_in_database(name)]
+          begin
+            [name, record[name], record.attribute_changed?(name), record.attribute_in_database(name)]
+          rescue StandardError
+            [name, :raw, record.read_attribute_before_type_cast(name)]
+          end
         end
       end
 
@@ -96,12 +105,24 @@ module ConcernsOnRails
         return if record.frozen?
 
         snapshot.each do |name, value, dirty, in_database|
+          next restore_raw!(record, name, dirty) if value == :raw
+
           record[name] = dirty ? in_database : value
           record.send(:clear_attribute_changes, [name])
           record[name] = value if dirty
         end
       end
-      private_class_method :snapshot, :restore!, :identity_snapshot, :restore_identity!
+
+      # Put a raw snapshot back as a LAZY from-database value: nothing is
+      # decrypted, and the attribute ends exactly as it was loaded. A fresh
+      # from-database attribute is already clean, so changes are only
+      # cleared when something still reports one — on Rails 6.0
+      # clear_attribute_changes re-reads (and so decrypts) the value.
+      def restore_raw!(record, name, raw)
+        record.instance_variable_get(:@attributes).write_from_database(name, raw)
+        record.send(:clear_attribute_changes, [name]) if record.attribute_changed?(name)
+      end
+      private_class_method :snapshot, :restore!, :restore_raw!, :identity_snapshot, :restore_identity!
     end
   end
 end
