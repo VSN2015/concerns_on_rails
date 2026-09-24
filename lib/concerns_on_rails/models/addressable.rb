@@ -136,8 +136,14 @@ module ConcernsOnRails
           raise ArgumentError, "#{LABEL}: unknown address part(s): #{unknown.join(', ')}" if unknown.any?
 
           overrides = mapping.to_h { |part, column| [part.to_sym, column.to_sym] }
-          ensure_columns!(LABEL, overrides.values, types: :string)
-          DEFAULT_FIELDS.merge(overrides).select { |_part, column| column_names.include?(column.to_s) }
+          fields = DEFAULT_FIELDS.merge(overrides)
+          # false = schema unreachable (db:create, an unmigrated table,
+          # precompile): column_names would raise, so keep the full mapping —
+          # the class is re-evaluated against the real schema once it loads
+          # after the migration, exactly as ColumnGuard's skip intends.
+          return fields unless ensure_columns!(LABEL, overrides.values, types: :string)
+
+          fields.select { |_part, column| column_names.include?(column.to_s) }
         end
 
         def ensure_required_columns!

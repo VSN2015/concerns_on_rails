@@ -814,4 +814,19 @@ describe ConcernsOnRails::Models::Addressable do
         .to raise_error(ArgumentError, /with_address needs `addressable_by fingerprint:` \(a column to store address_fingerprint in\)/)
     end
   end
+
+  describe "unreachable schema (1.29 audit)" do
+    # db:create / a fresh db:migrate / assets:precompile: the table is not
+    # there yet, and the model must still load.
+    it "loads on a table that has not been migrated yet" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "addressable_not_migrated_yet"
+          include ConcernsOnRails::Models::Addressable
+
+          addressable_by
+        end
+      end.not_to raise_error
+    end
+  end
 end

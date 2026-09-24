@@ -996,4 +996,30 @@ describe ConcernsOnRails::Lockable do
       )
     end
   end
+
+  describe "unreachable schema (1.29 audit)" do
+    # db:create / a fresh db:migrate / assets:precompile: the table is not
+    # there yet, and the model must still load.
+    it "loads on a table that has not been migrated yet" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "lockable_not_migrated_yet"
+          include ConcernsOnRails::Models::Lockable
+
+          lockable_by max_attempts: 3
+        end
+      end.not_to raise_error
+    end
+
+    it "loads when the connection itself is unavailable" do
+      klass = Class.new(TestModel) do
+        self.table_name = "users"
+        include ConcernsOnRails::Models::Lockable
+      end
+      allow(klass).to receive(:table_exists?).and_raise(ActiveRecord::ConnectionNotEstablished)
+      allow(klass).to receive(:columns_hash).and_raise(ActiveRecord::ConnectionNotEstablished)
+
+      expect { klass.lockable_by(max_attempts: 3) }.not_to raise_error
+    end
+  end
 end
