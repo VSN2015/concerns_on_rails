@@ -46,7 +46,7 @@ end
 | `except:` | `Symbol` or `Array<Symbol>` | `nil` (no exclusions) | Skips the rule for the listed action names. Mutually exclusive with `only:`. |
 | `if:` | `Symbol` or callable | `nil` (always applies) | Per-request skip condition. A Symbol names a controller method; a callable is evaluated against the controller, arity-aware like Rails' own `before_action` conditionals — a zero-arity `Proc` is `instance_exec`'d (so `request`, `params`, `current_user` are in scope), while a one-argument `Proc` (`->(c) { c.staff? }`) or any other callable object receives the controller. The rule applies only when it returns truthy — no counter increment, no headers otherwise. Anything else raises `ArgumentError`. |
 | `unless:` | `Symbol` or callable | `nil` (always applies) | Inverse of `if:` — the rule is skipped when it returns truthy. May be combined with `if:`; both must pass. |
-| `name:` | `Symbol` or `String` | `"rule0"`, `"rule1"`, … | Embedded in the cache key to disambiguate counters when multiple rules share the same discriminator value. Defaults to `"rule#{index}"` based on declaration order. |
+| `name:` | `Symbol` or `String` | `"<DeclaringController>#rule0"`, `"…#rule1"`, … | The counter's identity, embedded in the cache key. Rules that share a name (and a discriminator value) share **one** budget — even across controllers, so an explicit name is how two endpoints pool a limit. The default combines the class that declared the rule with its declaration index (`"Api::BaseController#rule0"`), so two unrelated controllers never collide, while a rule declared on a parent stays one budget across all its subclasses. An anonymous class falls back to `"anonymous-<object_id>#rule<n>"` (per-process — give such rules a `name:`). |
 
 `throttleable_store` is a class-level attribute (not a macro argument). It must be assigned before the first throttled request and must support atomic increment-with-expiry — specifically `store.increment(key, 1, expires_in: seconds)`. `Rails.cache` backed by Memcache or Redis satisfies this contract. A store that returns `nil` from `#increment` for a missing key is handled: the concern falls back to `store.write(key, 1, expires_in: period)` and treats the count as `1`.
 
@@ -184,6 +184,10 @@ end
 - **Rules are inherited but not shared.** `throttleable_rules` is a `class_attribute`. Subclasses inherit the parent's rules array but appending a rule in a subclass does not mutate the parent class's array (the macro does `self.throttleable_rules = throttleable_rules + [rule]`).
 
 - **Counter key format.** Cache keys follow the pattern `throttleable:<name>:<discriminator>:<window_bucket>`. Changing `name:`, the discriminator, or the `period` effectively resets all existing counters for that rule.
+
+## Changed in the next release
+
+- **Default rule names include the declaring controller.** They used to be a bare `"rule#{index}"`, so the first unnamed rule of *every* controller wrote the same counter per client — browsing one endpoint spent another's budget. Default names are now `"<DeclaringController>#rule<n>"`. Explicit `name:` values are unchanged. Because the cache key changes, **default-named counters start from zero once on deploy.** The `rule` field of `rate_limited.concerns_on_rails` carries the new name.
 
 ## Changed in 1.22.0
 
