@@ -1794,7 +1794,7 @@ end
 | Param        | Default | Notes                                                    |
 |--------------|---------|----------------------------------------------------------|
 | `?cursor=`   | —       | The opaque token from `X-Next-Cursor` (omit for page 1)  |
-| `?per_page=` | `25`    | Capped at `max_per_page` (default 200; `0` disables the cap) |
+| `?per_page=` | `25`    | Capped at `max_per_page` (default 200; `0` disables the configured cap, but never the absolute 1,000,000 ceiling it shares with Paginatable) |
 | `?order=`    | first preset | With `order_presets:` only — selects a named ordering from the allow-list (unknown names → 400 `invalid_order_preset`) |
 
 **Response headers**: `X-Per-Page`, `X-Count` (rows on **this** page — totals are deliberately not computed), `X-Has-More`, `X-Next-Cursor` (only while more pages exist). With `bidirectional: true`: also `X-Has-Prev`, `X-Prev-Cursor`. Plus an RFC 8288 `Link` header: `rel="next"` carries the next-cursor URL, `rel="prev"` the prev-cursor URL (bidirectional), `rel="first"` the current URL with the cursor dropped (once a cursor is in play); `per_page` and the order preset are preserved. `cursor_paginate_by link_header: false` turns it off.
@@ -1837,14 +1837,30 @@ accepted as a suffix `?price_gte=10` or in bracket form `?price[gte]=10&price[lt
 | `gt` `gte` `lt` `lte` | `?price_gte=10`       | `price >= 10` (cast through the column type) |
 | `in` `not_in` | `?status_in=a,b` or `?status_in[]=a` | `status IN ('a','b')`         |
 | `null`   | `?deleted_at_null=true`            | `deleted_at IS NULL` (`false` → `IS NOT NULL`) |
-| `contains` `starts_with` | `?title_contains=rails` | `title LIKE '%rails%'` (wildcards escaped; ILIKE on PostgreSQL) |
+| `contains` `starts_with` | `?title_contains=rails` | `title LIKE '%rails%'` (wildcards escaped; ILIKE on PostgreSQL; string/text columns only) |
 
 Comparison values are cast the way ActiveRecord casts them (the column's own type), or through `type:`
 (any ActiveModel type name); `type:` also pre-casts the value handed to a `with:` lambda. Blank values
 are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`/`lte` value the type
 cannot represent (`?price_gte=abc`) matches **nothing** rather than silently comparing against `0` —
-nothing raises at request time. `contains`/`starts_with` are case-insensitive on PostgreSQL, MySQL and
-SQLite alike. For strict, validated contracts reach for `Permittable`.
+nothing raises at request time. For strict, validated contracts reach for `Permittable`.
+
+Numeric columns are read **strictly, never truncated**, in every form (direct `?stock=`, suffix, bracket,
+`in`/`not_in` lists):
+
+- An integer column takes whole numbers only — `?stock_gt=1e3` or `?stock=5.5` matches nothing instead
+  of running `stock > 1` / `stock = 5`.
+- A decimal finer than the column's scale compares exactly (`?price_gt=99.985` keeps the `99.99` row)
+  and equals nothing.
+- A value beyond what the column can hold is answered per operator: `gt`/`gte` above the maximum (or
+  `lt`/`lte` below the minimum) match nothing, the opposite direction matches every non-NULL row; for
+  equality it matches nothing (and drops out of an `in` list), for `not`/`not_in` it excludes nothing
+  but NULLs.
+
+`contains`/`starts_with` apply to string/text columns only; on any other column (integer, decimal,
+datetime, uuid, …) they match **nothing** — PostgreSQL has no `LIKE` for those types. Matching is
+case-insensitive on PostgreSQL (`ILIKE`), on SQLite (ASCII letters only) and on MySQL under the default
+`_ci` collations; a MySQL column with a `_bin`/`_cs` collation compares case-sensitively.
 
 **Modes**
 
@@ -2157,7 +2173,7 @@ end
 
 Resolution order: `params[param]` → first match in `Accept-Language` → `default` → `I18n.default_locale`. The chosen locale is always validated against `I18n.available_locales`, so a stray param or a mismatched `available:` list can never raise `I18n::InvalidLocale`.
 
-Every response carries **`Content-Language: <resolved locale>`** (BCP 47 form — `pt_BR` → `pt-BR`) and, when `Accept-Language` is a locale source, **`Vary: Accept-Language`** appended to any existing `Vary` (de-duplicated) so shared caches key on the header. Both are written *before* the action runs, so a `rescue_from`-rendered error still carries them; `response_headers: false` turns them off.
+Every response carries **`Content-Language: <resolved locale>`** (BCP 47 form — `pt_BR` → `pt-BR`) and, when `Accept-Language` is a locale source, **`Vary: Accept-Language`** appended to any existing `Vary` (de-duplicated) so shared caches key on the header. Both are written *before* the action runs, so a `rescue_from`-rendered error still carries them; `response_headers: false` turns them off. `rescue_from` handlers — which Rails runs after the `around_action` has already unwound — also render **under the resolved locale** (so an ErrorHandleable 404 or a CursorPaginatable 400 is localized to match its `Content-Language`), and the previous locale is always restored afterwards, even when the handler raises. `Accept-Language` tags that share a q-value keep header order, and the `q` parameter is read case-insensitively.
 
 **Options**: `available:` (allow-list for matching; defaults to `I18n.available_locales`), `default:`, `param:` (default `:locale`), `header:` (default `true`), `response_headers:` (default `true`).
 
@@ -2256,6 +2272,7 @@ Resolution order: `params[param]` → `Time-Zone` header → cookie (if enabled)
 
 **Notes**
 - An unknown `available:` / `default:` zone raises `ArgumentError` at declaration time (fail-fast on misconfiguration); so does `persist:` without `cookie:`.
+- `rescue_from` handlers render under the resolved zone too (Rails runs them after the `around_action` has unwound), and the previous zone is always restored afterwards — even when the handler raises.
 - `time_zone_source` tells you which source won (`:param`, `:header`, `:cookie`, `:default`, `:current`) — handy for a "times shown in London (from your browser)" hint.
 - Pairs naturally with the model concerns that read the clock (`Schedulable`, `Publishable`, `Expirable`, `SoftDeletable`).
 
