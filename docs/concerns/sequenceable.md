@@ -227,11 +227,13 @@ draft.number                             # => "INV-00001"
 - Declared on the STI **base** — every subclass draws from one table-wide counter, so `Credit` and `Debit` rows sharing a unique `sequence` column never collide.
 - Declared on **each subclass** (`Invoice` with `prefix: "INV-"`, `CreditNote` with `prefix: "CN-"`) — each keeps its own gap-free sequence, INV-0001, INV-0002, CN-0001.
 - A subclass that merely inherits a parent's declaration shares the parent's counter.
-- A subclass that **re-declares** `sequenceable_by` numbers its own series (with its descendants), and those rows are left out of the parent's series.
+- A subclass that **re-declares** `sequenceable_by` numbers its own series (with its descendants). The parent's `MAX` still spans every row of the table, so the parent series may show a **gap** after those rows — never a duplicate, even when a subclass starts declaring its own sequence after a deploy.
 - Declared on an **abstract** class, each concrete table (and its STI subtree) keeps its own counter.
 - `scope: :type` on the base partitions one declaration per type.
 
-Leaving out re-declaring subclasses relies on `descendants`, which only lists classes that have loaded. With development autoloading and no eager loading, a subclass not yet loaded is not left out, so for per-type series `scope: :type` is the robust choice.
+For **independent per-type series without gaps**, declare once on the base with `scope: :type`.
+
+**Index per type.** Per-subclass (or re-declared) series share one integer column, so their numbers overlap across types. Index `(type, <field>)` — or the scope columns plus the field — not the field alone.
 
 **Upgrading from 1.29.0 or earlier:** a per-type series that used to number per subclass while *inheriting* a base declaration now shares the table-wide counter. Its next number jumps once to the table-wide MAX + 1, leaving a one-time gap. Declare `scope: :type` to keep per-type numbering.
 
