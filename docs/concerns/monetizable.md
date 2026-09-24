@@ -177,4 +177,3 @@ Order.paid.formatted_sum_total(unit: "EUR ")   # => "EUR 3.500,50"
 ## Changed in 1.22.0
 
 - The generated money setter casts garbage input (`"abc"`, `""`) to nil — the ActiveModel convention — instead of raising `ArgumentError` out of a form assignment.
-

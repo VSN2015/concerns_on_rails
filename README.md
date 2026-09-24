@@ -783,6 +783,7 @@ User.find_by(email: User.normalize(:email, params[:email]))
 - `with:` takes a preset, a Proc, or an Array of them (applied in order); every entry is validated at class load.
 - `nil` values are skipped — no `nil → ""` coercion (use `:nullify_blank` for the opposite direction).
 - Preset normalizers pass non-string values through unchanged.
+- "Whitespace" is Unicode whitespace: `:strip`/`:whitespace`/`:email`/`:url` strip a pasted no-break space, em space or ideographic space from both ends (plain `String#strip` does not), `:squish` collapses them, and `:nullify_blank` treats a value of only such spaces as blank.
 - Works on Rails 6.0+ (no dependency on Rails 7.1's built-in `normalizes`).
 
 ---

@@ -294,6 +294,33 @@ describe ConcernsOnRails::Models::Normalizable do
       expect(normalized(bio: "  hi   there ").bio).to eq("hi there")
     end
 
+    # String#strip only removes ASCII whitespace, so a pasted no-break space
+    # (or an ideographic / em space) survived :strip / :email / :url, and a
+    # value of nothing but NBSPs slipped past :nullify_blank.
+    it "treats Unicode whitespace as whitespace in every stripping preset" do
+      nbsp = " "
+      padded = "#{nbsp}  x 　#{nbsp}"
+
+      expect(NormalizableExtra.normalize(:note, padded)).to eq("x!")
+      expect(normalized(name: padded).name).to eq("X")
+      expect(normalized(bio: "#{nbsp} 　").bio).to be_nil
+      expect(normalized(website: "#{nbsp}Example.COM/x#{nbsp}").website).to eq("https://example.com/x")
+      expect(NormalizableExtra.normalize(:note, "a#{nbsp}b")).to eq("a#{nbsp}b!") # inner whitespace kept
+
+      stub_const("NormalizableUnicodeUser", Class.new(TestModel) do
+        self.table_name = "users"
+        include ConcernsOnRails::Models::Normalizable
+
+        normalizable :email, with: :email
+        normalizable :first_name, with: :whitespace
+        normalizable :bio, with: :nullify_blank
+      end)
+      expect(NormalizableUnicodeUser.normalize(:email, "#{nbsp}FOO@Bar.com ")).to eq("foo@bar.com")
+      expect(NormalizableUnicodeUser.normalize(:first_name, "#{nbsp}Ann#{nbsp}")).to eq("Ann")
+      expect(NormalizableUnicodeUser.normalize(:bio, "#{nbsp}#{nbsp}")).to be_nil
+      expect(NormalizableUnicodeUser.normalize(:bio, "#{nbsp}hi")).to eq("#{nbsp}hi") # content left alone
+    end
+
     it ":parameterize, :capitalize and :titleize" do
       expect(normalized(slug: "Hello World!").slug).to eq("hello-world")
       expect(normalized(title: "hELLO").title).to eq("Hello")
