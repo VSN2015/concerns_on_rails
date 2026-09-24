@@ -1,4 +1,5 @@
 require "spec_helper"
+require "benchmark"
 
 describe ConcernsOnRails::Controllers::Filterable do
   before do
@@ -286,28 +287,63 @@ describe ConcernsOnRails::Controllers::Filterable do
     end
 
     # ActiveModel::Type::Integer casts with `to_i`, so an exponent or a
-    # fraction passed the numeric-string check and was silently truncated:
-    # `?stock_gt=1e3` became `stock > 1`, `?stock=5.5` became `stock = 5`.
-    it "fails closed on exponent and fractional strings for an integer column instead of truncating" do
-      expect(names(stock_gt: "1e3")).to eq([])
-      expect(names(stock: { gt: "1e3" })).to eq([])
-      expect(names(stock_gte: "5.5")).to eq([])
-      expect(names(stock: { lte: "5.5" })).to eq([])
-      expect(names(stock: "5.5")).to eq([])
-      expect(names(stock_not: "5.5")).to eq([])
-      expect(names(stock_in: "5.5,12")).to eq([])
-      expect(names(stock_in: %w[1e1 12])).to eq([])
-      expect(names(stock: { in: "5.5" })).to eq([])
-      expect(names(stock_not_in: "1e3")).to eq([])
-      expect(names(stock: { not_in: "0x10" })).to eq([])
-      expect(names(stock_gte: 5.5)).to eq([]) # a JSON-body float too
+    # fraction was silently truncated: `?stock_gt=1e3` became `stock > 1`,
+    # `?stock=5.5` became `stock = 5`. An integer column now reads operands
+    # exactly, like a scale-0 decimal: "1e3" IS 1000, "5.0" IS 5, and 5.5 —
+    # which no stored value equals — is compared exactly (> 5.5 is >= 6,
+    # < 5.5 is <= 5) and equals nothing.
+    it "reads exponent and fractional operands on an integer column exactly instead of truncating" do
+      lamp = "Lamp 100% cotton shade"
+      all = [lamp, "Desk", "Chair", "Lampshade"]
 
-      # …while a real integer, however it is spelled, still works.
-      expect(names(stock_gte: " +5 ")).to eq(["Lamp 100% cotton shade", "Chair"])
-      expect(names(stock_gte: 5.0)).to eq(["Lamp 100% cotton shade", "Chair"])
+      expect(names(stock_gt: "1e3")).to eq([])
+      expect(names(stock: { lt: "1e3" })).to eq(all)
+      expect(names(stock_gte: "1e1")).to eq(["Chair"])
+      expect(names(stock_gte: "5.0")).to eq([lamp, "Chair"])
+
+      expect(names(stock_gt: "5.5")).to eq(["Chair"])
+      expect(names(stock_gte: "5.5")).to eq(["Chair"])
+      expect(names(stock: { lt: "5.5" })).to eq([lamp, "Desk", "Lampshade"])
+      expect(names(stock: { lte: "5.5" })).to eq([lamp, "Desk", "Lampshade"])
+      expect(names(stock_gt: "-0.5")).to eq(all)
+      expect(names(stock_lt: "-0.5")).to eq([])
+      expect(names(stock_gte: 5.5)).to eq(["Chair"]) # a JSON-body float too
+      expect(names(stock_gte: 5.0)).to eq([lamp, "Chair"])
+
+      expect(names(stock: "5.5")).to eq([])
+      expect(names(stock: "5.0")).to eq([lamp])
+      expect(names(stock: "1.2e1")).to eq(["Chair"])
+      expect(names(stock_not: "5.5")).to eq(all)
+      expect(names(stock_in: "5.5,12")).to eq(["Chair"])
+      expect(names(stock_in: %w[1e1 12])).to eq(["Chair"])
+      expect(names(stock: { in: "5.5" })).to eq([])
+      expect(names(stock_not_in: "1e3")).to eq(all)
+      expect(names(stock_not_in: "5.5,12")).to eq([lamp, "Desk", "Lampshade"])
+
+      # Only non-numeric garbage fails closed.
+      expect(names(stock: { not_in: "0x10" })).to eq([])
+      expect(names(stock_gt: "1_000")).to eq([])
+      expect(names(stock_gte: " +5 ")).to eq([lamp, "Chair"])
       expect(names(stock: "12")).to eq(["Chair"])
-      expect(names(stock_in: "5, 12")).to eq(["Lamp 100% cotton shade", "Chair"])
       expect(names(stock_not_in: "5,12")).to eq(%w[Desk Lampshade])
+    end
+
+    # `type:` decides that a value is read as a number; the COLUMN decides how
+    # it binds. `type: :decimal` on an integer column used to bind 5.5 through
+    # the integer type (`stock < 5`), and `type: :integer` on a decimal column
+    # refused 99.985 outright.
+    it "binds exactly through the column whatever numeric type: is declared" do
+      typed = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :stock, type: :decimal, operators: true
+        filter_by :price, type: :integer, operators: true
+      end
+      typed_names = ->(params) { typed.new(params: params).filtered(Product.order(:id)).pluck(:name) }
+
+      expect(typed_names.call(stock_lt: "5.5")).to eq(["Lamp 100% cotton shade", "Desk", "Lampshade"])
+      expect(typed_names.call(stock_gt: "5.5")).to eq(["Chair"])
+      expect(typed_names.call(price_gt: "99.985")).to eq(%w[Desk Chair])
     end
 
     # The Decimal type rounds to the column's scale, so `price > 99.985`
@@ -401,6 +437,59 @@ describe ConcernsOnRails::Controllers::Filterable do
 
       # String columns are unaffected.
       expect(names(status_contains: "arch")).to eq(["Chair"])
+    end
+
+    # PostgreSQL array columns report their ELEMENT type (`t.string :tags,
+    # array: true` is :string), so they passed the text-only gate and ran
+    # `varchar[] ILIKE` — a 500. SQLite has no arrays, so the column is
+    # stubbed the way the PostgreSQL adapter's Column answers.
+    it "fails closed for contains / starts_with on an array column" do
+      array_column = Struct.new(:name, :array).new("name", true)
+      allow(Product).to receive(:columns_hash).and_return(Product.columns_hash.merge("name" => array_column))
+
+      expect(names(name_contains: "Lamp")).to eq([])
+      expect(names(name: { starts_with: "La" })).to eq([])
+    end
+
+    # A decimal column without a declared precision (PostgreSQL's plain
+    # `numeric`, SQLite's bare `decimal`) put no bound on the operand, and
+    # binding BigDecimal("1e99999999") expands it through to_s("F") — about
+    # 1.3 s and 476 MB for a 12-byte param. Operands are bounded (length and
+    # exponent) before any BigDecimal is built.
+    context "on a decimal column without a declared precision" do
+      before do
+        ActiveRecord::Schema.define { add_column :products, :amount, :decimal }
+        Product.reset_column_information
+        Product.where(stock: 5).update_all(amount: 7)
+      end
+
+      let(:amount_class) do
+        Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Filterable
+
+          filter_by :amount, operators: true
+        end
+      end
+
+      def amount_names(params)
+        amount_class.new(params: params).filtered(Product.order(:id)).pluck(:name)
+      end
+
+      it "rejects an absurd exponent or length quickly instead of expanding it" do
+        elapsed = Benchmark.realtime do
+          expect(amount_names(amount_gt: "1e99999999")).to eq([])
+          expect(amount_names(amount: { lt: "-1e999999999" })).to eq([])
+          expect(amount_names(amount_gte: "1e-99999999")).to eq([])
+          expect(amount_names(amount: "1#{'0' * 200}")).to eq([])
+          expect(amount_names(amount_lt: 10**5000)).to eq(["Lamp 100% cotton shade"]) # a JSON-body integer beyond any numeric
+        end
+        expect(elapsed).to be < 0.5
+      end
+
+      it "still reads a large but sane operand exactly" do
+        expect(amount_names(amount_lt: "1e900")).to eq(["Lamp 100% cotton shade"])
+        expect(amount_names(amount_gt: "6.5")).to eq(["Lamp 100% cotton shade"])
+      end
     end
 
     it "ignores an array where a scalar operand is expected" do

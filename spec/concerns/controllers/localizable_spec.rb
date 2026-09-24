@@ -107,6 +107,22 @@ describe ConcernsOnRails::Controllers::Localizable do
       ranked = controller(accept_language: "fr;q=0.5,de;Q=0.9") { localizable available: %i[en fr de], default: :en }
       expect(ranked.resolved_locale).to eq(:de)
     end
+
+    # `Float(...)` read q=0x10 as 16, 1_0 as 10, Infinity as Infinity and 2
+    # as 2, so a malformed or out-of-range weight outranked every real one.
+    # RFC 9110 §12.4.2: qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] ).
+    # Anything else is treated as q=0 — the tag is dropped.
+    it "drops a tag whose q-value is not an RFC 9110 qvalue" do
+      %w[0x10 1_0 Infinity 2 1.5 0.1234 -1 .5].each do |bad|
+        c = controller(accept_language: "fr;q=#{bad},de;q=0.5") { localizable available: %i[en fr de], default: :en }
+        expect(c.resolved_locale).to eq(:de), "q=#{bad} was honoured"
+      end
+
+      c = controller(accept_language: "fr;q=1.000,de;q=0.999") { localizable available: %i[en fr de], default: :en }
+      expect(c.resolved_locale).to eq(:fr)
+      c = controller(accept_language: "fr;q=0.,de;q=0") { localizable available: %i[en fr de], default: :de }
+      expect(c.resolved_locale).to eq(:de)
+    end
   end
 
   describe "#switch_locale" do

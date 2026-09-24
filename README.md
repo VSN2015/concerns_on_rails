@@ -1848,17 +1848,23 @@ nothing raises at request time. For strict, validated contracts reach for `Permi
 Numeric columns are read **strictly, never truncated**, in every form (direct `?stock=`, suffix, bracket,
 `in`/`not_in` lists):
 
-- An integer column takes whole numbers only — `?stock_gt=1e3` or `?stock=5.5` matches nothing instead
-  of running `stock > 1` / `stock = 5`.
-- A decimal finer than the column's scale compares exactly (`?price_gt=99.985` keeps the `99.99` row)
-  and equals nothing.
+- Every operand is read as an exact decimal, then bound through the **column** (whatever numeric `type:`
+  is declared). On an integer column `?stock_gt=1e3` is `stock > 1000` and `?stock=5.0` is `stock = 5`
+  — they used to run `stock > 1` / `stock = 1`.
+- A value finer than the column's scale — `5.5` on an integer column, `99.985` on a scale-2 decimal —
+  compares exactly (`?stock_gt=5.5` is `stock >= 6`, `?stock_lte=5.5` is `stock <= 5`; `?price_gt=99.985`
+  keeps the `99.99` row) and equals nothing: `?stock=5.5` matches no row, drops out of an `in` list, and
+  `not`/`not_in` on it exclude nothing but NULLs.
+- Only non-numeric garbage (`abc`, `0x10`, `1_000`) fails closed, as do operands longer than 100
+  characters or with an exponent beyond ±1000 (a bounded read — `1e99999999` on an unconstrained
+  `numeric` column would otherwise expand to hundreds of megabytes).
 - A value beyond what the column can hold is answered per operator: `gt`/`gte` above the maximum (or
   `lt`/`lte` below the minimum) match nothing, the opposite direction matches every non-NULL row; for
   equality it matches nothing (and drops out of an `in` list), for `not`/`not_in` it excludes nothing
   but NULLs.
 
 `contains`/`starts_with` apply to string/text columns only; on any other column (integer, decimal,
-datetime, uuid, …) they match **nothing** — PostgreSQL has no `LIKE` for those types. Matching is
+datetime, uuid, a PostgreSQL array, …) they match **nothing** — PostgreSQL has no `LIKE` for those types. Matching is
 case-insensitive on PostgreSQL (`ILIKE`), on SQLite (ASCII letters only) and on MySQL under the default
 `_ci` collations; a MySQL column with a `_bin`/`_cs` collation compares case-sensitively.
 
@@ -2173,7 +2179,7 @@ end
 
 Resolution order: `params[param]` → first match in `Accept-Language` → `default` → `I18n.default_locale`. The chosen locale is always validated against `I18n.available_locales`, so a stray param or a mismatched `available:` list can never raise `I18n::InvalidLocale`.
 
-Every response carries **`Content-Language: <resolved locale>`** (BCP 47 form — `pt_BR` → `pt-BR`) and, when `Accept-Language` is a locale source, **`Vary: Accept-Language`** appended to any existing `Vary` (de-duplicated) so shared caches key on the header. Both are written *before* the action runs, so a `rescue_from`-rendered error still carries them; `response_headers: false` turns them off. `rescue_from` handlers — which Rails runs after the `around_action` has already unwound — also render **under the resolved locale** (so an ErrorHandleable 404 or a CursorPaginatable 400 is localized to match its `Content-Language`), and the previous locale is always restored afterwards, even when the handler raises. `Accept-Language` tags that share a q-value keep header order, and the `q` parameter is read case-insensitively.
+Every response carries **`Content-Language: <resolved locale>`** (BCP 47 form — `pt_BR` → `pt-BR`) and, when `Accept-Language` is a locale source, **`Vary: Accept-Language`** appended to any existing `Vary` (de-duplicated) so shared caches key on the header. Both are written *before* the action runs, so a `rescue_from`-rendered error still carries them; `response_headers: false` turns them off. `rescue_from` handlers — which Rails runs after the `around_action` has already unwound — also render **under the resolved locale** (so an ErrorHandleable 404 or a CursorPaginatable 400 is localized to match its `Content-Language`), and the previous locale is always restored afterwards, even when the handler raises. `Accept-Language` tags that share a q-value keep header order, the `q` parameter is read case-insensitively, and a weight that is not an RFC 9110 qvalue (`0`–`1`, at most three decimals — so not `0x10`, `1_0`, `Infinity` or `2`) is treated as `q=0`: that tag is dropped.
 
 **Options**: `available:` (allow-list for matching; defaults to `I18n.available_locales`), `default:`, `param:` (default `:locale`), `header:` (default `true`), `response_headers:` (default `true`).
 

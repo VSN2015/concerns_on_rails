@@ -73,12 +73,15 @@ RSpec.describe "Filterable operators through real ActionController dispatch" do
   end
 
   # Integer#cast is `to_i`: `1e3` ran `stock > 1`, `5.5` ran `stock = 5`.
-  it "fails closed on exponent / fractional integer operands in every form" do
+  it "reads exponent / fractional integer operands exactly in every form" do
     expect(names("stock[gt]=1e3")).to eq([])
-    expect(names("stock_gt=1e3")).to eq([])
+    expect(names("stock_lt=1e3")).to eq(%w[Lamp Desk Chair])
+    expect(names("stock[gte]=5.5")).to eq(%w[Chair])
+    expect(names("stock_lte=5.5")).to eq(%w[Lamp Desk])
     expect(names("stock=5.5")).to eq([])
-    expect(names("stock[in]=5.5,12")).to eq([])
-    expect(names("stock_not_in[]=1e1")).to eq([])
+    expect(names("stock=5.0")).to eq(%w[Lamp])
+    expect(names("stock[in]=5.5,12")).to eq(%w[Chair])
+    expect(names("stock_not_in[]=1e1")).to eq(%w[Lamp Desk Chair])
   end
 
   it "answers an out-of-range integer per operator in both forms" do

@@ -27,15 +27,28 @@ RSpec.describe ConcernsOnRails::Support::NumericOperand do
   end
 
   describe "integer operands" do
-    it "accepts whole numbers only — never an exponent, a fraction, or another base" do
+    it "reads every operand as an exact decimal of scale 0 — never truncated" do
       expect(classify("12", integer)).to eq([:exact, 12])
       expect(classify(" -08 ", integer)).to eq([:exact, -8])
       expect(classify(12, integer)).to eq([:exact, 12])
       expect(classify(5.0, integer)).to eq([:exact, 5])
+      expect(classify("5.0", integer)).to eq([:exact, 5])
+      expect(classify("1e3", integer)).to eq([:exact, 1000])
+      expect(described_class.classify("1e3", integer).value).to be_a(Integer)
 
-      %w[1e3 5.5 0x10 1_000 twelve].each { |raw| expect(classify(raw, integer)).to eq([:uncastable, nil]), raw }
-      expect(classify(5.5, integer)).to eq([:uncastable, nil])
+      five_and_a_half = described_class.classify("5.5", integer)
+      expect([five_and_a_half.status, five_and_a_half.value, five_and_a_half.floor]).to eq([:inexact, BigDecimal("5.5"), 5])
+      expect(described_class.classify(-5.5, integer).floor).to eq(-6)
+
+      %w[0x10 1_000 twelve 5e].each { |raw| expect(classify(raw, integer)).to eq([:uncastable, nil]), raw }
       expect(classify(true, integer)).to eq([:uncastable, nil])
+    end
+
+    it "range-checks the floor an inexact value binds on" do
+      max = 2**31
+      expect(described_class.classify("#{max - 1}.5", integer).status).to eq(:inexact)
+      expect(described_class.classify("#{max}.5", integer).status).to eq(:above)
+      expect(described_class.classify("-#{max}.5", integer).status).to eq(:below)
     end
 
     it "reports a value beyond the column's range as above / below" do
@@ -57,7 +70,7 @@ RSpec.describe ConcernsOnRails::Support::NumericOperand do
     it "keeps the unrounded value and flags one finer than the scale as inexact" do
       expect(classify("99.99", decimal)).to eq([:exact, BigDecimal("99.99")])
       expect(classify("99.985", decimal)).to eq([:inexact, BigDecimal("99.985")])
-      expect(described_class.classify("99.985", decimal).scale).to eq(2)
+      expect(described_class.classify("99.985", decimal).floor).to eq(BigDecimal("99.98"))
       expect(classify("1e2", decimal)).to eq([:exact, BigDecimal("100")])
       expect(classify(".5", decimal)).to eq([:exact, BigDecimal("0.5")])
       expect(classify("abc", decimal)).to eq([:uncastable, nil])
@@ -70,12 +83,28 @@ RSpec.describe ConcernsOnRails::Support::NumericOperand do
       expect(classify("1e400", ActiveModel::Type::Decimal.new).first).to eq(:exact) # unconstrained numeric
     end
 
+    # Nothing else bounds an unconstrained decimal, and binding
+    # BigDecimal("1e99999999") expands it through to_s("F").
+    it "refuses an operand too long or with too wide an exponent, before building it" do
+      unbounded = ActiveModel::Type::Decimal.new
+
+      expect(classify("1e1000", unbounded).first).to eq(:exact)
+      expect(classify("1e-1000", unbounded).first).to eq(:exact)
+      %w[1e1001 1e99999999 -1e999999999 1e-99999999].each do |raw|
+        expect(classify(raw, unbounded)).to eq([:uncastable, nil]), raw
+      end
+      expect(classify("1#{'0' * 100}", unbounded)).to eq([:uncastable, nil])
+      expect(classify("1#{'0' * 99}", unbounded).first).to eq(:exact)
+      expect(classify(10**5000, unbounded).first).to eq(:above) # a JSON-body Integer
+      expect(classify(-10**5000, ActiveModel::Type::Float.new).first).to eq(:below)
+    end
+
     it "treats an Integer-backed decimal (scale 0) as whole numbers" do
       whole = ActiveRecord::Type::DecimalWithoutScale.new(precision: 10)
 
       expect(classify("5.5", whole)).to eq([:inexact, BigDecimal("5.5")])
-      expect(described_class.classify("5.5", whole).scale).to eq(0)
-      expect(classify("5", whole)).to eq([:exact, BigDecimal("5")])
+      expect(described_class.classify("5.5", whole).floor).to eq(5)
+      expect(classify("5", whole)).to eq([:exact, 5])
     end
   end
 
@@ -87,6 +116,13 @@ RSpec.describe ConcernsOnRails::Support::NumericOperand do
       expect(classify("1e400", float)).to eq([:above, Float::INFINITY])
       expect(classify("-1e400", float)).to eq([:below, -Float::INFINITY])
       expect(classify("NaN", float)).to eq([:uncastable, nil])
+      expect(classify("1e99999999", float)).to eq([:uncastable, nil])
+    end
+
+    it "binds through the column's kind, whatever numeric type the operand is read as" do
+      expect(classify("5.5", decimal, column_type: integer)).to eq([:inexact, BigDecimal("5.5")])
+      expect(classify("99.985", integer, column_type: decimal)).to eq([:inexact, BigDecimal("99.985")])
+      expect(classify("1.5", integer, column_type: float)).to eq([:exact, 1.5])
     end
   end
 end

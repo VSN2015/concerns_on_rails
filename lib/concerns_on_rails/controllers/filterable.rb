@@ -29,13 +29,14 @@ module ConcernsOnRails
     # nothing here raises at request time — for strict, validated params use
     # Permittable.
     #
-    # Numeric columns are read strictly, never truncated: an integer column
-    # takes only whole numbers (`?stock_gt=1e3` or `?stock=5.5` matches
-    # nothing), a decimal finer than the column's scale compares exactly and
-    # equals nothing, and a value beyond what the column can hold is answered
-    # per operator (`?stock_lt=99999999999999999999` is every non-NULL row,
-    # `?stock_gt=` the same value is none). contains / starts_with apply to
-    # string/text columns only and match nothing on any other column.
+    # Numeric columns read every operand as an exact decimal, never
+    # truncated: on an integer column "1e3" is 1000 and "5.0" is 5, while 5.5
+    # compares exactly (`> 5.5` is `>= 6`, `< 5.5` is `<= 5`) and equals
+    # nothing — a decimal finer than its column's scale likewise. A value
+    # beyond what the column can hold is answered per operator
+    # (`?stock_lt=99999999999999999999` is every non-NULL row, `?stock_gt=`
+    # the same value is none). contains / starts_with apply to string/text
+    # (non-array) columns only and match nothing on any other column.
     #
     # Usage:
     #   class ArticlesController < ApplicationController
@@ -235,15 +236,15 @@ module ConcernsOnRails
 
       # A plain numeric column, read without ActiveModel's lossy casts (see
       # Support::NumericOperand). An exponent/fraction on an integer column
-      # used to TRUNCATE (`?stock_gt=1e3` ran `stock > 1`) and now fails
-      # closed like any other uncastable value. A value beyond what the column
-      # holds used to bind as 1=0 for every operator — `stock < 10**20` came
-      # back empty — and is now answered per operator: nothing is above an
-      # over-max bound, every non-NULL row is below it (and the mirror image
-      # for an under-min bound). A decimal finer than the column's scale can
-      # not be bound as-is — the column type rounds it (`price > 99.985`
-      # became `price > 99.99` and lost the 99.99 row) — so the comparison is
-      # rewritten onto its representable neighbours instead.
+      # used to TRUNCATE (`?stock_gt=1e3` ran `stock > 1`, `?stock_lt=5.5`
+      # ran `stock < 5`); every operand is now read as an exact decimal. A
+      # value beyond what the column holds used to bind as 1=0 for every
+      # operator — `stock < 10**20` came back empty — and is now answered per
+      # operator: nothing is above an over-max bound, every non-NULL row is
+      # below it (and the mirror image for an under-min bound). A value finer
+      # than the column's scale cannot be bound as-is — the column type
+      # rounds or truncates it (`price > 99.985` became `price > 99.99` and
+      # lost the 99.99 row) — so the comparison is rewritten exactly.
       def apply_filter_numeric_comparison(relation, field, operator, operand)
         case operand.status
         when :uncastable then relation.none
@@ -254,18 +255,21 @@ module ConcernsOnRails
         end
       end
 
-      # No value of scale `s` lies strictly between floor_s(v) and ceil_s(v)
-      # when v itself is not representable, so `> v` and `>= v` are exactly
-      # `> floor_s(v)`, and `< v` / `<= v` are exactly `< ceil_s(v)`. Both
-      # bounds ARE representable, so they bind through the column type
-      # unchanged — no unrounded literal (which a PostgreSQL money column or
-      # MySQL's 65-digit DECIMAL literal limit could choke on) reaches SQL.
+      # v is not representable at the column's scale s, so nothing stored lies
+      # between floor_s(v) and v: `> v` and `>= v` are exactly `> floor_s(v)`,
+      # and `< v` / `<= v` exactly `<= floor_s(v)` (on an integer column,
+      # `> 5.5` is `> 5`, i.e. `>= 6`; `<= 5.5` is `<= 5`). The floor IS
+      # representable — and range-checked by NumericOperand, so it can never be
+      # the unbindable one-past-the-maximum a ceiling could be — so it binds
+      # through the column type unchanged, and no unrounded literal (which a
+      # PostgreSQL money column or MySQL's 65-digit DECIMAL literal limit could
+      # choke on) reaches SQL.
       def apply_filter_inexact_comparison(relation, field, operator, operand)
         column = relation.model.arel_table[field]
         if %i[gt gte].include?(operator)
-          relation.where(column.gt(operand.value.floor(operand.scale)))
+          relation.where(column.gt(operand.floor))
         else
-          relation.where(column.lt(operand.value.ceil(operand.scale)))
+          relation.where(column.lteq(operand.floor))
         end
       end
 
@@ -362,12 +366,15 @@ module ConcernsOnRails
       # and on SQLite/MySQL the pattern went through the column's type
       # (Integer#serialize("1%") is 1), so it silently turned into equality.
       # Such a request now fails closed. A field with no attribute type (not a
-      # column) is left to the database as before.
+      # column) is left to the database as before. A PostgreSQL ARRAY column
+      # reports its ELEMENT type (`t.string :tags, array: true` is :string),
+      # so it is refused on the column itself: `varchar[] ILIKE` is an error.
       def apply_filter_like(relation, field, operator, raw)
         return relation unless ConcernsOnRails::Support::ScalarParam.scalar?(raw)
 
         column_type = filterable_column_type(relation, field)
         return relation.none if column_type && !LIKE_TYPES.include?(column_type.type)
+        return relation.none if filterable_array_column?(relation, field)
 
         escaped = raw.to_s.gsub(LIKE_SPECIAL) { |char| "#{LIKE_ESCAPE}#{char}" }
         pattern = operator == :contains ? "%#{escaped}%" : "#{escaped}%"
@@ -383,6 +390,19 @@ module ConcernsOnRails
         return UNCASTABLE if filterable_uncastable?(type, value)
 
         type.cast(value)
+      end
+
+      # PostgreSQL's Column answers `array` (its sql_type drops the "[]", so
+      # that alone cannot tell); the sql_type suffix covers adapters that keep it.
+      def filterable_array_column?(relation, field)
+        model = relation.model
+        return false unless model.respond_to?(:columns_hash)
+
+        column = model.columns_hash[field.to_s]
+        return false unless column
+        return true if column.respond_to?(:array) && column.array
+
+        column.respond_to?(:sql_type) && column.sql_type.to_s.end_with?("[]")
       end
 
       def filterable_column_type(relation, field)

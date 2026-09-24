@@ -41,6 +41,9 @@ module ConcernsOnRails
       # to the next request on the thread. An exception raised BEFORE
       # switch_locale ran (an earlier before_action) has no chosen locale and
       # is handled exactly as before.
+      # RFC 9110 §12.4.2: qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )
+      QVALUE = /\A(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)\z/
+
       module RescueUnderLocale
         def rescue_with_handler(exception)
           locale = @localizable_active_locale
@@ -167,14 +170,18 @@ module ConcernsOnRails
       end
 
       # The q-value (relative quality) of an Accept-Language part: 1.0 when
-      # absent, 0.0 when malformed. q=0 means "not acceptable" and is dropped.
+      # absent. q=0 means "not acceptable" and is dropped — and so is a weight
+      # that is not an RFC 9110 qvalue (0 to 1, at most three decimals):
+      # `Float()` used to read q=0x10 as 16, q=1_0 as 10, q=Infinity and q=2
+      # at face value, so a malformed weight outranked every real one.
       # The parameter name is case-insensitive (RFC 9110 §12.4.2): `Q=0` used
       # to read as "no weight" (1.0) and turned a refused tag into the winner.
       def accept_language_quality(params)
         qparam = params.find { |p| p.match?(/\Aq=/i) }
         return 1.0 unless qparam
 
-        Float(qparam[2..], exception: false) || 0.0
+        weight = qparam[2..].strip
+        QVALUE.match?(weight) ? weight.to_f : 0.0
       end
 
       def match_locale(candidate, allowed)
