@@ -185,7 +185,7 @@ end
 
 - **Counter key format.** Cache keys follow the pattern `throttleable:<name>:<discriminator>:<window_bucket>`. Changing `name:`, the discriminator, or the `period` effectively resets all existing counters for that rule.
 
-## Changed in the next release
+## Changed (unreleased)
 
 - **Default rule names include the declaring controller.** They used to be a bare `"rule#{index}"`, so the first unnamed rule of *every* controller wrote the same counter per client — browsing one endpoint spent another's budget. Default names are now `"<DeclaringController>#rule<n>"`. Explicit `name:` values are unchanged. Because the cache key changes, **default-named counters start from zero once on deploy.** The `rule` field of `rate_limited.concerns_on_rails` carries the new name.
 
