@@ -626,7 +626,7 @@ describe ConcernsOnRails::Sequenceable do
       expect(AbQuote.next_sequence).to eq(2)
     end
 
-    it "leaves out the rows of a subclass that re-declared its own sequence" do
+    it "lets a re-declaring subclass's rows leave a GAP in the parent series — never a duplicate" do
       ActiveRecord::Schema.define do
         create_table :rd_docs, force: true do |t|
           t.string  :type
@@ -645,10 +645,40 @@ describe ConcernsOnRails::Sequenceable do
       Object.const_set(:RdCnSub, Class.new(RdCn)) # inherits CN-
 
       numbers = [RdInv.create!, RdCn.create!, RdCnSub.create!, RdCn.create!, RdInv.create!, RdBase.create!].map(&:number)
-      expect(numbers).to eq(%w[INV-0001 CN-0001 CN-0002 CN-0003 INV-0002 INV-0003])
-      expect(RdInv.next_sequence).to eq(4)
-      expect(RdBase.next_sequence).to eq(4)
+      # The base series is MAX over every row of the table (as on master), so
+      # the CN rows push it past 3; per-type series without gaps: scope: :type.
+      expect(numbers).to eq(%w[INV-0001 CN-0001 CN-0002 CN-0003 INV-0004 INV-0005])
+      expect(RdInv.next_sequence).to eq(6)
+      expect(RdBase.next_sequence).to eq(6)
       expect(RdCnSub.next_sequence).to eq(4)
+    end
+
+    it "never reissues a parent number when a subclass starts declaring its own sequence after a deploy" do
+      ActiveRecord::Schema.define do
+        create_table :rd_docs, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+          t.string  :number
+        end
+        add_index :rd_docs, %i[type sequence], unique: true
+      end
+      Object.const_set(:RdBase, Class.new(TestModel) do
+        self.table_name = "rd_docs"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+      end)
+      Object.const_set(:RdInv, Class.new(RdBase))
+      issued = [RdBase.create!, RdInv.create!, RdInv.create!].map(&:number)
+      expect(issued).to eq(%w[INV-1 INV-2 INV-3])
+
+      # The deploy: RdInv now declares its own series.
+      RdInv.sequenceable_by :sequence, into: :number, prefix: "INV-"
+
+      next_base = RdBase.create!.number
+      expect(issued).not_to include(next_base)
+      expect(next_base).to eq("INV-4")
+      expect(RdInv.create!.number).to eq("INV-4") # its own series continues from its own rows
     end
   end
 end
