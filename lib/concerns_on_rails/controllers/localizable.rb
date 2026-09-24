@@ -31,9 +31,31 @@ module ConcernsOnRails
     module Localizable
       extend ActiveSupport::Concern
 
+      # rescue_from handlers run in ActionController::Rescue#process_action —
+      # AFTER the around_action has unwound and I18n.with_locale has put the
+      # default back — so every rescued error (ErrorHandleable's 404,
+      # CursorPaginatable's 400, an app's own handler) rendered English under
+      # `Content-Language: fr`. This re-enters the locale switch_locale chose
+      # for exactly the handler's duration; with_locale's ensure restores the
+      # previous locale even when the handler itself raises, so nothing leaks
+      # to the next request on the thread. An exception raised BEFORE
+      # switch_locale ran (an earlier before_action) has no chosen locale and
+      # is handled exactly as before.
+      module RescueUnderLocale
+        def rescue_with_handler(exception)
+          locale = @localizable_active_locale
+          return super unless locale
+
+          I18n.with_locale(locale) { super }
+        end
+      end
+
       included do
         class_attribute :localizable_options, instance_accessor: false, default: {}
         around_action :switch_locale
+        # Only where rescue_from exists (real controllers); a bare object
+        # must not suddenly answer rescue_with_handler.
+        include RescueUnderLocale if method_defined?(:rescue_with_handler)
       end
 
       class_methods do
@@ -49,10 +71,13 @@ module ConcernsOnRails
       end
 
       # Public so subclasses can override; writes the response headers, then
-      # runs the action under the resolved locale.
+      # runs the action under the resolved locale — and records it so a
+      # rescue_from handler renders under it too (an override that calls
+      # `super` keeps that).
       def switch_locale(&)
         locale = resolved_locale
         apply_locale_response_headers(locale)
+        @localizable_active_locale = locale
         I18n.with_locale(locale, &)
       end
 

@@ -211,6 +211,74 @@ describe ConcernsOnRails::Controllers::Localizable do
       expect(result.header("Content-Language")).to eq("fr")
     end
 
+    # rescue_from handlers run in ActionController::Rescue#process_action,
+    # AFTER the around_action has unwound and I18n.with_locale has restored
+    # the default — so ErrorHandleable's 404, CursorPaginatable's 400, any
+    # app handler rendered English details under `Content-Language: fr`.
+    describe "responses rendered by rescue_from" do
+      let(:klass) do
+        IntegrationHarness.build_controller do
+          include ConcernsOnRails::Controllers::Localizable
+
+          localizable available: %i[en fr de], default: :en
+
+          rescue_from(ArgumentError) { |_e| render json: { locale: I18n.locale }, status: :unprocessable_entity }
+          rescue_from(IndexError) { |_e| raise "handler exploded" }
+
+          def fail_arg
+            raise ArgumentError, "boom"
+          end
+
+          def fail_handler
+            raise IndexError, "boom"
+          end
+
+          def show
+            render json: { locale: I18n.locale }
+          end
+        end
+      end
+
+      it "renders under the resolved locale, and restores the default afterwards" do
+        result = IntegrationHarness.dispatch(klass, :fail_arg, headers: { "Accept-Language" => "fr" })
+
+        expect(result.status).to eq(422)
+        expect(JSON.parse(result.body)).to eq("locale" => "fr")
+        expect(result.header("Content-Language")).to eq("fr")
+        expect(I18n.locale).to eq(:en)
+      end
+
+      it "restores the default even when the handler itself raises" do
+        expect do
+          IntegrationHarness.dispatch(klass, :fail_handler, headers: { "Accept-Language" => "de" })
+        end.to raise_error(RuntimeError, "handler exploded")
+        expect(I18n.locale).to eq(:en)
+      end
+
+      it "never leaks the locale into the next request on the thread" do
+        IntegrationHarness.dispatch(klass, :fail_arg, headers: { "Accept-Language" => "fr" })
+        result = IntegrationHarness.dispatch(klass, :show)
+
+        expect(JSON.parse(result.body)).to eq("locale" => "en")
+      end
+
+      it "leaves an exception with no handler propagating as before" do
+        plain = IntegrationHarness.build_controller do
+          include ConcernsOnRails::Controllers::Localizable
+
+          localizable available: %i[en fr], default: :en
+
+          def show
+            raise KeyError, "unhandled"
+          end
+        end
+
+        expect { IntegrationHarness.dispatch(plain, :show, headers: { "Accept-Language" => "fr" }) }
+          .to raise_error(KeyError, "unhandled")
+        expect(I18n.locale).to eq(:en)
+      end
+    end
+
     it "is a no-op on a controller without a response object" do
       klass = Class.new do
         def self.around_action(*); end
