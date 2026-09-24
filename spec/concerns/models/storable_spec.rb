@@ -488,10 +488,12 @@ describe ConcernsOnRails::Storable do
         "encryptable declared after storable_by" => proc do
           storable_by :settings, theme: { default: "light" }
           include ConcernsOnRails::Models::Encryptable
+
           encryptable :settings
         end,
         "encryptable declared before storable_by" => proc do
           include ConcernsOnRails::Models::Encryptable
+
           encryptable :settings
           storable_by :settings, theme: { default: "light" }
         end

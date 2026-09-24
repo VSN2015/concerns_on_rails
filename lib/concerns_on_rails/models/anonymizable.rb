@@ -76,6 +76,21 @@ module ConcernsOnRails
         random_hex: ->(value) { value.nil? ? nil : SecureRandom.hex(16) }
       }.freeze
 
+      # Presets whose output never depends on the old value — only on whether
+      # there was one (nil in, nil out). They are fed a presence marker instead
+      # of the value, so an encrypted field is never decrypted to be erased.
+      # :nullify needs not even that.
+      PRESENCE_ONLY_PRESETS = %i[redact email random_hex].map { |name| PRESETS.fetch(name) }.freeze
+      # Stands in for the old value of a presence-only preset; never persisted.
+      PRESENT = Object.new.freeze
+      # What a value-dependent strategy (:hash, a callable) writes when the old
+      # value cannot be read — ciphertext that will not decrypt. Erasure must
+      # still happen, and a digest or callable output of a value we never saw
+      # is impossible, so the field is redacted.
+      UNREADABLE_FALLBACK = "[REDACTED]".freeze
+      # The slug that replaces one generated from an erased field.
+      ANONYMIZED_SLUG_PREFIX = "anon-".freeze
+
       included do
         class_attribute :anonymizable_rules, instance_accessor: false, default: {}
         class_attribute :anonymizable_stamp, instance_accessor: false, default: DEFAULT_STAMP
@@ -192,9 +207,11 @@ module ConcernsOnRails
         raise ArgumentError, "#{LABEL}: anonymize! cannot be called on a new record" if new_record?
 
         payload = anonymizable_payload
+        erase_slug_history = anonymizable_slug_payload!(payload)
         transaction do
           before_anonymize
           update_columns(payload)
+          anonymizable_delete_slug_history! if erase_slug_history
           after_anonymize
         end
       end
@@ -208,7 +225,7 @@ module ConcernsOnRails
       def anonymizable_payload
         payload = {}
         self.class.anonymizable_rules.each do |field, strategy|
-          value = anonymizable_apply_strategy(strategy, public_send(field))
+          value = anonymizable_erased_value(field, strategy)
           cast = self.class.type_for_attribute(field.to_s).cast(value)
           payload[field] = cast
           anonymizable_add_blind_index(payload, field, cast)
@@ -235,6 +252,96 @@ module ConcernsOnRails
 
       def anonymizable_apply_strategy(strategy, value)
         strategy.arity == 1 ? strategy.call(value) : strategy.call(value, self)
+      end
+
+      # The strategy's output for `field`, reading no more of the old value
+      # than the strategy needs: :nullify reads nothing, the presence-only
+      # presets learn only nil-or-not (for an encrypted field, from the stored
+      # ciphertext — nothing is decrypted), and only :hash / callables read the
+      # value itself. When that value is ciphertext that will not decrypt, the
+      # field falls back to UNREADABLE_FALLBACK rather than blocking erasure
+      # (or rolling back an anonymize_all! batch). The DecryptionError is
+      # swallowed deliberately and never re-raised with the value in it.
+      def anonymizable_erased_value(field, strategy)
+        return nil if strategy.equal?(PRESETS[:nullify])
+        return strategy.call(anonymizable_value_present?(field) ? PRESENT : nil) if PRESENCE_ONLY_PRESETS.include?(strategy)
+
+        value, readable = anonymizable_read_old_value(field)
+        return UNREADABLE_FALLBACK unless readable
+
+        anonymizable_apply_strategy(strategy, value)
+      end
+
+      # [value, readable]. An encrypted field is unreadable when it raises a
+      # DecryptionError, or — with raise_on_decrypt_error off — when it reads
+      # as nil although ciphertext is stored.
+      def anonymizable_read_old_value(field)
+        value = public_send(field)
+        return [value, true] unless value.nil? && anonymizable_encrypted_field?(field)
+
+        [nil, !anonymizable_stored_value?(field)]
+      rescue ConcernsOnRails::Encryption::DecryptionError
+        [nil, false]
+      end
+
+      def anonymizable_value_present?(field)
+        return !public_send(field).nil? unless anonymizable_encrypted_field?(field)
+
+        anonymizable_stored_value?(field)
+      end
+
+      # Whether an encrypted field holds a value, without decrypting it: a
+      # pending assignment is in-memory plaintext (no crypto to read it);
+      # otherwise the column's stored ciphertext is either there or NULL.
+      def anonymizable_stored_value?(field)
+        return !public_send(field).nil? if public_send("#{field}_changed?")
+
+        !read_attribute_before_type_cast(field.to_s).nil?
+      end
+
+      def anonymizable_encrypted_field?(field)
+        self.class.respond_to?(:encryptable_rules) && self.class.encryptable_rules.key?(field.to_sym)
+      end
+
+      # Sluggable: a slug generated from an erased field IS that field's PII
+      # ("jane-smith"), and update_columns skips the callbacks that would
+      # regenerate it. When the slug may derive from an anonymized field, add a
+      # random, non-identifying (and, at 128 bits, unique) slug to the same
+      # UPDATE. Returns true when friendly_id history rows must go too.
+      def anonymizable_slug_payload!(payload)
+        return false unless anonymizable_slug_from_erased_field?
+
+        config = self.class.friendly_id_config
+        slug_column = config.slug_column.to_sym
+        # An explicit `anonymizable :slug, with: ...` rule wins.
+        payload[slug_column] = "#{ANONYMIZED_SLUG_PREFIX}#{SecureRandom.hex(16)}" unless payload.key?(slug_column)
+        config.uses?(:history) && respond_to?(:slugs)
+      end
+
+      # The slug's sources: the sluggable field plus every candidate. A
+      # candidate that is a Proc or a method (not a column) could read any
+      # field, so it counts as derived — erring toward a rewritten URL over a
+      # URL that still spells the erased name.
+      def anonymizable_slug_from_erased_field?
+        klass = self.class
+        return false unless klass.respond_to?(:sluggable_field) && klass.respond_to?(:friendly_id_config)
+
+        erased = klass.anonymizable_rules.keys
+        sources = [klass.sluggable_field, *Array(klass.sluggable_candidates).flatten]
+        sources.any? do |source|
+          next true unless source.is_a?(Symbol) || source.is_a?(String)
+
+          name = source.to_sym
+          erased.include?(name) || !klass.column_names.include?(name.to_s)
+        end
+      end
+
+      # friendly_id's history table keeps every earlier slug — each one as
+      # identifying as the current. Deleted inside the erasure transaction, so
+      # a vetoing hook puts them back with everything else.
+      def anonymizable_delete_slug_history!
+        association(:slugs).scope.unscope(:order).delete_all
+        association(:slugs).reset
       end
 
       # The audit trail holds historical plaintext of tracked fields; when any

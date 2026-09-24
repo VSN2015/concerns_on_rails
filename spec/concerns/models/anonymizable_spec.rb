@@ -14,6 +14,7 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
         t.string :email_bidx
         t.datetime :anonymized_at
         t.datetime :when_wiped
+        t.string :slug
         t.timestamps null: true
       end
     end
@@ -324,6 +325,99 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
       expect(fresh.secret).to eq("[REDACTED]")
     end
 
+    # Erasure must never be blocked by crypto state: a row whose ciphertext
+    # cannot be decrypted (lost key, corruption) is exactly the kind of data a
+    # right-to-erasure request still has to destroy.
+    describe "a field whose ciphertext cannot be decrypted" do
+      let(:writer) do
+        model_class do
+          include ConcernsOnRails::Models::Encryptable
+
+          encryptable :secret, key: "the-key-that-wrote-the-row"
+        end
+      end
+
+      def eraser(strategy)
+        model_class do
+          include ConcernsOnRails::Models::Encryptable
+
+          encryptable :secret, key: "a-different-key-that-cannot-read-it"
+          anonymizable :secret, with: strategy
+        end
+      end
+
+      it "sanity: the row really is undecryptable under the eraser's key" do
+        id = writer.create!(secret: "top secret").id
+        expect { eraser(:redact).find(id).secret }.to raise_error(ConcernsOnRails::Encryption::DecryptionError)
+      end
+
+      %i[nullify redact email random_hex].each do |preset|
+        it "erases with :#{preset} without ever decrypting the old value" do
+          id = writer.create!(secret: "top secret").id
+          klass = eraser(preset)
+          record = klass.find(id)
+
+          expect(ConcernsOnRails::Support::Encryptor).not_to receive(:decrypt)
+          expect { record.send(:anonymize_record!) }.not_to raise_error
+          RSpec::Mocks.space.proxy_for(ConcernsOnRails::Support::Encryptor).reset
+
+          erased = klass.find(id).secret
+          case preset
+          when :nullify then expect(erased).to be_nil
+          when :redact then expect(erased).to eq("[REDACTED]")
+          when :email then expect(erased).to match(/\Aanon-\h{20}@anonymized\.invalid\z/)
+          when :random_hex then expect(erased).to match(/\A\h{32}\z/)
+          end
+        end
+      end
+
+      it "keeps the presence-only presets nil-in / nil-out without decrypting" do
+        id = writer.create!(secret: nil).id
+        record = eraser(:redact).find(id)
+        record.anonymize!
+        expect(record.secret).to be_nil
+      end
+
+      it "falls back to [REDACTED] for a value-dependent strategy (:hash, a callable)" do
+        seen = []
+        recorder = lambda do |value|
+          seen << value
+          "custom"
+        end
+        [:hash, recorder].each do |strategy|
+          id = writer.create!(secret: "top secret").id
+          record = eraser(strategy).find(id)
+
+          expect { record.anonymize! }.not_to raise_error
+          expect(record.secret).to eq("[REDACTED]")
+          expect(record.anonymized?).to be(true)
+        end
+        # The callable is never handed a value it cannot have read.
+        expect(seen).to be_empty
+      end
+
+      it "falls back the same way when decrypt errors are swallowed (the value reads as nil)" do
+        ConcernsOnRails.encryption.raise_on_decrypt_error = false
+        id = writer.create!(secret: "top secret").id
+        record = eraser(:hash).find(id)
+
+        record.anonymize!
+        expect(record.secret).to eq("[REDACTED]")
+      ensure
+        ConcernsOnRails.encryption.raise_on_decrypt_error = true
+      end
+
+      it "does not let one undecryptable row roll back anonymize_all!" do
+        good_writer = eraser(:hash)
+        good = good_writer.create!(secret: "readable")
+        bad = writer.create!(secret: "unreadable")
+
+        expect(eraser(:hash).anonymize_all!).to eq(2)
+        expect(good_writer.find(good.id).secret).to eq(Digest::SHA256.hexdigest("readable"))
+        expect(good_writer.find(bad.id).secret).to eq("[REDACTED]")
+      end
+    end
+
     context "with a blind index" do
       let(:klass) do
         model_class do
@@ -363,6 +457,128 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
         expect(record.email).to be_nil
         expect(record.email_bidx).to be_nil
       end
+    end
+  end
+
+  describe "Sluggable interaction" do
+    # update_columns skips callbacks, so a slug generated from an erased field
+    # kept the PII ("jane-smith") in every URL — and friendly_id's history
+    # table kept every earlier one.
+    before do
+      ActiveRecord::Schema.define do
+        create_table :friendly_id_slugs, force: true do |t|
+          t.string   :slug, null: false
+          t.integer  :sluggable_id, null: false
+          t.string   :sluggable_type, limit: 50
+          t.string   :scope
+          t.datetime :created_at
+        end
+      end
+    end
+
+    after { ActiveRecord::Base.connection.drop_table(:friendly_id_slugs) }
+
+    def slugged_class(name = "AnonSluggedUser", sluggable: [:name], &block)
+      klass = model_class do
+        include ConcernsOnRails::Models::Sluggable
+      end
+      stub_const(name, klass)
+      field, *options = sluggable
+      klass.sluggable_by(field, **(options.first || {}))
+      klass.class_eval(&block) if block
+      klass
+    end
+
+    it "replaces a slug derived from an anonymized field with a non-identifying unique one" do
+      klass = slugged_class { anonymizable :name, with: :redact }
+      jane = klass.create!(name: "Jane Smith")
+      john = klass.create!(name: "John Doe")
+      expect(jane.slug).to eq("jane-smith")
+
+      jane.anonymize!
+      john.anonymize!
+
+      expect(jane.slug).to match(/\Aanon-\h{32}\z/)
+      expect(john.slug).to match(/\Aanon-\h{32}\z/)
+      expect(jane.slug).not_to eq(john.slug)
+      expect(klass.friendly.find(jane.slug)).to eq(jane)
+      expect { klass.friendly.find("jane-smith") }.to raise_error(ActiveRecord::RecordNotFound)
+    end
+
+    it "rewrites the slug in the same single UPDATE" do
+      klass = slugged_class { anonymizable :name, with: :redact }
+      record = klass.create!(name: "Jane Smith")
+
+      statements = capture_sql { record.anonymize! }
+      expect(statements.grep(/\AUPDATE/i).size).to eq(1)
+    end
+
+    it "leaves the slug alone when its source field is not anonymized" do
+      klass = slugged_class { anonymizable :email, with: :email }
+      record = klass.create!(name: "Public Title", email: "jane@example.com")
+      record.anonymize!
+      expect(record.slug).to eq("public-title")
+    end
+
+    it "rewrites the slug when an anonymized field is one of its candidates" do
+      klass = slugged_class(sluggable: [:email, { candidates: [:name, %i[name phone]] }]) do
+        anonymizable :name, with: :redact
+      end
+      record = klass.create!(name: "Jane Smith", email: "x@example.com")
+      expect(record.slug).to eq("jane-smith")
+
+      record.anonymize!
+      expect(record.slug).to match(/\Aanon-\h{32}\z/)
+    end
+
+    it "keeps an explicit rule for the slug column itself" do
+      klass = slugged_class do
+        anonymizable :name, with: :redact
+        anonymizable :slug, with: ->(_value, record) { "user-#{record.id}" }
+      end
+      record = klass.create!(name: "Jane Smith")
+      record.anonymize!
+      expect(record.slug).to eq("user-#{record.id}")
+    end
+
+    it "deletes the record's friendly_id history rows, and only its own" do
+      klass = slugged_class(sluggable: [:name, { history: true }]) { anonymizable :name, with: :redact }
+      jane = klass.create!(name: "Jane Smith")
+      jane.update!(name: "Jane Doe")
+      other = klass.create!(name: "Other Person")
+      expect(FriendlyId::Slug.where(sluggable_id: jane.id).pluck(:slug)).to contain_exactly("jane-smith", "jane-doe")
+
+      jane.anonymize!
+
+      expect(FriendlyId::Slug.where(sluggable_id: jane.id)).to be_empty
+      expect(FriendlyId::Slug.where(sluggable_id: other.id).pluck(:slug)).to eq(["other-person"])
+      expect { klass.friendly.find("jane-smith") }.to raise_error(ActiveRecord::RecordNotFound)
+      expect { klass.friendly.find("jane-doe") }.to raise_error(ActiveRecord::RecordNotFound)
+      expect(klass.friendly.find(jane.slug)).to eq(jane)
+    end
+
+    it "rolls the history deletion back with the erasure when a hook raises" do
+      klass = slugged_class(sluggable: [:name, { history: true }]) do
+        anonymizable :name, with: :redact
+        define_method(:after_anonymize) { raise "veto" }
+      end
+      jane = klass.create!(name: "Jane Smith")
+
+      expect { jane.anonymize! }.to raise_error("veto")
+      expect(klass.find(jane.id).slug).to eq("jane-smith")
+      expect(FriendlyId::Slug.where(sluggable_id: jane.id).pluck(:slug)).to eq(["jane-smith"])
+    end
+
+    it "rewrites slugs and history in anonymize_all! too" do
+      klass = slugged_class(sluggable: [:name, { history: true }]) { anonymizable :name, with: :redact }
+      a = klass.create!(name: "Alice Adams")
+      b = klass.create!(name: "Bob Brown")
+
+      expect(klass.anonymize_all!).to eq(2)
+      slugs = klass.order(:id).pluck(:slug)
+      expect(slugs).to all(match(/\Aanon-\h{32}\z/))
+      expect(slugs.uniq.size).to eq(2)
+      expect(FriendlyId::Slug.where(sluggable_id: [a.id, b.id])).to be_empty
     end
   end
 end
