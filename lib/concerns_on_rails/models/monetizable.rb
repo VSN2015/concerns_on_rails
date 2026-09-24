@@ -62,6 +62,7 @@ module ConcernsOnRails
             { unit: unit, precision: precision, delimiter: delimiter, separator: separator, subunit_to_unit: subunit_to_unit },
             LABEL
           ).freeze
+          ConcernsOnRails::Support::Money.validate_unit!(config, LABEL)
 
           ensure_columns!("ConcernsOnRails::Models::Monetizable", fields, types: :integer)
           fields.each do |cents_field|

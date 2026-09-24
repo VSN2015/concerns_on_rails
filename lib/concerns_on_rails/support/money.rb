@@ -47,6 +47,16 @@ module ConcernsOnRails
         coerce_numeric_options(config.merge(overrides), label)
       end
 
+      # A unit that contains the delimiter or the separator (",", "Fr." with
+      # separator ".") would make formatted output ambiguous to read back.
+      def validate_unit!(options, label)
+        unit = strip_space(options.fetch(:unit, "$").to_s)
+        marks = [options.fetch(:delimiter, ","), options.fetch(:separator, ".")].map(&:to_s).reject(&:empty?)
+        return unless marks.any? { |mark| unit.include?(mark) }
+
+        raise ArgumentError, "#{label}: :unit must not contain the :delimiter or :separator (unit: #{unit.inspect})"
+      end
+
       # :subunit_to_unit to a positive Integer, :precision to an Integer
       # (a String "2" is fine; "two" or 1.5 raises). Returns a new Hash.
       def coerce_numeric_options(options, label)
@@ -72,7 +82,9 @@ module ConcernsOnRails
       # FloatDomainError from the cents rounding.
       MAX_EXPONENT = 24
       # A written exponent of three or more digits ("1e100000000") is absurd.
-      OVERSIZED_EXPONENT = /[eE][+-]?\d{3}/
+      # It must follow a digit, and is checked only once the unit is gone, so
+      # a unit ending in e/E ("Le100.00", "CHE100.00") is not mistaken for one.
+      OVERSIZED_EXPONENT = /\d[eE][+-]?\d{3}/
       # "1.234" / "-1.234.567": "."-grouped thousands.
       DOTTED_THOUSANDS = /\A[+-]?\d{1,3}(?:\.\d{3})+\z/
 
@@ -97,11 +109,8 @@ module ConcernsOnRails
       end
 
       def parse_string(amount, options)
-        stripped = strip_space(amount)
-        return nil unless plausible_input?(stripped)
-
-        body = strip_unit(stripped, options.fetch(:unit, "$").to_s)
-        return nil unless body
+        body = strip_unit(strip_space(amount), options.fetch(:unit, "$").to_s)
+        return nil unless body && plausible_input?(body)
 
         body = body.delete(".") if dotted_thousands?(body, options)
         canonical = BigDecimal(body, exception: false)
@@ -111,7 +120,8 @@ module ConcernsOnRails
         localized && BigDecimal(localized, exception: false)
       end
 
-      # Non-empty, bounded in length, and no three-digit written exponent.
+      # Non-empty, bounded in length, and no three-digit written exponent —
+      # checked on the amount with its unit removed.
       def plausible_input?(string)
         !string.empty? && string.length <= MAX_INPUT_LENGTH && !string.match?(OVERSIZED_EXPONENT)
       end

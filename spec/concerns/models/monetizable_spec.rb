@@ -134,6 +134,23 @@ describe ConcernsOnRails::Models::Monetizable do
       end
     end
 
+    # The exponent guard ran BEFORE the unit was stripped, so a unit ending in
+    # "e"/"E" that touches the digits ("Le100.00") read as a 3-digit exponent
+    # and `price = formatted_price` silently stored nil.
+    it "round-trips formatted output for units ending in e/E" do
+      %w[Le CHE E].each do |unit|
+        ["", ","].each do |delimiter|
+          klass = product_class { monetizable :price_cents, unit: unit, delimiter: delimiter }
+          [500, 10_000, 123_456].each do |cents|
+            formatted = klass.new(price_cents: cents).formatted_price
+            expect(cents_for(klass, formatted)).to eq(cents), "#{formatted.inspect} (delimiter #{delimiter.inspect})"
+            expect(cents_for(klass, "-#{formatted}")).to eq(-cents)
+          end
+        end
+      end
+      expect(cents_for(product_class { monetizable :price_cents }, "1e100")).to be_nil # a real 3-digit exponent
+    end
+
     it "only strips the unit at the start or the end of the amount" do
       klass = product_class { monetizable :price_cents }
       euro = product_class { monetizable :total_cents, unit: "EUR ", delimiter: ".", separator: "," }
@@ -202,6 +219,18 @@ describe ConcernsOnRails::Models::Monetizable do
     it "raises when :subunit_to_unit is not positive" do
       expect { product_class { monetizable :price_cents, subunit_to_unit: 0 } }
         .to raise_error(ArgumentError, /:subunit_to_unit must be a positive integer/)
+    end
+
+    # A unit that contains the delimiter or separator makes formatted output
+    # ambiguous to read back ("1.234" with unit "." — unit, or grouping?).
+    it "raises when the unit contains the delimiter or the separator" do
+      [{ unit: "," }, { unit: "." }, { unit: "Fr.", separator: "." }, { unit: "€", delimiter: "€" },
+       { unit: " , ", delimiter: "," }].each do |opts|
+        expect { product_class { monetizable :price_cents, **opts } }
+          .to raise_error(ArgumentError, /:unit must not contain the :delimiter or :separator/), opts.inspect
+      end
+      expect { product_class { monetizable :price_cents, unit: "EUR ", delimiter: " ", separator: "," } }.not_to raise_error
+      expect { product_class { monetizable :price_cents, unit: "", delimiter: "" } }.not_to raise_error
     end
 
     it "coerces a String :subunit_to_unit (1.26 — the writer silently nil'd, the reader raised)" do

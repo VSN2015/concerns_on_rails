@@ -1350,7 +1350,7 @@ product.formatted_price # => "$19.99"
 | Method            | Returns                                       |
 |-------------------|-----------------------------------------------|
 | `price`           | the amount as a `BigDecimal` (cents ÷ 100)    |
-| `price=`          | assign in major units; rounded to whole cents. Strings are read as plain decimals (`"19.99"`) or in the field's own display format (`"$1,234.50"`, `"€1.234,50"` with `separator: ","`), so `formatted_price` round-trips. The unit is only recognized at the start or end; in a `delimiter: "."` field with another separator, `"1.234"` means 1234 (like `"€1.234"`). Garbage, NaN, Infinity and oversized input (over 64 characters, a 3-digit exponent, or ≥ 10^24) become `nil` |
+| `price=`          | assign in major units; rounded to whole cents. Strings are read as plain decimals (`"19.99"`) or in the field's own display format (`"$1,234.50"`, `"€1.234,50"` with `separator: ","`), so `formatted_price` round-trips. The unit is only recognized at the start or end; in a `delimiter: "."` field with another separator, `"1.234"` means 1234 (like `"€1.234"`). Garbage, NaN, Infinity and oversized input (over 64 characters, a 3-digit exponent, or ≥ 10^24 — a parse-cost bound, far above a `bigint` column's ~9.2e18 subunits, so the database may still reject a large amount at save) become `nil` |
 | `formatted_price` | a display string (`"$1,234.56"`); accepts per-call overrides: `formatted_price(unit: "€", delimiter: ".", separator: ",")` |
 
 **Aggregates** — class methods that follow the current scope, exact and float-free:
@@ -1361,7 +1361,7 @@ Product.in_stock.average_price         # average_ / minimum_ / maximum_ too — 
 Order.paid.formatted_sum_total         # => "€3.500,50"  every aggregate has a formatted_ twin (overrides accepted)
 ```
 
-**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors. `precision:` and `subunit_to_unit:` are coerced (`"2"` works, `"two"` raises) at the macro and in per-call `formatted_` overrides alike.
+**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors. A `unit:` containing the `delimiter:` or `separator:` raises (formatted output could not be read back). `precision:` and `subunit_to_unit:` are coerced (`"2"` works, `"two"` raises) at the macro and in per-call `formatted_` overrides alike.
 
 ---
 
