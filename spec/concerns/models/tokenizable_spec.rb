@@ -471,5 +471,39 @@ describe ConcernsOnRails::Tokenizable do
         expect(statements.grep(/\AROLLBACK TO SAVEPOINT/i).size).to eq(1)
       end
     end
+
+    context "declared on one STI subclass only (review of #111)" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :sti_grants, force: true do |t|
+            t.string :type
+            t.string :api_token
+          end
+          add_index :sti_grants, :api_token, unique: true
+        end
+        Object.const_set(:StiGrant, Class.new(TestModel) { self.table_name = "sti_grants" })
+        Object.const_set(:StiApiGrant, Class.new(StiGrant) do
+          include ConcernsOnRails::Tokenizable
+
+          tokenizable_by :api_token
+        end)
+      end
+
+      after do
+        %i[StiApiGrant StiGrant].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+      end
+
+      it "generates, prechecks table-wide and regenerates on the declaring subclass" do
+        StiGrant.create!(api_token: "taken")
+        allow(StiApiGrant).to receive(:generate_tokenizable_value).and_return("taken", "fresh", "rolled")
+
+        grant = StiApiGrant.create!
+        expect(grant.api_token).to eq("fresh")
+        expect(StiGrant.create!.api_token).to be_nil
+        grant.regenerate_api_token!
+        expect(grant.reload.api_token).to eq("rolled")
+        expect(StiApiGrant.authenticate_by_api_token("rolled")).to eq(grant)
+      end
+    end
   end
 end

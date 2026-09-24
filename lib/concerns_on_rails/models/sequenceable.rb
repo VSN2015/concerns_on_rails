@@ -74,7 +74,10 @@ module ConcernsOnRails
           self.sequenceable_config = sequenceable_config.merge(
             field => { into: into, prefix: prefix.to_s, padding: padding.to_i,
                        separator: separator.to_s, start_at: start_at.to_i,
-                       scope: scope_cols, reset: reset, template: template, assign: assign }
+                       scope: scope_cols, reset: reset, template: template, assign: assign,
+                       # The rows that share this counter: the declaring class and
+                       # its descendants (see SequenceCalculator#sequence_relation).
+                       owner: self }
           )
 
           before_create -> { assign_sequenceable_value(field) } if assign == :create

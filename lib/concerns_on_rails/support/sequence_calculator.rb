@@ -17,22 +17,36 @@ module ConcernsOnRails
 
       # Relation of existing rows that share this record's scope (and period, when
       # reset is enabled). Reads from `unscoped` so a model's default_scope never
-      # hides rows the counter must account for — and from the STI BASE class,
-      # because a subclass's own `unscoped` still carries its `type = 'Sub'`
-      # condition: sibling subclasses sharing the column would each start at 1
-      # and collide on the unique index. Per-type numbering is `scope: :type`.
+      # hides rows the counter must account for — and from the class that
+      # DECLARED the macro (cfg[:owner]), not the receiver: declared on an STI
+      # base, every subclass draws from one table-wide counter (a subclass's own
+      # relation would filter on its type and siblings would collide); declared
+      # on each subclass, each keeps its own gap-free sequence. A subclass that
+      # merely inherits the config shares its declaring parent's counter.
       def sequence_relation(field, record, scope_attrs)
         cfg = sequenceable_config.fetch(field)
-        rel = base_class.unscoped
+        rel = (cfg[:owner] || self).unscoped
 
         cfg[:scope].each do |col|
-          value = record ? record[col] : (scope_attrs[col] || scope_attrs[col.to_s])
+          value = record ? record[col] : sequence_preview_scope_value(col, scope_attrs)
           rel = rel.where(col => value)
         end
 
         return rel if cfg[:reset] == :never
 
         rel.where(created_at: period_range(cfg[:reset], base_time(record)))
+      end
+
+      # next_<field> has no record to read the scope from. An omitted STI type
+      # column resolves to what a new record of the RECEIVING class would carry
+      # (its sti_name for a subclass, NULL for the base), so `Sub.next_number`
+      # previews the value `Sub.create!` will actually get under scope: :type.
+      def sequence_preview_scope_value(col, scope_attrs)
+        return scope_attrs[col] if scope_attrs.key?(col)
+        return scope_attrs[col.to_s] if scope_attrs.key?(col.to_s)
+        return nil unless col.to_s == inheritance_column.to_s
+
+        finder_needs_type_condition? ? sti_name : nil
       end
 
       def format_sequence(field, seq, record)

@@ -493,4 +493,102 @@ describe ConcernsOnRails::Sequenceable do
       expect(ManualInvoice.count).to eq(2)
     end
   end
+
+  describe "which rows share a counter: the class that DECLARED the macro (review of #111)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :x_docs, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+          t.string  :number
+          t.timestamps
+        end
+        add_index :x_docs, %i[type sequence], unique: true
+      end
+
+      Object.const_set(:XDoc, Class.new(TestModel) { self.table_name = "x_docs" })
+      Object.const_set(:XInvoice, Class.new(XDoc) do
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", padding: 4
+      end)
+      Object.const_set(:XCredit, Class.new(XDoc) do
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "CN-", padding: 4
+      end)
+    end
+
+    after do
+      %i[XInvoice XCredit XDoc].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    it "keeps per-subclass numbering when each subclass declares its own sequence (gap-free per type)" do
+      numbers = [XInvoice.create!, XInvoice.create!, XCredit.create!, XInvoice.create!].map(&:number)
+      expect(numbers).to eq(%w[INV-0001 INV-0002 CN-0001 INV-0003])
+    end
+
+    it "previews exactly what the next per-subclass assignment produces" do
+      2.times { XInvoice.create! }
+      XCredit.create!
+
+      expect(XInvoice.next_sequence).to eq(3)
+      expect(XCredit.next_sequence).to eq(2)
+      expect(XInvoice.create!.sequence).to eq(3)
+      expect(XCredit.create!.sequence).to eq(2)
+    end
+
+    it "previews the base-declared, table-wide counter from the base and from any subclass" do
+      ActiveRecord::Base.connection.remove_index(:x_docs, %i[type sequence])
+      base = Class.new(TestModel) do
+        self.table_name = "x_docs"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence
+      end
+      Object.const_set(:XShared, base)
+      Object.const_set(:XSharedSub, Class.new(base))
+      XSharedSub.create!
+      XShared.create!
+
+      expect(XShared.next_sequence).to eq(3)
+      expect(XSharedSub.next_sequence).to eq(3)
+      expect(XSharedSub.create!.sequence).to eq(3)
+    ensure
+      %i[XSharedSub XShared].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    it "previews scope: :type per receiving class when no scope attrs are passed" do
+      ActiveRecord::Base.connection.remove_index(:x_docs, %i[type sequence])
+      base = Class.new(TestModel) do
+        self.table_name = "x_docs"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, scope: :type
+      end
+      Object.const_set(:XTyped, base)
+      Object.const_set(:XTypedInv, Class.new(base))
+      Object.const_set(:XTypedCn, Class.new(base))
+      2.times { XTypedInv.create! }
+      XTypedCn.create!
+
+      expect(XTypedInv.next_sequence).to eq(3)
+      expect(XTypedCn.next_sequence).to eq(2)
+      expect(XTyped.next_sequence(type: "XTypedInv")).to eq(3) # explicit scope attrs still win
+      expect(XTyped.next_sequence).to eq(1) # base rows carry type NULL
+      expect([XTypedInv.create!, XTypedCn.create!, XTyped.create!].map(&:sequence)).to eq([3, 2, 1])
+    ensure
+      %i[XTypedInv XTypedCn XTyped].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    it "keeps the declaring class as the owner for a subclass that inherits the config" do
+      Object.const_set(:XInvoiceProforma, Class.new(XInvoice))
+      XInvoice.create!
+      XCredit.create!
+      expect(XInvoiceProforma.create!.number).to eq("INV-0002") # shares XInvoice's counter
+      expect(XInvoiceProforma.next_sequence).to eq(3)
+    ensure
+      Object.send(:remove_const, :XInvoiceProforma) if Object.const_defined?(:XInvoiceProforma)
+    end
+  end
 end

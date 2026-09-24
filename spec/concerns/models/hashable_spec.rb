@@ -381,9 +381,22 @@ describe ConcernsOnRails::Hashable do
         end
       end
 
-      it "rejects duplicate characters, which would silently bias the output" do
-        expect { build("AAB") }.to raise_error(ArgumentError, /alphabet has duplicate character\(s\): "A"/)
-        expect { build("abca1b") }.to raise_error(ArgumentError, /duplicate character\(s\): "a", "b"/)
+      it "de-duplicates a repeated character (removing the bias) and warns it will raise in 2.0" do
+        expect(ConcernsOnRails.deprecator).to receive(:warn).with(/duplicate character\(s\) "a", "b".*raise in 2\.0/m)
+        klass = build("abca1b")
+
+        expect(klass.hashable_alphabet).to eq("abc1")
+        expect(klass.create!.token).to match(/\A[abc1]{8}\z/)
+      end
+
+      it "does not warn for an alphabet without duplicates" do
+        expect(ConcernsOnRails.deprecator).not_to receive(:warn)
+        build("ABC123")
+      end
+
+      it "still rejects an alphabet that is all one character after de-duplication" do
+        allow(ConcernsOnRails.deprecator).to receive(:warn)
+        expect { build("ZZZ") }.to raise_error(ArgumentError, /at least 2 distinct characters/)
       end
 
       it "rejects an alphabet with fewer than two distinct characters" do
@@ -393,6 +406,39 @@ describe ConcernsOnRails::Hashable do
 
       it "still accepts a proper alphabet" do
         expect(build("ABC123").create!.token).to match(/\A[ABC123]{8}\z/)
+      end
+    end
+
+    context "declared on one STI subclass only (review of #111)" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :sti_parcels, force: true do |t|
+            t.string :type
+            t.string :token
+          end
+          add_index :sti_parcels, :token, unique: true
+        end
+        Object.const_set(:StiParcel, Class.new(TestModel) { self.table_name = "sti_parcels" })
+        Object.const_set(:StiTrackedParcel, Class.new(StiParcel) do
+          include ConcernsOnRails::Hashable
+
+          hashable_by :token, unique: true
+        end)
+      end
+
+      after do
+        %i[StiTrackedParcel StiParcel].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+      end
+
+      it "generates, prechecks table-wide and regenerates on the declaring subclass" do
+        StiParcel.create!(token: "taken")
+        allow(StiTrackedParcel).to receive(:generate_hashable_value).and_return("taken", "fresh", "rolled")
+
+        parcel = StiTrackedParcel.create!
+        expect(parcel.token).to eq("fresh")
+        expect(StiParcel.create!.token).to be_nil # the undeclared base generates nothing
+        parcel.regenerate_token!
+        expect(parcel.reload.token).to eq("rolled")
       end
     end
   end
