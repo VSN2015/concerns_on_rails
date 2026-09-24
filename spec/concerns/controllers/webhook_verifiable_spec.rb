@@ -94,10 +94,11 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       expect_failure(failing, :unauthorized, "webhook_signature_invalid")
     end
 
-    # Pre-fix the lookup was first-match over inherited-rules-first, so a
-    # parent's catch-all shadowed every rule a subclass declared: the
-    # subclass's own provider secret was never consulted.
-    it "prefers a subclass's own rule over an inherited catch-all" do
+    # Lookup is by SPECIFICITY: an action-specific rule naming the action wins
+    # over any catch-all, whichever class declared either. Pre-fix it was
+    # first-match over inherited-rules-first, so a parent's catch-all shadowed
+    # every rule a subclass declared.
+    it "prefers a subclass's specific rule over an inherited catch-all" do
       parent = verifiable_class { verify_webhook secret: "parent-secret", scheme: :hex, header: "X-Sig" }
       child = Class.new(parent) { verify_webhook :receive, secret: "child-secret", scheme: :hex, header: "X-Sig" }
 
@@ -105,7 +106,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       own.verify_webhook_signature!
       expect(own.webhook_verified?).to be(true)
 
-      # The parent's catch-all still covers every action the child did not claim.
+      # The parent's catch-all still covers every action the child did not name.
       other = instance(child, action: "other", headers: { "X-Sig" => hex_hmac("parent-secret", WH_BODY) })
       other.verify_webhook_signature!
       expect(other.webhook_verified?).to be(true)
@@ -117,51 +118,90 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       expect_failure(at_parent, :unauthorized, "webhook_signature_invalid")
     end
 
-    it "orders rules most-derived class first, keeping declaration order within a class" do
-      parent = verifiable_class { verify_webhook :receive, secret: "parent-secret", scheme: :hex, header: "X-Sig" }
-      child = Class.new(parent) do
-        verify_webhook :receive, secret: "child-first", scheme: :hex, header: "X-Sig"
-        verify_webhook :receive, secret: "child-second", scheme: :hex, header: "X-Sig"
+    # The reverse direction: a subclass adding a catch-all for its NEW actions
+    # must not take over an action its parent named — nor drop that rule's
+    # own replay:/scheme/tolerance.
+    it "keeps an inherited specific rule (and its replay:) ahead of a subclass catch-all" do
+      replay_store = Class.new do
+        attr_reader :data
+
+        def initialize
+          @data = {}
+        end
+
+        def write(key, value, options = {})
+          return nil if options[:unless_exist] && @data.key?(key)
+
+          @data[key] = value
+          true
+        end
+
+        def read(key)
+          @data[key]
+        end
+      end.new
+      parent = verifiable_class do
+        verify_webhook :receive, secret: "parent-secret", scheme: :hex, header: "X-Sig", replay: replay_store
       end
-      grandchild = Class.new(child) { verify_webhook :other, secret: "grandchild", scheme: :hex, header: "X-Sig" }
+      child = Class.new(parent) { verify_webhook secret: "generic", scheme: :hex, header: "X-Sig" }
 
-      expect(grandchild.webhook_rules.map { |rule| rule[:secret] })
-        .to eq(%w[grandchild child-first child-second parent-secret])
+      inherited = instance(child, headers: { "X-Sig" => hex_hmac("parent-secret", WH_BODY) })
+      inherited.verify_webhook_signature!
+      expect(inherited.webhook_verified?).to be(true)
+      expect(replay_store.data.size).to eq(1)
 
-      c = instance(grandchild, headers: { "X-Sig" => hex_hmac("child-first", WH_BODY) })
-      c.verify_webhook_signature!
-      expect(c.webhook_verified?).to be(true)
+      generic_on_receive = instance(child, headers: { "X-Sig" => hex_hmac("generic", WH_BODY) })
+      generic_on_receive.verify_webhook_signature!
+      expect_failure(generic_on_receive, :unauthorized, "webhook_signature_invalid")
+
+      new_action = instance(child, action: "other", headers: { "X-Sig" => hex_hmac("generic", WH_BODY) })
+      new_action.verify_webhook_signature!
+      expect(new_action.webhook_verified?).to be(true)
     end
 
-    it "lets a subclass's own catch-all take over the actions its parent named" do
-      parent = verifiable_class { verify_webhook :receive, secret: "parent-secret", scheme: :hex, header: "X-Sig" }
-      child = Class.new(parent) { verify_webhook secret: "child-secret", scheme: :hex, header: "X-Sig" }
+    # A shared concern module's `included { verify_webhook secret: ... }`
+    # lands in the host BEFORE the host's own specific rules; that must boot
+    # and the specific rules must still apply.
+    it "lets a specific rule declared after a same-class catch-all match" do
+      klass = verifiable_class do
+        verify_webhook secret: "generic", scheme: :hex, header: "X-Sig"
+        verify_webhook :receive, secret: "specific", scheme: :hex, header: "X-Sig"
+      end
 
-      c = instance(child, headers: { "X-Sig" => hex_hmac("child-secret", WH_BODY) })
-      c.verify_webhook_signature!
-      expect(c.webhook_verified?).to be(true)
+      specific = instance(klass, headers: { "X-Sig" => hex_hmac("specific", WH_BODY) })
+      specific.verify_webhook_signature!
+      expect(specific.webhook_verified?).to be(true)
+
+      other = instance(klass, action: "other", headers: { "X-Sig" => hex_hmac("generic", WH_BODY) })
+      other.verify_webhook_signature!
+      expect(other.webhook_verified?).to be(true)
     end
 
-    it "raises when a rule is declared after a catch-all in the same class (it could never match)" do
-      expect do
-        verifiable_class do
-          verify_webhook secret: WH_SECRET, scheme: :hex, header: "X-Sig"
-          verify_webhook :receive, secret: "other", scheme: :hex, header: "X-Sig"
-        end
-      end.to raise_error(ArgumentError, /declared after a catch-all.*could never match/)
+    it "resolves across several levels: most-derived specific, then most-derived catch-all" do
+      grandparent = verifiable_class do
+        verify_webhook :receive, secret: "gp-specific", scheme: :hex, header: "X-Sig"
+        verify_webhook secret: "gp-generic", scheme: :hex, header: "X-Sig"
+      end
+      parent = Class.new(grandparent) do
+        verify_webhook :receive, :ping, secret: "p-first", scheme: :hex, header: "X-Sig"
+        verify_webhook :receive, secret: "p-second", scheme: :hex, header: "X-Sig"
+      end
+      child = Class.new(parent) { verify_webhook secret: "c-generic", scheme: :hex, header: "X-Sig" }
 
-      expect do
-        verifiable_class do
-          verify_webhook secret: WH_SECRET, scheme: :hex, header: "X-Sig"
-          verify_webhook secret: "other", scheme: :hex, header: "X-Sig"
-        end
-      end.to raise_error(ArgumentError, /declared after a catch-all/)
-    end
+      expect(child.webhook_rules.map { |rule| rule[:secret] })
+        .to eq(%w[c-generic p-first p-second gp-specific gp-generic])
 
-    it "does not raise when the catch-all was inherited — the subclass's rule outranks it" do
-      parent = verifiable_class { verify_webhook secret: WH_SECRET, scheme: :hex, header: "X-Sig" }
-      expect { Class.new(parent) { verify_webhook :receive, secret: "other", scheme: :hex, header: "X-Sig" } }
-        .not_to raise_error
+      verified = lambda do |action, secret|
+        c = instance(child, action: action, headers: { "X-Sig" => hex_hmac(secret, WH_BODY) })
+        c.verify_webhook_signature!
+        c.webhook_verified?
+      end
+      expect(verified.call("receive", "p-first")).to be(true)   # parent's first specific rule
+      expect(verified.call("receive", "p-second")).to be(false) # declaration order within a class
+      expect(verified.call("receive", "c-generic")).to be(false)
+      expect(verified.call("ping", "p-first")).to be(true)
+      expect(verified.call("other", "c-generic")).to be(true)   # most-derived catch-all
+      expect(verified.call("other", "gp-generic")).to be(false)
     end
 
     it "treats a controller without a usable request as a missing signature (no crash)" do
@@ -680,7 +720,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       failed = instance(klass, headers: headers)
       failed.verify_webhook_signature!
       failed.response.status = 500
-      failed.commit_webhook_replay_claim
+      failed.send(:commit_webhook_replay_claim)
 
       retried = instance(klass, headers: headers)
       retried.verify_webhook_signature!
@@ -688,7 +728,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       expect(retried.webhook_verified?).to be(true)
 
       # And once a delivery really is handled, the duplicate is still rejected.
-      retried.commit_webhook_replay_claim
+      retried.send(:commit_webhook_replay_claim)
       duplicate = instance(klass, headers: headers)
       duplicate.verify_webhook_signature!
       expect_failure(duplicate, :conflict, "webhook_replayed")
@@ -723,7 +763,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       c = instance(short, headers: { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) })
       c.verify_webhook_signature!
       expect(fresh_store.writes.last[2][:expires_in]).to eq(60) # the claim
-      c.commit_webhook_replay_claim
+      c.send(:commit_webhook_replay_claim)
       expect(fresh_store.writes.last[2][:expires_in]).to eq(600) # the real ttl
     end
 
@@ -1007,6 +1047,53 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       expect(deliver.status).to eq(200)
       expect(store.data.size).to eq(1)
       expect(deliver.status).to eq(409)
+    end
+
+    it "keeps the replay callbacks out of action_methods" do
+      expect(controller.action_methods).to include("receive")
+      expect(controller.action_methods).not_to include("guard_webhook_replay_claim", "commit_webhook_replay_claim")
+    end
+
+    context "when the store's #delete raises" do
+      let(:store) do
+        Class.new do
+          attr_reader :data
+
+          def initialize
+            @data = {}
+          end
+
+          def write(key, value, options = {})
+            return nil if options[:unless_exist] && @data.key?(key)
+
+            @data[key] = value
+            true
+          end
+
+          def read(key)
+            @data[key]
+          end
+
+          def delete(_key)
+            raise IOError, "store went away"
+          end
+        end.new
+      end
+
+      it "does not turn a later filter's halt into a 500" do
+        expect(deliver("X-Halt" => "1").status).to eq(503)
+      end
+
+      it "never masks the action's own exception" do
+        expect(deliver("X-Boom" => "1").status).to eq(422) # still rescued as WebhookBoomError
+      end
+
+      it "logs the failed release" do
+        output = StringIO.new
+        controller.logger = Logger.new(output)
+        deliver("X-Halt" => "1")
+        expect(output.string).to match(/could not release.*IOError: store went away/)
+      end
     end
   end
 end

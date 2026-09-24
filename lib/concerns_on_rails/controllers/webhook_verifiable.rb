@@ -18,7 +18,7 @@ module ConcernsOnRails
     #     verify_webhook :github,  secret: -> { ENV["GITHUB_WEBHOOK_SECRET"] },  scheme: :github
     #     verify_webhook :shopify, secret: [NEW_SECRET, OLD_SECRET],             scheme: :shopify
     #     verify_webhook :custom,  secret: "s3cr3t", scheme: :hex, header: "X-Acme-Signature"
-    #     # verify_webhook secret: ...    # no actions = catch-all (declare it LAST in its class)
+    #     # verify_webhook secret: ...    # no actions = catch-all (used only when no rule names the action)
     #
     #     def stripe; ...; end
     #   end
@@ -105,13 +105,14 @@ module ConcernsOnRails
 
       module ClassMethods
         # Declare signature verification for the given actions (none =
-        # catch-all). The FIRST rule matching the current action wins, where a
-        # class's OWN rules are consulted before the rules it inherited (most-
-        # derived class first; declaration order within a class). So a
-        # subclass rule is never shadowed by a parent's catch-all — and a
-        # subclass catch-all takes over the actions its parent named. Within
-        # one class a catch-all must come last: declaring any rule after it
-        # raises ArgumentError, since that rule could never match.
+        # catch-all). Lookup is by SPECIFICITY: a rule that names the current
+        # action always beats a catch-all, whichever class declared either.
+        # Among rules naming the action — and, failing those, among
+        # catch-alls — the most-derived declaring class wins, then
+        # declaration order within a class. So a subclass rule is never
+        # shadowed by a parent's catch-all, and a subclass catch-all for its
+        # new actions never takes over an action its parent named (nor drops
+        # that rule's replay:/tolerance:/scheme).
         #
         # `replay:` adds replay protection for schemes that carry no timestamp
         # (GitHub, Shopify, plain hex/base64 — Stripe's `tolerance:` only bounds
@@ -142,28 +143,13 @@ module ConcernsOnRails
 
         private
 
-        # Own rules first, then the inherited ones (already most-derived
-        # first, by induction), so lookup stays a plain first match. A NEW
-        # array: the parent's is never mutated. Previously a subclass rule was
-        # appended AFTER the inherited ones, so a parent's catch-all matched
-        # first and shadowed it entirely.
+        # Stored most-derived declaring class first (own rules, then the
+        # inherited ones — already in that order, by induction), declaration
+        # order within a class, so both halves of the specificity lookup are a
+        # plain first match. A NEW array: the parent's is never mutated.
         def append_webhook_rule!(rule)
           own, inherited = webhook_rules.partition { |existing| existing[:owner].equal?(self) }
-          validate_webhook_rule_reachable!(own, rule[:actions])
           self.webhook_rules = own + [rule.merge(owner: self)] + inherited
-        end
-
-        # A rule declared after a catch-all of the SAME class can never match
-        # (the catch-all takes every action first) — almost certainly a
-        # misordered declaration, and one that would silently verify that
-        # action against the wrong provider's secret. An inherited catch-all
-        # is fine: the subclass's own rules outrank it.
-        def validate_webhook_rule_reachable!(own_rules, actions)
-          return unless own_rules.any? { |existing| existing[:actions].empty? }
-
-          target = actions.empty? ? "a catch-all rule" : "a rule for #{actions.join(', ')}"
-          raise ArgumentError, "#{LABEL}: #{target} declared after a catch-all in #{name || 'this class'} " \
-                               "could never match — declare the catch-all last"
         end
 
         # false is "off", not a bad store — `replay: Rails.env.production?`
@@ -260,10 +246,33 @@ module ConcernsOnRails
         !!@webhook_verified
       end
 
+      # Single funnel for all failure outcomes (override point). Uses
+      # Respondable's render_error when available, otherwise the same inline
+      # envelope as Throttleable / Idempotentable.
+      #
+      # Fails CLOSED, matching Authorizable#authorization_denied: when there is
+      # nothing to render the rejection into, raise. Returning nil here (the
+      # pre-1.29 behavior) left the before_action chain unhalted, so the action
+      # ran on an unverified — possibly forged — payload.
+      def webhook_verification_failed(message:, status:, code:)
+        unless webhook_can_render?
+          raise "ConcernsOnRails::Controllers::WebhookVerifiable: rejection for " \
+                "'#{webhook_action_name || '(unknown action)'}' could not be rendered " \
+                "(no response object) — refusing to fail open"
+        end
+
+        ConcernsOnRails::Support::ErrorEnvelope.render(self, message: message, status: status, code: code)
+      end
+
+      private
+
       # Promote the short claim to the configured replay_ttl once the action
       # has run (the after_action half of the replay check). A 5xx means the
       # delivery was not processed, so release the claim outright and let the
-      # provider retry immediately.
+      # provider retry immediately. Private (callbacks are dispatched with
+      # send) so it is never an action method. NOTE: `skip_after_action
+      # :commit_webhook_replay_claim` disables replay protection — every claim
+      # is then released by guard_webhook_replay_claim.
       def commit_webhook_replay_claim
         return unless @webhook_replay_claim
         return release_webhook_replay_claim if webhook_response_status.to_i >= 500
@@ -287,32 +296,24 @@ module ConcernsOnRails
         release_webhook_replay_claim
       end
 
-      # Single funnel for all failure outcomes (override point). Uses
-      # Respondable's render_error when available, otherwise the same inline
-      # envelope as Throttleable / Idempotentable.
-      #
-      # Fails CLOSED, matching Authorizable#authorization_denied: when there is
-      # nothing to render the rejection into, raise. Returning nil here (the
-      # pre-1.29 behavior) left the before_action chain unhalted, so the action
-      # ran on an unverified — possibly forged — payload.
-      def webhook_verification_failed(message:, status:, code:)
-        unless webhook_can_render?
-          raise "ConcernsOnRails::Controllers::WebhookVerifiable: rejection for " \
-                "'#{webhook_action_name || '(unknown action)'}' could not be rendered " \
-                "(no response object) — refusing to fail open"
-        end
-
-        ConcernsOnRails::Support::ErrorEnvelope.render(self, message: message, status: status, code: code)
-      end
-
-      private
-
+      # Runs from an ensure, so it must never raise: a failing #delete would
+      # replace the action's own exception, or turn a filter's halt into a
+      # 500. Worst case the claim expires on its own after REPLAY_CLAIM_TTL.
       def release_webhook_replay_claim
         claim = @webhook_replay_claim
         return unless claim
 
         @webhook_replay_claim = nil
         claim[:store].delete(claim[:key]) if claim[:store].respond_to?(:delete)
+      rescue StandardError => e
+        webhook_log_release_failure(e)
+      end
+
+      def webhook_log_release_failure(error)
+        log = respond_to?(:logger, true) ? send(:logger) : nil
+        log ||= Rails.logger if defined?(Rails) && Rails.respond_to?(:logger)
+        log&.error("#{LABEL}: could not release the replay claim (#{error.class}: #{error.message}); " \
+                   "it expires in #{REPLAY_CLAIM_TTL}s")
       end
 
       # Mirrors the render path in Support::ErrorEnvelope: a render_error
@@ -342,7 +343,8 @@ module ConcernsOnRails
         # webhook was accepted without a signature check.
         return webhook_unresolvable_action_rule(rules) if action.nil?
 
-        rules.find { |rule| rule[:actions].empty? || rule[:actions].include?(action) }
+        # Specificity first: a rule naming the action beats any catch-all.
+        rules.find { |rule| rule[:actions].include?(action) } || rules.find { |rule| rule[:actions].empty? }
       end
 
       # Which rule to verify against when the action cannot be resolved. A
