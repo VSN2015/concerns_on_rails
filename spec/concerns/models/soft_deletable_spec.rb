@@ -531,6 +531,21 @@ describe ConcernsOnRails::SoftDeletable do
           expect(rec.reload.deleted_at).to be_nil
         end
 
+        # Rails 6.0 reset a record created earlier in the caller's transaction
+        # to new_record? when the savepoint rolled back → duplicate INSERT.
+        it 'keeps one row when a record created in the caller transaction is vetoed' do
+          vetoing_class.veto = :soft_delete
+          vetoing_class.delete_all
+
+          ActiveRecord::Base.transaction do
+            rec = vetoing_class.create!(name: 'v')
+            expect(rec.soft_delete!).to be(false)
+            rec.update!(name: 'renamed')
+          end
+
+          expect(vetoing_class.pluck(:name, :deleted_at)).to eq([['renamed', nil]])
+        end
+
         it 'soft_delete_all raises RecordNotSaved and commits nothing' do
           vetoing_class.veto = :soft_delete
           vetoing_class.delete_all

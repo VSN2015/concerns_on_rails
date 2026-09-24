@@ -594,6 +594,50 @@ describe ConcernsOnRails::Publishable do
     end
   end
 
+  # Rails 6.0 reset a record created earlier in the caller's transaction to
+  # new_record? (id nil) when the verb's savepoint rolled back, so the next
+  # save INSERTed a duplicate.
+  describe "a record created in the caller's transaction, then a failed verb" do
+    before do
+      stub_const("TxArticle", Class.new(TestModel) do
+        self.table_name = "articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+        validates :title, presence: true
+
+        cattr_accessor :veto
+
+        def after_publish
+          raise ActiveRecord::Rollback if self.class.veto
+        end
+      end)
+    end
+
+    it "keeps one row after a validation failure" do
+      Article.transaction do
+        post = TxArticle.create!(title: "t")
+        post.title = nil
+        expect(post.publish!).to be(false)
+        post.title = "x"
+        post.save!
+      end
+
+      expect(TxArticle.pluck(:title)).to eq(["x"])
+    end
+
+    it "keeps one row after a hook veto" do
+      TxArticle.veto = true
+      Article.transaction do
+        post = TxArticle.create!(title: "t")
+        expect(post.publish!).to be(false)
+        post.update!(title: "x")
+      end
+
+      expect(TxArticle.pluck(:title, :published_at)).to eq([["x", nil]])
+    end
+  end
+
   # `update` returning false (validation) used to leave the before-hook's own
   # writes committed: the hook ran inside a transaction nothing rolled back.
   describe "a failed write rolls the before-hook's side effects back" do

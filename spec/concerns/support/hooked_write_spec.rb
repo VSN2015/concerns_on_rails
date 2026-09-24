@@ -44,10 +44,41 @@ describe ConcernsOnRails::Support::HookedWrite do
     described_class.run(item, before: :before_write, after: :after_write, restore: [:state], **options, &write)
   end
 
-  # Eager: a lazy `let` would first create the record INSIDE the caller's
-  # transaction in the example below, and Rails 6.0's savepoint rollback then
-  # resets that brand-new record's id.
-  let!(:item) { HookedItem.create!(state: "old") }
+  let(:item) { HookedItem.create!(state: "old") }
+
+  # Rails 6.0: rolling back the savepoint makes `rolledback!` restore the
+  # record's transaction state from when it was CREATED inside the caller's
+  # outer transaction — id nil, new_record? true — so the next save INSERTed
+  # a duplicate row.
+  describe "a record created earlier in the caller's transaction" do
+    it "stays persisted after a falsey write, so the next save updates the same row" do
+      ActiveRecord::Base.transaction do
+        fresh = HookedItem.create!(state: "old")
+        expect(run(fresh) { false }).to be(false)
+
+        expect(fresh).to be_persisted
+        expect(fresh.id).not_to be_nil
+        fresh.note = "edited"
+        fresh.save!
+      end
+
+      expect(HookedItem.count).to eq(1)
+      expect(HookedItem.first.note).to eq("edited")
+    end
+
+    it "stays persisted after an after-hook Rollback veto" do
+      HookedItem.after_action = :rollback
+      ActiveRecord::Base.transaction do
+        fresh = HookedItem.create!(state: "old")
+        expect(run(fresh) { fresh.update(state: "new") }).to be(false)
+
+        expect(fresh).to be_persisted
+        fresh.update!(note: "edited")
+      end
+
+      expect(HookedItem.pluck(:state, :note)).to eq([%w[old edited]])
+    end
+  end
 
   it "runs before, write, after (private hooks included) and returns true" do
     expect(run(item) { item.update(state: "new") }).to be(true)

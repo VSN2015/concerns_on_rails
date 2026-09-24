@@ -287,6 +287,28 @@ describe ConcernsOnRails::Activatable do
     end
   end
 
+  # Rails 6.0 reset a record created earlier in the caller's transaction to
+  # new_record? when the verb's savepoint rolled back → duplicate INSERT.
+  it "keeps one row when a record created in the caller's transaction fails activate!" do
+    klass = Class.new(TestModel) do
+      self.table_name = "subscriptions"
+      include ConcernsOnRails::Activatable
+
+      activatable_by
+      validates :name, presence: true
+    end
+
+    Subscription.transaction do
+      record = klass.create!(name: "ok", active: false)
+      record.name = nil
+      expect(record.activate!).to be(false)
+      record.name = "x"
+      record.save!
+    end
+
+    expect(klass.pluck(:name)).to eq(["x"])
+  end
+
   # `update` returning false (validation) used to leave the before hook's
   # own writes committed.
   it "rolls the before hook's side effects back when the write fails validation" do

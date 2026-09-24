@@ -36,6 +36,7 @@ module ConcernsOnRails
 
       def run(record, before: nil, after: nil, restore: [])
         snapshot = snapshot(record, restore)
+        identity = identity_snapshot(record)
         completed = false
         begin
           record.transaction(requires_new: true) do
@@ -46,9 +47,40 @@ module ConcernsOnRails
             completed = true
           end
         ensure
-          restore!(record, snapshot) unless completed
+          unless completed
+            restore!(record, snapshot)
+            restore_identity!(record, identity)
+          end
         end
         completed
+      end
+
+      # Rails 6.0: rolling the savepoint back runs `rolledback!`, which
+      # restores the record's transaction state from when it FIRST joined the
+      # enclosing transaction. For a record CREATED earlier in the caller's
+      # transaction that is "new, no id", so the next save INSERTed a
+      # duplicate row. A record persisted before the write is persisted after
+      # an aborted one, so its identity is put back. (A no-op on 6.1+, which
+      # leaves it alone.)
+      def identity_snapshot(record)
+        return nil unless record.persisted?
+
+        { id: record.id,
+          previously_new_record: record.instance_variable_get(:@previously_new_record) }
+      end
+
+      def restore_identity!(record, identity)
+        return if identity.nil? || record.frozen?
+
+        record.instance_variable_set(:@new_record, false)
+        record.instance_variable_set(:@destroyed, false)
+        if record.instance_variable_defined?(:@previously_new_record)
+          record.instance_variable_set(:@previously_new_record, identity[:previously_new_record])
+        end
+        return if record.id == identity[:id]
+
+        record.id = identity[:id]
+        record.send(:clear_attribute_changes, Array(record.class.primary_key).map(&:to_s))
       end
 
       # [name, value, dirty?, database value] per attribute, taken before
@@ -69,7 +101,7 @@ module ConcernsOnRails
           record[name] = value if dirty
         end
       end
-      private_class_method :snapshot, :restore!
+      private_class_method :snapshot, :restore!, :identity_snapshot, :restore_identity!
     end
   end
 end
