@@ -77,7 +77,7 @@ On destroy:
 
 - **Only a row that was actually deleted is decremented.** Destroying a stale second instance of an already-destroyed row (the `DELETE` matched 0 rows), or a never-saved record, writes nothing.
 - **The persisted values decide.** The parent and the `if:` verdict come from the database values, so an unsaved reparent (`comment.post = other; comment.destroy`) or condition flip can't redirect the decrement.
-- **The parent destroying its children is not decremented.** When the child is destroyed through the parent's own `dependent: :destroy` on the same foreign key, that parent row is about to be deleted — as with Rails' native counter cache the decrement is skipped (bumping it first would also bump `lock_version` and fail the parent's own DELETE with `StaleObjectError`). Counters on the child's other associations still decrement.
+- **The parent destroying its children is not decremented.** When the child is destroyed through the parent's own `has_many ..., dependent: :destroy` on the same foreign key, that parent row is about to be deleted — as with Rails' native counter cache the decrement is skipped (bumping it first would also bump `lock_version` and fail the parent's own DELETE with `StaleObjectError`). Counters on the child's other associations still decrement. A `has_one ..., dependent: :destroy` **replacement** (assigning a new record destroys the old one while the parent stays) does decrement.
 
 ## Examples
 
