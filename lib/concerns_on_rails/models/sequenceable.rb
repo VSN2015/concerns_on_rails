@@ -151,13 +151,23 @@ module ConcernsOnRails
       def sequenceable_assign!(field)
         return false if self[field].present?
 
-        cfg = self.class.sequenceable_config.fetch(field)
-        # created_at: sequenceable_pin_created_at may stamp it (reset: periods).
-        written = [field, cfg[:into], (:created_at unless cfg[:reset] == :never)].compact
-        previous = written.to_h { |column| [column, self[column]] }
+        previous = sequenceable_written_columns(field).to_h { |column| [column, self[column]] }
         assign_sequenceable_value(field)
         return true if new_record?
 
+        sequenceable_save_or_restore!(previous)
+      end
+      private :sequenceable_assign!
+
+      # The columns assign_sequenceable_value may write: the field, into:, and
+      # created_at (sequenceable_pin_created_at stamps it under reset:).
+      def sequenceable_written_columns(field)
+        cfg = self.class.sequenceable_config.fetch(field)
+        [field, cfg[:into], (:created_at unless cfg[:reset] == :never)].compact
+      end
+      private :sequenceable_written_columns
+
+      def sequenceable_save_or_restore!(previous)
         saved = false
         begin
           self.class.transaction(requires_new: true) { saved = save! }
@@ -167,7 +177,7 @@ module ConcernsOnRails
         end
         saved ? true : false
       end
-      private :sequenceable_assign!
+      private :sequenceable_save_or_restore!
 
       # Pin the row inside the period its number is drawn from: with reset:
       # enabled the period is computed from "now" during before_create, but

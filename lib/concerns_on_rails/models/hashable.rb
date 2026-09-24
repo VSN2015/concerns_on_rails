@@ -104,10 +104,6 @@ module ConcernsOnRails
             raise ArgumentError, "ConcernsOnRails::Models::Hashable: length must be a positive integer"
           end
 
-          if hashable_type == :custom && (!hashable_alphabet.is_a?(String) || hashable_alphabet.empty?)
-            raise ArgumentError, "ConcernsOnRails::Models::Hashable: type :custom requires a non-empty alphabet: String"
-          end
-
           validate_hashable_alphabet! if hashable_type == :custom
           validate_hashable_extras!
         end
@@ -117,6 +113,10 @@ module ConcernsOnRails
         # three) — a quiet loss of entropy. One distinct character is a
         # constant, not an identifier.
         def validate_hashable_alphabet!
+          unless hashable_alphabet.is_a?(String) && !hashable_alphabet.empty?
+            raise ArgumentError, "ConcernsOnRails::Models::Hashable: type :custom requires a non-empty alphabet: String"
+          end
+
           duplicates = hashable_alphabet.each_char.tally.select { |_char, n| n > 1 }.keys
           unless duplicates.empty?
             raise ArgumentError,

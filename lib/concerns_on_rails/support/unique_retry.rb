@@ -32,10 +32,10 @@ module ConcernsOnRails
     module UniqueRetry
       module_function
 
-      def with_retries(limit: 3, savepoint: nil)
+      def with_retries(limit: 3, savepoint: nil, &)
         attempts = 0
         begin
-          savepoint ? savepoint.transaction(requires_new: true) { yield } : yield
+          savepoint ? savepoint.transaction(requires_new: true, &) : yield
         rescue ActiveRecord::RecordNotUnique
           attempts += 1
           raise if attempts >= limit
