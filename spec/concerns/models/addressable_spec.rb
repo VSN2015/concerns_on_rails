@@ -695,6 +695,17 @@ describe ConcernsOnRails::Models::Addressable do
       expect(Location.new(city: "CHECK").valid?).to be false
     end
 
+    # A two-argument lambda (which Rails' own callbacks accept) raised.
+    it "evaluates conditions arity-aware, like Rails callbacks" do
+      define_location(required: %i[country], if: [->(record, _extra) { record.city == "CHECK" },
+                                                  proc { |record, *| record.line2.nil? }],
+                      unless: proc { |*args| args.any? })
+
+      expect(Location.new(city: "CHECK").valid?).to be false
+      expect(Location.new(city: "skip").valid?).to be true
+      expect(Location.new(city: "CHECK", line2: "x").valid?).to be true
+    end
+
     it "still normalizes even when the validation condition is false" do
       define_location(required: [], if: :line2?, normalize_country: true)
       loc = Location.new(country: "canada", city: "  Town  ")

@@ -337,14 +337,24 @@ module ConcernsOnRails
           Array(condition[:unless]).none? { |cond| address_condition_value(cond) }
       end
 
-      # Symbol/String: a method on the record. Proc: instance_exec'd, receiving
-      # the record when it takes an argument (as Rails does). Anything else
-      # callable is called with the record.
+      # Symbol/String: a method on the record. Proc: instance_exec'd with the
+      # arguments ActiveSupport::Callbacks gives a condition of that arity —
+      # (record, nil) for arity 2, (record) for 1 / -2, none otherwise — so a
+      # condition written for a stock Rails validation behaves the same here.
+      # Anything else callable is called with the record.
       def address_condition_value(cond)
         case cond
         when Symbol, String then send(cond)
-        when Proc then cond.arity.positive? ? instance_exec(self, &cond) : instance_exec(&cond)
+        when Proc then instance_exec(*address_condition_args(cond.arity), &cond)
         else cond.respond_to?(:call) ? cond.call(self) : cond
+        end
+      end
+
+      def address_condition_args(arity)
+        case arity
+        when 2 then [self, nil]
+        when 1, -2 then [self]
+        else []
         end
       end
 
