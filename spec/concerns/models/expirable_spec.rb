@@ -216,6 +216,197 @@ describe ConcernsOnRails::Expirable do
       expect(klass.coupon_active.to_a).to eq([live])
       expect(klass.respond_to?(:active)).to be(false)
     end
+
+    # The affix used to cover only the scopes: `active?`/`expired?` kept their
+    # plain names, so on a model that also includes Activatable or
+    # Schedulable one concern's predicate silently replaced the other's.
+    it "defines affixed predicates alongside the plain ones" do
+      ActiveRecord::Schema.define do
+        create_table :coupons, force: true do |t|
+          t.datetime :expires_at
+        end
+      end
+
+      klass = Class.new(TestModel) do
+        self.table_name = "coupons"
+        include ConcernsOnRails::Expirable
+
+        expirable_by :expires_at, prefix: :coupon
+      end
+
+      live = klass.create!(expires_at: 1.hour.from_now)
+      lapsed = klass.create!(expires_at: 1.hour.ago)
+      expect([live.coupon_active?, live.coupon_expired?]).to eq([true, false])
+      expect([lapsed.coupon_active?, lapsed.coupon_expired?]).to eq([false, true])
+      expect([lapsed.active?, lapsed.expired?]).to eq([false, true])
+    end
+
+    it "affixes predicates with suffix: and prefix: true too" do
+      ActiveRecord::Schema.define do
+        create_table :coupons, force: true do |t|
+          t.datetime :expires_at
+        end
+      end
+
+      suffixed = Class.new(TestModel) do
+        self.table_name = "coupons"
+        include ConcernsOnRails::Expirable
+
+        expirable_by :expires_at, suffix: :term
+      end
+      field_prefixed = Class.new(TestModel) do
+        self.table_name = "coupons"
+        include ConcernsOnRails::Expirable
+
+        expirable_by :expires_at, prefix: true
+      end
+
+      expect(suffixed.create!(expires_at: 1.hour.ago).expired_term?).to be(true)
+      expect(field_prefixed.create!(expires_at: 1.hour.ago).expires_at_expired?).to be(true)
+      expect(ApiToken.new).not_to respond_to(:_active?)
+    end
+  end
+
+  # An after hook vetoing with ActiveRecord::Rollback used to be swallowed by a
+  # bare `transaction` that joined the caller's (or expire_all's): the expiry
+  # committed, expire! returned true, and expire_all counted the row.
+  describe "ActiveRecord::Rollback from after_expire" do
+    let(:vetoing) do
+      Class.new(TestModel) do
+        self.table_name = "api_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by
+
+        def after_expire
+          raise ActiveRecord::Rollback
+        end
+      end
+    end
+
+    it "expire! returns false and leaves the record (row and memory) unexpired" do
+      token = vetoing.create!(value: "t")
+
+      expect(token.expire!).to be(false)
+      expect(token.expires_at).to be_nil
+      expect(token.reload.expires_at).to be_nil
+    end
+
+    it "rolls back inside a caller transaction, keeping the caller's own writes" do
+      token = vetoing.create!(value: "t")
+      other = vetoing.create!(value: "other")
+
+      ActiveRecord::Base.transaction do
+        other.update!(value: "renamed")
+        token.expire!
+      end
+
+      expect(other.reload.value).to eq("renamed")
+      expect(token.reload.expires_at).to be_nil
+    end
+
+    it "expire_all raises RecordNotSaved and commits nothing" do
+      vetoing.create!(value: "a")
+      vetoing.create!(value: "b")
+
+      expect { vetoing.expire_all }.to raise_error(ActiveRecord::RecordNotSaved, /failed to expire/)
+      expect(vetoing.where.not(expires_at: nil).count).to eq(0)
+    end
+  end
+
+  # `update` returning false (validation) used to leave before_expire's own
+  # writes committed.
+  it "rolls before_expire's side effects back when the write fails validation" do
+    klass = Class.new(TestModel) do
+      self.table_name = "api_tokens"
+      include ConcernsOnRails::Expirable
+
+      expirable_by
+      validates :value, presence: true
+
+      def before_expire
+        self.class.where(id: id).update_all(value: "touched-by-hook")
+      end
+    end
+    token = klass.create!(value: "ok")
+    token.value = nil
+
+    expect(token.expire!).to be(false)
+    expect(token.reload.value).to eq("ok")
+    expect(token.expires_at).to be_nil
+  end
+
+  # nil / blank / unparseable input fired the expiry hooks and then wrote
+  # the raw value — which AR casts to nil, i.e. "never expires": the exact
+  # opposite of what the caller asked for.
+  describe "degenerate expiry times" do
+    let(:hooked) do
+      Class.new(TestModel) do
+        self.table_name = "api_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by
+
+        attr_reader :log
+
+        def before_expire
+          (@log ||= []) << :before_expire
+        end
+      end
+    end
+
+    [nil, "", "   ", false, []].each do |blank|
+      it "expire!(#{blank.inspect}) expires now" do
+        token = hooked.create!(value: "t")
+        freeze_time do
+          expect(token.expire!(blank)).to be(true)
+          expect(token.reload.expires_at).to eq(Time.zone.now)
+        end
+        expect(token).to be_expired
+        expect(token.log).to eq(%i[before_expire])
+      end
+    end
+
+    ["not a time", "2026-13-45 99:99", 42, 1.hour].each do |bad|
+      it "expire!(#{bad.inspect}) raises ArgumentError before any hook runs" do
+        token = hooked.create!(value: "t")
+
+        expect { token.expire!(bad) }.to raise_error(ArgumentError, /cannot be parsed as a time/)
+        expect(token.log).to be_nil
+        expect(token.reload.expires_at).to be_nil
+      end
+    end
+
+    it "still accepts a parseable String" do
+      token = hooked.create!(value: "t")
+
+      expect(token.expire!("2020-01-01 00:00:00")).to be(true)
+      expect(token.reload.expires_at).to eq(Time.utc(2020, 1, 1))
+    end
+
+    it "expire_all(nil) expires now on the fast path" do
+      2.times { ApiToken.create!(value: "t") }
+      freeze_time do
+        expect(ApiToken.expire_all(nil)).to eq(2)
+        expect(ApiToken.pluck(:expires_at)).to all(eq(Time.zone.now))
+      end
+    end
+
+    it "expire_all(nil) expires now on the per-record path" do
+      2.times { hooked.create!(value: "t") }
+      freeze_time do
+        expect(hooked.expire_all(nil)).to eq(2)
+        expect(hooked.pluck(:expires_at)).to all(eq(Time.zone.now))
+      end
+    end
+
+    it "expire_all rejects an unparseable time on both paths before writing anything" do
+      ApiToken.create!(value: "t")
+
+      expect { ApiToken.expire_all("garbage") }.to raise_error(ArgumentError, /cannot be parsed as a time/)
+      expect { hooked.expire_all("garbage") }.to raise_error(ArgumentError, /cannot be parsed as a time/)
+      expect(ApiToken.where.not(expires_at: nil).count).to eq(0)
+    end
   end
 
   describe "batch operations" do

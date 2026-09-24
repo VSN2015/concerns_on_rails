@@ -23,6 +23,27 @@ module ConcernsOnRails
         option == true ? default.to_s : option.to_s
       end
 
+      # Define affixed twins of a concern's instance predicates on `klass`:
+      # `{ active: :expirable_live? }` with `prefix: "term"` defines
+      # `term_active?`, which calls the concern's private `expirable_live?`
+      # (never the public plain predicate, which another concern included
+      # later may have replaced). A no-op without an affix. The methods live
+      # in a fresh module included into `klass` — the way Rails generates
+      # attribute methods — so a predicate the model defines itself still
+      # wins. Returns the defined names.
+      def define_predicates(klass, mapping, prefix:, suffix:)
+        return [] unless prefix || suffix
+
+        mod = Module.new
+        names = mapping.map do |base, target|
+          predicate = :"#{name(base, prefix: prefix, suffix: suffix)}?"
+          mod.send(:define_method, predicate) { |*args| send(target, *args) }
+          predicate
+        end
+        klass.include(mod)
+        names
+      end
+
       # Snapshot the scopes a concern just defined on `klass`: a
       # name => UnboundMethod map, captured immediately after definition.
       # Names that aren't defined are skipped (a concern may generate a scope
