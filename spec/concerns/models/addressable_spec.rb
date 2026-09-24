@@ -828,5 +828,57 @@ describe ConcernsOnRails::Models::Addressable do
         end
       end.not_to raise_error
     end
+
+    context "resolved lazily once the table exists (review of #111)" do
+      after do
+        conn = ActiveRecord::Base.connection
+        conn.drop_table(:addressable_late) if conn.table_exists?(:addressable_late)
+      end
+
+      let(:klass) do
+        Class.new(TestModel) do
+          self.table_name = "addressable_late"
+          include ConcernsOnRails::Models::Addressable
+
+          addressable_by
+        end
+      end
+
+      it "maps only the columns that exist, on first use after the migration" do
+        klass # declared while the table is missing
+        ActiveRecord::Schema.define do
+          create_table :addressable_late, force: true do |t|
+            t.string :line1
+            t.string :city
+            t.string :postal_code
+            t.string :country # no line2 / state columns
+          end
+        end
+        klass.reset_column_information
+
+        expect(klass.addressable_fields.keys).to contain_exactly(:line1, :city, :postal_code, :country)
+        record = klass.new(line1: "1 Main St", city: "Springfield", postal_code: "12345", country: "US")
+        expect(record).to be_valid
+        expect(record.full_address).to include("1 Main St", "Springfield")
+      end
+
+      it "enforces the required parts at first use instead of skipping the check" do
+        klass
+        ActiveRecord::Schema.define do
+          create_table :addressable_late, force: true do |t|
+            t.string :line1
+            t.string :country # city and postal_code are required but missing
+          end
+        end
+        klass.reset_column_information
+
+        expect { klass.addressable_fields }
+          .to raise_error(ArgumentError, /required address part\(s\) city, postal_code have no matching column/)
+      end
+
+      it "maps nothing while the schema is still unreachable" do
+        expect(klass.addressable_fields).to eq({})
+      end
+    end
   end
 end
