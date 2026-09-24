@@ -292,16 +292,34 @@ module ConcernsOnRails
         # and MySQL's default collation fold case — which silently matched
         # every row and made this return nothing. Hence SUBSTR + `<>`, with
         # MySQL forced onto a binary collation.
+        #
+        # SCOPE: called on the model itself (`Patient.needs_reencryption`) it
+        # covers the WHOLE table — rows hidden by a default_scope (SoftDeletable,
+        # Publishable `default_scope: true`) still hold ciphertext under the old
+        # key, and dropping that key from previous_keys makes them unreadable,
+        # so "nothing left to rotate" must count them. Called on a relation
+        # (`Patient.where(org_id: 1).needs_reencryption`, an association, a
+        # `scoping` block) it narrows exactly that relation, default scope
+        # included like any other chain — start from `unscoped` to reach hidden
+        # rows in a subset.
         def needs_reencryption(*fields)
           columns = encryptable_rotatable_fields(fields)
-          return none if columns.empty?
+          base = encryptable_rotation_base
+          return base.none if columns.empty?
 
           prefix = ConcernsOnRails::Support::Encryptor.header_prefix(ConcernsOnRails.encryption.key_id)
           clauses = columns.map do |field|
             quoted = "#{quoted_table_name}.#{connection.quote_column_name(field)}"
             "(#{quoted} IS NOT NULL AND #{encryptable_prefix_mismatch_sql(quoted)})"
           end
-          where(clauses.join(" OR "), *Array.new(columns.size, prefix))
+          base.where(clauses.join(" OR "), *Array.new(columns.size, prefix))
+        end
+
+        # The relation a rotation sweeps: the caller's explicit relation when
+        # there is one (relation delegation and `scoping` set current_scope),
+        # otherwise every row of the table, default_scope bypassed.
+        def encryptable_rotation_base
+          current_scope ? all : unscoped
         end
 
         # Case-exact "the first 4 characters are not this prefix", per adapter.
@@ -318,10 +336,14 @@ module ConcernsOnRails
         end
 
         # Rewrite every stale row (see needs_reencryption) under the current key,
-        # blind indexes included — one update_columns per row, streamed with
+        # blind indexes included — one guarded UPDATE per row, streamed with
         # find_each, no giant transaction (each row is valid before and after).
         # Returns the Integer count of rows rewritten. Run it after every
         # rotation, then drop the old id from `previous_keys`.
+        #
+        # `Patient.reencrypt_all!` sweeps the whole table, default_scope
+        # bypassed (soft-deleted / unpublished rows included); on a relation it
+        # sweeps exactly that relation (see needs_reencryption).
         def reencrypt_all!(*fields)
           columns = encryptable_rotatable_fields(fields)
           return 0 if columns.empty? # e.g. only per-field-keyed fields were named
