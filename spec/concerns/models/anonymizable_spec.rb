@@ -670,25 +670,27 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
     end
 
     describe "slug length" do
-      it "fits sluggable_by max_length:, dropping the prefix when it will not fit" do
-        klass = slugged_class(sluggable: [:name, { max_length: 12 }]) { anonymizable :name, with: :redact }
-        a = klass.create!(name: "Jane Smith")
-        b = klass.create!(name: "John Doe")
-        a.anonymize!
-        b.anonymize!
-
-        expect(a.slug).to match(/\A\h{12}\z/)
-        expect(b.slug).to match(/\A\h{12}\z/)
-        expect(a.slug).not_to eq(b.slug)
+      def stored_slug(klass, id)
+        klass.unscoped.where(id: id).pluck(:slug).first
       end
 
-      it "fits the slug column's limit (asserted explicitly — SQLite does not enforce it)" do
+      it "sizes the slug by the column only — Sluggable's max_length: is cosmetic, not a cap" do
+        # Conflict suffixes already exceed max_length:, so it is no hard limit;
+        # honouring it shrank the random part for nothing.
+        klass = slugged_class(sluggable: [:name, { max_length: 12 }]) { anonymizable :name, with: :redact }
+        record = klass.create!(name: "Jane Smith")
+        record.anonymize!
+
+        expect(record.slug).to match(/\Aanon-\h{32}\z/)
+      end
+
+      it "drops the prefix when a column limit leaves room only for the 16 random characters" do
         ActiveRecord::Base.connection.change_column :anon_users, :slug, :string, limit: 16
         klass = slugged_class { anonymizable :name, with: :redact }
         record = klass.create!(name: "Jane Smith")
         record.anonymize!
 
-        # Too tight for the prefix plus 16 random characters: all 16 are random.
+        # SQLite does not enforce the limit, so assert it explicitly.
         expect(record.slug.length).to be <= 16
         expect(record.slug).to match(/\A\h{16}\z/)
       end
@@ -702,28 +704,81 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
         expect(record.slug).to match(/\Aanon-\h{19}\z/)
       end
 
-      it "raises at macro time when the limit leaves room for fewer than 8 random characters" do
+      it "raises at anonymize time — naming slug: false — when the column cannot hold 16 random characters" do
+        ActiveRecord::Base.connection.change_column :anon_users, :slug, :string, limit: 15
+        klass = slugged_class { anonymizable :name, with: :redact } # no boot-time check
+        record = klass.create!(name: "Jane")
+
+        expect { record.anonymize! }
+          .to raise_error(ArgumentError, /allows only 15 characters.*at least 16.*slug: false/)
+        expect(klass.find(record.id).name).to eq("Jane") # nothing was written
+        expect(klass.find(record.id).anonymized?).to be(false)
+      end
+
+      it "never raises at boot for a limit that only matters once a slug would be rewritten" do
         ActiveRecord::Base.connection.change_column :anon_users, :slug, :string, limit: 7
-        expect { slugged_class { anonymizable :name, with: :redact } }
-          .to raise_error(ArgumentError, /allows only 7 characters.*at least 8 characters/)
+        # include Sluggable -> anonymizable :name -> sluggable_by :title order:
+        # before sluggable_by, the default sluggable field (:name) looked erased.
+        ActiveRecord::Base.connection.add_column :anon_users, :title, :string
+        late = nil
+        expect do
+          late = model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            anonymizable :name, with: :redact
+          end
+          stub_const("AnonLateSlugged", late)
+          late.sluggable_by :title
+        end.not_to raise_error
+
+        # A first call without slug: false, then one with it.
+        expect do
+          slugged_class("AnonTwoCallSlugged") do
+            anonymizable :name, with: :redact
+            anonymizable :email, with: :email, slug: false
+          end
+        end.not_to raise_error
+
+        record = late.create!(name: "Jane", title: "Short")
+        record.anonymize!
+        expect(record.slug).to eq("short")
+      end
+    end
+
+    describe "slug collisions" do
+      it "retries a colliding random slug with a fresh value instead of rolling back anonymize_all!" do
+        ActiveRecord::Base.connection.add_index :anon_users, :slug, unique: true
+        klass = slugged_class { anonymizable :name, with: :redact }
+        a = klass.create!(name: "Alice Adams")
+        b = klass.create!(name: "Bob Brown")
+        candidates = %w[anon-collide anon-collide anon-fresh]
+        allow(klass).to receive(:anonymizable_random_slug) { candidates.shift }
+
+        expect(klass.anonymize_all!).to eq(2)
+        expect(klass.order(:id).pluck(:slug)).to eq(%w[anon-collide anon-fresh])
+        expect(klass.find(a.id).anonymized?).to be(true)
+        expect(klass.find(b.id).name).to eq("[REDACTED]")
       end
 
-      it "raises from sluggable_by when anonymizable was declared first" do
-        klass = model_class do
-          include ConcernsOnRails::Models::Sluggable
+      it "gives up after a bounded number of attempts" do
+        ActiveRecord::Base.connection.add_index :anon_users, :slug, unique: true
+        klass = slugged_class { anonymizable :name, with: :redact }
+        klass.create!(name: "Taken")
+        record = klass.create!(name: "Jane Smith")
+        allow(klass).to receive(:anonymizable_random_slug).and_return("taken")
 
-          anonymizable :name, with: :redact # fine so far: no limit on the column
-        end
-        stub_const("AnonLateSlugged", klass)
-
-        expect { klass.sluggable_by :name, max_length: 5 }
-          .to raise_error(ArgumentError, /allows only 5 characters.*at least 8 characters/)
+        expect { record.anonymize! }.to raise_error(ActiveRecord::RecordNotUnique)
+        expect(klass.find(record.id).slug).to eq("jane-smith")
       end
+    end
 
-      it "does not check the length when the slug is never rewritten (slug: false)" do
-        ActiveRecord::Base.connection.change_column :anon_users, :slug, :string, limit: 7
-        expect { slugged_class { anonymizable :name, with: :redact, slug: false } }.not_to raise_error
-      end
+    it "does not swallow a programming error while detecting the slug source (fails closed)" do
+      klass = slugged_class { anonymizable :name, with: :redact }
+      record = klass.create!(name: "Jane Smith")
+      allow(klass).to receive(:sluggable_field).and_raise(NoMethodError, "boom")
+
+      expect { record.anonymize! }.to raise_error(NoMethodError, /boom/)
+      expect(klass.find(record.id).slug).to eq("jane-smith")
     end
 
     describe "a friendly_id model without the gem's Sluggable" do

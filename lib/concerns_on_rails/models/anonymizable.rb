@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/unique_retry"
 require "digest"
 require "securerandom"
 
@@ -101,13 +102,16 @@ module ConcernsOnRails
       # anonymized; true always; false never.
       SLUG_MODES = [:auto, true, false].freeze
       # The slug that replaces one generated from an erased field:
-      # "anon-<32 hex>", shortened to fit the slug column / max_length. The
-      # prefix is kept only while PREFIXED_SLUG_MIN_RANDOM random characters
-      # still fit; below MIN_SLUG_RANDOM the limit is rejected at macro time.
+      # "anon-<32 hex>", shortened to fit the slug COLUMN's limit (Sluggable's
+      # max_length: is cosmetic — conflict suffixes already exceed it). The
+      # prefix is kept only while MIN_SLUG_RANDOM random characters (64 bits)
+      # still fit beside it; a column too short for MIN_SLUG_RANDOM raises
+      # when a slug would be rewritten. A collision is retried with a fresh
+      # value (SLUG_WRITE_ATTEMPTS in total).
       ANONYMIZED_SLUG_PREFIX = "anon-".freeze
       FULL_SLUG_RANDOM = 32
-      PREFIXED_SLUG_MIN_RANDOM = 16
-      MIN_SLUG_RANDOM = 8
+      MIN_SLUG_RANDOM = 16
+      SLUG_WRITE_ATTEMPTS = 3
 
       included do
         class_attribute :anonymizable_rules, instance_accessor: false, default: {}
@@ -135,7 +139,6 @@ module ConcernsOnRails
           self.anonymizable_rules = anonymizable_rules.merge(fields.to_h { |f| [f.to_sym, strategy] })
 
           anonymizable_define_scopes(prefix, suffix)
-          anonymizable_validate_slug_room!
         end
 
         # Whether anonymize! replaces the friendly_id slug (see the module
@@ -158,30 +161,23 @@ module ConcernsOnRails
           anonymizable_slug_sources.filter_map do |source|
             source.to_sym if (source.is_a?(Symbol) || source.is_a?(String)) && columns.include?(source.to_s)
           end
-        rescue StandardError
-          [] # schema unreachable (db:create, assets:precompile)
+        rescue ActiveRecord::ActiveRecordError
+          # Schema unreachable only (the ColumnGuard convention) — any other
+          # error propagates: swallowing it would silently keep a PII slug.
+          []
         end
 
-        # A random, non-identifying replacement slug that fits the column's
-        # `limit` and Sluggable's `max_length:`.
+        # A random, non-identifying replacement slug that fits the slug
+        # column's `limit`. Raises (before anything is written) when the
+        # column cannot hold MIN_SLUG_RANDOM random characters.
         def anonymizable_random_slug
-          room = anonymizable_slug_room
+          room = anonymizable_slug_column_limit
           prefix = ANONYMIZED_SLUG_PREFIX
           return "#{prefix}#{anonymizable_random_hex(FULL_SLUG_RANDOM)}" if room.nil? || room >= prefix.length + FULL_SLUG_RANDOM
-          return "#{prefix}#{anonymizable_random_hex(room - prefix.length)}" if room >= prefix.length + PREFIXED_SLUG_MIN_RANDOM
+          return "#{prefix}#{anonymizable_random_hex(room - prefix.length)}" if room >= prefix.length + MIN_SLUG_RANDOM
           return anonymizable_random_hex(room) if room >= MIN_SLUG_RANDOM
 
           raise ArgumentError, anonymizable_slug_room_message(room)
-        end
-
-        # Macro-time guard, re-run by Sluggable's sluggable_by so either
-        # declaration order is covered: a slug limit too short for a random
-        # replacement would otherwise only surface when erasure is attempted.
-        def anonymizable_validate_slug_room!
-          return unless anonymizable_rewrites_slug?
-
-          room = anonymizable_slug_room
-          raise ArgumentError, anonymizable_slug_room_message(room) if room && room < MIN_SLUG_RANDOM
         end
 
         # Anonymize every matching record that isn't already stamped, in one
@@ -230,24 +226,18 @@ module ConcernsOnRails
           SecureRandom.hex((length + 1) / 2)[0, length]
         end
 
-        # The tighter of the slug column's `limit` and Sluggable's max_length.
-        def anonymizable_slug_room
-          limits = []
-          limits << sluggable_max_length if respond_to?(:sluggable_max_length)
-          limits << anonymizable_slug_column_limit
-          limits.compact.min
-        end
-
+        # The slug column's declared `limit` (nil when unlimited or the schema
+        # is unreachable — the UPDATE itself then reports a real failure).
         def anonymizable_slug_column_limit
           columns_hash[friendly_id_config.slug_column.to_s]&.limit
-        rescue StandardError
+        rescue ActiveRecord::ActiveRecordError
           nil
         end
 
         def anonymizable_slug_room_message(room)
-          "#{LABEL}: the slug allows only #{room} characters, but an anonymized slug needs at least " \
-            "#{MIN_SLUG_RANDOM} characters to stay random and unique — widen the slug column / max_length:, " \
-            "or pass slug: false"
+          "#{LABEL}: the slug column allows only #{room} characters, but an anonymized slug needs at least " \
+            "#{MIN_SLUG_RANDOM} random characters to stay unique — widen the column, or pass slug: false " \
+            "to leave slugs out of erasure"
         end
 
         def anonymizable_apply_options(stamp, clear_audit_trail)
@@ -317,12 +307,26 @@ module ConcernsOnRails
         raise ArgumentError, "#{LABEL}: anonymize! cannot be called on a new record" if new_record?
 
         payload = anonymizable_payload
-        erase_slug_history = anonymizable_slug_payload!(payload)
+        slug = anonymizable_slug_payload!(payload)
         transaction do
           before_anonymize
-          update_columns(payload)
-          anonymizable_delete_slug_history! if erase_slug_history
+          anonymizable_write!(payload, slug[:generated])
+          anonymizable_delete_slug_history! if slug[:history]
           after_anonymize
+        end
+      end
+
+      # The single UPDATE. When it carries a generated slug, a unique-index
+      # collision is retried with a fresh slug, each attempt in its own
+      # SAVEPOINT so the surrounding transaction (anonymize_all!'s batch
+      # included) survives the rejected write on PostgreSQL.
+      def anonymizable_write!(payload, generated_slug_column)
+        return update_columns(payload) unless generated_slug_column
+
+        attempt = 0
+        ConcernsOnRails::Support::UniqueRetry.with_retries(limit: SLUG_WRITE_ATTEMPTS, savepoint: self.class) do
+          payload[generated_slug_column] = self.class.anonymizable_random_slug if (attempt += 1) > 1
+          update_columns(payload)
         end
       end
 
@@ -418,16 +422,20 @@ module ConcernsOnRails
       # ("jane-smith"), and update_columns skips the callbacks that would
       # regenerate it. When the slug is rewritten (see the class method
       # anonymizable_rewrites_slug?), a random non-identifying slug joins the
-      # same UPDATE. Returns true when friendly_id history rows must go too.
+      # same UPDATE. Returns { generated: <slug column, when this generated
+      # the value>, history: <friendly_id history rows must go too> }.
       def anonymizable_slug_payload!(payload)
         klass = self.class
-        return false unless klass.anonymizable_rewrites_slug?
+        return {} unless klass.anonymizable_rewrites_slug?
 
         config = klass.friendly_id_config
         slug_column = config.slug_column.to_sym
+        plan = { history: config.uses?(:history) && respond_to?(:slugs) }
         # An explicit `anonymizable :slug, with: ...` rule wins.
-        payload[slug_column] = klass.anonymizable_random_slug unless payload.key?(slug_column)
-        config.uses?(:history) && respond_to?(:slugs)
+        return plan if payload.key?(slug_column)
+
+        payload[slug_column] = klass.anonymizable_random_slug
+        plan.merge(generated: slug_column)
       end
 
       # friendly_id's history table keeps every earlier slug — each one as
