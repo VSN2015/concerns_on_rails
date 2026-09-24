@@ -126,7 +126,9 @@ module ConcernsOnRails
 
       # Language tags from an Accept-Language header (kept whole — see
       # parse_accept_language for region handling), q=0 dropped, highest-q
-      # first (RFC 7231 preference order).
+      # first (RFC 7231 preference order). Ties keep header order: Ruby's
+      # sort_by is NOT stable (from ~8 entries equal keys come back shuffled),
+      # so the header position is an explicit secondary key.
       def ranked_accept_languages(header)
         pairs = header.split(",").filter_map do |part|
           token, *params = part.split(";").map(&:strip)
@@ -136,13 +138,15 @@ module ConcernsOnRails
           lang = token.to_s.strip
           [lang, quality] if lang.present?
         end
-        pairs.sort_by { |(_lang, quality)| -quality }.map(&:first)
+        pairs.each_with_index.sort_by { |(_lang, quality), index| [-quality, index] }.map { |(lang, _q), _i| lang }
       end
 
       # The q-value (relative quality) of an Accept-Language part: 1.0 when
       # absent, 0.0 when malformed. q=0 means "not acceptable" and is dropped.
+      # The parameter name is case-insensitive (RFC 9110 §12.4.2): `Q=0` used
+      # to read as "no weight" (1.0) and turned a refused tag into the winner.
       def accept_language_quality(params)
-        qparam = params.find { |p| p.start_with?("q=") }
+        qparam = params.find { |p| p.match?(/\Aq=/i) }
         return 1.0 unless qparam
 
         Float(qparam[2..], exception: false) || 0.0

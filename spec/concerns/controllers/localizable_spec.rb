@@ -81,6 +81,32 @@ describe ConcernsOnRails::Controllers::Localizable do
       end
       expect(c.resolved_locale).to eq(:fr)
     end
+
+    # Ruby's sort_by is not stable: from about eight entries up, tags sharing a
+    # q-value came back reordered, so the client's own tie-break — header
+    # order — was lost and a later tag won.
+    it "keeps header order among tags with equal q-values, however many there are" do
+      c = controller(accept_language: "de,x1,x2,x3,x4,x5,x6,x7,x8,fr") do
+        localizable available: %i[en fr de], default: :en
+      end
+      expect(c.resolved_locale).to eq(:de)
+
+      weighted = controller(accept_language: "x1;q=0.5,de;q=0.5,x2;q=0.5,x3;q=0.5,x4;q=0.5,x5;q=0.5,x6;q=0.5,x7;q=0.5,fr;q=0.5") do
+        localizable available: %i[en fr de], default: :en
+      end
+      expect(weighted.resolved_locale).to eq(:de)
+    end
+
+    # RFC 9110 §12.4.2: the weight parameter name is case-insensitive, so
+    # `Q=0` is "not acceptable" exactly like `q=0` — it used to be read as an
+    # absent weight (1.0), making the rejected tag the top choice.
+    it "reads the q parameter case-insensitively" do
+      c = controller(accept_language: "fr;Q=0,de") { localizable available: %i[en fr de], default: :en }
+      expect(c.resolved_locale).to eq(:de)
+
+      ranked = controller(accept_language: "fr;q=0.5,de;Q=0.9") { localizable available: %i[en fr de], default: :en }
+      expect(ranked.resolved_locale).to eq(:de)
+    end
   end
 
   describe "#switch_locale" do
