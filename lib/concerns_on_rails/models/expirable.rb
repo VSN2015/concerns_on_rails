@@ -106,7 +106,8 @@ module ConcernsOnRails
           # Schedulable (`expired?`) define the same plain names, and the
           # concern included last wins them.
           ConcernsOnRails::Support::Affix.define_predicates(
-            self, { active: :expirable_live?, expired: :expirable_expired? }, prefix: prefix, suffix: suffix
+            self, { active: :expirable_live?, expired: :expirable_expired? },
+            prefix: prefix, suffix: suffix, label: "ConcernsOnRails::Models::Expirable"
           )
         end
       end

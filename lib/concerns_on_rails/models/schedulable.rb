@@ -144,7 +144,8 @@ module ConcernsOnRails
           ConcernsOnRails::Support::Affix.define_predicates(
             self, { active_at: :schedulable_active_at?, current: :schedulable_current?,
                     upcoming: :schedulable_upcoming?, expired: :schedulable_expired?,
-                    overlaps: :schedulable_overlaps? }, prefix: prefix, suffix: suffix
+                    overlaps: :schedulable_overlaps? },
+            prefix: prefix, suffix: suffix, label: "ConcernsOnRails::Models::Schedulable"
           )
         end
       end # rubocop:enable Metrics/BlockLength

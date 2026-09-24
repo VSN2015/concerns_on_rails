@@ -69,7 +69,8 @@ module ConcernsOnRails
           scope activatable_scope_names[:inactive], -> { where(activatable_field => [false, nil]) }
           # ...and the predicates, which collide the same way (Expirable's active?).
           ConcernsOnRails::Support::Affix.define_predicates(
-            self, { active: :activatable_on?, inactive: :activatable_off? }, prefix: prefix, suffix: suffix
+            self, { active: :activatable_on?, inactive: :activatable_off? },
+            prefix: prefix, suffix: suffix, label: LABEL
           )
         end
 

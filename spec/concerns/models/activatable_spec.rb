@@ -198,6 +198,27 @@ describe ConcernsOnRails::Activatable do
     end
   end
 
+  # The affixed predicates live in a module included AFTER Rails' generated
+  # attribute methods, so `flag_active?` silently shadowed the query method
+  # of a real `flag_active` column. That is refused at macro time now.
+  it "refuses an affix whose predicate would shadow a column's query method" do
+    ActiveRecord::Schema.define do
+      create_table :flagged_memberships, force: true do |t|
+        t.boolean :active
+        t.boolean :flag_active
+      end
+    end
+
+    expect do
+      Class.new(TestModel) do
+        self.table_name = "flagged_memberships"
+        include ConcernsOnRails::Activatable
+
+        activatable_by :active, prefix: :flag
+      end
+    end.to raise_error(ArgumentError, /flag_active\?.*'flag_active' column/)
+  end
+
   # With Expirable included AFTER Activatable, `active?` is Expirable's
   # ("not expired" — true for a nil expiry). toggle_active! read it, so it
   # deactivated an inactive record instead of activating it.

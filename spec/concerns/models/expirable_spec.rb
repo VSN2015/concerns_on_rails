@@ -260,6 +260,42 @@ describe ConcernsOnRails::Expirable do
       expect([lapsed.active?, lapsed.expired?]).to eq([false, true])
     end
 
+    # Re-declaring the macro with a different affix used to leave the old
+    # affix's predicates defined alongside the new ones.
+    it "retires the previous affix's predicates when the macro is re-declared" do
+      klass = Class.new(TestModel) do
+        self.table_name = "api_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by :expires_at, prefix: :old
+        expirable_by :expires_at, prefix: :new
+      end
+      token = klass.create!(expires_at: 1.hour.ago)
+
+      expect(token.new_expired?).to be(true)
+      expect(token).not_to respond_to(:old_expired?)
+      expect(token).not_to respond_to(:old_active?)
+
+      bare = Class.new(klass) { expirable_by :expires_at }
+      expect(bare.new).not_to respond_to(:new_expired?)
+      expect(bare.new.expired?).to be(false)
+    end
+
+    it "retires an inherited affix's predicates on a subclass only" do
+      parent = Class.new(TestModel) do
+        self.table_name = "api_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by :expires_at, prefix: :old
+      end
+      child = Class.new(parent) { expirable_by :expires_at, prefix: :new }
+
+      expect(child.new).to respond_to(:new_expired?)
+      expect(child.new).not_to respond_to(:old_expired?)
+      expect(parent.new).to respond_to(:old_expired?)
+      expect(parent.new).not_to respond_to(:new_expired?)
+    end
+
     it "affixes predicates with suffix: and prefix: true too" do
       ActiveRecord::Schema.define do
         create_table :coupons, force: true do |t|
