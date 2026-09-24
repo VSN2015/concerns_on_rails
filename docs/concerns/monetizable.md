@@ -70,7 +70,7 @@ All method names below use `price` as the example base name, derived from a colu
 | Signature | Returns | Description |
 |-----------|---------|-------------|
 | `price` | `BigDecimal` or `nil` | Divides the raw integer column value by `subunit_to_unit` using `BigDecimal` arithmetic. Returns `nil` when the column is `nil`. |
-| `price=(amount)` | — | Multiplies `amount` by `subunit_to_unit`, rounds to the nearest whole subunit, and writes the result back to the integer column. Accepts any value coercible to `BigDecimal` (numeric, string). Assigns `nil` when `amount` is `nil`. |
+| `price=(amount)` | — | Multiplies `amount` by `subunit_to_unit`, rounds to the nearest whole subunit, and writes the result back to the integer column. Accepts a number or a String: a plain decimal (`"19.99"`, read first, as before) or the field's own display format — the configured `unit:` (once, either side), `delimiter:` (only where it groups digits in threes) and `separator:` — so `formatted_price` output reads back (`"$1,234.50"`, `"-$5.00"`, `"€1.234,50"` for `separator: ","`). Surrounding Unicode whitespace is ignored. Assigns `nil` when `amount` is `nil`, garbage (`"abc"`, a wrong-locale `"1,5"` in a `"."` field), or non-finite (`Float::NAN`, `Float::INFINITY`). |
 | `formatted_price(**overrides)` | `String` or `nil` | Returns a human-readable string using the `unit`, `precision`, `delimiter`, and `separator` options configured at class load time. Any of those (plus `subunit_to_unit`) can be overridden per call — `formatted_price(unit: "€", delimiter: ".", separator: ",")` — and an unknown key raises `ArgumentError`. Negative values are rendered with a leading minus before the unit symbol (e.g. `"-$5.00"`). Returns `nil` when the column is `nil`. |
 
 ### Class methods
@@ -177,3 +177,4 @@ Order.paid.formatted_sum_total(unit: "EUR ")   # => "EUR 3.500,50"
 ## Changed in 1.22.0
 
 - The generated money setter casts garbage input (`"abc"`, `""`) to nil — the ActiveModel convention — instead of raising `ArgumentError` out of a form assignment.
+

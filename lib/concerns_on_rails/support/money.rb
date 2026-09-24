@@ -35,14 +35,82 @@ module ConcernsOnRails
       end
 
       # Merge per-call display overrides into a field's formatting config,
-      # rejecting typos (`units:`) instead of silently ignoring them.
+      # rejecting typos (`units:`) instead of silently ignoring them. Numeric
+      # overrides are coerced exactly as the macro coerces them — a String
+      # `subunit_to_unit: "100"` used to TypeError inside format().
       def format_options(config, overrides, label)
         return config if overrides.empty?
 
         unknown = overrides.keys - FORMAT_OPTIONS
         raise ArgumentError, "#{label}: unknown formatting option(s): #{unknown.join(', ')}" if unknown.any?
 
-        config.merge(overrides)
+        coerce_numeric_options(config.merge(overrides), label)
+      end
+
+      # :subunit_to_unit to a positive Integer, :precision to an Integer
+      # (a String "2" is fine; "two" or 1.5 raises). Returns a new Hash.
+      def coerce_numeric_options(options, label)
+        subunit = options.key?(:subunit_to_unit) ? options[:subunit_to_unit].to_i : 100
+        raise ArgumentError, "#{label}: :subunit_to_unit must be a positive integer" unless subunit.positive?
+
+        precision = options.key?(:precision) ? coerce_precision(options[:precision], label) : 2
+        options.merge(subunit_to_unit: subunit, precision: precision)
+      end
+
+      def coerce_precision(value, label)
+        precision = value.is_a?(Float) ? nil : Integer(value, exception: false)
+        return precision if precision
+
+        raise ArgumentError, "#{label}: :precision must be an integer, got #{value.inspect}"
+      end
+
+      # Parse a writer's input into a finite BigDecimal amount (major units),
+      # or nil. Strings are read canonically first ("19.99", "5", "1e3" — the
+      # pre-existing behaviour), then in the field's own display format, so
+      # formatted output reads back: "$1,234.50" / "€1.234,50" / "-$5.00".
+      # Non-finite values (NaN, Infinity) and garbage are nil, never raised.
+      def parse(amount, options = {})
+        decimal = amount.is_a?(String) ? parse_string(amount, options) : BigDecimal(amount.to_s)
+        decimal&.finite? ? decimal : nil
+      rescue ArgumentError, TypeError, FloatDomainError
+        nil
+      end
+
+      def parse_string(amount, options)
+        stripped = strip_space(amount)
+        return nil if stripped.empty?
+
+        canonical = BigDecimal(stripped, exception: false)
+        return canonical if canonical
+
+        localized = localized_to_canonical(stripped, options)
+        localized && BigDecimal(localized, exception: false)
+      end
+
+      # Drop the (one) unit, split on the separator, and remove the delimiter from
+      # the whole part — only where it groups digits in threes, so a
+      # wrong-locale "1,5" in a "." field is garbage (nil), not 15.
+      def localized_to_canonical(string, options)
+        unit = options.fetch(:unit, "$").to_s
+        separator = options.fetch(:separator, ".").to_s
+
+        string = strip_space(unit.empty? ? string : string.sub(unit, ""))
+        sign = string.start_with?("-", "+") ? string[0] : ""
+        whole, sep, frac = separator.empty? ? [string.delete_prefix(sign), "", ""] : string.delete_prefix(sign).partition(separator)
+        whole = ungroup(strip_space(whole), options.fetch(:delimiter, ",").to_s)
+        whole && "#{sign}#{whole}#{'.' unless sep.empty?}#{frac}"
+      end
+
+      def ungroup(whole, delimiter)
+        return whole if delimiter.empty? || !whole.include?(delimiter)
+        return nil unless whole.match?(/\A\d{1,3}(?:#{Regexp.escape(delimiter)}\d{3})+\z/)
+
+        whole.gsub(delimiter, "")
+      end
+
+      # String#strip misses Unicode whitespace such as a no-break space.
+      def strip_space(string)
+        string.gsub(/\A[[:space:]]+|[[:space:]]+\z/, "")
       end
 
       # Subunits to a BigDecimal amount. A grouped relation's aggregate is a

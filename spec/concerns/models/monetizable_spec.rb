@@ -69,6 +69,55 @@ describe ConcernsOnRails::Models::Monetizable do
     end
   end
 
+  # The writer fed Strings straight to BigDecimal, so the concern's OWN
+  # formatted output ("$19.99", "1,234.50") came back as nil, and a
+  # non-finite Float raised FloatDomainError out of the setter.
+  describe "writer input parsing" do
+    def cents_for(klass, value, field: :price)
+      product = klass.new
+      product.public_send("#{field}=", value)
+      product.public_send("#{field}_cents")
+    end
+
+    it "accepts the formatted output and delimited amounts" do
+      klass = product_class { monetizable :price_cents }
+
+      expect(cents_for(klass, "$19.99")).to eq(1999)
+      expect(cents_for(klass, "1,234.50")).to eq(123_450)
+      expect(cents_for(klass, " $1,234.56 ")).to eq(123_456)
+      expect(cents_for(klass, "-$5.00")).to eq(-500)
+      expect(cents_for(klass, "$ 7")).to eq(700)
+      expect(cents_for(klass, " 12.5 ")).to eq(1250)
+    end
+
+    it "round-trips formatted_<name> back through the writer" do
+      klass = product_class { monetizable :price_cents }
+      [123_456, -500, 0, 7, 100_000_000].each do |cents|
+        expect(cents_for(klass, klass.new(price_cents: cents).formatted_price)).to eq(cents)
+      end
+    end
+
+    it "honours a comma-separator locale's unit, delimiter and separator" do
+      klass = product_class { monetizable :total_cents, unit: "€", delimiter: ".", separator: "," }
+
+      expect(cents_for(klass, "€1.999,99", field: :total)).to eq(199_999)
+      expect(cents_for(klass, "1.234,5 €", field: :total)).to eq(123_450)
+      expect(cents_for(klass, "19,99", field: :total)).to eq(1999)
+      # A plain decimal String is still read canonically (no regression).
+      expect(cents_for(klass, "19.99", field: :total)).to eq(1999)
+      expect(cents_for(klass, klass.new(total_cents: 123_456).formatted_total, field: :total)).to eq(123_456)
+    end
+
+    it "casts non-finite numbers and garbage to nil instead of raising" do
+      klass = product_class { monetizable :price_cents }
+
+      [Float::NAN, Float::INFINITY, -Float::INFINITY, BigDecimal("NaN"), "NaN", "Infinity",
+       "abc", "", "  ", "$", "1.2.3", "12abc", "($5.00)", "1,5", "12,34.5", "$$5"].each do |garbage|
+        expect(cents_for(klass, garbage)).to be_nil, "#{garbage.inspect} should cast to nil"
+      end
+    end
+  end
+
   describe "options" do
     it "names the methods via :as" do
       klass = product_class { monetizable :shipping_cents, as: :shipping }
@@ -187,6 +236,26 @@ describe ConcernsOnRails::Models::Monetizable do
       expect(klass.new(price_cents: 1999).formatted_price).to eq("$19.99") # defaults untouched
       expect { klass.new(price_cents: 1).formatted_price(units: "x") }
         .to raise_error(ArgumentError, /unknown formatting option\(s\): units/)
+    end
+
+    it "coerces per-call precision:/subunit_to_unit: overrides the way the macro does" do
+      product = klass.new(price_cents: 123_456)
+
+      expect(product.formatted_price(subunit_to_unit: "100")).to eq("$1,234.56")
+      expect(product.formatted_price(precision: "1")).to eq("$1,234.6")
+      expect(klass.formatted_sum_price(subunit_to_unit: "1000", precision: "3")).to eq("$2.500")
+      expect { product.formatted_price(subunit_to_unit: 0) }
+        .to raise_error(ArgumentError, /:subunit_to_unit must be a positive integer/)
+      expect { product.formatted_price(precision: "two") }
+        .to raise_error(ArgumentError, /:precision must be an integer/)
+    end
+
+    it "coerces a String :precision at the macro too" do
+      money = product_class { monetizable :price_cents, precision: "0" }
+
+      expect(money.new(price_cents: 123_456).formatted_price).to eq("$1,235")
+      expect { product_class { monetizable :price_cents, precision: 1.5 } }
+        .to raise_error(ArgumentError, /:precision must be an integer/)
     end
 
     it "derives the aggregate names from as: too" do
