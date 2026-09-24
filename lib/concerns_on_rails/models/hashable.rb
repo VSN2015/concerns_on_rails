@@ -110,22 +110,31 @@ module ConcernsOnRails
 
         # Sampling is uniform over the alphabet's POSITIONS, so a repeated
         # character is silently drawn more often ("AAB" yields A two times in
-        # three) — a quiet loss of entropy. One distinct character is a
-        # constant, not an identifier.
+        # three) — a quiet loss of entropy. Raising would break the boot of an
+        # app that shipped such an alphabet, so it is de-duplicated (removing
+        # the bias) with a deprecation warning; 2.0 will raise. One distinct
+        # character is a constant, not an identifier — that still raises.
         def validate_hashable_alphabet!
           unless hashable_alphabet.is_a?(String) && !hashable_alphabet.empty?
             raise ArgumentError, "ConcernsOnRails::Models::Hashable: type :custom requires a non-empty alphabet: String"
           end
 
-          duplicates = hashable_alphabet.each_char.tally.select { |_char, n| n > 1 }.keys
-          unless duplicates.empty?
-            raise ArgumentError,
-                  "#{LABEL}: alphabet has duplicate character(s): #{duplicates.map(&:inspect).join(', ')} " \
-                  "— they would bias the generated values"
-          end
+          dedupe_hashable_alphabet!
           return if hashable_alphabet.length >= 2
 
           raise ArgumentError, "#{LABEL}: alphabet needs at least 2 distinct characters"
+        end
+
+        def dedupe_hashable_alphabet!
+          duplicates = hashable_alphabet.each_char.tally.select { |_char, n| n > 1 }.keys
+          return if duplicates.empty?
+
+          ConcernsOnRails.deprecator.warn(
+            "#{LABEL}: #{name || 'model'} alphabet has duplicate character(s) " \
+            "#{duplicates.map(&:inspect).join(', ')}, which biased the generated values; they have been " \
+            "de-duplicated. Remove them from the alphabet — this will raise in 2.0."
+          )
+          self.hashable_alphabet = hashable_alphabet.each_char.to_a.uniq.join
         end
 
         # prefix: is a literal String prepended to string-typed values only —
