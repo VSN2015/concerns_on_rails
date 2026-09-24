@@ -81,6 +81,7 @@ module ConcernsOnRails
     autoload :Encryptor,               "concerns_on_rails/support/encryptor"
     autoload :Affix,                   "concerns_on_rails/support/affix"
     autoload :BatchOps,                "concerns_on_rails/support/batch_ops"
+    autoload :HookedWrite,             "concerns_on_rails/support/hooked_write"
     autoload :LinkHeader,              "concerns_on_rails/support/link_header"
     autoload :VaryHeader,              "concerns_on_rails/support/vary_header"
   end

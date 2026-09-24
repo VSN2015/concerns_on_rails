@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/hooked_write"
 
 module ConcernsOnRails
   module Models
@@ -127,9 +128,17 @@ module ConcernsOnRails
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
 
+          # The boolean predicate is an Arel IN node, never an equality: Rails'
+          # scope_for_create copies every `Arel::Nodes::Equality` in the where
+          # clause (hash condition or `arel_table[f].eq`) onto records built
+          # through the scope, so under `default_scope: true` the old
+          # `where(field => true)` made every NEW record start out published.
+          # IN (TRUE) selects the same rows, is never copied, and is still
+          # peeled by `unscope(where: field)`. (The timestamp branch was
+          # already an Arel `<=`, which is never copied either.)
           scope publishable_scope_names[:published], lambda {
             if publishable_boolean_column?
-              where(publishable_field => true)
+              where(arel_table[publishable_field].in([true]))
             else
               where(arel_table[publishable_field].lteq(Time.zone.now))
             end
@@ -258,19 +267,19 @@ module ConcernsOnRails
         publishable_write_with_hooks(time, :publish)
       end
 
-      # Shared write path: hooks and the timestamp write in ONE transaction, so
-      # a raising hook rolls the change back (SoftDeletable's pattern). Before
-      # 1.22 a raising after_publish left the record published with the side
-      # effect half-done. (Postfix private — the keyword form trips RuboCop's
-      # scope analysis against the `private` inside the class_methods block.)
+      # Shared write path: hooks and the write in their own savepoint via
+      # Support::HookedWrite, so a raising hook — or one vetoing with
+      # ActiveRecord::Rollback, even inside a caller's transaction or
+      # publish_all — rolls the change back and returns false; a failed
+      # validation rolls back the before-hook's side effects too. (Postfix
+      # private — the keyword form trips RuboCop's scope analysis against the
+      # `private` inside the class_methods block.)
       def publishable_write_with_hooks(value, kind)
-        result = false
-        transaction do
-          kind == :publish ? before_publish : before_unpublish
-          result = update(self.class.publishable_field => value)
-          (kind == :publish ? after_publish : after_unpublish) if result
+        field = self.class.publishable_field
+        before, after = kind == :publish ? %i[before_publish after_publish] : %i[before_unpublish after_unpublish]
+        ConcernsOnRails::Support::HookedWrite.run(self, before: before, after: after, restore: [field]) do
+          update(field => value)
         end
-        result
       end
       private :publishable_write_with_hooks
     end

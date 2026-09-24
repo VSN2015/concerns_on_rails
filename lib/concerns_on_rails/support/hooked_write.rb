@@ -1,0 +1,75 @@
+module ConcernsOnRails
+  module Support
+    # The one write path shared by every concern verb that wraps a column
+    # write in before_/after_ lifecycle hooks (Publishable, SoftDeletable,
+    # Expirable, Activatable, Anonymizable, Stateable).
+    #
+    # The contract, in full:
+    #
+    # * The hooks and the write run in their OWN savepoint
+    #   (`transaction(requires_new: true)`). A bare `transaction` JOINS an
+    #   enclosing one — BatchOps.run's, or the caller's — and Rails then
+    #   swallows an ActiveRecord::Rollback raised by a hook without rolling
+    #   anything back, so a vetoed change committed anyway.
+    # * The result is true only once the after-hook has RETURNED. Taking it
+    #   from `update` (which runs before the after-hook) reported a fake
+    #   success for a write the hook had just rolled back, and BatchOps
+    #   counted the row instead of aborting the batch.
+    # * A write that returns falsey (a validation failure from `update`)
+    #   rolls the savepoint back too, so a before-hook's own side effects
+    #   never commit for a write that did not happen. The after-hook is
+    #   skipped and the result is false.
+    # * On any abort — false write, Rollback, or an exception — the
+    #   `restore:` attributes are put back to their pre-write in-memory
+    #   values. A database rollback never undoes the attribute cache
+    #   (update_column(s) syncs it immediately; `update` leaves the new value
+    #   assigned), and the concerns' idempotency guards (`return true if
+    #   deleted?`) would otherwise turn every retry into a silent no-op.
+    #   An attribute that was already dirty before the call is restored as
+    #   dirty against its database value, so unsaved edits are not lost.
+    #
+    # The block performs the write and returns truthy on success. Hooks are
+    # method names sent to the record (so private overrides work); either may
+    # be nil to skip it. Returns true or false; exceptions propagate.
+    module HookedWrite
+      module_function
+
+      def run(record, before: nil, after: nil, restore: [])
+        snapshot = snapshot(record, restore)
+        completed = false
+        begin
+          record.transaction(requires_new: true) do
+            record.send(before) if before
+            raise ActiveRecord::Rollback unless yield
+
+            record.send(after) if after
+            completed = true
+          end
+        ensure
+          restore!(record, snapshot) unless completed
+        end
+        completed
+      end
+
+      # [name, value, dirty?, database value] per attribute, taken before
+      # anything is written.
+      def snapshot(record, names)
+        names.map do |name|
+          name = name.to_s
+          [name, record[name], record.attribute_changed?(name), record.attribute_in_database(name)]
+        end
+      end
+
+      def restore!(record, snapshot)
+        return if record.frozen?
+
+        snapshot.each do |name, value, dirty, in_database|
+          record[name] = dirty ? in_database : value
+          record.send(:clear_attribute_changes, [name])
+          record[name] = value if dirty
+        end
+      end
+      private_class_method :snapshot, :restore!
+    end
+  end
+end
