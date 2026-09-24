@@ -20,10 +20,13 @@ module ConcernsOnRails
     #   not · gt · gte · lt · lte · in · not_in (comma list or array) ·
     #   null (true/false) · contains · starts_with (LIKE, wildcards escaped)
     #
-    # Comparison values are cast the way ActiveRecord casts them — through the
-    # column's own attribute type — or through `type:` (any ActiveModel type
-    # name: :integer, :decimal, :boolean, :date, :datetime, ...). `type:` also
-    # pre-casts the value handed to a `with:` lambda. Blank values are skipped,
+    # Comparison values are cast through the column's own attribute type, or
+    # through `type:` (any ActiveModel type name: :integer, :decimal,
+    # :boolean, :date, :datetime, ...) — except numbers, which are read
+    # exactly rather than through ActiveModel's lossy numeric casts (below).
+    # `type:` also pre-casts the value handed to a `with:` lambda (a numeric
+    # `type:` strictly: a value it cannot represent exactly fails the filter
+    # closed without calling the lambda). Blank values are skipped,
     # unknown operators and non-scalar values are ignored, and a comparison
     # value the type cannot represent (`?price_gte=abc`) matches nothing;
     # nothing here raises at request time — for strict, validated params use
@@ -167,8 +170,22 @@ module ConcernsOnRails
       # `type:` pre-casts a with: lambda's value; the column's own type must
       # NOT, or every existing lambda on a column-backed param silently starts
       # receiving true / a Time where it used to get "1" / "2020-01-02".
+      #
+      # A plain numeric `type:` reads the value the way every operator does
+      # (Support::NumericOperand) instead of through Integer#cast, which made
+      # "1e3" 1 and "abc" 0: the lambda gets the exact number, and a value
+      # the type cannot represent exactly — garbage, or 5.5 for :integer —
+      # fails the filter closed (`none`) without calling the lambda. There is
+      # no column here, so no range applies.
       def apply_filter_lambda(relation, value, options)
-        options[:with].call(relation, options[:type] ? options[:type].cast(value) : value)
+        type = options[:type]
+        return options[:with].call(relation, type ? type.cast(value) : value) unless type
+
+        operand = ConcernsOnRails::Support::NumericOperand.classify(value, type, column_type: nil)
+        return options[:with].call(relation, type.cast(value)) if operand.nil?
+        return relation.none unless operand.status == :exact
+
+        options[:with].call(relation, operand.value)
       end
 
       # ?price[gte]=10&price[lte]=50 — unknown keys are ignored.

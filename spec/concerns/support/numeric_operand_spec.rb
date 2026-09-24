@@ -62,7 +62,25 @@ RSpec.describe ConcernsOnRails::Support::NumericOperand do
       wide = ActiveModel::Type::Integer.new(limit: 8)
 
       expect(classify((2**40).to_s, integer, column_type: wide)).to eq([:exact, 2**40])
-      expect(classify((2**40).to_s, integer, column_type: ActiveModel::Type::String.new)).to eq([:above, 2**40])
+    end
+
+    # ActiveModel::Type.lookup(:integer) carries a 4-byte range that says
+    # nothing about a string column (or one missing from attribute_types):
+    # only a real numeric COLUMN bounds the value.
+    it "applies no range or precision when the column is not numeric" do
+      expect(classify((2**40).to_s, integer, column_type: ActiveModel::Type::String.new)).to eq([:exact, 2**40])
+      expect(classify((2**40).to_s, integer, column_type: nil)).to eq([:exact, 2**40])
+      expect(classify("1e20", decimal, column_type: nil)).to eq([:exact, BigDecimal("1e20")])
+      expect(classify("5.5", integer, column_type: nil).first).to eq(:inexact) # the declared scale still applies
+    end
+
+    # A JSON body can carry a Float infinity (1e400) where a query string
+    # carries "1e400"; both must answer alike.
+    it "reports a non-finite JSON Float as above / below, like its string spelling" do
+      expect(classify(Float::INFINITY, integer).first).to eq(:above)
+      expect(classify(-Float::INFINITY, decimal).first).to eq(:below)
+      expect(classify("1e400", integer).first).to eq(:above)
+      expect(classify(Float::NAN, integer)).to eq([:uncastable, nil])
     end
   end
 

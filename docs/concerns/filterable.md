@@ -42,7 +42,7 @@ Declares one or more filterable URL params. Multiple fields can be batched in a 
 | `*fields` | One or more `Symbol` | — (required) | The param key(s) to watch. Each becomes a key in `filterable_rules`. At least one field is required or `ArgumentError` is raised. |
 | `scope:` | `Symbol` | `nil` | Name of a model scope to call (`public_send`) when the param is present and non-blank. Mutually exclusive with `with:`. |
 | `with:` | `Proc` / `lambda` | `nil` | A callable with signature `(relation, value)` invoked when the param is present and non-blank. Mutually exclusive with `scope:`. |
-| `type:` | `Symbol` | `nil` | An ActiveModel type name (`:integer`, `:decimal`, `:boolean`, `:date`, `:datetime`, …). Casts comparison-operator values (instead of the column's own type) and pre-casts the value handed to a `with:` lambda. An unknown name raises `ArgumentError` at class load. |
+| `type:` | `Symbol` | `nil` | An ActiveModel type name (`:integer`, `:decimal`, `:boolean`, `:date`, `:datetime`, …). Casts comparison-operator values (instead of the column's own type) and pre-casts the value handed to a `with:` lambda. A numeric type (`:integer`, `:decimal`, `:float`) only marks the value as a number: comparisons bind exactly through the column (range/precision limits come from a real numeric column, never from `type:`), and a `with:` lambda receives the exact number (`"1e1"` → `10`) — a value the type cannot represent exactly (`"abc"`, or `"5.5"` for `:integer`) fails the filter closed without calling the lambda. An unknown name raises `ArgumentError` at class load. |
 | `operators:` | `true` or `Array<Symbol>` | `nil` (none) | Direct-where mode only. Enables comparison operators for the field, as a suffix (`?price_gte=10`) or bracket form (`?price[gte]=10`): `not`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `null`, `contains`, `starts_with`. `true` enables all; a list enables a subset; unknown names raise `ArgumentError`. Combining with `scope:`/`with:` raises. |
 
 Passing neither `scope:` nor `with:` activates **direct where mode**: `relation.where(field => value)`.
@@ -95,6 +95,8 @@ end
 # GET /products?discontinued_at_null=true         → discontinued_at IS NULL
 # GET /products?name_contains=100%                → name LIKE '%100\%%' ESCAPE '\'  (wildcards escaped)
 # GET /products?min_stock=5                       → the lambda receives Integer 5, not "5"
+# GET /products?min_stock=1e1                     → the lambda receives Integer 10 (Integer#cast would give 1)
+# GET /products?min_stock=abc                     → no rows; the lambda is not called
 ```
 
 

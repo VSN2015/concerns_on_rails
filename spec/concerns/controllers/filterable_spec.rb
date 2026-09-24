@@ -424,6 +424,32 @@ describe ConcernsOnRails::Controllers::Filterable do
         expect(weighted_names(weight_gt: "1e3")).to eq([]) # and a finite exponent is exact
         expect(weighted_names(weight_lt: "1e3")).to eq(stocked)
       end
+
+      it "answers a JSON-body Float infinity like the string 1e400" do
+        expect(names(stock_lt: Float::INFINITY)).to eq(stocked)
+        expect(names(stock_lt: "1e400")).to eq(stocked)
+        expect(names(stock_gt: Float::INFINITY)).to eq([])
+        expect(names(stock: { gt: -Float::INFINITY })).to eq(stocked)
+      end
+
+      # `type: :integer` carries ActiveModel's 4-byte range, which says nothing
+      # about a string column: 4_000_000_000 read as "beyond every value" and
+      # returned every non-NULL row.
+      it "applies no declared type's range to a column that is not numeric" do
+        ActiveRecord::Schema.define { add_column :products, :ext, :string }
+        Product.reset_column_information
+        { "Lamp 100% cotton shade" => "1000000000", "Desk" => "3000000000", "Chair" => "5000000000" }.each do |name, ext|
+          Product.where(name: name).update_all(ext: ext)
+        end
+        typed = Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Filterable
+
+          filter_by :ext, type: :integer, operators: true
+        end
+
+        expect(typed.new(params: { ext_lt: "4000000000" }).filtered(Product.order(:id)).pluck(:name))
+          .to eq(["Lamp 100% cotton shade", "Desk"])
+      end
     end
 
     # LIKE on a non-text column is an error on PostgreSQL (`integer ~~* unknown`
@@ -543,6 +569,33 @@ describe ConcernsOnRails::Controllers::Filterable do
       expect(klass.new(params: { min_stock: "5" }).filtered(Product.order(:id)).pluck(:name)).to eq(["Lamp 100% cotton shade", "Chair"])
       expect(klass.new(params: { since: (Time.zone.today - 1).iso8601 }).filtered(Product.order(:id)).pluck(:name)).to eq(["Desk"])
       expect(klass.new(params: { since: (Time.zone.today + 2).iso8601 }).filtered(Product.order(:id)).pluck(:name)).to eq([])
+    end
+
+    # A numeric `type:` pre-cast used Integer#cast — "1e3" became 1 and "abc"
+    # became 0 — contradicting the strict reading every operator now uses.
+    # The lambda gets the exact number; a value the declared type cannot
+    # represent exactly (garbage, or 5.5 for :integer) fails the filter
+    # closed without calling the lambda.
+    it "pre-casts a numeric type: for a with: lambda strictly, failing closed on what it cannot represent" do
+      seen = []
+      probe = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :min_stock, type: :integer, with: lambda { |rel, v|
+          seen << v
+          rel.where(rel.model.arel_table[:stock].gteq(v))
+        }
+      end
+      run = ->(value) { probe.new(params: { min_stock: value }).filtered(Product.order(:id)).pluck(:name) }
+
+      expect(run.call("1e1")).to eq(["Chair"])
+      expect(seen).to eq([10])
+      expect(run.call("5.0")).to eq(["Lamp 100% cotton shade", "Chair"])
+      expect(seen.last).to eq(5)
+
+      expect(run.call("abc")).to eq([])
+      expect(run.call("5.5")).to eq([])
+      expect(seen.size).to eq(2) # never called for those
     end
 
     it "hands a with: lambda the RAW value when no type: is declared, even on a real column" do

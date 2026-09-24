@@ -1839,8 +1839,12 @@ accepted as a suffix `?price_gte=10` or in bracket form `?price[gte]=10&price[lt
 | `null`   | `?deleted_at_null=true`            | `deleted_at IS NULL` (`false` → `IS NOT NULL`) |
 | `contains` `starts_with` | `?title_contains=rails` | `title LIKE '%rails%'` (wildcards escaped; ILIKE on PostgreSQL; string/text columns only) |
 
-Comparison values are cast the way ActiveRecord casts them (the column's own type), or through `type:`
-(any ActiveModel type name); `type:` also pre-casts the value handed to a `with:` lambda. Blank values
+Comparison values are cast through the column's own type, or through `type:` (any ActiveModel type
+name) — except numbers, which are read exactly rather than through ActiveModel's lossy numeric casts
+(see below). `type:` also pre-casts the value handed to a `with:` lambda; a numeric `type:` does it with
+the same strict reader, so `?min_stock=1e1` hands the lambda `10` (not `1`), and a value the type cannot
+represent exactly (`abc`, or `5.5` for `:integer`) fails the filter closed without calling the lambda.
+Range limits only ever come from a real numeric column, never from a declared `type:`. Blank values
 are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`/`lte` value the type
 cannot represent (`?price_gte=abc`) matches **nothing** rather than silently comparing against `0` —
 nothing raises at request time. For strict, validated contracts reach for `Permittable`.

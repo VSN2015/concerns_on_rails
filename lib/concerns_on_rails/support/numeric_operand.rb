@@ -69,33 +69,49 @@ module ConcernsOnRails
       # operand is read as a number; the column it binds to decides what it
       # can hold, whatever numeric `type:` was declared — `type: :decimal` on
       # an integer column must not bind 5.5 through the integer type's
-      # truncation. Only a column that is not plain numeric (a virtual field,
-      # or a numeric `type:` over a string column) falls back to `type`.
+      # truncation. A column that is not plain numeric (a virtual field, a
+      # column missing from attribute_types, or a numeric `type:` over a
+      # string column) falls back to `type` for the SCALE only: range and
+      # precision limits come from a real numeric column or not at all —
+      # ActiveModel::Type.lookup(:integer)'s 4-byte range says nothing about a
+      # string column, and read 4_000_000_000 there as "beyond every value".
+      # `column_type: nil` means "no column" (a with: lambda's value).
       def classify(raw, type, column_type: type)
         return nil unless kind(type)
 
-        limits = kind(column_type) ? column_type : type
-        return out_of_range(raw) if raw.is_a?(Integer) && raw.abs.bit_length > MAX_INTEGER_BITS
+        bounded = !kind(column_type).nil?
+        limits = bounded ? column_type : type
+        return out_of_range(raw) if beyond_any_column?(raw)
 
-        kind(limits) == :float ? float_operand(raw) : decimal_operand(raw, limits)
+        kind(limits) == :float ? float_operand(raw) : decimal_operand(raw, limits, bounded)
       end
 
-      def decimal_operand(raw, limits)
+      # A JSON-body Integer past ~10**1000, or a Float infinity (a JSON 1e400,
+      # answered exactly like the query-string "1e400").
+      def beyond_any_column?(raw)
+        return raw.abs.bit_length > MAX_INTEGER_BITS if raw.is_a?(Integer)
+
+        raw.is_a?(Float) && raw.infinite?
+      end
+
+      def decimal_operand(raw, limits, bounded)
         value = decimal_value(raw)
         return UNCASTABLE if value.nil?
 
         scale = decimal_scale(limits)
-        return out_of_range(value) if beyond_precision?(value, limits, scale)
-
         inexact = scale && value.round(scale) != value
         bound = bindable(inexact ? value.floor(scale) : value, scale)
-        return out_of_range(value) unless within_integer_range?(limits, bound)
+        return out_of_range(value) if bounded && beyond_column?(value, bound, limits, scale)
 
         inexact ? Operand.new(:inexact, value, bound) : Operand.new(:exact, bound)
       end
 
-      def within_integer_range?(limits, bound)
-        !integer_limits?(limits) || serializable?(limits, bound)
+      # Only ever asked of a real numeric column: its decimal precision, or
+      # its integer range (checked on `bound`, the value that actually binds).
+      def beyond_column?(value, bound, limits, scale)
+        return true if beyond_precision?(value, limits, scale)
+
+        integer_limits?(limits) && !serializable?(limits, bound)
       end
 
       # What actually binds: an Integer on a scale-0 column (so the integer
