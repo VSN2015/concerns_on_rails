@@ -391,4 +391,121 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
         .to raise_error(ArgumentError, /bogus is not a duplicable association \(declared: dup_line_items, dup_note, dup_tags\)/)
     end
   end
+
+  describe "counter-cache columns (1.29 audit)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :cc_posts, force: true do |t|
+          t.string :title
+          t.integer :comments_count, default: 0
+          t.integer :approved_comments_count, default: 0
+          t.integer :reviews_count, default: 0
+          t.integer :cc_pings_count, default: 0
+        end
+        create_table :cc_comments, force: true do |t|
+          t.integer :cc_post_id
+          t.boolean :approved, default: false
+          t.integer :replies_count, default: 0
+        end
+        create_table :cc_replies, force: true do |t|
+          t.integer :cc_comment_id
+        end
+        create_table :cc_reviews, force: true do |t|
+          t.integer :cc_post_id
+        end
+        create_table :cc_pings, force: true do |t|
+          t.integer :target_id
+          t.string :target_type
+        end
+      end
+
+      Object.const_set(:CcPost, Class.new(TestModel) { self.table_name = "cc_posts" })
+      Object.const_set(:CcComment, Class.new(TestModel) { self.table_name = "cc_comments" })
+      Object.const_set(:CcReply, Class.new(TestModel) { self.table_name = "cc_replies" })
+      Object.const_set(:CcReview, Class.new(TestModel) { self.table_name = "cc_reviews" })
+      Object.const_set(:CcPing, Class.new(TestModel) { self.table_name = "cc_pings" })
+
+      CcReply.belongs_to :cc_comment, counter_cache: :replies_count
+      CcReview.belongs_to :cc_post, counter_cache: :reviews_count
+      CcPing.belongs_to :target, polymorphic: true, counter_cache: true
+
+      CcComment.class_eval do
+        include ConcernsOnRails::Models::CounterCacheable
+
+        belongs_to :cc_post
+        has_many :cc_replies
+        counter_cacheable_by :cc_post, count: :comments_count
+        counter_cacheable_by :cc_post, count: :approved_comments_count, if: -> { approved? }
+      end
+
+      CcPost.class_eval do
+        include ConcernsOnRails::Models::Duplicable
+
+        has_many :cc_comments
+        has_many :cc_reviews
+        has_many :cc_pings, as: :target
+        # An association whose class can't be loaded must not break duplicate.
+        has_many :ghosts, class_name: "NoSuchGhostClass"
+        duplicable_by associations: %i[cc_comments cc_reviews cc_pings]
+      end
+    end
+
+    after do
+      %i[CcPost CcComment CcReply CcReview CcPing].each do |name|
+        Object.send(:remove_const, name) if Object.const_defined?(name)
+      end
+      %i[cc_posts cc_comments cc_replies cc_reviews cc_pings].each do |table|
+        ActiveRecord::Base.connection.drop_table(table)
+      end
+    end
+
+    let(:original) do
+      post = CcPost.create!(title: "A")
+      CcComment.create!(cc_post: post, approved: true)
+      CcComment.create!(cc_post: post, approved: false)
+      CcReview.create!(cc_post: post)
+      CcPing.create!(target: post)
+      post.reload
+    end
+
+    def counts(post)
+      fresh = CcPost.find(post.id)
+      [fresh.comments_count, fresh.approved_comments_count, fresh.reviews_count, fresh.cc_pings_count]
+    end
+
+    it "sets up the original's counters (sanity)" do
+      expect(counts(original)).to eq([2, 1, 1, 1])
+    end
+
+    it "zeroes counter columns on the unsaved copy" do
+      copy = original.duplicate(only: [])
+      expect([copy.comments_count, copy.approved_comments_count, copy.reviews_count, copy.cc_pings_count])
+        .to eq([0, 0, 0, 0])
+    end
+
+    it "a deep copy counts exactly the children it copied (CounterCacheable, native and polymorphic native)" do
+      copy = original.duplicate!
+      expect(counts(copy)).to eq([2, 1, 1, 1])
+      expect(counts(original)).to eq([2, 1, 1, 1])
+    end
+
+    it "a shallow copy starts every counter at zero" do
+      copy = original.duplicate!(only: [])
+      expect(counts(copy)).to eq([0, 0, 0, 0])
+    end
+
+    it "a partial copy counts only the association it carried" do
+      copy = original.duplicate!(only: :cc_reviews)
+      expect(counts(copy)).to eq([0, 0, 1, 0])
+    end
+
+    it "zeroes a plain (non-Duplicable) child's own counters — its children are not copied" do
+      comment = original.cc_comments.first
+      CcReply.create!(cc_comment: comment)
+      expect(comment.reload.replies_count).to eq(1)
+
+      copy = original.duplicate!
+      expect(copy.cc_comments.map { |c| c.reload.replies_count }).to eq([0, 0])
+    end
+  end
 end

@@ -34,6 +34,16 @@ module ConcernsOnRails
     #     creation is then audited normally, like any create)
     #   * SoftDeletable timestamp — a copy of trash is a live record
     #   * Lockable attempts (0) / locked_at (nil) — a copy starts unlocked
+    #   * counter-cache columns (0) maintained by a child — a child class's
+    #     CounterCacheable rules or a native `belongs_to ..., counter_cache:`
+    #     pointing at this class (found through its has_many / has_one
+    #     reflections). A copy starts at zero and each child it actually
+    #     carries re-increments it on save, so a deep copy counts its copied
+    #     children and a shallow copy counts none. A plain (non-Duplicable)
+    #     child copy gets the same zeroing for its own counters, since its
+    #     children are never copied. A counter kept by a child with no
+    #     has_many/has_one on this class is invisible here — list it in
+    #     `reset:` (nil) or `on_duplicate`.
     # Business state (Publishable/Stateable/Activatable/...) is a judgment
     # call, so it is NOT auto-reset — list those columns in `reset:`.
     #
@@ -169,6 +179,7 @@ module ConcernsOnRails
           copy[column] = nil if copy.class.column_names.include?(column.to_s)
         end
         copy[self.class.lockable_attempts_field] = 0 if duplicable_concern?(Lockable)
+        Duplicable.zero_counter_cache_columns(copy)
       end
 
       def duplicable_apply_suffixes(copy)
@@ -251,7 +262,69 @@ module ConcernsOnRails
 
         plain = child.dup
         TIMESTAMP_COLUMNS.each { |column| plain[column] = nil if plain.class.column_names.include?(column) }
+        Duplicable.zero_counter_cache_columns(plain)
         plain
+      end
+
+      class << self
+        # Zero every counter-cache column on `record`'s class (see the module
+        # docs): the copy's children re-increment it on save.
+        def zero_counter_cache_columns(record)
+          counter_cache_columns(record.class).each { |column| record[column] = 0 }
+        end
+
+        # Columns of `klass` maintained by a child's counter — CounterCacheable
+        # rules or native belongs_to counter_cache — discovered through
+        # klass's own has_many / has_one reflections (through associations
+        # carry no counter of their own).
+        def counter_cache_columns(klass)
+          columns = klass.reflect_on_all_associations.flat_map do |reflection|
+            next [] unless %i[has_many has_one].include?(reflection.macro) && !reflection.options[:through]
+
+            child = counter_cache_safe_klass(reflection)
+            next [] unless child
+
+            counter_cacheable_columns(klass, child) + native_counter_cache_columns(klass, reflection, child)
+          end
+          columns.map(&:to_s).uniq & klass.column_names
+        end
+
+        private
+
+        def counter_cacheable_columns(klass, child)
+          return [] unless defined?(ConcernsOnRails::Models::CounterCacheable) &&
+                           child.include?(ConcernsOnRails::Models::CounterCacheable)
+
+          child.counter_cacheable_rules.filter_map do |rule|
+            target = counter_cache_safe_klass(child.reflect_on_association(rule[:association]))
+            rule[:count_column] if target && klass <= target
+          end
+        end
+
+        # A polymorphic belongs_to counts on whichever owner declared the
+        # matching `has_many ..., as:`; a plain one on its own target class.
+        def native_counter_cache_columns(klass, reflection, child)
+          child.reflect_on_all_associations(:belongs_to).filter_map do |belongs_to|
+            next unless belongs_to.options[:counter_cache]
+
+            owner = if belongs_to.polymorphic?
+                      reflection.options[:as].to_s == belongs_to.name.to_s
+                    else
+                      target = counter_cache_safe_klass(belongs_to)
+                      target && klass <= target
+                    end
+            belongs_to.counter_cache_column if owner
+          end
+        end
+
+        # A reflection whose class can't be resolved (a typo'd class_name, a
+        # model not loadable in this process) contributes no counters rather
+        # than breaking every duplicate.
+        def counter_cache_safe_klass(reflection)
+          reflection&.klass
+        rescue NameError, ArgumentError, ActiveRecord::ActiveRecordError
+          nil
+        end
       end
     end
   end
