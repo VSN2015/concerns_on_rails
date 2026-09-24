@@ -253,7 +253,7 @@ Location.find_each(&:save)   # backfill: existing rows keep a NULL fingerprint u
 
 - **Normalization is unconditional.** The `before_validation :normalize_address` callback registered in `included do` runs regardless of any `if:` or `unless:` condition on `addressable_by`. Only the validations are gated by those conditions.
 
-- **`validate :validate_address` is registered only once.** Calling `addressable_by` a second time in the same class updates the configuration attributes but does not register a second validation callback. The `if:`/`unless:` condition from the first call is the one that sticks.
+- **`validate :validate_address` is registered only once; the condition is per class.** Calling `addressable_by` again in the same class (or in a subclass) replaces the whole configuration — including `if:`/`unless:`, which is evaluated inside the validation, so the most recent call wins (a call without a condition removes it). A subclass's condition never changes its parent's.
 
 - **Country resolution for postal/state checks follows three-step logic.** When validating a postal code or state, the concern resolves the effective country as: (1) the record's country value if it is a recognized ISO alpha-2 code, (2) `default_country` if the country column is absent or blank, (3) `nil` (permissive fallback) if a country value is present but unrecognized. This means a full name like `"Canada"` stored without `normalize_country: true` will not trigger the CA-specific postal pattern — it falls back to the permissive pattern instead of incorrectly applying `default_country`'s rules.
 

@@ -1140,7 +1140,7 @@ end
 | `normalize_country:` | `false`                           | When `true`, canonicalize the country to its ISO 3166-1 alpha-2 code: an English name (`"Canada"`, `"United States"`) or a 3-letter alpha-3 (`"CAN"`, `"USA"`) maps to the alpha-2 (`"CA"`, `"US"`); unrecognized values are left untouched. This also lets postal/state validation recognize a named country. |
 | `verify_with:`    | `nil`                                | A callable for real-world verification (see below).                 |
 | `fingerprint:`    | `nil`                                | A `string` column to store `address_fingerprint` in (stamped in `before_validation`, after normalization) so duplicates are one indexed query away: `Location.with_address(record)`. |
-| `if:` / `unless:` | `nil`                                | Standard Rails validation conditions (Symbol, Proc, or Array) gating the address **validations** — e.g. `if: :on_addresses?`. Normalization still runs unconditionally. |
+| `if:` / `unless:` | `nil`                                | Standard Rails validation conditions (Symbol, Proc, or Array) gating the address **validations** — e.g. `if: :on_addresses?`. Normalization still runs unconditionally. Per class: a later `addressable_by` (or a subclass's) replaces the condition. |
 
 **What it normalizes** (in `before_validation`)
 - Text parts: `strip` + `squish`.

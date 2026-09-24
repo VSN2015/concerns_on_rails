@@ -661,6 +661,40 @@ describe ConcernsOnRails::Models::Addressable do
       expect { define_location(required: [], if: :line2?, unless: :persisted?) }.not_to raise_error
     end
 
+    # The validation used to be registered once, carrying the FIRST call's
+    # condition; a later addressable_by (or a subclass's) could never change it.
+    it "honours the condition from a later addressable_by call" do
+      define_location(required: %i[country], if: :line2?)
+      Location.addressable_by(required: %i[country], unless: :line2?)
+
+      expect(Location.new(line2: "Apt 1").valid?).to be true
+      expect(Location.new.valid?).to be false
+    end
+
+    it "drops the condition when a later call declares none" do
+      define_location(required: %i[country], if: :line2?)
+      Location.addressable_by(required: %i[country])
+
+      expect(Location.new.valid?).to be false
+    end
+
+    it "lets a subclass replace the condition without changing the parent's" do
+      define_location(required: %i[country], if: :line2?)
+      child = Class.new(Location) { addressable_by(required: %i[country], if: -> { city == "CHECK" }) }
+
+      expect(child.new(line2: "Apt 1").valid?).to be true
+      expect(child.new(city: "CHECK").valid?).to be false
+      expect(Location.new(line2: "Apt 1").valid?).to be false
+      expect(Location.new(city: "CHECK").valid?).to be true
+    end
+
+    it "passes the record to a one-argument lambda, like Rails" do
+      define_location(required: %i[country], if: ->(record) { record.city == "CHECK" })
+
+      expect(Location.new(city: "skip").valid?).to be true
+      expect(Location.new(city: "CHECK").valid?).to be false
+    end
+
     it "still normalizes even when the validation condition is false" do
       define_location(required: [], if: :line2?, normalize_country: true)
       loc = Location.new(country: "canada", city: "  Town  ")
