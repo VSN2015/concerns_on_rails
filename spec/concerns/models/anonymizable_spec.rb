@@ -209,6 +209,70 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
       expect(record.reload.name).to eq("Jane")
       expect(record.anonymized?).to be(false)
     end
+
+    # update_columns syncs the attribute cache at once and a ROLLBACK never
+    # undoes it, so the record used to read as erased while the row was not.
+    it "puts the in-memory values back when a hook raises" do
+      klass = model_class do
+        anonymizable :name, with: :redact
+
+        def after_anonymize
+          raise "boom"
+        end
+      end
+      record = klass.create!(name: "Jane")
+
+      expect { record.anonymize! }.to raise_error("boom")
+      expect(record.name).to eq("Jane")
+      expect(record.anonymized?).to be(false)
+      expect(record.changed?).to be(false)
+    end
+  end
+
+  # A bare `transaction` JOINED the caller's (and anonymize_all!'s), so Rails
+  # swallowed an ActiveRecord::Rollback from a hook with nothing rolled back:
+  # the erasure committed, anonymize! returned true, anonymize_all! counted it.
+  describe "ActiveRecord::Rollback from after_anonymize" do
+    let(:vetoing) do
+      model_class do
+        anonymizable :name, with: :redact
+
+        def after_anonymize
+          raise ActiveRecord::Rollback
+        end
+      end
+    end
+
+    it "anonymize! returns false and leaves the row intact" do
+      record = vetoing.create!(name: "Jane")
+
+      expect(record.anonymize!).to be(false)
+      expect(record.name).to eq("Jane")
+      expect(record.reload.name).to eq("Jane")
+      expect(record.anonymized?).to be(false)
+    end
+
+    it "rolls back inside a caller transaction, keeping the caller's own writes" do
+      record = vetoing.create!(name: "Jane")
+      other = vetoing.create!(name: "Other")
+
+      ActiveRecord::Base.transaction do
+        other.update!(email: "o@example.com")
+        record.anonymize!
+      end
+
+      expect(other.reload.email).to eq("o@example.com")
+      expect(record.reload.name).to eq("Jane")
+    end
+
+    it "anonymize_all! raises RecordNotSaved and commits nothing" do
+      vetoing.create!(name: "a")
+      vetoing.create!(name: "b")
+
+      expect { vetoing.anonymize_all! }.to raise_error(ActiveRecord::RecordNotSaved, /failed to anonymize/)
+      expect(vetoing.pluck(:name)).to match_array(%w[a b])
+      expect(vetoing.anonymized.count).to eq(0)
+    end
   end
 
   describe ".anonymize_all!" do

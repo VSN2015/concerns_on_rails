@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/hooked_write"
 
 module ConcernsOnRails
   module Models
@@ -290,28 +291,23 @@ module ConcernsOnRails
         current = self[field].to_s
         raise InvalidTransition, "#{self.class.name}: cannot #{event} from '#{self[field]}'" unless from.empty? || from.include?(current)
 
-        result = false
-        # requires_new: a bare `transaction` JOINS an enclosing one instead of
-        # opening a savepoint, so under a caller's transaction Rails swallowed
-        # an ActiveRecord::Rollback from after_transition and rolled nothing
-        # back — the state change committed and this returned true, exactly
-        # opposite to the documented contract above.
-        # Set AFTER after_transition, never from update! — the same reason
-        # Lockable's lockable_write_with_hooks flips `completed` only once the
-        # block has run to the end. Rails swallows ActiveRecord::Rollback at
-        # the savepoint boundary, so taking the return value from update!
-        # reported a fake success for a transition the hook had just aborted:
-        # `raise unless ticket.archive!` never fired, and transition_all
-        # counted a row it had rolled back.
-        transaction(requires_new: true) do
+        # Support::HookedWrite (the helper every hooked concern write shares):
+        # its own savepoint, because a bare `transaction` JOINS an enclosing
+        # one and Rails then swallowed an ActiveRecord::Rollback from
+        # after_transition with nothing rolled back; and a result that is true
+        # only once the block has run to the end, because taking it from
+        # update! reported a fake success for a transition the hook had just
+        # aborted (`raise unless ticket.archive!` never fired, and
+        # transition_all counted a row it had rolled back). The hooks take
+        # arguments, so they run inside the block rather than as before:/after:.
+        ConcernsOnRails::Support::HookedWrite.run(self) do
           before_transition(event, current, to)
           stateable_event_hook(:"before_#{name}")
           update!(stateable_write_attributes(to))
           stateable_event_hook(:"after_#{name}")
           after_transition(event, current, to)
-          result = true
+          true
         end
-        result
       end
 
       def stateable_event_hook(method_name)
