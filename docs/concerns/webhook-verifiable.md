@@ -20,7 +20,7 @@ class WebhooksController < ApplicationController
   verify_webhook :github,  secret: -> { ENV["GITHUB_WEBHOOK_SECRET"] },    scheme: :github
   verify_webhook :shopify, secret: [ENV["NEW_SECRET"], ENV["OLD_SECRET"]], scheme: :shopify  # rotation
   verify_webhook :custom,  secret: "s3cr3t", scheme: :hex, header: "X-Acme-Signature"
-  # verify_webhook secret: ...   # no actions = catch-all (declare specific rules first)
+  # verify_webhook secret: ...   # no actions = catch-all (declare it last in its class)
 
   def stripe
     event = JSON.parse(request.raw_post)   # parse the raw body — it is what was signed
@@ -34,7 +34,7 @@ end
 
 ### `verify_webhook(*actions, secret:, scheme: :hex, header: nil, tolerance: nil, digest: :sha256)`
 
-Each call appends a rule; the **first** rule matching the current action wins (no actions = catch-all, so declare specific rules first). Invalid configuration raises `ArgumentError` at class-load time.
+The **first** rule matching the current action wins (no actions = catch-all). A controller's **own** rules are consulted before the rules it inherited — most-derived class first, declaration order within a class — so a subclass rule is never shadowed by a parent's catch-all, and a subclass catch-all takes over the actions its parent named. Within one class the catch-all must come last: declaring any rule after it raises `ArgumentError` (it could never match). Invalid configuration raises `ArgumentError` at class-load time.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -44,7 +44,7 @@ Each call appends a rule; the **first** rule matching the current action wins (n
 | `header:` | `String` | scheme preset | Required for `:hex`/`:base64` (they have no standard header); overrides the preset for the others. |
 | `tolerance:` | positive duration | `300` (Stripe only) | Replay window for `:stripe` — rejects `\|now − t\| > tolerance`. Raises if passed with any other scheme. |
 | `digest:` | `Symbol` | `:sha256` | `:sha1`/`:sha512` allowed for `:hex`/`:base64` only; the provider presets pin SHA256. |
-| `replay:` | `true`, a store, or `false` | `nil` (off) | Replay protection. After the signature verifies, `SHA256(delivery identity)` is written to the store with `unless_exist:` and `replay_ttl:`; a second delivery with the same signature is rejected with 409 `webhook_replayed`. The identity is the signature header, except for `:stripe` where it is the signed `"#{t}.#{body}"` payload — the raw Stripe header is not canonical (the parser ignores unknown `v0=` keys and whitespace, so a captured header can be mutated into unlimited valid variants). `true` uses `ConcernsOnRails.config.cache_store` (raises with a setup hint when none is configured); any object with `#write(key, value, expires_in:, unless_exist:)` and `#read(key)` works — `#read` is **required**, because without it a falsy `#write` cannot be told apart from an unreachable store. `#delete(key)` is optional (it releases the claim when the action 5xxs). `false` is the same as `nil`, so `replay: Rails.env.production?` is safe. Forged traffic never consumes a slot; keys are scoped per controller action. |
+| `replay:` | `true`, a store, or `false` | `nil` (off) | Replay protection. After the signature verifies, `SHA256(delivery identity)` is written to the store with `unless_exist:` and `replay_ttl:`; a second delivery with the same signature is rejected with 409 `webhook_replayed`. The identity is the signature header, except for `:stripe` where it is the signed `"#{t}.#{body}"` payload — the raw Stripe header is not canonical (the parser ignores unknown `v0=` keys and whitespace, so a captured header can be mutated into unlimited valid variants). `true` uses `ConcernsOnRails.config.cache_store` (raises with a setup hint when none is configured); any object with `#write(key, value, expires_in:, unless_exist:)` and `#read(key)` works — `#read` is **required**, because without it a falsy `#write` cannot be told apart from an unreachable store. `#delete(key)` is optional (it releases the claim whenever the delivery was not processed — the action 5xxed or raised, or a later `before_action` halted; without it the 60-second claim expires on its own). `false` is the same as `nil`, so `replay: Rails.env.production?` is safe. Forged traffic never consumes a slot; keys are scoped per controller action. |
 | `replay_ttl:` | positive duration | `24.hours` | How long a seen signature stays blocked, counted from when the action **completed**. Requires `replay:`. For Stripe the `tolerance:` window already bounds replays, so a shorter ttl is fine there. |
 
 ### Schemes
@@ -123,3 +123,8 @@ end
 - **Stripe specifics.** The first `t` in the header feeds both the tolerance check and the signed payload, so appending a fresh `t` to a captured stale header cannot resurrect it. The tolerance window is symmetric (future timestamps are rejected too). At most 16 `v1` candidates are considered.
 - **CSRF and auth filters are your job.** Webhook endpoints need `skip_before_action :verify_authenticity_token` and should be excluded from session-auth filters.
 - **No raw-body buffering concerns**: verification is a single HMAC pass over `request.raw_post`, which Rails has already read.
+
+## Changed (unreleased)
+
+- **A controller's own rules outrank inherited ones.** Lookup used to be first-match over the inherited rules first, so a parent's catch-all shadowed every rule a subclass declared. A subclass rule now wins for its actions; a subclass catch-all now takes over actions its parent named. Declaring any rule after a catch-all in the **same** class raises `ArgumentError`.
+- **The replay claim is released whenever the delivery was not processed.** Rails skips `after_action` callbacks when a later `before_action` halts and when the action raises; the claim then lingered for 60 seconds and the provider's retry got a 409 for a delivery that never ran. A new `around_action` (`guard_webhook_replay_claim`) releases it.
