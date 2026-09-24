@@ -57,6 +57,7 @@ RSpec.describe ConcernsOnRails::Support::NumericOperand do
     it "keeps the unrounded value and flags one finer than the scale as inexact" do
       expect(classify("99.99", decimal)).to eq([:exact, BigDecimal("99.99")])
       expect(classify("99.985", decimal)).to eq([:inexact, BigDecimal("99.985")])
+      expect(described_class.classify("99.985", decimal).scale).to eq(2)
       expect(classify("1e2", decimal)).to eq([:exact, BigDecimal("100")])
       expect(classify(".5", decimal)).to eq([:exact, BigDecimal("0.5")])
       expect(classify("abc", decimal)).to eq([:uncastable, nil])
@@ -73,6 +74,7 @@ RSpec.describe ConcernsOnRails::Support::NumericOperand do
       whole = ActiveRecord::Type::DecimalWithoutScale.new(precision: 10)
 
       expect(classify("5.5", whole)).to eq([:inexact, BigDecimal("5.5")])
+      expect(described_class.classify("5.5", whole).scale).to eq(0)
       expect(classify("5", whole)).to eq([:exact, BigDecimal("5")])
     end
   end

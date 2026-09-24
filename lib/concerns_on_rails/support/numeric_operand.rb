@@ -20,8 +20,10 @@ module ConcernsOnRails
     #
     #   :exact      — representable as-is; bind `value` normally.
     #   :inexact    — a decimal finer than the column's scale: no stored value
-    #                 can EQUAL it, but it compares exactly when bound
-    #                 unrounded (`value` is the unrounded BigDecimal).
+    #                 can EQUAL it. `value` is the unrounded BigDecimal and
+    #                 `scale` the column's, so a comparison can be rewritten
+    #                 onto the neighbouring representable values (see
+    #                 Filterable#apply_filter_inexact_comparison).
     #   :above      — beyond the largest value the column can hold.
     #   :below      — beyond the smallest.
     #   :uncastable — not a number of this kind at all ("twelve", "0x10", or
@@ -36,7 +38,7 @@ module ConcernsOnRails
       NUMERIC_CLASSES = [ActiveModel::Type::Integer, ActiveModel::Type::Decimal, ActiveModel::Type::Float].freeze
       KINDS = %i[integer decimal float].freeze
 
-      Operand = Struct.new(:status, :value)
+      Operand = Struct.new(:status, :value, :scale)
       UNCASTABLE = Operand.new(:uncastable, nil).freeze
 
       module_function
@@ -93,7 +95,9 @@ module ConcernsOnRails
         precision = limits.precision
         return out_of_range(value) if precision && value.abs >= BigDecimal(10)**(precision - (scale || 0))
 
-        Operand.new(scale && value.round(scale) != value ? :inexact : :exact, value)
+        return Operand.new(:inexact, value, scale) if scale && value.round(scale) != value
+
+        Operand.new(:exact, value)
       end
 
       def decimal_value(raw)

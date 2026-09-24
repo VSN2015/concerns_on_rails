@@ -240,17 +240,32 @@ module ConcernsOnRails
       # holds used to bind as 1=0 for every operator — `stock < 10**20` came
       # back empty — and is now answered per operator: nothing is above an
       # over-max bound, every non-NULL row is below it (and the mirror image
-      # for an under-min bound). A decimal finer than the column's scale is
-      # bound UNROUNDED, because the column type would round it
-      # (`price > 99.985` became `price > 99.99` and lost the 99.99 row).
+      # for an under-min bound). A decimal finer than the column's scale can
+      # not be bound as-is — the column type rounds it (`price > 99.985`
+      # became `price > 99.99` and lost the 99.99 row) — so the comparison is
+      # rewritten onto its representable neighbours instead.
       def apply_filter_numeric_comparison(relation, field, operator, operand)
         case operand.status
         when :uncastable then relation.none
         when :above then %i[gt gte].include?(operator) ? relation.none : relation.where.not(field => nil)
         when :below then %i[lt lte].include?(operator) ? relation.none : relation.where.not(field => nil)
+        when :inexact then apply_filter_inexact_comparison(relation, field, operator, operand)
+        else relation.where(relation.model.arel_table[field].public_send(COMPARISONS.fetch(operator), operand.value))
+        end
+      end
+
+      # No value of scale `s` lies strictly between floor_s(v) and ceil_s(v)
+      # when v itself is not representable, so `> v` and `>= v` are exactly
+      # `> floor_s(v)`, and `< v` / `<= v` are exactly `< ceil_s(v)`. Both
+      # bounds ARE representable, so they bind through the column type
+      # unchanged — no unrounded literal (which a PostgreSQL money column or
+      # MySQL's 65-digit DECIMAL literal limit could choke on) reaches SQL.
+      def apply_filter_inexact_comparison(relation, field, operator, operand)
+        column = relation.model.arel_table[field]
+        if %i[gt gte].include?(operator)
+          relation.where(column.gt(operand.value.floor(operand.scale)))
         else
-          value = operand.status == :inexact ? Arel::Nodes.build_quoted(operand.value) : operand.value
-          relation.where(relation.model.arel_table[field].public_send(COMPARISONS.fetch(operator), value))
+          relation.where(column.lt(operand.value.ceil(operand.scale)))
         end
       end
 

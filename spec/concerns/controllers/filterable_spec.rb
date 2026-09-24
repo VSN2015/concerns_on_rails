@@ -318,6 +318,8 @@ describe ConcernsOnRails::Controllers::Filterable do
       expect(names(price: { gte: "99.985" })).to eq(%w[Desk Chair])
       expect(names(price_lte: "99.985")).to eq(["Lamp 100% cotton shade", "Lampshade"])
       expect(names(price_lt: "30.001")).to eq(["Lamp 100% cotton shade", "Lampshade"])
+      expect(names(price: { lt: "99.991" })).to eq(["Lamp 100% cotton shade", "Chair", "Lampshade"])
+      expect(names(price_gte: "-0.005")).to eq(["Lamp 100% cotton shade", "Desk", "Chair", "Lampshade"])
       expect(names(price: "99.985")).to eq([])
       expect(names(price_in: "99.985,10")).to eq(["Lamp 100% cotton shade"])
       expect(names(price_gt: "1e2")).to eq(["Desk"]) # an exponent is exact for a decimal
