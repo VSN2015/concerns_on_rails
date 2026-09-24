@@ -58,6 +58,25 @@ describe ConcernsOnRails::Schedulable do
       expect(promo.current?).to be false
       expect(promo.upcoming?).to be false
     end
+
+    # The plain predicates keep master's delegation: overriding `active_at?`
+    # (blackout dates, say) still moves `current?` with it.
+    it "derives current? from an overridden active_at?" do
+      klass = Class.new(TestModel) do
+        self.table_name = "promotions"
+        include ConcernsOnRails::Schedulable
+
+        schedulable_by prefix: :window
+
+        def active_at?(_time)
+          false
+        end
+      end
+      promo = klass.create!(starts_at: 1.hour.ago, ends_at: 1.hour.from_now)
+
+      expect(promo.current?).to be(false)
+      expect(promo.window_current?).to be(true) # the affixed predicate is Schedulable's own answer
+    end
   end
 
   describe "boundary semantics (inclusive start, exclusive end)" do

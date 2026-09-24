@@ -153,7 +153,9 @@ module ConcernsOnRails
       # model that also includes Expirable (`expired?`), the concern included
       # LAST owns a shared name; configure `prefix:`/`suffix:` and use the
       # affixed predicates (`window_expired?`, …) to keep Schedulable's
-      # answer reachable. Each delegates to a private unaffixed check.
+      # answer reachable. They delegate as they always have (`current?` is
+      # `active_at?(now)`, so overriding `active_at?` moves both); the
+      # affixed predicates call the private unaffixed checks instead.
 
       # Is the record active at the given time? Inclusive start, exclusive end.
       def active_at?(time)
@@ -161,7 +163,7 @@ module ConcernsOnRails
       end
 
       def current?
-        schedulable_current?
+        active_at?(Time.zone.now)
       end
 
       # Does this record's window intersect [from, to)? Mirrors the

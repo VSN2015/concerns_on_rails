@@ -111,12 +111,14 @@ module ConcernsOnRails
         end
       end
 
-      # Plain names kept for compatibility. On a model that also includes
-      # Activatable or Schedulable, the concern included LAST owns these;
-      # configure `prefix:`/`suffix:` and use the affixed predicates
-      # (`term_active?`, `term_expired?`) to keep Expirable's answer reachable.
+      # Plain names kept for compatibility, delegating as they always have
+      # (`active?` is `!expired?`, so overriding `expired?` moves both). On a
+      # model that also includes Activatable or Schedulable, the concern
+      # included LAST owns these; configure `prefix:`/`suffix:` and use the
+      # affixed predicates (`term_active?`, `term_expired?`), which always
+      # give Expirable's own answer.
       def active?
-        expirable_live?
+        !expired?
       end
 
       # nil means never expires; equal-to-now is treated as expired (exclusive boundary).

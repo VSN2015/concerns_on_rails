@@ -161,13 +161,14 @@ module ConcernsOnRails
         end
       end
 
-      # Plain names kept for compatibility — see the module note on collisions.
+      # Plain names kept for compatibility, delegating as they always have
+      # (`inactive?` is `!active?`) — see the module note on collisions.
       def active?
         activatable_on?
       end
 
       def inactive?
-        activatable_off?
+        !active?
       end
 
       # Lifecycle hooks — no-ops to override. They run around activate! /

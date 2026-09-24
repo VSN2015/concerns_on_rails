@@ -43,6 +43,25 @@ describe ConcernsOnRails::Expirable do
       expect(token.active?).to be false
     end
 
+    # The plain predicates keep master's delegation: an app overriding
+    # `expired?` (a grace period, say) still moves `active?` with it.
+    it "derives active? from an overridden expired?" do
+      graced = Class.new(TestModel) do
+        self.table_name = "api_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by :expires_at, prefix: :term
+
+        def expired?
+          false
+        end
+      end
+      token = graced.create!(expires_at: 1.hour.ago)
+
+      expect(token.active?).to be(true)
+      expect(token.term_active?).to be(false) # the affixed predicate is Expirable's own answer
+    end
+
     it "is expired at exactly the expiry instant (exclusive boundary)" do
       freeze_time do
         token = ApiToken.create!(value: "boundary", expires_at: Time.zone.now)

@@ -44,6 +44,26 @@ describe ConcernsOnRails::Activatable do
     end
   end
 
+  # The plain predicates keep master's delegation: overriding `active?` still
+  # moves `inactive?` — while toggle_active! reads the flag itself.
+  it "derives inactive? from an overridden active?" do
+    klass = Class.new(TestModel) do
+      self.table_name = "subscriptions"
+      include ConcernsOnRails::Activatable
+
+      activatable_by
+
+      def active?
+        true
+      end
+    end
+    record = klass.create!(name: "n", active: false)
+
+    expect(record.inactive?).to be(false)
+    record.toggle_active!
+    expect(record.reload.active).to be(true)
+  end
+
   describe "scopes" do
     it ".active returns only records with the column set to true" do
       on = Subscription.create!(name: "on", active: true)
