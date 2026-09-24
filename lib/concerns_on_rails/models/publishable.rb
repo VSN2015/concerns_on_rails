@@ -56,6 +56,26 @@ module ConcernsOnRails
           @publishable_boolean_column = columns_hash[publishable_field.to_s]&.type == :boolean
         end
 
+        # The boolean `.published` predicate. Rails' scope_for_create copies
+        # every top-level `Arel::Nodes::Equality` in a where clause (a hash
+        # condition or `arel_table[f].eq`) onto records built through the
+        # scope, so under `default_scope: true` the old `where(field => true)`
+        # made every NEW record start out published. Wrapping the equality in
+        # a Grouping hides it from that extraction while keeping the
+        # index-friendly `= TRUE` form (a partial index `WHERE published =
+        # true` still matches), and `unscope(where: field)` still peels it —
+        # on Rails 6.1+. Rails 6.0 cannot unscope a Grouping (the negative
+        # scopes would stop working under the default scope) and also copies
+        # `In`, so there it falls back to `<> FALSE`: same rows (NULL <> FALSE
+        # is NULL), never copied, peelable. (Public only because scope
+        # lambdas resolve methods through the relation.)
+        def publishable_true_predicate
+          column = arel_table[publishable_field]
+          return column.not_eq(false) if ActiveRecord.gem_version < Gem::Version.new("6.1")
+
+          Arel::Nodes::Grouping.new(column.eq(true))
+        end
+
         # Publish every not-currently-published record in the relation.
         # Returns the Integer count. NOTE this includes *scheduled* rows,
         # whose future timestamp is overwritten with now — chain the draft
@@ -128,19 +148,12 @@ module ConcernsOnRails
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
 
-          # The boolean predicate is `<> FALSE`, never an equality: Rails'
-          # scope_for_create copies every `Arel::Nodes::Equality` in the where
-          # clause (hash condition or `arel_table[f].eq`; on Rails 6.0 also
-          # `In`, which subclasses Equality there) onto records built through
-          # the scope, so under `default_scope: true` the old
-          # `where(field => true)` made every NEW record start out published.
-          # `<> FALSE` selects the same rows (NULL <> FALSE is NULL, so NULL
-          # rows stay out), is copied on no Rails line, and is still peeled by
-          # `unscope(where: field)`. (The timestamp branch was already an Arel
-          # `<=`, which is never copied either.)
+          # See publishable_true_predicate for why the boolean branch is not
+          # `where(field => true)`. (The timestamp branch is an Arel `<=`,
+          # which Rails never copies onto new records.)
           scope publishable_scope_names[:published], lambda {
             if publishable_boolean_column?
-              where(arel_table[publishable_field].not_eq(false))
+              where(publishable_true_predicate)
             else
               where(arel_table[publishable_field].lteq(Time.zone.now))
             end

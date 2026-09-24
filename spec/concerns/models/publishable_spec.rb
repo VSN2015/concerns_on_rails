@@ -707,6 +707,28 @@ describe ConcernsOnRails::Publishable do
       expect(FlagPost.unpublished.map(&:title)).to eq(["draft"])
     end
 
+    it "partitions every row, NULL included, between .published and .unpublished" do
+      FlagPost.create!(title: "on", is_published: true)
+      FlagPost.create!(title: "off", is_published: false)
+      FlagPost.create!(title: "null")
+
+      expect(FlagPost.published.map(&:title)).to eq(["on"])
+      expect(FlagPost.unpublished.map(&:title)).to match_array(%w[off null])
+      expect(FlagPost.unscoped.published.count + FlagPost.unscoped.unpublished.count).to eq(3)
+    end
+
+    # `<> FALSE` (the first cut of this fix) defeats an index / PG partial
+    # index on `published = TRUE`. A Grouping around the equality keeps the
+    # `= TRUE` form while hiding it from scope_for_create. Rails 6.0 cannot
+    # `unscope` a Grouping, so it alone keeps the `<> FALSE` form.
+    it "keeps the = TRUE predicate form", min_rails: "6.1" do
+      sql = FlagPost.unscoped.published.to_sql
+      column = TestDatabase.quoted_column("is_published")
+
+      expect(sql).to match(/#{Regexp.escape(column)} = (TRUE|1)\b/i)
+      expect(sql).not_to match(/<>|!=/)
+    end
+
     it "publishes via publish! and publish_all" do
       post = FlagPost.create!(title: "a")
       FlagPost.create!(title: "b")
