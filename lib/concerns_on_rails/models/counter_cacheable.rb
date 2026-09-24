@@ -315,9 +315,21 @@ module ConcernsOnRails
       # condition flip in memory must not redirect the decrement.
       def counter_cacheable_run_destroy
         adjustments = counter_cacheable_with_attributes(counter_cacheable_unsaved_changes) do
-          counter_cacheable_presence_adjustments(-1)
+          counter_cacheable_presence_adjustments(-1) { |rule| !counter_cacheable_destroyed_by_parent?(rule) }
         end
         counter_cacheable_flush(adjustments)
+      end
+
+      # Rails' native counter cache skips the decrement when the child is being
+      # destroyed by the parent's own `dependent: :destroy` on the same foreign
+      # key: that parent row is about to be deleted, and bumping it first (the
+      # UPDATE also increments lock_version) makes the parent's own DELETE fail
+      # with StaleObjectError. Counters on other associations still decrement.
+      def counter_cacheable_destroyed_by_parent?(rule)
+        by = destroyed_by_association
+        return false unless by
+
+        Array(by.foreign_key).map(&:to_s) == Array(counter_cacheable_reflection(rule).foreign_key).map(&:to_s)
       end
 
       def counter_cacheable_run_update
@@ -327,8 +339,11 @@ module ConcernsOnRails
       end
 
       # create/destroy share one shape: ±1 on the current parent when counted.
+      # An optional block filters the rules (destroy skips the parent doing the
+      # destroying).
       def counter_cacheable_presence_adjustments(delta)
         self.class.counter_cacheable_rules.filter_map do |rule|
+          next if block_given? && !yield(rule)
           next unless counter_cacheable_counted_now?(rule)
 
           counter_cacheable_adjustment(rule, counter_cacheable_fk_value(rule), delta)

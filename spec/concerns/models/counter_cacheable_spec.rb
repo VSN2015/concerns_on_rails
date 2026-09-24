@@ -554,4 +554,58 @@ describe ConcernsOnRails::Models::CounterCacheable do
       expect(board_counts(decoy)).to eq([7, 7])
     end
   end
+
+  describe "destroyed by the parent's dependent: :destroy (review of #111)" do
+    before(:each) do
+      ActiveRecord::Schema.define do
+        create_table :lk_posts, force: true do |t|
+          t.integer :lock_version, default: 0
+          t.integer :lk_notes_count, default: 0
+        end
+        create_table :lk_users, force: true do |t|
+          t.integer :lk_notes_count, default: 0
+        end
+        create_table :lk_notes, force: true do |t|
+          t.integer :lk_post_id
+          t.integer :lk_user_id
+        end
+      end
+
+      Object.const_set(:LkPost, Class.new(TestModel) { self.table_name = "lk_posts" })
+      Object.const_set(:LkUser, Class.new(TestModel) { self.table_name = "lk_users" })
+      Object.const_set(:LkNote, Class.new(TestModel) { self.table_name = "lk_notes" })
+      LkPost.has_many :lk_notes, dependent: :destroy
+      LkNote.class_eval do
+        include ConcernsOnRails::CounterCacheable
+
+        belongs_to :lk_post
+        belongs_to :lk_user, optional: true
+        counter_cacheable_by :lk_post
+        counter_cacheable_by :lk_user
+      end
+    end
+
+    after(:each) do
+      %i[LkNote LkPost LkUser].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    it "skips the decrement on the parent being destroyed (no StaleObjectError under lock_version)" do
+      post = LkPost.create!
+      user = LkUser.create!
+      2.times { LkNote.create!(lk_post: post, lk_user: user) }
+
+      expect { post.reload.destroy! }.not_to raise_error
+      expect(LkPost.count).to eq(0)
+      expect(LkNote.count).to eq(0)
+      # Only the counter on the association doing the destroying is skipped.
+      expect(user.reload.lk_notes_count).to eq(0)
+    end
+
+    it "still decrements when the child is destroyed on its own" do
+      post = LkPost.create!
+      note = LkNote.create!(lk_post: post)
+      note.destroy!
+      expect(post.reload.lk_notes_count).to eq(0)
+    end
+  end
 end
