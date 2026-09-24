@@ -108,6 +108,47 @@ describe ConcernsOnRails::Models::Monetizable do
       expect(cents_for(klass, klass.new(total_cents: 123_456).formatted_total, field: :total)).to eq(123_456)
     end
 
+    # A finite but astronomically large amount got past the finiteness check
+    # and raised FloatDomainError from the cents rounding; a long exponent or
+    # digit string could also be used to burn CPU in BigDecimal.
+    it "casts overflowing and oversized input to nil instead of raising" do
+      klass = product_class { monetizable :price_cents }
+
+      ["1e100000000", "-1e100000000", "1e-100000000", "9" * 10_000, "1#{'0' * 200}", "1e99999999999999999999",
+       BigDecimal("1e100000000"), 10**400, 1e300].each do |huge|
+        expect(cents_for(klass, huge)).to be_nil, "#{huge.to_s[0, 30].inspect} should cast to nil"
+      end
+      expect(cents_for(klass, "1e3")).to eq(100_000)
+      expect(cents_for(klass, "92233720368547758.07")).to eq(9_223_372_036_854_775_807)
+    end
+
+    # In a "," separator field, "1.234" used to be read as the decimal 1.234
+    # (123 cents) while "€1.234" was 1234.00 and "1.234.567" was 1234567.
+    it "reads '.'-grouped thousands consistently in a comma-separator field" do
+      klass = product_class { monetizable :total_cents, unit: "€", delimiter: ".", separator: "," }
+
+      { "1.234" => 123_400, "€1.234" => 123_400, "1.234 €" => 123_400, "-1.234" => -123_400,
+        "1.234.567" => 123_456_700, "€1.234.567" => 123_456_700, "19.99" => 1999, "1.5" => 150,
+        "€19.99" => 1999, "1.234,5" => 123_450, "12.34.5" => nil }.each do |input, cents|
+        expect(cents_for(klass, input, field: :total)).to eq(cents), "#{input.inspect} => #{cents.inspect}"
+      end
+    end
+
+    it "only strips the unit at the start or the end of the amount" do
+      klass = product_class { monetizable :price_cents }
+      euro = product_class { monetizable :total_cents, unit: "EUR ", delimiter: ".", separator: "," }
+
+      expect(cents_for(klass, "5$5")).to be_nil
+      expect(cents_for(klass, "1$,234")).to be_nil
+      expect(cents_for(klass, "$5$")).to be_nil
+      expect(cents_for(klass, "5 $")).to eq(500)
+      expect(cents_for(klass, "- $5")).to eq(-500)
+      expect(cents_for(klass, "$-5")).to eq(-500)
+      expect(cents_for(euro, "EUR 3.500,50", field: :total)).to eq(350_050)
+      expect(cents_for(euro, "3.500,50 EUR", field: :total)).to eq(350_050)
+      expect(cents_for(euro, "3.5EUR00", field: :total)).to be_nil
+    end
+
     it "casts non-finite numbers and garbage to nil instead of raising" do
       klass = product_class { monetizable :price_cents }
 

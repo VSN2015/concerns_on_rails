@@ -64,37 +64,84 @@ module ConcernsOnRails
         raise ArgumentError, "#{label}: :precision must be an integer, got #{value.inspect}"
       end
 
+      # Writer input longer than this (after trimming) is rejected before any
+      # BigDecimal work — no real amount needs it, and it bounds the cost.
+      MAX_INPUT_LENGTH = 64
+      # Largest accepted magnitude: < 10**MAX_EXPONENT major units (far past
+      # any 64-bit cents column). Bigger finite values used to raise
+      # FloatDomainError from the cents rounding.
+      MAX_EXPONENT = 24
+      # A written exponent of three or more digits ("1e100000000") is absurd.
+      OVERSIZED_EXPONENT = /[eE][+-]?\d{3}/
+      # "1.234" / "-1.234.567": "."-grouped thousands.
+      DOTTED_THOUSANDS = /\A[+-]?\d{1,3}(?:\.\d{3})+\z/
+
       # Parse a writer's input into a finite BigDecimal amount (major units),
-      # or nil. Strings are read canonically first ("19.99", "5", "1e3" — the
-      # pre-existing behaviour), then in the field's own display format, so
-      # formatted output reads back: "$1,234.50" / "€1.234,50" / "-$5.00".
-      # Non-finite values (NaN, Infinity) and garbage are nil, never raised.
+      # or nil. A String has its unit removed (only at the start or the end),
+      # then is read canonically ("19.99", "5", "1e3" — the pre-existing
+      # behaviour), then in the field's own display format, so formatted
+      # output reads back: "$1,234.50" / "€1.234,50" / "-$5.00". Non-finite,
+      # oversized and garbage input is nil, never raised.
       def parse(amount, options = {})
         decimal = amount.is_a?(String) ? parse_string(amount, options) : BigDecimal(amount.to_s)
-        decimal&.finite? ? decimal : nil
+        decimal&.finite? && decimal.exponent <= MAX_EXPONENT ? decimal : nil
       rescue ArgumentError, TypeError, FloatDomainError
+        nil
+      end
+
+      # Major units to whole subunits (half-up), nil if that cannot be done.
+      def subunits(decimal, subunit)
+        (decimal * subunit).round
+      rescue FloatDomainError
         nil
       end
 
       def parse_string(amount, options)
         stripped = strip_space(amount)
-        return nil if stripped.empty?
+        return nil unless plausible_input?(stripped)
 
-        canonical = BigDecimal(stripped, exception: false)
+        body = strip_unit(stripped, options.fetch(:unit, "$").to_s)
+        return nil unless body
+
+        body = body.delete(".") if dotted_thousands?(body, options)
+        canonical = BigDecimal(body, exception: false)
         return canonical if canonical
 
-        localized = localized_to_canonical(stripped, options)
+        localized = localized_to_canonical(body, options)
         localized && BigDecimal(localized, exception: false)
       end
 
-      # Drop the (one) unit, split on the separator, and remove the delimiter from
-      # the whole part — only where it groups digits in threes, so a
-      # wrong-locale "1,5" in a "." field is garbage (nil), not 15.
-      def localized_to_canonical(string, options)
-        unit = options.fetch(:unit, "$").to_s
-        separator = options.fetch(:separator, ".").to_s
+      # Non-empty, bounded in length, and no three-digit written exponent.
+      def plausible_input?(string)
+        !string.empty? && string.length <= MAX_INPUT_LENGTH && !string.match?(OVERSIZED_EXPONENT)
+      end
 
-        string = strip_space(unit.empty? ? string : string.sub(unit, ""))
+      # Remove the unit where the formatter puts it — the start (after an
+      # optional sign) or the end. A unit anywhere else ("5$5") is garbage.
+      def strip_unit(string, unit)
+        unit = strip_space(unit)
+        return string if unit.empty?
+
+        sign = string[/\A[+-]/].to_s
+        rest = strip_space(string.delete_prefix(sign))
+        rest = rest.start_with?(unit) ? rest.delete_prefix(unit) : rest.delete_suffix(unit)
+        rest.include?(unit) ? nil : "#{sign}#{strip_space(rest)}"
+      end
+
+      # In a field that groups with "." and separates with something else,
+      # "1.234" is one thousand two hundred thirty-four — the same amount as
+      # "€1.234" — not the decimal 1.234. Other "." decimals ("19.99", "1.5")
+      # are still read canonically.
+      def dotted_thousands?(body, options)
+        options.fetch(:delimiter, ",").to_s == "." && options.fetch(:separator, ".").to_s != "." &&
+          body.match?(DOTTED_THOUSANDS)
+      end
+
+      # Split on the separator and remove the delimiter from the whole part —
+      # only where it groups digits in threes, so a wrong-locale "1,5" in a
+      # "." field is garbage (nil), not 15.
+      def localized_to_canonical(string, options)
+        separator = options.fetch(:separator, ".").to_s
         sign = string.start_with?("-", "+") ? string[0] : ""
         whole, sep, frac = separator.empty? ? [string.delete_prefix(sign), "", ""] : string.delete_prefix(sign).partition(separator)
         whole = ungroup(strip_space(whole), options.fetch(:delimiter, ",").to_s)

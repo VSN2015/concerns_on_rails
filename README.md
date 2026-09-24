@@ -1350,7 +1350,7 @@ product.formatted_price # => "$19.99"
 | Method            | Returns                                       |
 |-------------------|-----------------------------------------------|
 | `price`           | the amount as a `BigDecimal` (cents ÷ 100)    |
-| `price=`          | assign in major units; rounded to whole cents. Strings are read as plain decimals (`"19.99"`) or in the field's own display format (`"$1,234.50"`, `"€1.234,50"` with `separator: ","`), so `formatted_price` round-trips; garbage, NaN and Infinity become `nil` |
+| `price=`          | assign in major units; rounded to whole cents. Strings are read as plain decimals (`"19.99"`) or in the field's own display format (`"$1,234.50"`, `"€1.234,50"` with `separator: ","`), so `formatted_price` round-trips. The unit is only recognized at the start or end; in a `delimiter: "."` field with another separator, `"1.234"` means 1234 (like `"€1.234"`). Garbage, NaN, Infinity and oversized input (over 64 characters, a 3-digit exponent, or ≥ 10^24) become `nil` |
 | `formatted_price` | a display string (`"$1,234.56"`); accepts per-call overrides: `formatted_price(unit: "€", delimiter: ".", separator: ",")` |
 
 **Aggregates** — class methods that follow the current scope, exact and float-free:

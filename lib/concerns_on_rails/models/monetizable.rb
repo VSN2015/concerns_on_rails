@@ -86,12 +86,13 @@ module ConcernsOnRails
 
           # Strings are read canonically ("19.99") or in this field's display
           # format ("$1,234.50", "€1.234,50"), so formatted output round-trips.
-          # Form garbage ("abc", "") and non-finite numbers (NaN, Infinity)
-          # cast to nil — the ActiveModel convention Storable/Encryptable
-          # follow — instead of raising out of the setter before validation.
+          # Form garbage ("abc", ""), non-finite numbers (NaN, Infinity) and
+          # absurdly large or long input cast to nil — the ActiveModel
+          # convention Storable/Encryptable follow — instead of raising out of
+          # the setter before validation.
           define_method("#{name}=") do |amount|
             decimal = amount.nil? ? nil : ConcernsOnRails::Support::Money.parse(amount, config)
-            self[cents_field] = decimal && (decimal * subunit).round
+            self[cents_field] = decimal && ConcernsOnRails::Support::Money.subunits(decimal, subunit)
           end
 
           define_method("formatted_#{name}") do |**overrides|
