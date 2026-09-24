@@ -56,7 +56,15 @@ module ConcernsOnRails
     #     audit column in the SAME update (opt out per-macro with
     #     `clear_audit_trail: false`). The trail is one column — clearing is
     #     all-or-nothing.
-    #   * Encryptable interaction: works transparently (see HOW IT WRITES).
+    #   * Encryptable interaction: works transparently (see HOW IT WRITES),
+    #     and erasure is never blocked by ciphertext that will not decrypt:
+    #     :nullify reads nothing, :redact/:email/:random_hex check presence
+    #     only, and :hash/callables fall back to a fresh random 64-hex value
+    #     (cast through the field's type) for a value that cannot be read.
+    #   * Slugs (`slug:` :auto / true / false): a friendly_id slug built from an
+    #     anonymized COLUMN is replaced in the same UPDATE by a random,
+    #     length-fitting slug and its history rows are deleted. :auto cannot
+    #     see through a method or Proc slug source — declare `slug: true`.
     #   * Erasure is terminal: unsaved changes on the instance are discarded by
     #     the post-write reload.
     module Anonymizable

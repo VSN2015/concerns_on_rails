@@ -1637,8 +1637,8 @@ User.where(...).anonymize_all!     # batch; returns the count, skips stamped rec
 **Notes**
 - Deliberately `update_columns`: erasure is never blocked by validations and never runs callbacks that could copy old values elsewhere. Values still serialize through the attribute types, so an `encryptable` field stores a fresh ciphertext envelope — never plaintext.
 - `before_anonymize`/`after_anonymize` hooks run inside the transaction; the record reloads afterwards (erasure is terminal for the instance).
-- Never blocked by crypto state: `:nullify` reads nothing, `:redact`/`:email`/`:random_hex` only check presence (from the stored ciphertext for an encrypted field — no decryption), and `:hash`/callables write `"[REDACTED]"` when an encrypted value cannot be decrypted, so one bad row never rolls back `anonymize_all!`.
-- With Sluggable, a slug derived from an anonymized field is replaced in the same UPDATE by a random `anon-<hex>` slug, and friendly_id history rows for the record are deleted in the same transaction.
+- Never blocked by crypto state: `:nullify` reads nothing, `:redact`/`:email`/`:random_hex` only check presence (from the stored ciphertext for an encrypted field — no decryption), and `:hash`/callables write a fresh random 64-hex value (cast through the field's type) when an encrypted value cannot be decrypted — random per row, so unique indexes survive — and one bad row never rolls back `anonymize_all!`.
+- Slugs (`slug: :auto` default / `true` / `false`): a friendly_id slug built from an anonymized **column** (`sluggable_by` field, or the `candidates:` columns when given; a bare friendly_id model's base column) is replaced in the same UPDATE by a random slug that fits the column `limit` / `max_length:`, and the record's friendly_id history rows are deleted in the same transaction. `:auto` does not see through methods or Procs — declare `slug: true` when your slug derives from PII that way.
 - `:hash` is pseudonymization — use `:nullify`/`:random_hex` for true erasure. Backups/replicas/logs are out of scope.
 
 ---

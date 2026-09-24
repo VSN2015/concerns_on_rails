@@ -41,10 +41,10 @@ end
 ## Configuration
 
 ```ruby
-anonymizable(*fields, with:, stamp: :anonymized_at, clear_audit_trail: true, prefix: nil, suffix: nil)
+anonymizable(*fields, with:, stamp: :anonymized_at, clear_audit_trail: true, slug: :auto, prefix: nil, suffix: nil)
 ```
 
-The macro is repeatable — field rules merge across calls. `stamp:` and `clear_audit_trail:` apply only when explicitly passed (the last explicit value wins), so later calls can't silently reset earlier choices.
+The macro is repeatable — field rules merge across calls. `stamp:`, `clear_audit_trail:` and `slug:` apply only when explicitly passed (the last explicit value wins), so later calls can't silently reset earlier choices.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
@@ -52,6 +52,7 @@ The macro is repeatable — field rules merge across calls. `stamp:` and `clear_
 | `with:` | Symbol preset or callable (required) | — | The erasure strategy for these fields (see below). |
 | `stamp:` | Symbol or `false` | `:anonymized_at` | The datetime column stamped by `anonymize!`. `false` disables stamping (and the scopes). |
 | `clear_audit_trail:` | Boolean | `true` | When the model is also `Auditable` and any anonymized field is tracked, clear the audit column in the same UPDATE (the trail holds historical plaintext). |
+| `slug:` | `:auto`, `true` or `false` | `:auto` | Whether `anonymize!` replaces a friendly_id slug (see *Slugs* below). `:auto` rewrites only when the slug's source **columns** are anonymized; `true` always rewrites; `false` never does. Anything else — `nil` included — raises `ArgumentError` (omit the option for the default). |
 | `prefix:` / `suffix:` | Symbol/String | `nil` | Affix the scope names (e.g. `prefix: :privacy` → `privacy_anonymized`). Taken from the first defining call. |
 
 ### Strategy presets
@@ -72,8 +73,16 @@ The macro is repeatable — field rules merge across calls. `stamp:` and `clear_
 - **No validations** — erasure must not be blocked by a presence/format validation.
 - **No callbacks** — a `before_save` hook must never see (or copy) the old values; Auditable's capture hook is the canonical example.
 - **Types still apply** — `update_columns` serializes each value through the model's attribute types, so a field that is also `encryptable` stores a fresh ciphertext envelope of the anonymized value, never plaintext.
-- **Never blocked by crypto state** — a strategy reads no more of the old value than it needs. `:nullify` reads nothing; `:redact`, `:email` and `:random_hex` only need to know whether there *was* a value, which for an encrypted field comes from the stored ciphertext (nothing is decrypted). Only `:hash` and callables read the value itself, and when an encrypted field's ciphertext will not decrypt (lost key, corruption — with `raise_on_decrypt_error` on or off) the field is written as `"[REDACTED]"` instead of raising: a digest or callable output of a value that cannot be read is impossible, and erasure must still happen. The callable is not called for that field. One undecryptable row therefore no longer rolls back `anonymize_all!`.
-- **Slugs derived from erased fields are replaced** — with Sluggable, a slug generated from an anonymized field *is* that PII (`"jane-smith"`), and `update_columns` skips the callbacks that would regenerate it. When the slug's source (the `sluggable_by` field or any `candidates:` entry) is anonymized, the same UPDATE writes a random `anon-<32 hex>` slug (unique, non-identifying), and with `history: true` the record's `friendly_id_slugs` rows are deleted in the same transaction (a vetoing hook restores them). A candidate that is a Proc or a non-column method counts as derived, since it could read any field. An explicit `anonymizable :slug, with: ...` rule wins over the generated slug. Old URLs stop resolving — that is the point.
+- **Never blocked by crypto state** — a strategy reads no more of the old value than it needs. `:nullify` reads nothing; `:redact`, `:email` and `:random_hex` only need to know whether there *was* a value, which for an encrypted field comes from the stored ciphertext (nothing is decrypted). Only `:hash` and callables read the value itself, and when an encrypted field's ciphertext will not decrypt (lost key, corruption — with `raise_on_decrypt_error` on or off) the field is written as a **fresh random 64-hex value** (`SecureRandom.hex(32)`, the shape of the SHA-256 digest `:hash` produces) instead of raising: a digest or callable output of a value that cannot be read is impossible, and erasure must still happen. It is random per row, so a unique index on the field or its blind-index column survives a batch of unreadable rows. The callable is not called for that field. Like every strategy output the fallback is cast through the field's type, so on a typed encrypted field (`encryptable :age, type: :integer`) it becomes whatever that type makes of a hex string — e.g. an integer — or `nil`; declare `:nullify` for such fields if that matters. One undecryptable row no longer rolls back `anonymize_all!`.
+
+## Slugs
+
+A slug generated from an anonymized field *is* that PII (`"jane-smith"`), and `update_columns` skips the callbacks that would regenerate it. When the slug is rewritten, the same UPDATE writes a random, non-identifying slug, and with friendly_id `history` the record's `friendly_id_slugs` rows are deleted in the same transaction (a vetoing hook restores them). Old URLs stop resolving — that is the point.
+
+- **`slug: :auto` (default)** rewrites only when the slug's source **columns** intersect the anonymized fields. The sources are the `candidates:` entries that are columns (nested arrays flattened) when `sluggable_by … candidates:` is given — candidates replace the sluggable field — otherwise the `sluggable_by` field. On a model that uses friendly_id directly (`extend FriendlyId; friendly_id :name, use: :slugged`) the source is friendly_id's base, when that is a column.
+- **Methods and Procs are not seen through.** A candidate like `:full_name` (a method) or `-> { … }` could read any field, so `:auto` cannot tell whether it is PII and leaves the slug alone. **If your slug derives from personal data through a method or Proc, declare `slug: true`.**
+- **`slug: true`** always rewrites; **`slug: false`** never does. Both work for the gem's Sluggable and for any friendly_id `:slugged` model. An explicit `anonymizable :slug, with: ...` rule wins over the generated slug.
+- **Length.** The replacement is `anon-<32 hex>`, shortened to the tighter of the slug column's `limit` and `sluggable_by max_length:`: the `anon-` prefix is kept while 16 random characters still fit, otherwise the whole slug is random hex. A limit below 8 characters raises `ArgumentError` at macro time (from `anonymizable`, or from a later `sluggable_by`), unless `slug: false`.
 
 ## Scopes
 
