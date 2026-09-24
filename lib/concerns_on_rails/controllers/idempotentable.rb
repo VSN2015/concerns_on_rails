@@ -33,6 +33,9 @@ module ConcernsOnRails
     #   * in flight  -> 409 with code "idempotency_conflict" and `Retry-After`.
     #   * same key, different request payload -> 422 "idempotency_key_reuse"
     #     (override `idempotency_fingerprint` to customize payload matching).
+    #   * store unreachable -> 503 "idempotency_store_unavailable" with
+    #     `Retry-After`, and the action does NOT run (fail closed; see
+    #     `on_store_unavailable:`).
     #
     # The claim is taken atomically via `write(..., unless_exist: true)`
     # (memcached `add` / Redis `SET NX` through Rails.cache); a store without
@@ -64,6 +67,9 @@ module ConcernsOnRails
       # replayed.
       DEFAULT_REPLAY_HEADERS = %w[Location Content-Location ETag Last-Modified Link].freeze
       IGNORED_FINGERPRINT_KEYS = %w[controller action format].freeze
+      STORE_UNAVAILABLE_POLICIES = %i[reject proceed].freeze
+      # Seconds a client is told to wait after a 503 idempotency_store_unavailable.
+      STORE_UNAVAILABLE_RETRY_AFTER = 5
 
       included do
         class_attribute :idempotency_rules, instance_accessor: false, default: []
@@ -77,22 +83,35 @@ module ConcernsOnRails
         # worker cannot wedge a key), `header:` the request header to read,
         # `required:` whether a missing key is a 400, and `headers:` the
         # response headers captured and replayed with the cached response
-        # (default DEFAULT_REPLAY_HEADERS; `[]` to capture none). Each call
-        # appends a rule; the first rule listing the current action wins.
+        # (default DEFAULT_REPLAY_HEADERS; `[]` to capture none), and
+        # `on_store_unavailable:` what to do when the store cannot be reached:
+        # `:reject` (default) answers 503 "idempotency_store_unavailable"
+        # without running the action; `:proceed` runs it WITHOUT
+        # deduplication. Each call appends a rule; the first rule listing the
+        # current action wins.
+        #
+        # Why fail closed by default: this concern guards the requests a
+        # client retries precisely because a duplicate is harmful — charges,
+        # transfers, orders. With the store down there is no way to know
+        # whether a retry's original already ran, so running it risks a
+        # double charge; a 503 the client retries later costs only latency.
+        # Opt into :proceed for endpoints where a duplicate is merely noise.
         def idempotent_actions(*actions, ttl: 86_400, lock_ttl: 60, header: DEFAULT_HEADER, required: false,
-                               headers: DEFAULT_REPLAY_HEADERS)
+                               headers: DEFAULT_REPLAY_HEADERS, on_store_unavailable: :reject)
           actions = actions.flatten.map(&:to_s)
-          validate_idempotent!(actions, ttl: ttl, lock_ttl: lock_ttl, header: header, required: required, headers: headers)
+          validate_idempotent!(actions, ttl: ttl, lock_ttl: lock_ttl, header: header, required: required, headers: headers,
+                                        on_store_unavailable: on_store_unavailable)
 
           rule = { actions: actions, ttl: ttl.to_i, lock_ttl: lock_ttl.to_i, header: header.to_s, required: required,
-                   headers: headers.map(&:to_s) }
+                   headers: headers.map(&:to_s), on_store_unavailable: on_store_unavailable }
           self.idempotency_rules = idempotency_rules + [rule]
         end
 
         private
 
-        def validate_idempotent!(actions, ttl:, lock_ttl:, header:, required:, headers:)
+        def validate_idempotent!(actions, ttl:, lock_ttl:, header:, required:, headers:, on_store_unavailable:)
           prefix = "ConcernsOnRails::Controllers::Idempotentable"
+          validate_idempotent_store_policy!(prefix, on_store_unavailable)
           raise ArgumentError, "#{prefix}: pass at least one action" if actions.empty?
           raise ArgumentError, "#{prefix}: :ttl must be a positive duration" unless ttl.to_i.positive?
           raise ArgumentError, "#{prefix}: :lock_ttl must be a positive duration" unless lock_ttl.to_i.positive?
@@ -100,6 +119,13 @@ module ConcernsOnRails
           raise ArgumentError, "#{prefix}: :required must be true or false" unless [true, false].include?(required)
 
           validate_idempotent_headers!(prefix, headers)
+        end
+
+        def validate_idempotent_store_policy!(prefix, policy)
+          return if STORE_UNAVAILABLE_POLICIES.include?(policy)
+
+          raise ArgumentError, "#{prefix}: :on_store_unavailable must be one of " \
+                               "#{STORE_UNAVAILABLE_POLICIES.map(&:inspect).join(', ')}"
         end
 
         def validate_idempotent_headers!(prefix, headers)
@@ -208,12 +234,40 @@ module ConcernsOnRails
         fingerprint = idempotency_fingerprint
         emit_idempotency_key_header(key)
 
-        claim = { "state" => "in_flight", "fingerprint" => fingerprint, "claimed_at" => Time.now.to_i }
-        if store.write(cache_key, claim, expires_in: rule[:lock_ttl], unless_exist: true)
-          idempotency_execute_and_store(store, cache_key, rule, fingerprint, &)
-        else
-          idempotency_resolve_existing(store, cache_key, rule, fingerprint)
+        if idempotency_claim(store, cache_key, rule, fingerprint)
+          return idempotency_execute_and_store(store, cache_key, rule, fingerprint, &)
         end
+
+        record = store.read(cache_key)
+        return idempotency_resolve_existing(record, rule, fingerprint) unless record.nil?
+
+        # A lost claim with nothing to read back: either the holder's lock
+        # expired in between (rare), or the store is unreachable — Rails'
+        # Redis and memcached stores swallow connection errors, returning
+        # false from #write and nil from #read. Previously both answered 409,
+        # so a cache outage turned every keyed request into a permanent
+        # "in progress". Claim once more to tell the two apart: a freed key
+        # is won, a dead store fails again.
+        if idempotency_claim(store, cache_key, rule, fingerprint)
+          return idempotency_execute_and_store(store, cache_key, rule, fingerprint, &)
+        end
+
+        idempotency_store_unavailable(rule, &)
+      end
+
+      def idempotency_claim(store, cache_key, rule, fingerprint)
+        claim = { "state" => "in_flight", "fingerprint" => fingerprint, "claimed_at" => Time.now.to_i }
+        store.write(cache_key, claim, expires_in: rule[:lock_ttl], unless_exist: true)
+      end
+
+      # on_store_unavailable: :reject (default) — fail closed with a 503 and
+      # Retry-After; :proceed — run the action with no deduplication.
+      def idempotency_store_unavailable(rule)
+        return yield if rule[:on_store_unavailable] == :proceed
+
+        response.set_header("Retry-After", STORE_UNAVAILABLE_RETRY_AFTER.to_s) if respond_to?(:response) && response
+        idempotency_error_response(message: "The #{rule[:header]} store is unavailable; retry later.",
+                                   status: :service_unavailable, code: "idempotency_store_unavailable")
       end
 
       def idempotency_execute_and_store(store, cache_key, rule, fingerprint)
@@ -265,18 +319,14 @@ module ConcernsOnRails
         found
       end
 
-      def idempotency_resolve_existing(store, cache_key, rule, fingerprint)
-        record = store.read(cache_key)
-
-        if record && record["fingerprint"] != fingerprint
+      def idempotency_resolve_existing(record, rule, fingerprint)
+        if record["fingerprint"] != fingerprint
           return idempotency_error_response(message: "#{rule[:header]} was already used with a different request payload.",
                                             status: :unprocessable_entity, code: "idempotency_key_reuse")
         end
 
-        return replay_idempotent_response(record) if record && record["state"] == "done"
+        return replay_idempotent_response(record) if record["state"] == "done"
 
-        # In flight — or the claim expired between our failed write and this
-        # read (rare); answering 409 is the conservative, retry-safe choice.
         idempotency_conflict_response(rule, record)
       end
 

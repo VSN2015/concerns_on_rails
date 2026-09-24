@@ -231,8 +231,8 @@ module ConcernsOnRails
         return unless rule
         return unless respond_to?(:response) && response
 
-        value = http_cache_control_value(rule)
-        response.set_header("Cache-Control", value) if value && (rule[:no_store] || http_cache_fresh_response?)
+        value = http_cache_control_for_response(rule)
+        response.set_header("Cache-Control", value) if value
         http_cache_merge_vary(rule[:vary]) if rule[:vary]
         # Here too, not only from set_cache_validators: an action that renders
         # without calling stale_resource? still owes the etag_with sources their
@@ -394,6 +394,13 @@ module ConcernsOnRails
       # the header non-blank so Rails skipped its own `Vary: Accept`.
       def http_cache_merge_vary(vary_list)
         ConcernsOnRails::Support::VaryHeader.append(self, *vary_list)
+      end
+
+      # no-store always; any other policy only when http_cache_fresh_response?.
+      def http_cache_control_for_response(rule)
+        return http_cache_control_value(rule) if rule[:no_store] || http_cache_fresh_response?
+
+        nil
       end
 
       # May this response carry the rule's positive freshness policy? Only a

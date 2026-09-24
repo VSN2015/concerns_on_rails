@@ -132,23 +132,26 @@ module ConcernsOnRails
           validate_verify_webhook!(secret: secret, scheme: scheme, header: header, tolerance: tolerance, digest: digest)
           validate_webhook_replay!(replay, replay_ttl)
 
-          own, inherited = webhook_rules.partition { |existing| existing[:owner].equal?(self) }
-          validate_webhook_rule_reachable!(own, actions)
-
           rule = { actions: actions, secret: secret, scheme: scheme,
                    header: (header || SCHEMES[scheme][:header]).to_s,
                    tolerance: scheme == :stripe ? (tolerance || STRIPE_DEFAULT_TOLERANCE).to_i : nil,
                    digest: digest,
-                   replay: replay, replay_ttl: replay ? (replay_ttl || DEFAULT_REPLAY_TTL).to_i : nil,
-                   owner: self }
-          # Own rules first, then the inherited ones (already most-derived
-          # first, by induction). A NEW array: the parent's is never mutated.
-          # Previously a subclass rule was appended AFTER the inherited ones,
-          # so a parent's catch-all matched first and shadowed it entirely.
-          self.webhook_rules = own + [rule] + inherited
+                   replay: replay, replay_ttl: replay ? (replay_ttl || DEFAULT_REPLAY_TTL).to_i : nil }
+          append_webhook_rule!(rule)
         end
 
         private
+
+        # Own rules first, then the inherited ones (already most-derived
+        # first, by induction), so lookup stays a plain first match. A NEW
+        # array: the parent's is never mutated. Previously a subclass rule was
+        # appended AFTER the inherited ones, so a parent's catch-all matched
+        # first and shadowed it entirely.
+        def append_webhook_rule!(rule)
+          own, inherited = webhook_rules.partition { |existing| existing[:owner].equal?(self) }
+          validate_webhook_rule_reachable!(own, rule[:actions])
+          self.webhook_rules = own + [rule.merge(owner: self)] + inherited
+        end
 
         # A rule declared after a catch-all of the SAME class can never match
         # (the catch-all takes every action first) — almost certainly a

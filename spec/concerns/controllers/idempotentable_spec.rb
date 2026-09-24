@@ -1,4 +1,5 @@
 require "spec_helper"
+require "support/integration_harness"
 
 describe ConcernsOnRails::Controllers::Idempotentable do
   # Minimal read/write(unless_exist:)/delete store — the contract Idempotentable
@@ -378,6 +379,13 @@ describe ConcernsOnRails::Controllers::Idempotentable do
     it "rejects a non-boolean required" do
       expect { declare { idempotent_actions :create, required: "yes" } }.to raise_error(ArgumentError, /:required/)
     end
+
+    it "rejects an unknown on_store_unavailable" do
+      expect { declare { idempotent_actions :create, on_store_unavailable: :ignore } }
+        .to raise_error(ArgumentError, /:on_store_unavailable must be one of :reject, :proceed/)
+      expect { declare { idempotent_actions :create, on_store_unavailable: nil } }
+        .to raise_error(ArgumentError, /:on_store_unavailable/)
+    end
   end
   describe "response header capture" do
     def perform_with_headers(controller, headers, status: 201, body: '{"id":1}')
@@ -461,6 +469,130 @@ describe ConcernsOnRails::Controllers::Idempotentable do
         .to raise_error(ArgumentError, /:headers must be an Array of non-blank header names/)
       expect { idempotent_class(store) { idempotent_actions :create, headers: ["Location", " "] } }
         .to raise_error(ArgumentError, /:headers must be an Array of non-blank header names/)
+    end
+  end
+
+  # Rails' Redis and memcached stores swallow connection errors: #write
+  # returns false and #read returns nil. Pre-fix that looked exactly like "a
+  # concurrent request holds the key", so while the cache was down EVERY keyed
+  # request got 409 idempotency_conflict — forever, since no claim ever
+  # existed to expire.
+  describe "an unreachable store" do
+    class UnreachableIdempotencyStore
+      attr_reader :writes
+
+      def initialize
+        @writes = 0
+      end
+
+      # nil (not false): just as falsy as Rails' own false, minus RuboCop
+      # reading a writer as a predicate.
+      def write(_key, _value, _options = {})
+        @writes += 1
+        nil
+      end
+
+      def read(_key)
+        nil
+      end
+
+      def delete(_key)
+        nil
+      end
+    end
+
+    # The claim holder's lock expired between our failed write and our read:
+    # the key is free again, so the retried claim wins.
+    class ExpiredBetweenStore < FakeIdempotencyStore
+      def initialize
+        super
+        @failed_once = false
+      end
+
+      def write(key, value, options = {})
+        if options[:unless_exist] && !@failed_once
+          @failed_once = true
+          return false
+        end
+        super
+      end
+    end
+
+    it "renders 503 idempotency_store_unavailable with Retry-After, without running the action (fail closed)" do
+      klass = idempotent_class(UnreachableIdempotencyStore.new) { idempotent_actions :create }
+      c = instance(klass, key: "k1")
+
+      expect(perform(c)).to eq(0)
+      expect(c.rendered[:status]).to eq(:service_unavailable)
+      expect(c.rendered[:json][:error][:code]).to eq("idempotency_store_unavailable")
+      expect(c.response.headers["Retry-After"]).to eq(described_class::STORE_UNAVAILABLE_RETRY_AFTER.to_s)
+    end
+
+    it "runs the action without deduplication under on_store_unavailable: :proceed" do
+      unreachable = UnreachableIdempotencyStore.new
+      klass = idempotent_class(unreachable) { idempotent_actions :create, on_store_unavailable: :proceed }
+      c = instance(klass, key: "k1")
+
+      expect(perform(c)).to eq(1)
+      expect(c.rendered).to be_nil
+      expect(c.response.status).to eq(201)
+    end
+
+    it "retries the claim once, so a lock that expired between write and read is not mistaken for an outage" do
+      racing = ExpiredBetweenStore.new
+      klass = idempotent_class(racing) { idempotent_actions :create }
+      c = instance(klass, key: "k1")
+
+      expect(perform(c)).to eq(1)
+      expect(c.rendered).to be_nil
+      expect(racing.data.values.first["state"]).to eq("done")
+    end
+
+    it "still answers a real in-flight duplicate with 409, not 503" do
+      klass = idempotent_class(store) { idempotent_actions :create }
+      outer = instance(klass, key: "dup")
+      inner = instance(klass, key: "dup")
+      outer.enforce_idempotency { perform(inner) }
+
+      expect(inner.rendered[:json][:error][:code]).to eq("idempotency_conflict")
+    end
+
+    it "delegates the 503 to render_error when available" do
+      klass = idempotent_class(UnreachableIdempotencyStore.new) do
+        idempotent_actions :create
+
+        def render_error(message:, status:, code: nil)
+          @rendered = { delegated: true, status: status, code: code, message: message }
+        end
+      end
+      c = instance(klass, key: "k1")
+
+      expect(perform(c)).to eq(0)
+      expect(c.rendered).to include(delegated: true, status: :service_unavailable, code: "idempotency_store_unavailable")
+    end
+
+    it "exposes the option on the rule (default :reject)" do
+      expect(idempotent_class(store) { idempotent_actions :create }.idempotency_rules.first[:on_store_unavailable])
+        .to eq(:reject)
+    end
+
+    it "answers 503 through real ActionController dispatch, and the action never runs" do
+      unreachable = UnreachableIdempotencyStore.new
+      controller = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Idempotentable
+
+        self.idempotency_store = unreachable
+        idempotent_actions :create
+
+        def create
+          raise "the action must not run while the store is unreachable"
+        end
+      end
+
+      result = IntegrationHarness.dispatch(controller, :create, method: "POST", headers: { "Idempotency-Key" => "k1" })
+      expect(result.status).to eq(503)
+      expect(result.header("Retry-After")).to eq(described_class::STORE_UNAVAILABLE_RETRY_AFTER.to_s)
+      expect(JSON.parse(result.body).dig("error", "code")).to eq("idempotency_store_unavailable")
     end
   end
 end
