@@ -85,20 +85,40 @@ module ConcernsOnRails
 
       # [name, value, dirty?, database value] per attribute, taken before
       # anything is written. Reading an attribute runs its type's
-      # deserializer, which can itself fail — an Encryptable field whose
-      # ciphertext no longer decrypts raises DecryptionError — and the
-      # snapshot must never abort the write (Anonymizable exists to erase
-      # exactly such a field). So a value that cannot be read is snapshotted
-      # RAW instead: [name, :raw, value_before_type_cast].
+      # deserializer — for an Encryptable field that DECRYPTS, which an
+      # erasure must never do just to take a snapshot (and which raises
+      # DecryptionError for ciphertext that no longer decrypts). So an
+      # attribute still exactly as loaded (from the database, never read,
+      # never assigned) is snapshotted RAW without deserializing:
+      # [name, :raw, value_before_type_cast]. A value already in memory
+      # keeps the typed path; one that still cannot be read falls back to raw.
       def snapshot(record, names)
         names.map do |name|
           name = name.to_s
+          next raw_snapshot(record, name) if unread_from_database?(record, name)
+
           begin
             [name, record[name], record.attribute_changed?(name), record.attribute_in_database(name)]
           rescue StandardError
-            [name, :raw, record.read_attribute_before_type_cast(name)]
+            raw_snapshot(record, name)
           end
         end
+      end
+
+      def raw_snapshot(record, name)
+        [name, :raw, record.read_attribute_before_type_cast(name)]
+      end
+
+      # True for an attribute loaded from the database and neither read nor
+      # assigned since — its value has never been deserialized. Checking this
+      # deserializes nothing (Attribute#has_been_read? only tests @value).
+      # Matched by class NAME: Attribute::FromDatabase is a private constant
+      # on newer Rails and cannot be referenced directly.
+      def unread_from_database?(record, name)
+        attribute = record.instance_variable_get(:@attributes)&.[](name)
+        return false unless attribute.respond_to?(:has_been_read?)
+
+        attribute.class.name.to_s.end_with?("::FromDatabase") && !attribute.has_been_read?
       end
 
       def restore!(record, snapshot)
@@ -122,7 +142,8 @@ module ConcernsOnRails
         record.instance_variable_get(:@attributes).write_from_database(name, raw)
         record.send(:clear_attribute_changes, [name]) if record.attribute_changed?(name)
       end
-      private_class_method :snapshot, :restore!, :restore_raw!, :identity_snapshot, :restore_identity!
+      private_class_method :snapshot, :restore!, :restore_raw!, :raw_snapshot, :unread_from_database?,
+                           :identity_snapshot, :restore_identity!
     end
   end
 end

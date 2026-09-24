@@ -175,6 +175,52 @@ describe ConcernsOnRails::Support::HookedWrite do
       SealedItem.find(id)
     end
 
+    # Erasure must not load old PII into memory just to snapshot it: an
+    # attribute nobody has read yet is snapshotted raw, never decrypted.
+    def unread_record
+      SealedItem.find(SealedItem.create!(ssn: "123-45-6789").id)
+    end
+
+    it "never decrypts an unread field on a successful write" do
+      record = unread_record
+      expect(ConcernsOnRails::Support::Encryptor).not_to receive(:decrypt)
+
+      result = described_class.run(record, after: :after_write, restore: [:ssn]) do
+        record.update_columns(ssn: nil, note: "erased")
+      end
+
+      expect(result).to be(true)
+    end
+
+    it "never decrypts an unread field on a vetoed write, and restores it raw" do
+      record = unread_record
+      raw = record.read_attribute_before_type_cast(:ssn)
+      SealedItem.veto = true
+      expect(ConcernsOnRails::Support::Encryptor).not_to receive(:decrypt)
+
+      result = described_class.run(record, after: :after_write, restore: [:ssn]) do
+        record.update_columns(ssn: nil, note: "erased")
+      end
+
+      expect(result).to be(false)
+      expect(record.read_attribute_before_type_cast(:ssn)).to eq(raw)
+      expect(record.changed).not_to include("ssn")
+    end
+
+    it "still restores an already-read field to its in-memory value" do
+      record = unread_record
+      expect(record.ssn).to eq("123-45-6789")
+      SealedItem.veto = true
+
+      described_class.run(record, after: :after_write, restore: [:ssn]) do
+        record.update_columns(ssn: nil, note: "erased")
+      end
+
+      expect(record.ssn).to eq("123-45-6789")
+      expect(record.changed).not_to include("ssn")
+      expect(SealedItem.find(record.id).ssn).to eq("123-45-6789")
+    end
+
     it "does not raise when the write succeeds" do
       record = undecryptable_record
 
