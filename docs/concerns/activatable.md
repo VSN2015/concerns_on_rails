@@ -109,7 +109,7 @@ Subscription.inactive  # WHERE active = FALSE OR active IS NULL
 | `deactivate!` | The mirror image: `before_deactivate`, `false` (+ `deactivated_at`), `after_deactivate`. |
 | `before_activate` / `after_activate` / `before_deactivate` / `after_deactivate` | No-op override points. Gating is per direction: overriding a direction's bang method or either of its two hooks moves **that** verb to the per-record path, so the hooks run for every record. Overriding `after_deactivate` leaves `activate_all` on the single-`UPDATE` fast path. |
 | `toggle_active!` | Calls `deactivate!` if the flag is currently on, `activate!` otherwise. A `NULL` column is treated as inactive, so toggling it sets the column to `true`. It reads the column itself, not `active?`, so it flips the right way even when another concern owns `active?`. |
-| `<affix>active?` / `<affix>inactive?` | Defined when `prefix:`/`suffix:` is configured (`flag_active?`, `active_flag?`, …). They always give Activatable's answer, whichever concern owns the plain names. |
+| `<affix>active?` / `<affix>inactive?` | Defined when `prefix:`/`suffix:` is configured (`flag_active?`, `active_flag?`, …). They always give Activatable's answer, whichever concern owns the plain names. The macro raises `ArgumentError` if one would shadow a different column's query method. When the affixed name is the flag column itself (`activatable_by :account_active, prefix: :account`), the column's own `account_active?` is kept. |
 
 ### Class methods
 

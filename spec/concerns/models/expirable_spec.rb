@@ -296,6 +296,27 @@ describe ConcernsOnRails::Expirable do
       expect(parent.new).not_to respond_to(:new_expired?)
     end
 
+    # A subclass that first re-declared its parent's affix, then another,
+    # removed its own copies but still reached the parent's through
+    # inheritance.
+    it "hides the parent's predicates after a subclass re-declares twice" do
+      parent = Class.new(TestModel) do
+        self.table_name = "api_tokens"
+        include ConcernsOnRails::Expirable
+
+        expirable_by :expires_at, prefix: :term
+      end
+      child = Class.new(parent) do
+        expirable_by :expires_at, prefix: :term
+        expirable_by :expires_at, prefix: :xx
+      end
+
+      expect(child.new).to respond_to(:xx_active?)
+      expect(child.new).not_to respond_to(:term_active?)
+      expect(child.new).not_to respond_to(:term_expired?)
+      expect(parent.new).to respond_to(:term_active?)
+    end
+
     it "affixes predicates with suffix: and prefix: true too" do
       ActiveRecord::Schema.define do
         create_table :coupons, force: true do |t|

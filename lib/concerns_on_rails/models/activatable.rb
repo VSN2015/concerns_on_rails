@@ -70,7 +70,10 @@ module ConcernsOnRails
           # ...and the predicates, which collide the same way (Expirable's active?).
           ConcernsOnRails::Support::Affix.define_predicates(
             self, { active: :activatable_on?, inactive: :activatable_off? },
-            prefix: prefix, suffix: suffix, label: LABEL
+            prefix: prefix, suffix: suffix, label: LABEL,
+            # `activatable_by :account_active, prefix: :account`: the column's
+            # own query method is already `account_active?`.
+            column_answers: { active: activatable_field }
           )
         end
 

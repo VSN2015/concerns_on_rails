@@ -219,6 +219,50 @@ describe ConcernsOnRails::Activatable do
     end.to raise_error(ArgumentError, /flag_active\?.*'flag_active' column/)
   end
 
+  # When the colliding column IS the concern's own flag, its query method
+  # already answers Activatable's question — these configs booted on master
+  # and must keep booting (the affixed `active` predicate is simply left to
+  # the column).
+  describe "an affix that reproduces the concern's own column name" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :own_flag_accounts, force: true do |t|
+          t.boolean :account_active
+          t.boolean :active_flag
+        end
+      end
+    end
+
+    it "boots with activatable_by :account_active, prefix: :account" do
+      klass = Class.new(TestModel) do
+        self.table_name = "own_flag_accounts"
+        include ConcernsOnRails::Activatable
+
+        activatable_by :account_active, prefix: :account
+      end
+
+      on = klass.create!(account_active: true)
+      off = klass.create!(account_active: nil)
+      expect([on.account_active?, on.account_inactive?]).to eq([true, false])
+      expect([off.account_active?, off.account_inactive?]).to eq([false, true])
+      expect(klass.account_active.to_a).to eq([on])
+    end
+
+    it "boots with activatable_by :active_flag, suffix: :flag" do
+      klass = Class.new(TestModel) do
+        self.table_name = "own_flag_accounts"
+        include ConcernsOnRails::Activatable
+
+        activatable_by :active_flag, suffix: :flag
+      end
+
+      on = klass.create!(active_flag: true)
+      off = klass.create!(active_flag: false)
+      expect([on.active_flag?, on.inactive_flag?]).to eq([true, false])
+      expect([off.active_flag?, off.inactive_flag?]).to eq([false, true])
+    end
+  end
+
   # With Expirable included AFTER Activatable, `active?` is Expirable's
   # ("not expired" — true for a nil expiry). toggle_active! read it, so it
   # deactivated an inactive record instead of activating it.

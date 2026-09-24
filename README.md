@@ -763,8 +763,12 @@ The affixed predicates always give Expirable's own answer.
 The same rules apply to every concern with affixed predicates (Expirable, Activatable, Schedulable):
 - The macro raises `ArgumentError` if an affixed predicate would shadow a column's query method. For
   example, `activatable_by :active, prefix: :flag` on a table that has a `flag_active` column is refused.
+  There is one exception: the colliding column is the concern's own flag
+  (`activatable_by :account_active, prefix: :account`). In that case the column's own query method
+  `account_active?` already answers the question, so it is left alone and nothing is raised.
 - Re-declaring the macro with a different affix (or none) removes the previous affix's predicates. On a
-  subclass, the inherited ones are hidden and the parent keeps its own.
+  subclass, every inherited affixed predicate that the current affix no longer defines is hidden, and the
+  parent keeps its own.
 
 **Bulk operations**
 

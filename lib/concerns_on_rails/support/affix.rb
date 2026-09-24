@@ -39,13 +39,25 @@ module ConcernsOnRails
       # the predicates of the previous declaration (keyed by `label`, one
       # set per concern): the class's own earlier ones are removed, and a
       # subclass hides the ones it inherited without touching its parent.
-      def define_predicates(klass, mapping, prefix:, suffix:, label:)
+      #
+      # `column_answers:` names the concern's own column for a base whose
+      # question that column's query method already answers — Activatable's
+      # `{ active: :account_active }`. When the affixed name IS that column
+      # (`activatable_by :account_active, prefix: :account`), the predicate
+      # is left to the column instead of raising; a collision with any OTHER
+      # attribute still raises.
+      def define_predicates(klass, mapping, prefix:, suffix:, label:, column_answers: {})
         predicates = affixed_predicates(mapping, prefix, suffix)
+        answered = column_answers.filter_map do |base, column|
+          predicate = :"#{name(base, prefix: prefix, suffix: suffix)}?"
+          predicate if predicates.key?(predicate) && predicate == :"#{column}?"
+        end
+        predicates = predicates.except(*answered)
         check_predicate_collisions!(klass, predicates.keys, label)
 
         registry = predicate_registry(klass)
         inherited = retire_predicates!(klass, registry[label], label)
-        stale = inherited ? inherited[:names] - predicates.keys : []
+        stale = inherited ? inherited[:names] - predicates.keys - answered : []
         if predicates.empty? && stale.empty?
           registry.delete(label)
           return []
@@ -81,17 +93,24 @@ module ConcernsOnRails
           klass.instance_variable_set(:@concerns_on_rails_affixed_predicates, {})
       end
 
-      # Removes this class's own earlier predicates (returning nil), or
-      # returns the nearest ancestor's registry entry — the predicates a new
-      # declaration on this subclass must hide.
+      # Removes this class's own earlier predicates, then returns the nearest
+      # ancestor's registry entry — the inherited predicates a new
+      # declaration must hide. Looked up even after removing the class's own:
+      # a subclass that first re-declared its parent's affix and then another
+      # would otherwise reach the parent's copies again through inheritance.
       def retire_predicates!(klass, own, label)
-        if own
-          own[:names].each do |predicate|
-            own[:module].send(:remove_method, predicate) if own[:module].method_defined?(predicate, false)
-          end
-          return nil
-        end
+        remove_own_predicates!(own) if own
+        inherited_predicates(klass, label)
+      end
 
+      def remove_own_predicates!(own)
+        own[:names].each do |predicate|
+          own[:module].send(:remove_method, predicate) if own[:module].method_defined?(predicate, false)
+        end
+      end
+
+      # The nearest ancestor's registry entry for `label`, or nil.
+      def inherited_predicates(klass, label)
         klass.ancestors.drop(1).grep(Class).each do |ancestor|
           entry = ancestor.instance_variable_get(:@concerns_on_rails_affixed_predicates)&.[](label)
           return entry if entry
@@ -173,7 +192,8 @@ module ConcernsOnRails
       end
       private_class_method :retire_guard_owner!, :predicate_registry, :retire_predicates!,
                            :check_predicate_collisions!, :predicate_schema_reachable?,
-                           :affixed_predicates, :predicate_module
+                           :affixed_predicates, :predicate_module, :remove_own_predicates!,
+                           :inherited_predicates
     end
   end
 end
