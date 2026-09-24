@@ -45,6 +45,56 @@ describe ConcernsOnRails::Taggable do
         end
       end.to raise_error(ArgumentError, /'tags' does not exist/)
     end
+
+    # An empty delimiter split every stored value into single characters.
+    it "raises on an empty delimiter" do
+      [nil, ""].each do |delimiter|
+        expect do
+          Class.new(TestModel) do
+            self.table_name = "tag_articles"
+            include ConcernsOnRails::Taggable
+
+            taggable_by :tags, delimiter: delimiter
+          end
+        end.to raise_error(ArgumentError, /delimiter: must be a non-empty String/)
+      end
+    end
+  end
+
+  # tagged_with matches the NORMALIZED column form ("ruby,rails"); a row
+  # written around the callback (update_column, raw SQL, an import) as
+  # "ruby, rails" was invisible to it while tagged_with? found the tag.
+  # normalize_tags! is the repair path.
+  describe ".normalize_tags!" do
+    def legacy(raw)
+      TagArticle.create!(title: raw.to_s).tap { |a| a.update_columns(tags: raw) }
+    end
+
+    it "rewrites rows to the normalized form so tagged_with finds them" do
+      spaced = legacy("ruby, rails , Ruby")
+      blank = legacy(" , ")
+      clean = TagArticle.create!(tag_list: %w[go])
+      untagged = TagArticle.create!(title: "none")
+      expect(TagArticle.tagged_with("rails")).to be_empty # documented limitation
+
+      expect(TagArticle.normalize_tags!).to eq(2)
+
+      expect(spaced.reload[:tags]).to eq("ruby,rails,Ruby")
+      expect(blank.reload[:tags]).to be_nil
+      expect(clean.reload[:tags]).to eq("go")
+      expect(untagged.reload[:tags]).to be_nil
+      expect(TagArticle.tagged_with("rails")).to contain_exactly(spaced)
+      expect(TagArticle.normalize_tags!).to eq(0) # idempotent
+    end
+
+    it "follows the current scope" do
+      a = legacy("a, b")
+      b = legacy("c, d")
+
+      expect(TagArticle.where(id: a.id).normalize_tags!).to eq(1)
+      expect(a.reload[:tags]).to eq("a,b")
+      expect(b.reload[:tags]).to eq("c, d")
+    end
   end
 
   describe "#tag_list" do

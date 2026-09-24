@@ -1208,19 +1208,21 @@ Article.tagged_with("ruby", "rails")          # records carrying BOTH tags
 Article.tagged_with("ruby", "go", any: true)  # records carrying ANY tag
 Article.all_tags                               # => sorted unique tags in use
 Article.published.tag_counts(limit: 20)        # => { "ruby" => 12, "rails" => 7, ... } — a tag cloud, relation-aware
+Article.normalize_tags!                        # repair rows written around the callbacks → count rewritten
 ```
 
 **Options**
 
 | Option       | Default | Purpose                                                          |
 |--------------|---------|------------------------------------------------------------------|
-| `delimiter:` | `","`   | Character joining the stored tags (a tag must not contain it).    |
+| `delimiter:` | `","`   | Character joining the stored tags (a tag must not contain it; an empty delimiter raises). |
 | `downcase:`  | `false` | Case-fold tags on write so matching is case-insensitive.          |
 
 **Notes**
 - Matching is **boundary-safe** — searching `rail` does not match `rails`. An explicit SQL `ESCAPE` clause makes tags containing `_` / `%` match literally on every adapter.
 - `tagged_with` matches **case-insensitively on every adapter** — `LIKE` on SQLite and MySQL, `ILIKE` on PostgreSQL — so one call means one thing everywhere (how non-ASCII characters fold is still the database collation's business). The Ruby-side helpers (`tagged_with?`, `all_tags`, `tag_counts`) compare exactly, so `downcase: true` — which folds on write — is what makes the scope and the helpers agree.
 - Tags are normalized in `before_validation`, so a direct `record.tags = "a, b"` assignment is cleaned too. An empty list stores `NULL`.
+- `tagged_with` matches the **normalized** column form (`"ruby,rails"`) — which every write through the model produces. A row written around the callbacks (`update_column`, `update_all`, raw SQL, an import) as `"ruby, rails"` is found by `tagged_with?` but not by `tagged_with`; run `Model.normalize_tags!` (relation-aware, one `update_columns` per changed row in a transaction, no validations/callbacks, returns the count; `unscoped` to include default-scoped-away rows) to rewrite such rows.
 - `tag_counts` runs one `GROUP BY` on the raw column — identical tag strings ship once with their row count and are split in Ruby — so it scales with distinct tag strings, not rows; ordered by count desc then name, `limit:` keeps the top N.
 - Reach for [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) when you need tag contexts, ownership, or polymorphic tags shared across models.
 

@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
@@ -38,6 +39,11 @@ module ConcernsOnRails
     #     it is split into multiple tags on the spot (`add_tags("a,b")` adds
     #     "a" and "b"), everywhere, so what you read back always matches what
     #     a save would have produced.
+    #   * `tagged_with` (SQL) matches the NORMALIZED column form: tags joined by
+    #     the bare delimiter ("ruby,rails"). Writes through the model always
+    #     produce it; rows written around the callbacks (update_column, raw
+    #     SQL, imports) as "ruby, rails" are not found until repaired with
+    #     `Model.normalize_tags!`.
     #   * Reach for acts-as-taggable-on when you need tag contexts, ownership,
     #     or polymorphic tags shared across models.
     module Taggable
@@ -64,6 +70,9 @@ module ConcernsOnRails
 
         # Configure the tag column. See the module docs for the DSL.
         def taggable_by(field = DEFAULT_FIELD, delimiter: DEFAULT_DELIMITER, downcase: false)
+          # An empty delimiter would split every stored value into characters.
+          raise ArgumentError, "#{LABEL}: delimiter: must be a non-empty String" if delimiter.to_s.empty?
+
           self.taggable_field = field.to_sym
           self.taggable_delimiter = delimiter.to_s
           self.taggable_downcase = downcase
@@ -82,6 +91,26 @@ module ConcernsOnRails
           return where(predicates.reduce { |memo, node| memo.or(node) }) if any
 
           predicates.reduce(all) { |memo, node| memo.where(node) }
+        end
+
+        # Rewrite every tagged row in the current scope to the normalized
+        # column form — the form the before_validation hook writes and the
+        # form `tagged_with` matches (its SQL is boundary-safe on the
+        # delimiter, so a row stored as "ruby, rails" by update_column / raw
+        # SQL / an import is invisible to it, though tagged_with? finds it).
+        # One update_columns per row that actually changes — deliberately no
+        # validations, callbacks or updated_at bump (Sanitizable's
+        # sanitize_all! contract), inside one transaction. Returns the
+        # Integer count of rows rewritten; idempotent. Rows hidden by a
+        # default_scope need `unscoped.normalize_tags!`.
+        def normalize_tags!
+          field = taggable_field
+          tagged = where.not(field => nil)
+          ConcernsOnRails::Support::BatchOps.run(tagged, label: LABEL, message: "failed to normalize tags") do |record|
+            raw = record[field]
+            normalized = taggable_join(taggable_split(raw))
+            normalized == raw ? :skip : record.update_columns(field => normalized)
+          end
         end
 
         # All distinct tags currently stored across the table, sorted.
@@ -139,6 +168,11 @@ module ConcernsOnRails
         # Split a raw stored column value into a normalized tag array.
         def taggable_split(raw)
           taggable_clean_all(raw.to_s.split(taggable_delimiter))
+        end
+
+        # The stored column form of a tag array (nil when empty).
+        def taggable_join(tags)
+          tags.empty? ? nil : tags.join(taggable_delimiter)
         end
 
         # Normalize a single tag (strip + optional downcase).
@@ -202,7 +236,7 @@ module ConcernsOnRails
 
       def tag_list=(value)
         tags = taggable_coerce(value)
-        self[self.class.taggable_field] = tags.empty? ? nil : tags.join(self.class.taggable_delimiter)
+        self[self.class.taggable_field] = self.class.taggable_join(tags)
       end
 
       def add_tags(*names)
@@ -235,8 +269,7 @@ module ConcernsOnRails
         raw = self[field]
         return if raw.nil?
 
-        tags = self.class.taggable_split(raw)
-        self[field] = tags.empty? ? nil : tags.join(self.class.taggable_delimiter)
+        self[field] = self.class.taggable_join(self.class.taggable_split(raw))
       end
 
       # Funnel every input shape through taggable_split so Strings and Arrays
