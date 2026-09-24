@@ -418,4 +418,140 @@ describe ConcernsOnRails::Models::CounterCacheable do
       expect(tallied).to be < zeroed
     end
   end
+
+  describe "destroy uses the persisted row (1.29 audit)" do
+    it "decrements once when two stale instances of the same row are both destroyed" do
+      comment = Comment.create!(post: post, approved: true)
+      Comment.create!(post: post, approved: true)
+      stale = Comment.find(comment.id)
+
+      comment.destroy!
+      stale.destroy # the DELETE matches 0 rows — nothing was removed
+
+      expect(reload_counts(post)).to eq([1, 1])
+    end
+
+    it "does not decrement when a new (never-saved) record is destroyed" do
+      Comment.create!(post: post, approved: true)
+      Comment.new(post: post, approved: true).destroy
+
+      expect(reload_counts(post)).to eq([1, 1])
+    end
+
+    it "decrements the PERSISTED parent, not an unsaved in-memory reparent" do
+      comment = Comment.create!(post: post)
+      comment.post = other # assigned but never saved
+
+      comment.destroy!
+
+      expect(post.reload.comments_count).to eq(0)
+      expect(other.reload.comments_count).to eq(0)
+    end
+
+    it "evaluates if: against the persisted state, not an unsaved condition flip" do
+      comment = Comment.create!(post: post, approved: true)
+      comment.approved = false # unsaved flip
+
+      comment.destroy!
+
+      expect(reload_counts(post)).to eq([0, 0])
+    end
+
+    it "leaves the in-memory unsaved values in place after evaluating the persisted ones" do
+      comment = Comment.create!(post: post, approved: true)
+      comment.approved = false
+      comment.destroy!
+
+      expect(comment.approved).to be(false)
+    end
+  end
+
+  describe "belongs_to primary_key: (1.29 audit)" do
+    before(:each) do
+      ActiveRecord::Schema.define do
+        create_table :boards, force: true do |t|
+          t.integer :code
+          t.integer :pins_count, default: 0
+          t.integer :hot_pins_count, default: 0
+        end
+
+        create_table :pins, force: true do |t|
+          t.integer :board_code
+          t.boolean :hot, default: false
+        end
+      end
+
+      class Board < TestModel; end
+
+      class Pin < TestModel
+        include ConcernsOnRails::CounterCacheable
+
+        belongs_to :board, primary_key: :code, foreign_key: :board_code, optional: true
+        counter_cacheable_by :board
+        counter_cacheable_by :board, count: :hot_pins_count, if: -> { hot? }
+      end
+    end
+
+    after(:each) do
+      %i[Pin Board].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    # decoy.id == target.code, so a lookup by `id` would hit the wrong row.
+    let!(:target) { Board.create!(code: 2) }
+    let!(:decoy)  { Board.create!(code: 99) }
+
+    def board_counts(board)
+      fresh = board.reload
+      [fresh.pins_count, fresh.hot_pins_count]
+    end
+
+    it "adjusts the parent addressed by the association key on create / update / destroy" do
+      expect(decoy.id).to eq(target.code)
+
+      pin = Pin.create!(board: target, hot: true)
+      expect(board_counts(target)).to eq([1, 1])
+      expect(board_counts(decoy)).to eq([0, 0])
+
+      pin.update!(hot: false)
+      expect(board_counts(target)).to eq([1, 0])
+
+      pin.update!(board: decoy)
+      expect(board_counts(target)).to eq([0, 0])
+      expect(board_counts(decoy)).to eq([1, 0])
+
+      pin.destroy!
+      expect(board_counts(decoy)).to eq([0, 0])
+    end
+
+    it "recounts by the association key" do
+      Pin.create!(board: target, hot: true)
+      Pin.create!(board: target)
+      Board.update_all(pins_count: 7, hot_pins_count: 7)
+
+      Pin.recount_counter_caches!
+
+      expect(board_counts(target)).to eq([2, 1])
+      expect(board_counts(decoy)).to eq([0, 0])
+    end
+
+    it "recounts only the given parents: (records, relations and ids) by the association key" do
+      Pin.create!(board: target, hot: true)
+      Board.update_all(pins_count: 7, hot_pins_count: 7)
+
+      Pin.recount_counter_caches!(parents: target)
+      expect(board_counts(target)).to eq([1, 1])
+      expect(board_counts(decoy)).to eq([7, 7])
+
+      Board.update_all(pins_count: 7, hot_pins_count: 7)
+      Pin.recount_counter_caches!(parents: Board.where(id: target.id))
+      expect(board_counts(target)).to eq([1, 1])
+      expect(board_counts(decoy)).to eq([7, 7])
+
+      # Bare values are the parent's primary-key ids, as documented.
+      Board.update_all(pins_count: 7, hot_pins_count: 7)
+      Pin.recount_counter_caches!(parents: [target.id])
+      expect(board_counts(target)).to eq([1, 1])
+      expect(board_counts(decoy)).to eq([7, 7])
+    end
+  end
 end

@@ -27,7 +27,12 @@ module ConcernsOnRails
     #
     # Behaviour:
     #   * create/destroy adjust the counter by ±1 when the foreign key is present
-    #     and the `if:` condition holds for the record's current state.
+    #     and the `if:` condition holds for the record's PERSISTED state. A
+    #     destroy only decrements when its DELETE actually removed the row (like
+    #     Rails' native counter cache), so destroying a stale second instance of
+    #     an already-deleted row, or a never-saved record, writes nothing — and
+    #     an unsaved reparent or condition flip is ignored: the row that goes is
+    #     the row the database held.
     #   * update handles BOTH a foreign-key reparent (the row moved to another
     #     parent) AND a condition flip (the `if:` result changed): the old parent
     #     is decremented if it used to count the row, the new parent incremented
@@ -35,6 +40,9 @@ module ConcernsOnRails
     #   * Adjustments use `update_counters` — a single SQL `COALESCE(col,0) ± 1`,
     #     atomic under concurrency — and run inside the record's own save
     #     transaction, so a rolled-back save rolls back the counter too.
+    #   * A `belongs_to ..., primary_key: :code` is honoured everywhere: the
+    #     parent row is addressed by the association key (not its `id`), both by
+    #     the live adjustments and by `recount_counter_caches!`.
     #
     # Notes:
     #   * The `belongs_to` must be declared BEFORE the macro (the reflection is
@@ -67,7 +75,8 @@ module ConcernsOnRails
 
         after_create  :counter_cacheable_run_create
         after_update  :counter_cacheable_run_update
-        after_destroy :counter_cacheable_run_destroy
+        # Destroy is handled in #destroy_row (below), not an after_destroy: only
+        # there is it known whether the DELETE removed a row.
       end
 
       module ClassMethods
@@ -128,37 +137,57 @@ module ConcernsOnRails
         end
 
         # Not passed → every parent. Otherwise normalize records/relations to
-        # ids; the rules must all target one association or the ids are
-        # ambiguous. An explicit nil is a mistake, not "every parent": it would
-        # turn a scoped repair into a full-table rewrite.
+        # the ASSOCIATION KEY values the children's foreign keys hold (the
+        # parent's `id`, or its `belongs_to primary_key:` column); bare values
+        # are the parent's primary-key ids, as documented. The rules must all
+        # target one association or the ids are ambiguous. An explicit nil is a
+        # mistake, not "every parent": it would turn a scoped repair into a
+        # full-table rewrite.
         def counter_cacheable_parent_ids(parents, rules)
           return nil if parents.equal?(UNSET)
           raise ArgumentError, "#{LABEL}: parents: cannot be nil — omit it to repair every parent" if parents.nil?
 
-          parent_class = counter_cacheable_sole_parent_class(rules)
+          reflection = counter_cacheable_sole_reflection(rules)
+          parent_class = reflection.klass
+          key = counter_cacheable_parent_key(reflection)
           if parents.is_a?(ActiveRecord::Relation)
             counter_cacheable_check_parent_class!(parents.klass, parent_class)
-            return parents.pluck(parents.primary_key)
+            return parents.pluck(key)
           end
 
-          Array(parents).map do |parent|
+          ids = Array(parents).map do |parent|
             next parent unless parent.is_a?(ActiveRecord::Base)
 
             counter_cacheable_check_parent_class!(parent.class, parent_class)
             parent.id
           end
+          counter_cacheable_ids_to_keys(parent_class, key, ids)
+        end
+
+        # Bare ids (and records, normalized to ids above) are primary-key
+        # values; a custom association key needs one lookup to translate them.
+        def counter_cacheable_ids_to_keys(parent_class, key, ids)
+          return ids if key == parent_class.primary_key.to_s || ids.empty?
+
+          parent_class.unscoped.where(parent_class.primary_key => ids).pluck(key)
         end
 
         # The ids address one parent table, so every rule in play must target the
         # same association — otherwise there is no telling which table they mean.
-        def counter_cacheable_sole_parent_class(rules)
+        def counter_cacheable_sole_reflection(rules)
           associations = rules.map { |rule| rule[:association] }.uniq
           if associations.size > 1
             raise ArgumentError,
                   "#{LABEL}: parents: needs the association when more than one is declared (#{associations.join(', ')})"
           end
 
-          reflect_on_association(associations.first).klass
+          reflect_on_association(associations.first)
+        end
+
+        # The parent column the child's foreign key points at: `primary_key:`
+        # on the belongs_to, else the parent's primary key.
+        def counter_cacheable_parent_key(reflection)
+          reflection.association_primary_key.to_s
         end
 
         # Ids from the wrong table would zero and rewrite whichever parent rows
@@ -214,6 +243,7 @@ module ConcernsOnRails
           reflection = reflect_on_association(rule[:association])
           fk = reflection.foreign_key
           parent_class = reflection.klass
+          key = counter_cacheable_parent_key(reflection)
           column = rule[:count_column]
           condition = rule[:condition]
 
@@ -226,7 +256,7 @@ module ConcernsOnRails
           tally = parent_class.transaction do
             targets = parent_class.unscoped
             if parent_ids
-              targets = targets.where(parent_class.primary_key => parent_ids)
+              targets = targets.where(key => parent_ids)
               targets.lock.pluck(parent_class.primary_key)
             end
 
@@ -235,22 +265,23 @@ module ConcernsOnRails
             counts = condition ? counter_cacheable_recount_tally(children, fk, condition) : children.group(fk).count
 
             targets.update_all(column => 0)
-            counter_cacheable_apply_tally(parent_class, column, counts)
+            counter_cacheable_apply_tally(parent_class, key, column, counts)
             counts
           end
           tally.count { |_id, n| n.to_i.positive? }
         end
 
         # Grouped by tally value so the repair costs O(distinct counts)
-        # statements instead of one UPDATE per parent row.
-        def counter_cacheable_apply_tally(parent_class, column, tally)
+        # statements instead of one UPDATE per parent row. The tally is keyed by
+        # foreign-key value, i.e. the parent's association key.
+        def counter_cacheable_apply_tally(parent_class, key, column, tally)
           tally.group_by { |_id, n| n.to_i }.each do |n, pairs|
             next if n.zero?
 
             ids = pairs.map(&:first).compact
             next if ids.empty?
 
-            parent_class.unscoped.where(parent_class.primary_key => ids).update_all(column => n)
+            parent_class.unscoped.where(key => ids).update_all(column => n)
           end
         end
 
@@ -269,8 +300,24 @@ module ConcernsOnRails
         counter_cacheable_flush(counter_cacheable_presence_adjustments(1))
       end
 
+      # Rails' own counter cache decrements here, and only when the DELETE
+      # affected a row: a second, stale instance of an already-destroyed row
+      # (or a never-saved record, which never reaches destroy_row) must not
+      # decrement again. Runs inside the destroy transaction, before freeze.
+      def destroy_row
+        affected_rows = super
+        counter_cacheable_run_destroy if affected_rows.to_i.positive?
+        affected_rows
+      end
+
+      # The row being deleted is the PERSISTED one, so its parent and its `if:`
+      # verdict are read from the database values — an unsaved reparent or
+      # condition flip in memory must not redirect the decrement.
       def counter_cacheable_run_destroy
-        counter_cacheable_flush(counter_cacheable_presence_adjustments(-1))
+        adjustments = counter_cacheable_with_attributes(counter_cacheable_unsaved_changes) do
+          counter_cacheable_presence_adjustments(-1)
+        end
+        counter_cacheable_flush(adjustments)
       end
 
       def counter_cacheable_run_update
@@ -310,23 +357,29 @@ module ConcernsOnRails
         end
       end
 
-      def counter_cacheable_adjustment(rule, parent_id, delta)
-        return nil if parent_id.nil?
+      # `parent_key` is the foreign-key value: the parent's association key
+      # (its `id`, or the belongs_to's `primary_key:` column).
+      def counter_cacheable_adjustment(rule, parent_key, delta)
+        return nil if parent_key.nil?
 
-        { klass: counter_cacheable_reflection(rule).klass, parent_id: parent_id,
+        reflection = counter_cacheable_reflection(rule)
+        { klass: reflection.klass, key_column: reflection.association_primary_key.to_s, parent_key: parent_key,
           column: rule[:count_column], delta: delta, touch: rule[:touch] }
       end
 
-      # One update_counters per distinct (parent class, parent id): sibling
-      # rules adjusting the same parent (comments_count + approved_comments_count)
-      # ride a single UPDATE instead of one statement each.
+      # One update_counters per distinct (parent class, key column, key value):
+      # sibling rules adjusting the same parent (comments_count +
+      # approved_comments_count) ride a single UPDATE instead of one statement
+      # each. Addressed by the association key, not `id` — the class-level
+      # update_counters(id, ...) would hit whichever row's id equals the key.
       def counter_cacheable_flush(adjustments)
-        adjustments.compact.group_by { |adj| [adj[:klass], adj[:parent_id]] }.each do |(klass, parent_id), group|
+        groups = adjustments.compact.group_by { |adj| [adj[:klass], adj[:key_column], adj[:parent_key]] }
+        groups.each do |(klass, key_column, parent_key), group|
           counters = counter_cacheable_merged_counters(group)
           next if counters.empty?
 
           counters[:touch] = true if group.any? { |adj| adj[:touch] }
-          klass.update_counters(parent_id, counters)
+          klass.unscoped.where(key_column => parent_key).update_counters(counters)
         end
       end
 
@@ -357,11 +410,12 @@ module ConcernsOnRails
         condition = rule[:condition]
         return true unless condition
 
-        counter_cacheable_with_previous_attributes { instance_exec(&condition) ? true : false }
+        counter_cacheable_with_attributes(counter_cacheable_changes) { instance_exec(&condition) ? true : false }
       end
 
-      def counter_cacheable_with_previous_attributes
-        changes = counter_cacheable_changes
+      # Temporarily put each changed attribute back to the FIRST value of its
+      # [old, new] pair, run the block, then restore the current values.
+      def counter_cacheable_with_attributes(changes)
         return yield if changes.empty?
 
         restore = {}
@@ -380,6 +434,11 @@ module ConcernsOnRails
       # Rails 5.1+; previous_changes is the 5.0 fallback.
       def counter_cacheable_changes
         respond_to?(:saved_changes) ? saved_changes : previous_changes
+      end
+
+      # { "attr" => [in_database, in_memory] } for changes not yet saved.
+      def counter_cacheable_unsaved_changes
+        respond_to?(:changes_to_save) ? changes_to_save : changes
       end
     end
   end
