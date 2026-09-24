@@ -142,7 +142,7 @@ describe ConcernsOnRails::Auditable do
 
     it "shares one timestamp when several tracked fields change in one save" do
       p = travel_to(Time.utc(2026, 6, 10, 12, 0, 0)) { AuditProduct.create!(price: 1, status: "new") }
-      expect(p.audit_trail.map { |e| e["at"] }.uniq).to eq(["2026-06-10T12:00:00Z"])
+      expect(p.audit_trail.map { |e| e["at"] }.uniq).to eq(["2026-06-10T12:00:00.000000Z"])
     end
 
     it "ignores changes to untracked fields" do
@@ -159,10 +159,10 @@ describe ConcernsOnRails::Auditable do
       expect(p.reload[:audit_log]).to be_nil
     end
 
-    it "stamps at as ISO8601 UTC" do
+    it "stamps at as ISO8601 UTC with microseconds" do
       travel_to(Time.utc(2026, 6, 10, 12, 34, 56)) do
         p = AuditProduct.create!(price: 1)
-        expect(p.audit_trail.first["at"]).to eq("2026-06-10T12:34:56Z")
+        expect(p.audit_trail.first["at"]).to eq("2026-06-10T12:34:56.000000Z")
       end
     end
   end
@@ -268,6 +268,31 @@ describe ConcernsOnRails::Auditable do
       p = travel_to(Time.utc(2026, 6, 1, 12, 0, 0)) { AuditProduct.create!(price: 1) }
       travel_to(Time.utc(2026, 6, 9, 12, 0, 0)) { p.update!(price: 2) }
       expect(p.audited_changes_since(Time.utc(2026, 6, 5)).map { |e| e["to"] }).to eq([2])
+    end
+
+    it "separates edits made within the same second (1.29 audit)" do
+      allow(Time).to receive(:now).and_return(Time.utc(2026, 6, 1, 12, 0, 0, 200_000))
+      p = AuditProduct.create!(price: 1)
+      allow(Time).to receive(:now).and_return(Time.utc(2026, 6, 1, 12, 0, 0, 700_000))
+      p.update!(price: 2)
+
+      expect(p.audit_trail.map { |e| e["at"] }).to eq(%w[2026-06-01T12:00:00.200000Z 2026-06-01T12:00:00.700000Z])
+      expect(p.audited_changes_since(Time.utc(2026, 6, 1, 12, 0, 0, 500_000)).map { |e| e["to"] }).to eq([2])
+    end
+
+    it "still reads second-precision entries written before 1.29, counting their whole second" do
+      legacy = [
+        { "field" => "price", "from" => nil, "to" => 1, "at" => "2026-06-01T11:59:59Z" },
+        { "field" => "price", "from" => 1, "to" => 2, "at" => "2026-06-01T12:00:00Z" }
+      ]
+      p = AuditProduct.create!(name: "legacy")
+      p.update_column(:audit_log, JSON.generate(legacy))
+
+      # The legacy stamp only says "some time during 12:00:00", so an edit in
+      # that second is not missed by a sub-second cutoff.
+      expect(p.audited_changes_since(Time.utc(2026, 6, 1, 12, 0, 0, 500_000)).map { |e| e["to"] }).to eq([2])
+      expect(p.audited_changes_since(Time.utc(2026, 6, 1, 12, 0, 1)).map { |e| e["to"] }).to eq([])
+      expect(p.audited_changes_since(Time.utc(2026, 6, 1)).map { |e| e["to"] }).to eq([1, 2])
     end
   end
 
