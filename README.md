@@ -1480,7 +1480,7 @@ Book.joins(:sections).where(sections: { title: "Intro" })
 
 **Notes**
 - One loaded cache under two names: `record.association(:alias)` IS `record.association(:source)`, and only the source macro installs callbacks — `dependent:`, counter caches, autosave and validations run exactly once.
-- `accepts_nested_attributes_for :alias` behaves exactly like it does for the source (create, update, `_destroy`, `reject_if:`, `limit:`; each child saved once). It turns autosave on for the source association, and child validation errors are keyed under the source name.
+- `accepts_nested_attributes_for :alias` behaves exactly like it does for the source (create, update, `_destroy`, `reject_if:`, `limit:`; each child saved once). It turns autosave on for the source association, and child validation errors are keyed under the source name. Declared in a subclass, it sets autosave on the inherited source reflection, so the parent autosaves too — the same as stock Rails nested attributes on an inherited association.
 - The where-hash key must match the name you joined under (stock-Rails rule): `joins(:sections).where(sections: {...})` works; `joins(:chapters).where(sections: {...})` does not.
 - The `belongs_to` foreign-key **attribute** is not aliased — pair with `alias_attribute :writer_id, :author_id` if you need it.
 - `has_and_belongs_to_many` cannot be aliased (use `has_many :through`). `has_many`/`has_one :through` **can** — the copy pins `source:` so it is not re-derived from the alias name; if your classes load lazily and the through model names the source differently (e.g. `belongs_to :author` behind `has_many :authors`), declare `source:` explicitly on the original association. Aliases are inherited by subclasses.

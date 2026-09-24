@@ -44,7 +44,10 @@ module ConcernsOnRails
     #     source (create, update, _destroy, reject_if, limit). It turns
     #     autosave on for the SOURCE association (the two names share one
     #     cache, so they cannot differ), and child validation errors are
-    #     keyed under the source name (e.g. "books.title").
+    #     keyed under the source name (e.g. "books.title"). Declared in a
+    #     subclass, it sets autosave on the INHERITED source reflection, so
+    #     the parent class autosaves that association too — exactly what
+    #     stock Rails nested attributes do for an inherited association.
     #   * Query SQL: a bare joins(:sections) joins "chapters" directly; when
     #     paired with where(sections: {...}) Rails aliases the join as
     #     "sections" (INNER JOIN "chapters" "sections"). A where-hash key

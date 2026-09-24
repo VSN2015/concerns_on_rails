@@ -726,6 +726,17 @@ describe ConcernsOnRails::Aliasable do
       expect(author.reload.name).to eq("new")
     end
 
+    # Pins the documented behaviour: stock Rails nested attributes set autosave
+    # on the (shared, inherited) reflection too, so the parent autosaves.
+    it "sets autosave on the inherited source reflection when a subclass declares it" do
+      parent = Author
+      expect(parent.reflect_on_association(:books).options[:autosave]).to be_nil
+
+      Class.new(parent) { accepts_nested_attributes_for :works }
+
+      expect(parent.reflect_on_association(:books).options[:autosave]).to be(true)
+    end
+
     it "does not define a writer for the source name" do
       expect(NestedAuthor.method_defined?(:books_attributes=)).to be(false)
       expect(NestedAuthor.method_defined?(:works_attributes=)).to be(true)
