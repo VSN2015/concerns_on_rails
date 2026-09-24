@@ -1849,7 +1849,7 @@ Numeric columns are read **strictly, never truncated**, in every form (direct `?
 `in`/`not_in` lists):
 
 - Every operand is read as an exact decimal, then bound through the **column** (whatever numeric `type:`
-  is declared). On an integer column `?stock_gt=1e3` is `stock > 1000` and `?stock=5.0` is `stock = 5`
+  is declared). On an integer column `?stock_gt=1e3` is `stock > 1000` and `?stock=1e1` is `stock = 10`
   — they used to run `stock > 1` / `stock = 1`.
 - A value finer than the column's scale — `5.5` on an integer column, `99.985` on a scale-2 decimal —
   compares exactly (`?stock_gt=5.5` is `stock >= 6`, `?stock_lte=5.5` is `stock <= 5`; `?price_gt=99.985`
