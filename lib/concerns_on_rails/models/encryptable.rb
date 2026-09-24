@@ -326,7 +326,6 @@ module ConcernsOnRails
           base.where(clauses.join(" OR "), *Array.new(columns.size, prefix))
         end
 
-
         # Case-exact "the first 4 characters are not this prefix", per adapter.
         # The MySQL family is matched the way Models::Storable matches it —
         # Trilogy (the Rails 7.1+ default) reports "Trilogy" and MariaDB setups
