@@ -54,6 +54,21 @@ describe "scope-name collisions across concerns" do
     expect(Membership.trash_without_deleted.pluck(:id)).to match_array([healthy.id, flagged_off.id, lapsed.id])
   end
 
+  # The affix used to rename only the scopes: `active?` stayed plain on both
+  # Activatable and Expirable, so the last-included (Expirable) silently
+  # answered for both, and toggle_active! flipped the flag the wrong way.
+  it "gives each concern its own non-colliding predicates" do
+    lapsed_but_flagged_off = Membership.create!(active: false, expires_at: 1.day.ago)
+    live_but_flagged_off = Membership.create!(active: false, expires_at: nil)
+
+    expect([lapsed_but_flagged_off.flag_active?, lapsed_but_flagged_off.term_active?]).to eq([false, false])
+    expect([live_but_flagged_off.flag_active?, live_but_flagged_off.term_active?]).to eq([false, true])
+    expect(live_but_flagged_off.term_expired?).to be(false)
+
+    live_but_flagged_off.toggle_active!
+    expect(live_but_flagged_off.reload.flag_active?).to be(true)
+  end
+
   it "composes the three affixed scopes in one chain" do
     healthy = Membership.create!(active: true, expires_at: 1.day.from_now, deleted_at: nil)
     Membership.create!(active: true, expires_at: 1.day.ago, deleted_at: nil)

@@ -273,6 +273,56 @@ describe ConcernsOnRails::Schedulable do
       expect(klass.upcoming_window.pluck(:id)).to eq([soon.id])
       expect(klass.expired_window.pluck(:id)).to eq([over.id])
     end
+
+    # The affix used to cover only the scopes, so with Expirable included too
+    # one concern's `expired?` silently replaced the other's.
+    it "defines affixed predicates alongside the plain ones" do
+      klass = affixed_class(prefix: :event)
+      live = klass.create!(starts_at: 1.day.ago, ends_at: 1.day.from_now)
+      soon = klass.create!(starts_at: 1.day.from_now, ends_at: 2.days.from_now)
+      over = klass.create!(starts_at: 3.days.ago, ends_at: 1.day.ago)
+
+      expect([live.event_current?, live.event_upcoming?, live.event_expired?]).to eq([true, false, false])
+      expect([soon.event_current?, soon.event_upcoming?, soon.event_expired?]).to eq([false, true, false])
+      expect([over.event_current?, over.event_upcoming?, over.event_expired?]).to eq([false, false, true])
+      expect(live.event_active_at?(Time.zone.now)).to be(true)
+      expect(live.event_overlaps?(1.hour.ago, 1.hour.from_now)).to be(true)
+      expect(over.expired?).to be(true)
+      expect(affixed_class.new).not_to respond_to(:event_expired?)
+    end
+  end
+
+  # Expirable (included after Schedulable) owns the plain `expired?`; the
+  # affixed predicates keep each concern's answer reachable, and Schedulable's
+  # own `current?` no longer routes through a collidable public name.
+  describe "alongside Expirable" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :timed_offers, force: true do |t|
+          t.datetime :starts_at
+          t.datetime :ends_at
+          t.datetime :expires_at
+        end
+      end
+
+      stub_const("TimedOffer", Class.new(TestModel) do
+        self.table_name = "timed_offers"
+        include ConcernsOnRails::Schedulable
+        include ConcernsOnRails::Expirable
+
+        schedulable_by prefix: :window
+        expirable_by :expires_at, prefix: :offer
+      end)
+    end
+
+    it "answers each concern's question through its affixed predicate" do
+      offer = TimedOffer.create!(starts_at: 3.days.ago, ends_at: 1.day.ago, expires_at: 1.day.from_now)
+
+      expect(offer.window_expired?).to be(true)
+      expect(offer.offer_expired?).to be(false)
+      expect(offer.expired?).to be(false) # Expirable, included last
+      expect(offer.window_current?).to be(false)
+    end
   end
   describe ".overlapping / #overlaps? (window intersection)" do
     let(:t0) { Time.utc(2026, 6, 1, 10) }
