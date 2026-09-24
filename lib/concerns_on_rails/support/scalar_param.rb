@@ -6,7 +6,30 @@ module ConcernsOnRails
     # passing them to `.where` — raises and surfaces as a 500. Controller
     # concerns route untrusted param reads through here instead.
     module ScalarParam
+      # Absolute upper bound on a resolved per_page, whatever the paginator's
+      # configured cap says. per_page is untrusted input that becomes LIMIT;
+      # `max_per_page: 0` is documented as "no cap", and with no cap
+      # `?per_page=99999999999999999999` overflowed LIMIT — an unauthenticated
+      # 500. "No cap" means no CONFIGURED cap, not an unbounded LIMIT; a page
+      # of a million records is already far past what any client can render.
+      MAX_PER_PAGE = 1_000_000
+
       module_function
+
+      # The per_page resolver shared by Paginatable and CursorPaginatable, so
+      # the two cannot drift again (the cursor paginator's private copy never
+      # got the ceiling above). A positive integer request wins; anything else
+      # — missing, non-positive, garbage, Array/Parameters — falls back to
+      # `default`. A positive `cap` then applies (0 or negative = no configured
+      # cap), and the absolute MAX_PER_PAGE ceiling applies last, even when a
+      # cap IS configured: `max_per_page: 10**30` is its own way of asking for
+      # the overflow back.
+      def per_page(value, default:, cap:)
+        requested = to_i(value, default: 0)
+        requested = default if requested < 1
+        requested = [requested, cap].min if cap.positive?
+        [requested, MAX_PER_PAGE].min
+      end
 
       # A single scalar value, safe for `.to_i` / string coercion.
       def scalar?(value)

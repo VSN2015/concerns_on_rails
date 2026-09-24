@@ -45,12 +45,9 @@ module ConcernsOnRails
       # dataset, so it simply comes back empty. Deep pagination at this depth
       # wants Controllers::CursorPaginatable instead.
       MAX_PAGE = 1_000_000
-      # The same guard for per_page. `max_per_page: 0` is documented as "no
-      # cap", and with no cap the identical untrusted value overflowed LIMIT
-      # instead of OFFSET — the same unauthenticated 500, one option away. "No
-      # cap" means no CONFIGURED cap, not an unbounded LIMIT; a page of a
-      # million records is already far past what any client can render.
-      MAX_PER_PAGE = 1_000_000
+      # The same guard for per_page (see Support::ScalarParam::MAX_PER_PAGE,
+      # which both paginators share).
+      MAX_PER_PAGE = ConcernsOnRails::Support::ScalarParam::MAX_PER_PAGE
 
       included do
         class_attribute :paginatable_per_page, default: DEFAULT_PER_PAGE
@@ -249,13 +246,10 @@ module ConcernsOnRails
       end
 
       def pagination_per_page
-        requested = ConcernsOnRails::Support::ScalarParam.to_i(pagination_param(self.class.paginatable_per_page_param), default: 0)
-        requested = self.class.paginatable_per_page if requested < 1
-        cap = self.class.paginatable_max_per_page
-        requested = [requested, cap].min if cap.positive?
-        # Applied even when a cap IS configured: `max_per_page: 10**30` is its
-        # own way of asking for the overflow back.
-        [requested, MAX_PER_PAGE].min
+        ConcernsOnRails::Support::ScalarParam.per_page(
+          pagination_param(self.class.paginatable_per_page_param),
+          default: self.class.paginatable_per_page, cap: self.class.paginatable_max_per_page
+        )
       end
 
       # Dig the configured path out of params: `["page"]` → params[:page];
