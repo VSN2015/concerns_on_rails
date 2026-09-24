@@ -83,6 +83,7 @@ module ConcernsOnRails
     autoload :BatchOps,                "concerns_on_rails/support/batch_ops"
     autoload :LinkHeader,              "concerns_on_rails/support/link_header"
     autoload :VaryHeader,              "concerns_on_rails/support/vary_header"
+    autoload :NumericOperand,          "concerns_on_rails/support/numeric_operand"
   end
 
   # Encryption config + error types (Support::Encryptor requires it itself)

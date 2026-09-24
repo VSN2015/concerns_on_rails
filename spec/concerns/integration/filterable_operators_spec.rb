@@ -72,6 +72,30 @@ RSpec.describe "Filterable operators through real ActionController dispatch" do
     expect(names("stock_gt=twelve")).to eq([])
   end
 
+  # Integer#cast is `to_i`: `1e3` ran `stock > 1`, `5.5` ran `stock = 5`.
+  it "fails closed on exponent / fractional integer operands in every form" do
+    expect(names("stock[gt]=1e3")).to eq([])
+    expect(names("stock_gt=1e3")).to eq([])
+    expect(names("stock=5.5")).to eq([])
+    expect(names("stock[in]=5.5,12")).to eq([])
+    expect(names("stock_not_in[]=1e1")).to eq([])
+  end
+
+  it "answers an out-of-range integer per operator in both forms" do
+    huge = "99999999999999999999"
+
+    expect(names("stock[lt]=#{huge}")).to eq(%w[Lamp Desk Chair])
+    expect(names("stock_gte=#{huge}")).to eq([])
+    expect(names("stock[in][]=#{huge}&stock[in][]=12")).to eq(%w[Chair])
+  end
+
+  # PostgreSQL has no `integer ~~* unknown` operator: `?stock_contains=1` was a 500.
+  it "fails closed for contains / starts_with on a non-string column" do
+    expect(names("stock[contains]=1")).to eq([])
+    expect(names("stock_starts_with=12")).to eq([]) # SQLite used to run `stock LIKE 12`
+    expect(names("discontinued_at[contains]=20")).to eq([])
+  end
+
   it "ignores a nested or array-shaped operand instead of 500ing" do
     expect(names("stock[gt][x]=1")).to eq(%w[Lamp Desk Chair])
     expect(names("stock_gt[]=1&stock_gt[]=2")).to eq(%w[Lamp Desk Chair])
