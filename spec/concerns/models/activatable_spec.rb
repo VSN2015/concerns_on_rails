@@ -152,6 +152,161 @@ describe ConcernsOnRails::Activatable do
       expect(klass.membership_active.to_a).to eq([on])
       expect(klass.respond_to?(:active)).to be(false)
     end
+
+    # The affix used to cover only the scopes, so with Expirable included too
+    # one concern's `active?` silently replaced the other's.
+    it "defines affixed predicates alongside the plain ones" do
+      ActiveRecord::Schema.define do
+        create_table :memberships, force: true do |t|
+          t.boolean :active
+        end
+      end
+
+      klass = Class.new(TestModel) do
+        self.table_name = "memberships"
+        include ConcernsOnRails::Activatable
+
+        activatable_by :active, suffix: :flag
+      end
+
+      on = klass.create!(active: true)
+      off = klass.create!(active: nil)
+      expect([on.active_flag?, on.inactive_flag?]).to eq([true, false])
+      expect([off.active_flag?, off.inactive_flag?]).to eq([false, true])
+      expect(on.active?).to be(true)
+      expect(Subscription.new).not_to respond_to(:active_flag?)
+    end
+  end
+
+  # With Expirable included AFTER Activatable, `active?` is Expirable's
+  # ("not expired" — true for a nil expiry). toggle_active! read it, so it
+  # deactivated an inactive record instead of activating it.
+  describe "toggle_active! alongside Expirable" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :memberships, force: true do |t|
+          t.boolean :active
+          t.datetime :expires_at
+        end
+      end
+
+      stub_const("ExpiringMembership", Class.new(TestModel) do
+        self.table_name = "memberships"
+        include ConcernsOnRails::Activatable
+        include ConcernsOnRails::Expirable
+
+        activatable_by :active, prefix: :flag
+        expirable_by :expires_at, prefix: :term
+      end)
+    end
+
+    it "flips its own flag, whatever the plain active? says" do
+      record = ExpiringMembership.create!(active: false, expires_at: nil)
+      expect(record.active?).to be(true) # Expirable's answer: never expires
+
+      record.toggle_active!
+      expect(record.reload.active).to be(true)
+
+      record.toggle_active!
+      expect(record.reload.active).to be(false)
+    end
+
+    it "keeps both concerns' questions reachable through the affixed predicates" do
+      record = ExpiringMembership.create!(active: false, expires_at: 1.day.ago)
+
+      expect([record.flag_active?, record.flag_inactive?]).to eq([false, true])
+      expect([record.term_active?, record.term_expired?]).to eq([false, true])
+    end
+  end
+
+  # An after hook vetoing with ActiveRecord::Rollback used to be swallowed by a
+  # bare `transaction` that joined the caller's (or the batch's): the flip
+  # committed, the verb returned true, and activate_all counted the row.
+  describe "ActiveRecord::Rollback from a lifecycle hook" do
+    let(:vetoing) do
+      Class.new(TestModel) do
+        self.table_name = "subscriptions"
+        include ConcernsOnRails::Activatable
+
+        activatable_by
+
+        cattr_accessor :veto
+
+        def after_activate
+          raise ActiveRecord::Rollback if self.class.veto == :activate
+        end
+
+        def after_deactivate
+          raise ActiveRecord::Rollback if self.class.veto == :deactivate
+        end
+      end
+    end
+
+    it "activate! returns false and leaves the row (and memory) inactive" do
+      vetoing.veto = :activate
+      record = vetoing.create!(name: "n", active: false)
+
+      expect(record.activate!).to be(false)
+      expect(record.active).to be(false)
+      expect(record.reload.active).to be(false)
+    end
+
+    it "deactivate! and toggle_active! return false and leave the row active" do
+      vetoing.veto = :deactivate
+      record = vetoing.create!(name: "n", active: true)
+
+      expect(record.deactivate!).to be(false)
+      expect(record.toggle_active!).to be(false)
+      expect(record.reload.active).to be(true)
+    end
+
+    it "rolls back inside a caller transaction, keeping the caller's own writes" do
+      vetoing.veto = :activate
+      record = vetoing.create!(name: "n", active: false)
+      other = vetoing.create!(name: "other")
+
+      ActiveRecord::Base.transaction do
+        other.update!(name: "renamed")
+        record.activate!
+      end
+
+      expect(other.reload.name).to eq("renamed")
+      expect(record.reload.active).to be(false)
+    end
+
+    it "activate_all and deactivate_all raise RecordNotSaved and commit nothing" do
+      vetoing.veto = :activate
+      vetoing.create!(name: "a", active: false)
+      expect { vetoing.activate_all }.to raise_error(ActiveRecord::RecordNotSaved, /failed to activate/)
+      expect(vetoing.where(active: true).count).to eq(0)
+
+      vetoing.veto = :deactivate
+      vetoing.update_all(active: true)
+      expect { vetoing.deactivate_all }.to raise_error(ActiveRecord::RecordNotSaved, /failed to deactivate/)
+      expect(vetoing.where(active: true).count).to eq(1)
+    end
+  end
+
+  # `update` returning false (validation) used to leave the before hook's
+  # own writes committed.
+  it "rolls the before hook's side effects back when the write fails validation" do
+    klass = Class.new(TestModel) do
+      self.table_name = "subscriptions"
+      include ConcernsOnRails::Activatable
+
+      activatable_by
+      validates :name, presence: true
+
+      def before_activate
+        self.class.where(id: id).update_all(name: "touched-by-hook")
+      end
+    end
+    record = klass.create!(name: "ok", active: false)
+    record.name = nil
+
+    expect(record.activate!).to be(false)
+    expect(record.reload.name).to eq("ok")
+    expect(record.active).to be(false)
   end
 
   describe "batch operations" do

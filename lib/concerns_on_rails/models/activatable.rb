@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/hooked_write"
 
 module ConcernsOnRails
   module Models
@@ -25,8 +26,13 @@ module ConcernsOnRails
     # `deactivated_at` on the transitions (a Hash renames a column or drops a
     # side with nil); the other column keeps its last value.
     #
-    # Note: SoftDeletable also defines a `.active` scope (alias of `.without_deleted`).
-    # If both concerns are included on the same model, the later one wins.
+    # Note: SoftDeletable and Expirable also define an `.active` scope, and
+    # Expirable an `active?` predicate. On a model combining them, pass
+    # `prefix:`/`suffix:` — it renames the scopes AND defines affixed
+    # predicates (`flag_active?`, `flag_inactive?`) that always answer
+    # Activatable's question. The plain `active?`/`inactive?` stay for
+    # compatibility and belong to whichever concern was included last;
+    # Activatable's own logic (toggle_active!) never relies on them.
     module Activatable
       extend ActiveSupport::Concern
 
@@ -61,6 +67,10 @@ module ConcernsOnRails
           # (e.g. SoftDeletable / Expirable) can coexist on one model.
           scope activatable_scope_names[:active],   -> { where(activatable_field => true) }
           scope activatable_scope_names[:inactive], -> { where(activatable_field => [false, nil]) }
+          # ...and the predicates, which collide the same way (Expirable's active?).
+          ConcernsOnRails::Support::Affix.define_predicates(
+            self, { active: :activatable_on?, inactive: :activatable_off? }, prefix: prefix, suffix: suffix
+          )
         end
 
         # Activate every inactive record in the relation; returns the count.
@@ -151,12 +161,13 @@ module ConcernsOnRails
         end
       end
 
+      # Plain names kept for compatibility — see the module note on collisions.
       def active?
-        self[self.class.activatable_field] == true
+        activatable_on?
       end
 
       def inactive?
-        !active?
+        activatable_off?
       end
 
       # Lifecycle hooks — no-ops to override. They run around activate! /
@@ -178,23 +189,36 @@ module ConcernsOnRails
       def toggle_active!
         # Lock the row for the read-modify-write so concurrent toggles don't lose
         # an update (with_lock wraps a transaction + SELECT ... FOR UPDATE).
-        with_lock { active? ? deactivate! : activate! }
+        # activatable_on?, not active?: with Expirable included later the
+        # plain predicate answers "not expired" and the toggle flipped the
+        # wrong way.
+        with_lock { activatable_on? ? deactivate! : activate! }
       end
 
-      # Hooks and the write share one transaction: a raising after-hook rolls
-      # the flip back; a failed write (validation) returns false and skips the
-      # after-hook (Publishable / Expirable's contract).
+      # Hooks and the write share one savepoint (Support::HookedWrite): a
+      # raising after-hook — or one vetoing with ActiveRecord::Rollback, even
+      # inside a caller's transaction or activate_all — rolls the flip back
+      # and returns false; a failed write (validation) returns false, skips
+      # the after-hook, and rolls back the before-hook's side effects.
       def activatable_transition(value, kind)
         before_hook, after_hook = HOOKS.fetch(kind)
-        result = false
-        transaction do
-          send(before_hook)
-          result = update(self.class.activatable_attributes(value, kind))
-          send(after_hook) if result
+        attributes = self.class.activatable_attributes(value, kind)
+        ConcernsOnRails::Support::HookedWrite.run(self, before: before_hook, after: after_hook,
+                                                        restore: attributes.keys) do
+          update(attributes)
         end
-        result
       end
-      private :activatable_transition
+
+      # The unaffixed checks behind the public predicates; internal logic and
+      # the affixed predicates call these, never the collidable plain names.
+      def activatable_on?
+        self[self.class.activatable_field] == true
+      end
+
+      def activatable_off?
+        !activatable_on?
+      end
+      private :activatable_transition, :activatable_on?, :activatable_off?
     end
   end
 end
