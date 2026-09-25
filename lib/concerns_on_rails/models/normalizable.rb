@@ -199,6 +199,10 @@ module ConcernsOnRails
 
       def normalizable_each_pending_rule
         self.class.normalizable_rules.each do |field, normalizer|
+          # A partial `select` load lacks the column: reading it would raise
+          # MissingAttributeError, and there is nothing to normalize.
+          next unless has_attribute?(field)
+
           value = self[field]
           next if value.nil?
           # Persisted records: a field not part of this save already went

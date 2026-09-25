@@ -180,10 +180,20 @@ describe ConcernsOnRails::Models::Normalizable do
     end
 
     context "when validation is skipped" do
-      # Anonymous: the outer after(:each) removes a User constant itself.
+      before do
+        ActiveRecord::Schema.define do
+          create_table :normalized_accounts, force: true do |t|
+            t.string :email
+            t.string :code
+          end
+        end
+      end
+
+      # Anonymous, on its own table: `users` is reused (with other columns)
+      # across spec files, and an anonymous class's reload can trip over that.
       let(:model) do
         Class.new(TestModel) do
-          self.table_name = "users"
+          self.table_name = "normalized_accounts"
           include ConcernsOnRails::Models::Normalizable
 
           normalizable :email, with: :email
@@ -224,6 +234,13 @@ describe ConcernsOnRails::Models::Normalizable do
         user.valid?
         user.save(validate: false)
         expect(user.reload.code).to eq("x!")
+      end
+
+      it "skips a column a partial select did not load" do
+        user = model.create!(email: "a@b.com", code: "x")
+        partial = model.select(:id, :code).find(user.id)
+        expect { partial.update_attribute(:code, "y") }.not_to raise_error
+        expect(user.reload.code).to eq("y!")
       end
 
       it "leaves an unchanged field of a persisted record alone" do
