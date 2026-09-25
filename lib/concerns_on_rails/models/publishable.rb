@@ -16,10 +16,24 @@ module ConcernsOnRails
         class_attribute :publishable_scope_names, instance_accessor: false,
                                                   default: SCOPE_BASES.to_h { |b| [b, b] }.freeze
         class_attribute :publishable_captured_scopes, instance_accessor: false, default: {}.freeze
+        # Whether `.all` hides unpublished rows. OFF unless publishable_by
+        # passes `default_scope: true`; every call sets it, so the last call
+        # (or an STI subclass's own call) decides.
+        class_attribute :publishable_default_scope, instance_accessor: false, default: false
 
         define_publishable_scopes(nil, nil)
         self.publishable_captured_scopes =
           ConcernsOnRails::Support::Affix.capture(self, SCOPE_BASES).freeze
+
+        # Registered ONCE and evaluated lazily against the flag (SoftDeletable's
+        # pattern). Appending a `default_scope` block per `default_scope: true`
+        # call made it permanent — a later `default_scope: false`, or an STI
+        # subclass's, could not undo it — and repeated `true` calls stacked
+        # duplicate predicates. Resolved through the names map, so an affixed
+        # model still filters.
+        default_scope do
+          publishable_default_scope ? public_send(publishable_scope_names.fetch(:published)) : all
+        end
       end
 
       class_methods do # rubocop:disable Metrics/BlockLength
@@ -28,6 +42,8 @@ module ConcernsOnRails
         # Pass `default_scope: true` to hide unpublished records by default
         # (`.all` then returns only published). The negative scopes
         # (.unpublished/.scheduled/.draft) unscope the field, so they still work.
+        # Every call sets it: re-declaring without `default_scope: true` (on
+        # the same class or an STI subclass) turns it back off.
         def publishable_by(field = nil, default_scope: false, prefix: nil, suffix: nil)
           self.publishable_field = field || :published_at
           @publishable_boolean_column = nil
@@ -39,7 +55,7 @@ module ConcernsOnRails
                                                     label: "ConcernsOnRails::Models::Publishable")
           end
 
-          enable_published_default_scope if default_scope
+          self.publishable_default_scope = default_scope ? true : false
         end
 
         # True when the configured column is a boolean (vs a datetime timestamp);
@@ -180,13 +196,6 @@ module ConcernsOnRails
               unscope(where: publishable_field).where(publishable_field => nil)
             end
           }
-        end
-
-        # Routed through a helper so the `default_scope:` keyword doesn't shadow
-        # the `default_scope` macro inside `publishable_by`.
-        def enable_published_default_scope
-          published_scope = publishable_scope_names.fetch(:published)
-          default_scope { public_send(published_scope) }
         end
 
         # "Not currently published", built against the CURRENT relation: the

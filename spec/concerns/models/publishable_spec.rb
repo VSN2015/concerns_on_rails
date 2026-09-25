@@ -180,6 +180,50 @@ describe ConcernsOnRails::Publishable do
     end
   end
 
+  # The default scope is registered once and reads a flag, so the LAST
+  # publishable_by call decides it (SoftDeletable/Sortable's pattern) — a
+  # permanent default_scope block per `true` call could never be undone.
+  describe "re-declaring default_scope:" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :redeclared_posts, force: true do |t|
+          t.string :type
+          t.datetime :published_at
+        end
+      end
+    end
+
+    let(:parent) do
+      Class.new(TestModel) do
+        self.table_name = "redeclared_posts"
+        include ConcernsOnRails::Publishable
+
+        publishable_by :published_at, default_scope: true
+      end
+    end
+
+    it "lets an STI subclass turn an inherited default_scope: true off" do
+      stub_const("RedeclaredPost", parent)
+      stub_const("RedeclaredPreviewPost", Class.new(parent) { publishable_by :published_at, default_scope: false })
+
+      RedeclaredPreviewPost.create!(published_at: nil)
+      expect(RedeclaredPreviewPost.count).to eq(1)
+      expect(RedeclaredPost.count).to eq(0)
+    end
+
+    it "lets a later call on the same class turn it off" do
+      parent.publishable_by :published_at, default_scope: false
+      parent.create!(published_at: nil)
+      expect(parent.count).to eq(1)
+    end
+
+    it "does not stack a second predicate when default_scope: true is repeated" do
+      parent.publishable_by :published_at, default_scope: true
+      column = TestDatabase.quoted_column(:published_at)
+      expect(parent.all.to_sql.scan(column).size).to eq(1)
+    end
+  end
+
   describe "boolean publishable column" do
     before do
       ActiveRecord::Schema.define do
