@@ -41,7 +41,11 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Models::Addressable".freeze
 
       included do
-        class_attribute :addressable_fields, instance_accessor: false, default: {}
+        # The resolved part => column map is read through `addressable_fields`
+        # (below), which resolves a mapping deferred while the schema was
+        # unreachable at declaration time.
+        class_attribute :addressable_field_map, instance_accessor: false, default: {}.freeze
+        class_attribute :addressable_pending_mapping, instance_accessor: false, default: nil
         class_attribute :addressable_required, instance_accessor: false, default: [].freeze
         class_attribute :addressable_default_country, instance_accessor: false, default: "US"
         class_attribute :addressable_validate_state, instance_accessor: false, default: false
@@ -76,7 +80,7 @@ module ConcernsOnRails
                            validate_state: false, verify_with: nil,
                            lengths: {}, allow_blank: false, normalize_country: false, fingerprint: nil, **mapping)
           condition = extract_validation_condition!(mapping)
-          self.addressable_fields = resolve_addressable_fields(mapping)
+          overrides = normalize_address_overrides(mapping)
           self.addressable_required = Array(required).map(&:to_sym)
           self.addressable_default_country = default_country.to_s.upcase
           self.addressable_validate_state = validate_state
@@ -85,9 +89,23 @@ module ConcernsOnRails
           self.addressable_allow_blank = resolve_allow_blank(allow_blank)
           self.addressable_normalize_country = normalize_country
           self.addressable_fingerprint_column = resolve_fingerprint_column(fingerprint)
-          ensure_required_columns!
+          install_addressable_fields(overrides)
           register_address_validation(condition)
           define_address_changed_alias
+        end
+
+        # part => column for the columns this table actually has. Declared
+        # while the schema was unreachable (db:create, an unmigrated table,
+        # assets:precompile), the mapping is resolved here on first use once
+        # the schema is reachable — override columns and required parts are
+        # validated then, exactly as addressable_by would have — and is {}
+        # (maps nothing) until it can be.
+        def addressable_fields
+          pending = addressable_pending_mapping
+          return addressable_field_map if pending.nil? || !schema_reachable?
+
+          install_addressable_fields(pending)
+          addressable_field_map
         end
 
         # Records stored with the same address fingerprint as `value` (a record,
@@ -131,17 +149,31 @@ module ConcernsOnRails
           column
         end
 
-        def resolve_addressable_fields(mapping)
+        def normalize_address_overrides(mapping)
           unknown = mapping.keys.map(&:to_sym) - DEFAULT_FIELDS.keys
           raise ArgumentError, "#{LABEL}: unknown address part(s): #{unknown.join(', ')}" if unknown.any?
 
-          overrides = mapping.to_h { |part, column| [part.to_sym, column.to_sym] }
-          ensure_columns!(LABEL, overrides.values, types: :string)
-          DEFAULT_FIELDS.merge(overrides).select { |_part, column| column_names.include?(column.to_s) }
+          mapping.to_h { |part, column| [part.to_sym, column.to_sym] }.freeze
         end
 
-        def ensure_required_columns!
-          missing = addressable_required.reject { |part| addressable_fields.key?(part) }
+        # Resolve against the live schema now, or — when ensure_columns!
+        # reports it unreachable (column_names would raise) — park the
+        # overrides for addressable_fields to resolve on first use.
+        def install_addressable_fields(overrides)
+          unless ensure_columns!(LABEL, overrides.values, types: :string)
+            self.addressable_pending_mapping = overrides
+            self.addressable_field_map = {}.freeze
+            return
+          end
+
+          fields = DEFAULT_FIELDS.merge(overrides).select { |_part, column| column_names.include?(column.to_s) }
+          ensure_required_columns!(fields)
+          self.addressable_field_map = fields.freeze
+          self.addressable_pending_mapping = nil
+        end
+
+        def ensure_required_columns!(fields)
+          missing = addressable_required.reject { |part| fields.key?(part) }
           return if missing.empty?
 
           raise ArgumentError,

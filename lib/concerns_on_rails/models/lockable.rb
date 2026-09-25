@@ -98,10 +98,13 @@ module ConcernsOnRails
           self.lockable_unlock_in = unlock_in
           self.lockable_unlock_token_field = unlock_token
           # ONE guard call, so a fresh model missing all three columns gets a
-          # single migration command instead of three boot failures.
-          ensure_columns!(LABEL, attempts, locked_at, unlock_token,
-                          types: lockable_column_types(attempts, locked_at, unlock_token))
-          validate_lockable_attempts_column!(attempts)
+          # single migration command instead of three boot failures. false =
+          # schema unreachable (db:create, an unmigrated table, precompile):
+          # the column-type check below reads columns_hash, which would raise
+          # there, so it is skipped with the rest of the validation.
+          schema_checked = ensure_columns!(LABEL, attempts, locked_at, unlock_token,
+                                           types: lockable_column_types(attempts, locked_at, unlock_token))
+          validate_lockable_attempts_column!(attempts) if schema_checked
           lockable_register_filter_parameter(unlock_token) if unlock_token
           define_lockable_scopes(prefix, suffix)
         end

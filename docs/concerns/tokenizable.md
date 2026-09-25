@@ -85,7 +85,7 @@ For each field declared with `tokenizable_by`, the following instance methods ar
 
 | Method | Description |
 |---|---|
-| `regenerate_api_token!` | Generates a new token value and immediately persists it with `update!`. Overwrites the existing value unconditionally. |
+| `regenerate_api_token!` | Generates a new token value and immediately persists it with `update!`. Overwrites the existing value unconditionally. A `RecordNotUnique` from the unique index is retried with a fresh token, each attempt in its own savepoint — so it also works inside your transaction on PostgreSQL. |
 | `revoke_api_token!` | Sets the column to `nil` and immediately persists the change with `update!`. |
 | `api_token?` | Returns `true` if the column value is present (non-nil, non-blank), `false` otherwise. |
 | `api_token_expired?` | `true` once `api_token_expires_at` has been reached. Always `false` for a field without `expires_in:`, or when the expiry is `nil`. |
@@ -171,7 +171,7 @@ device2.pin  # => "847203" (random 6-digit string)
 - **Column must exist at class load time.** `tokenizable_by` calls `ensure_columns!` immediately when the macro is evaluated. If the migration has not been run, Rails will raise `ArgumentError: '...' does not exist in the database (table: ...)` as soon as the class is loaded, not at runtime.
 - **Caller-supplied values are preserved.** The `before_create` callback calls `assign_tokenizable_value` only when the column is blank. `User.create!(api_token: "preset")` will store `"preset"` unchanged.
 - **Tokens are generated on `create` only.** There is no `before_save` or `before_update` callback. Tokens do not rotate automatically on update; call `regenerate_<field>!` explicitly when rotation is needed.
-- **Uniqueness retry with a ceiling.** Before assigning a generated value, the concern queries the database with `unscoped.exists?` to detect collisions. It retries up to `MAX_GENERATION_ATTEMPTS` (10) times. If all 10 attempts collide, it raises a `RuntimeError` matching `/could not generate a unique value/`. This is a best-effort guard; a unique database index is the authoritative uniqueness constraint and should always accompany short or low-entropy token fields (`:numeric`, short `:alphanumeric`).
+- **Uniqueness retry with a ceiling.** Before assigning a generated value, the concern queries the database with `unscoped.exists?` — on the STI **base** class, so a sibling subclass's token is seen — to detect collisions. It retries up to `MAX_GENERATION_ATTEMPTS` (10) times. If all 10 attempts collide, it raises a `RuntimeError` matching `/could not generate a unique value/`. This is a best-effort guard; a unique database index is the authoritative uniqueness constraint and should always accompany short or low-entropy token fields (`:numeric`, short `:alphanumeric`).
 - **Timing-safe lookup requires exact byte-length match.** `authenticate_by_<field>` returns `nil` if the stored token and the supplied value have different byte sizes, before `secure_compare` is called. This prevents length-oracle attacks but means tokens containing multi-byte characters (unlikely given the alphabets) would require special handling.
 - **`authenticate_by_<field>` returns `nil` for blank input.** Passing `nil` or `""` short-circuits the lookup entirely without hitting the database.
 - **Subclass isolation.** `tokenizable_fields` is a `class_attribute` that merges into a fresh hash on each `tokenizable_by` call, so subclasses that call `tokenizable_by` do not mutate the parent class's configuration.

@@ -605,7 +605,8 @@ Order.find_by(public_id: params[:id]) || Order.find(params[:id])
 - A `regenerate_<field>!` instance method is defined dynamically.
 - `prefix:` is prepended to every generated value (string types only — not `:integer`); the uniqueness check sees the full prefixed value.
 - `to_param: true` overrides `to_param` to return the hashed field, falling back to the id while it is blank — pair it with `find_by!(field: params[:id])`, or with `find_by(field: params[:id]) || find(params[:id])` while a backfill is still in flight (a blank field puts an integer in the URL). Raises at class load alongside Sluggable, in either declaration order — friendly_id overrides `to_param` too.
-- `unique: true` prechecks for collisions and retries a bounded number of times (still add a unique index — that is the real guarantee).
+- `unique: true` prechecks for collisions (across the whole table — an STI subclass sees its siblings' values) and retries a bounded number of times (still add a unique index — that is the real guarantee). `regenerate_<field>!` retries a `RecordNotUnique` from that index in its own savepoint, so it also works inside your transaction on PostgreSQL.
+- A `:custom` alphabet needs at least 2 distinct characters (`ArgumentError` otherwise). A repeated character would silently be drawn more often, so duplicates are removed and `ConcernsOnRails.deprecator` warns — this will raise in 2.0.
 - For fixed-width numeric codes (e.g. `000042`), use a **string** column — integer columns drop leading zeros.
 - If your model has `validates :<field>, presence: true`, switch this concern's hook to `before_validation` in your model — it uses `before_create` by default.
 
@@ -929,7 +930,7 @@ User.reset_password_token_expired         # scope: rows whose expiry has passed 
 **Notes**
 - URL-safe by default (`A–Z`, `a–z`, `0–9`, `-`, `_`) — drop straight into URLs and headers.
 - Caller-supplied values are respected: `User.create!(api_token: "preset")` won't be overwritten.
-- Generation does a best-effort uniqueness check before insert and retries up to 10 times. Pair with a `unique` DB index for real safety, especially for short alphanumeric/numeric codes.
+- Generation does a best-effort uniqueness check before insert (across the whole table — an STI subclass sees its siblings' tokens) and retries up to 10 times. Pair with a `unique` DB index for real safety, especially for short alphanumeric/numeric codes; `regenerate_<field>!` retries a `RecordNotUnique` from that index in its own savepoint, so it also works inside your transaction on PostgreSQL.
 - `.authenticate_by_<field>` uses `ActiveSupport::SecurityUtils.secure_compare` to avoid leaking partial matches via response timing, and returns `nil` once an `expires_in:` token has expired.
 - `.consume_<field>(value)` (every field) is the single-use verb — password resets, invite codes, magic links: it authenticates, then revokes with a **conditional `UPDATE`** keyed on the token still being present, so two concurrent consumers cannot both succeed; the loser gets `nil`. An expired token is refused and left in place.
 - A caller-supplied token on an `expires_in:` field gets the configured lifetime **on create** unless the caller also sets `<field>_expires_at`. Assigning one to an already-persisted row (`user.update!(reset_password_token: "preset")`) stamps nothing, and a row whose expiry is `nil` never expires — rotate with `regenerate_<field>!` (which stamps a fresh expiry) or set `<field>_expires_at` yourself.
@@ -999,7 +1000,8 @@ Invoice.next_sequence(account_id: 1)   # => 4  (peek the next value, without cre
 - The next value is `MAX(<field>) + 1` within the scope (and period), so numbering is dense and ordered — not random.
 - Caller-supplied values are respected: `Invoice.create!(sequence: 100)` is not overwritten (and its `into:` string is still formatted from `100`).
 - With `assign: :manual`, numbering follows **assignment** order (the first invoice finalized is #1, whenever it was drafted); with `reset:` the period is still taken from the row's `created_at`, exactly as on create.
-- Generation reads `MAX` then inserts, so two concurrent inserts can race. It's **best-effort** — add a **scoped unique index** on `<field>` (and on `into:`) for a real guarantee, the same way you would for any `MAX`-based numbering.
+- Generation reads `MAX` then inserts, so two concurrent inserts can race. It's **best-effort** — add a **scoped unique index** on `<field>` (and on `into:`) for a real guarantee, the same way you would for any `MAX`-based numbering, and wrap the write in `ConcernsOnRails::Support::UniqueRetry.with_retries { … }` (pass `savepoint: Invoice` when it runs inside your own transaction, so a rejected attempt rolls back to a savepoint instead of aborting it on PostgreSQL). `assign_<field>!` saves in its own savepoint and puts the number back when the save fails, so a retried `assign_<field>!` draws a fresh one.
+- With STI, the rows that share a counter are those of the class that **declared** `sequenceable_by` (and its subclasses): declared on the base, every subclass draws from one table-wide counter; declared on each subclass (`INV-` / `CN-`), each keeps its own sequence. A subclass that re-declares the macro under a declaring parent numbers its own series, while the parent's MAX still spans the whole table: the parent series may show a **gap**, never a duplicate. For independent per-type series without gaps, use `scope: :type`. Declared on an abstract class, each concrete table gets its own counter. `next_<field>` previews exactly what the receiving class's next `create!` gets in each of these setups. Per-subclass series share one integer column, so index `(type, <field>)` rather than the column alone.
 - `reset:` requires a `created_at` column; the period is taken from each row's creation time.
 - For fixed-width display (`00042`), make the `into:` column a **string** — integer columns drop leading zeros.
 - Distinct from `Hashable` / `Tokenizable`, which generate *random* values; reach for those when the identifier must be unguessable.
@@ -1380,7 +1382,7 @@ ConcernsOnRails.setup { |config| config.audit_actor = -> { Current.user&.id } }
 
 product.update!(price: 200)
 product.audit_trail
-# => [{"field"=>"price", "from"=>100, "to"=>200, "at"=>"2026-06-10T12:34:56Z", "by"=>"admin@shop.com"}]
+# => [{"field"=>"price", "from"=>100, "to"=>200, "at"=>"2026-06-10T12:34:56.123456Z", "by"=>"admin@shop.com"}]
 product.last_change_for(:price)            # newest entry for one field
 product.audited_changes_since(1.day.ago)   # recent entries, oldest first
 product.clear_audit_trail!                 # wipe the column (skips callbacks)
@@ -1393,6 +1395,7 @@ One entry is recorded **per changed field per save** (creates record `"from" => 
 **Notes**
 - Writes that skip callbacks (`update_column(s)`, `touch`, `increment!`) are **not** audited; `save(validate: false)` is.
 - Values are JSON-coerced (times → ISO8601 UTC strings, `BigDecimal` → precision-safe numeric string); a corrupt column decodes as `[]` and is replaced on the next tracked save.
+- `"at"` is ISO8601 UTC with **microseconds**, so `audited_changes_since` tells apart two edits in the same second. Second-precision entries written by 1.29.0 and earlier still parse; they only say "during that second", so they match any cutoff within it.
 - Per-record and bounded by design — reach for [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) when you need reify/undo or audit queries across models.
 
 ---
@@ -1544,7 +1547,7 @@ Comment.recount_counter_caches!    # repair drift / backfill every counter
 Comment.recount_counter_caches!(:post, parents: imported_posts)   # repair just these parents (ids, records or a relation)
 ```
 
-Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose.
+Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose. A destroy decrements only when its DELETE actually removed the row (as Rails' native counter cache does) — destroying a stale second instance, or a never-saved record, writes nothing — and it reads the parent and the `if:` verdict from the **persisted** values, so an unsaved reparent or condition flip can't redirect it. A `belongs_to ..., primary_key: :code` is honoured: parents are addressed by that key (live adjustments and `recount_counter_caches!` alike), never by `id`. A child destroyed by its parent's own `has_many ..., dependent: :destroy` does not decrement that parent (as with Rails' native counter cache) — the row is going away, and bumping it first would trip the parent's `lock_version`. A `has_one` replacement, where the parent survives, still decrements. With `lock_version` on the parent, two pre-existing cases can still raise `StaleObjectError`: destroying a parent whose counted child hangs off a `has_one ..., dependent: :destroy`, and a `has_many :through ..., dependent: :destroy` (Rails deletes the join rows without `destroyed_by_association`).
 
 **Options** (`counter_cacheable_by association, …`, repeatable): `count:` (the parent column; default `"<table_name>_count"`), `if:` (a callable evaluated against the record — counts only when truthy; the previous state is reconstructed for updates), `touch:` (`false`; also bump the parent's `updated_at`).
 
@@ -1664,6 +1667,8 @@ copy = invoice.duplicate!(only: [])                     # shallow copy — attri
 ```
 
 **Auto-reset identity columns** (no configuration): `created_at`/`updated_at`, Sluggable slug, Tokenizable/Hashable tokens, Sequenceable sequence + `into:` columns, Auditable trail, SoftDeletable timestamp, Lockable attempts/locked_at. Business state (Publishable, Stateable, …) is a judgment call — list it in `reset:`.
+
+**Counter-cache columns start at 0**: a column on the copy's class maintained by a child — CounterCacheable rules or a native `belongs_to ..., counter_cache:` (polymorphic `as:` included), found through the class's `has_many`/`has_one` reflections — is zeroed, and each child the copy actually carries re-increments it on save. A deep copy of a post with two comments therefore counts 2 (not 4), a shallow copy 0. Plain (non-Duplicable) child copies get the same treatment for their own counters, since their children are never copied. A has_many with no inverse (a scoped one) makes Rails bump the copy's in-memory counter as children are attached; that bump is undone before the INSERT, so the result is right with partial inserts on or off, and `duplicate!` re-reads the counters after saving. (After a plain `duplicate` + your own `save!`, the in-memory counter stays at 0 until `reload`; the row is correct.) A counter kept by a child with no `has_many`/`has_one` on the parent is invisible to this — set it in `on_duplicate`.
 
 **Associations** (`associations:` allow-list, declared before the macro, validated at macro time): `has_many`/`has_one` children are deep-copied — a child that also includes Duplicable copies via **its own** rules, so nested graphs stay declarative; `has_and_belongs_to_many` re-links the *same* records; `belongs_to` and `has_many :through` are rejected with an explanation.
 

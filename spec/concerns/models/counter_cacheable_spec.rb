@@ -418,4 +418,230 @@ describe ConcernsOnRails::Models::CounterCacheable do
       expect(tallied).to be < zeroed
     end
   end
+
+  describe "destroy uses the persisted row (1.29 audit)" do
+    it "decrements once when two stale instances of the same row are both destroyed" do
+      comment = Comment.create!(post: post, approved: true)
+      Comment.create!(post: post, approved: true)
+      stale = Comment.find(comment.id)
+
+      comment.destroy!
+      stale.destroy # the DELETE matches 0 rows — nothing was removed
+
+      expect(reload_counts(post)).to eq([1, 1])
+    end
+
+    it "does not decrement when a new (never-saved) record is destroyed" do
+      Comment.create!(post: post, approved: true)
+      Comment.new(post: post, approved: true).destroy
+
+      expect(reload_counts(post)).to eq([1, 1])
+    end
+
+    it "decrements the PERSISTED parent, not an unsaved in-memory reparent" do
+      comment = Comment.create!(post: post)
+      comment.post = other # assigned but never saved
+
+      comment.destroy!
+
+      expect(post.reload.comments_count).to eq(0)
+      expect(other.reload.comments_count).to eq(0)
+    end
+
+    it "evaluates if: against the persisted state, not an unsaved condition flip" do
+      comment = Comment.create!(post: post, approved: true)
+      comment.approved = false # unsaved flip
+
+      comment.destroy!
+
+      expect(reload_counts(post)).to eq([0, 0])
+    end
+
+    it "leaves the in-memory unsaved values in place after evaluating the persisted ones" do
+      comment = Comment.create!(post: post, approved: true)
+      comment.approved = false
+      comment.destroy!
+
+      expect(comment.approved).to be(false)
+    end
+  end
+
+  describe "belongs_to primary_key: (1.29 audit)" do
+    before(:each) do
+      ActiveRecord::Schema.define do
+        create_table :boards, force: true do |t|
+          t.integer :code
+          t.integer :pins_count, default: 0
+          t.integer :hot_pins_count, default: 0
+        end
+
+        create_table :pins, force: true do |t|
+          t.integer :board_code
+          t.boolean :hot, default: false
+        end
+      end
+
+      class Board < TestModel; end
+
+      class Pin < TestModel
+        include ConcernsOnRails::CounterCacheable
+
+        belongs_to :board, primary_key: :code, foreign_key: :board_code, optional: true
+        counter_cacheable_by :board
+        counter_cacheable_by :board, count: :hot_pins_count, if: -> { hot? }
+      end
+    end
+
+    after(:each) do
+      %i[Pin Board].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    # decoy.id == target.code, so a lookup by `id` would hit the wrong row.
+    let!(:target) { Board.create!(code: 2) }
+    let!(:decoy)  { Board.create!(code: 99) }
+
+    def board_counts(board)
+      fresh = board.reload
+      [fresh.pins_count, fresh.hot_pins_count]
+    end
+
+    it "adjusts the parent addressed by the association key on create / update / destroy" do
+      expect(decoy.id).to eq(target.code)
+
+      pin = Pin.create!(board: target, hot: true)
+      expect(board_counts(target)).to eq([1, 1])
+      expect(board_counts(decoy)).to eq([0, 0])
+
+      pin.update!(hot: false)
+      expect(board_counts(target)).to eq([1, 0])
+
+      pin.update!(board: decoy)
+      expect(board_counts(target)).to eq([0, 0])
+      expect(board_counts(decoy)).to eq([1, 0])
+
+      pin.destroy!
+      expect(board_counts(decoy)).to eq([0, 0])
+    end
+
+    it "recounts by the association key" do
+      Pin.create!(board: target, hot: true)
+      Pin.create!(board: target)
+      Board.update_all(pins_count: 7, hot_pins_count: 7)
+
+      Pin.recount_counter_caches!
+
+      expect(board_counts(target)).to eq([2, 1])
+      expect(board_counts(decoy)).to eq([0, 0])
+    end
+
+    it "recounts only the given parents: (records, relations and ids) by the association key" do
+      Pin.create!(board: target, hot: true)
+      Board.update_all(pins_count: 7, hot_pins_count: 7)
+
+      Pin.recount_counter_caches!(parents: target)
+      expect(board_counts(target)).to eq([1, 1])
+      expect(board_counts(decoy)).to eq([7, 7])
+
+      Board.update_all(pins_count: 7, hot_pins_count: 7)
+      Pin.recount_counter_caches!(parents: Board.where(id: target.id))
+      expect(board_counts(target)).to eq([1, 1])
+      expect(board_counts(decoy)).to eq([7, 7])
+
+      # Bare values are the parent's primary-key ids, as documented.
+      Board.update_all(pins_count: 7, hot_pins_count: 7)
+      Pin.recount_counter_caches!(parents: [target.id])
+      expect(board_counts(target)).to eq([1, 1])
+      expect(board_counts(decoy)).to eq([7, 7])
+    end
+  end
+
+  describe "destroyed by the parent's dependent: :destroy (review of #111)" do
+    before(:each) do
+      ActiveRecord::Schema.define do
+        create_table :lk_posts, force: true do |t|
+          t.integer :lock_version, default: 0
+          t.integer :lk_notes_count, default: 0
+        end
+        create_table :lk_users, force: true do |t|
+          t.integer :lk_notes_count, default: 0
+        end
+        create_table :lk_notes, force: true do |t|
+          t.integer :lk_post_id
+          t.integer :lk_user_id
+        end
+      end
+
+      Object.const_set(:LkPost, Class.new(TestModel) { self.table_name = "lk_posts" })
+      Object.const_set(:LkUser, Class.new(TestModel) { self.table_name = "lk_users" })
+      Object.const_set(:LkNote, Class.new(TestModel) { self.table_name = "lk_notes" })
+      LkPost.has_many :lk_notes, dependent: :destroy
+      LkNote.class_eval do
+        include ConcernsOnRails::CounterCacheable
+
+        belongs_to :lk_post
+        belongs_to :lk_user, optional: true
+        counter_cacheable_by :lk_post
+        counter_cacheable_by :lk_user
+      end
+    end
+
+    after(:each) do
+      %i[LkNote LkPost LkUser].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    it "skips the decrement on the parent being destroyed (no StaleObjectError under lock_version)" do
+      post = LkPost.create!
+      user = LkUser.create!
+      2.times { LkNote.create!(lk_post: post, lk_user: user) }
+
+      expect { post.reload.destroy! }.not_to raise_error
+      expect(LkPost.count).to eq(0)
+      expect(LkNote.count).to eq(0)
+      # Only the counter on the association doing the destroying is skipped.
+      expect(user.reload.lk_notes_count).to eq(0)
+    end
+
+    it "still decrements when the child is destroyed on its own" do
+      post = LkPost.create!
+      note = LkNote.create!(lk_post: post)
+      note.destroy!
+      expect(post.reload.lk_notes_count).to eq(0)
+    end
+  end
+
+  describe "has_one replacement with dependent: :destroy (re-review of #111)" do
+    before(:each) do
+      ActiveRecord::Schema.define do
+        create_table :ho_profiles, force: true do |t|
+          t.integer :ho_avatars_count, default: 0
+        end
+        create_table :ho_avatars, force: true do |t|
+          t.integer :ho_profile_id
+        end
+      end
+
+      Object.const_set(:HoProfile, Class.new(TestModel) { self.table_name = "ho_profiles" })
+      Object.const_set(:HoAvatar, Class.new(TestModel) { self.table_name = "ho_avatars" })
+      HoProfile.has_one :ho_avatar, dependent: :destroy
+      HoAvatar.class_eval do
+        include ConcernsOnRails::CounterCacheable
+
+        belongs_to :ho_profile
+        counter_cacheable_by :ho_profile
+      end
+    end
+
+    after(:each) do
+      %i[HoAvatar HoProfile].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    it "decrements for the replaced record — the parent survives" do
+      profile = HoProfile.create!
+      profile.create_ho_avatar!
+      profile.create_ho_avatar! # destroys the old one through the has_one
+
+      expect(HoAvatar.count).to eq(1)
+      expect(profile.reload.ho_avatars_count).to eq(1)
+    end
+  end
 end
