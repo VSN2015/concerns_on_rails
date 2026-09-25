@@ -1148,7 +1148,8 @@ stateable_by :state, states: %i[open closed], prefix: true
 
 **Notes**
 - String-column backed (not integer-backed like Rails enum) — values are stored as-is.
-- States like `active` / `expired` overlap with `Activatable`/`Expirable` scopes — use `prefix:` or `suffix:` to disambiguate.
+- A generated method or scope that would override one the class already has — from ActiveRecord (an event `lock` → `lock!`, a state `valid` → `valid?`) or another concern (`active` next to `Activatable`, `restore` next to `SoftDeletable`) — raises `ArgumentError` at class load; use `prefix:` or `suffix:`. Re-declaring Stateable itself (same class or subclass) is fine.
+- Re-declaring without `default:` drops the earlier default (new records fall back to the column's database default).
 - No persistence of transition history; combine with `Publishable` / `Schedulable` for time-based state tracking.
 
 ---

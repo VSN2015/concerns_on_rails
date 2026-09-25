@@ -58,7 +58,7 @@ stateable_by(field, states:, **options)
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `states:` | `Array<Symbol>` | — (required) | Ordered list of all valid state names. Cannot be empty. |
-| `default:` | `Symbol` | `nil` | State applied to new, unsaved records whose column is blank. Must be a member of `states:`. Set via an `after_initialize` callback; does not override a non-blank value. |
+| `default:` | `Symbol` | `nil` | State applied to new, unsaved records whose column is blank. Must be a member of `states:`. Set as an attribute-level default; does not override an explicit value. A re-declaration without `default:` removes it again (falling back to the column's database default). |
 | `transitions:` | `Hash` | `{}` | Named events. Each key is the event name (Symbol); each value is a hash with `:to` (required, Symbol) and optional `:from` (Symbol or Array of Symbols). Omitting `:from` means the transition is allowed from any state. |
 | `prefix:` | `true`, `String`, or `Symbol` | `nil` | Prepended to all generated method/scope names separated by `_`. Pass `true` to use the field name; pass a string/symbol to use a literal prefix. |
 | `suffix:` | `true`, `String`, or `Symbol` | `nil` | Appended to all generated method/scope names separated by `_`. Same coercion rules as `prefix:`. |
@@ -181,6 +181,7 @@ ticket.transition_to!(:nope)
   - A transition omits `:to`.
   - A transition references a state name not declared in `states:`.
   - A transition event name matches an existing state setter name — use `prefix:` or `suffix:` to resolve the clash.
+  - A generated method (`<state>?`, `<state>!`, `<event>!`, `may_<event>?`) or scope (`.<state>`) would override one the class already has from ActiveRecord or another concern — an event named `lock` (AR's pessimistic `lock!`, which `with_lock` and `lock: true` rely on), a state named `valid`, an event `restore` next to `SoftDeletable#restore!`, a state `active` next to `Activatable`. Use `prefix:` or `suffix:`. Methods an earlier `stateable_by` generated are exempt, so re-declaring on the same class or a subclass works.
   - `timestamps:` is neither `true`, `false`/`nil` nor an Array of states.
   - `timestamps:` names a state not declared in `states:`.
   - A stamped state's `<state>_at` column does not exist (all missing ones in one `:datetime` migration hint).
@@ -198,7 +199,9 @@ ticket.transition_to!(:nope)
 
 - **`transition_to!` bypasses guards** — it only validates that the target state is declared; it does not consult `transitions:` `:from` rules. Use it for administrative or migration tooling, not for business-rule enforcement.
 
-- **Method name conflicts with ActiveRecord** — state names like `new`, `valid`, or `save` will generate methods and scopes that shadow core ActiveRecord/Ruby methods. Use `prefix:` or `suffix:` for any state name that could collide.
+- **Method name conflicts are refused** — a state or event whose generated method or scope would override an existing ActiveRecord method (`valid?`, `lock!`, `save!`, …) or one another concern defined (`restore!`, `.active`) raises `ArgumentError` at class load instead of silently shadowing it. Use `prefix:` or `suffix:`. (Column attribute methods Rails generates lazily are not checked.)
+
+- **Re-declaring without `default:`** — a later `stateable_by` (same class or an STI subclass) that omits `default:` drops the earlier declaration's default; new records fall back to the column's own database default.
 
 - **`update!` is used throughout** — setters, event methods, and `transition_to!` all call `update!`. This means ActiveRecord validations run on every state change, and a `RecordInvalid` error can be raised if other validations on the model fail.
 
