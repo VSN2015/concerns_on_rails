@@ -69,7 +69,8 @@ module ConcernsOnRails
 
       # The streaming slow path. `find_each` pages forward by primary key, so
       # rows leaving the filtered set as they're updated are never skipped or
-      # revisited, and the relation is never materialized in full.
+      # revisited, and the relation is never materialized in full (see
+      # each_record for how an ordered or limited relation is iterated).
       #
       # The block returns truthy (counted), `:skip` (not counted, not an
       # error — a record that legitimately can't transition), or falsey
@@ -77,7 +78,7 @@ module ConcernsOnRails
       def run(relation, label:, message: "failed to update record")
         relation.klass.transaction do
           count = 0
-          relation.find_each do |record|
+          each_record(relation) do |record|
             result = yield(record)
             next if result == :skip
 
@@ -87,6 +88,28 @@ module ConcernsOnRails
           end
           count
         end
+      end
+
+      # `find_each` over exactly the rows `relation` selects — the iteration
+      # every batch verb, cascade and sweep goes through.
+      #
+      # `find_each` pages by primary key, so it IGNORES the relation's ORDER
+      # (raising outright under `error_on_ignored_order`, which a Sortable
+      # model's default_scope order tripped on every slow-path verb) yet
+      # HONORS its LIMIT: `order(id: :desc).limit(2)` batched the two LOWEST
+      # ids, not the two rows the fast path's update_all writes. So the order
+      # is stripped, and a limit/offset is resolved up front — the primary
+      # keys the relation selects (order, limit, default scopes and all) are
+      # plucked in one query, then iterated with every other condition kept.
+      # Plucked rather than a subquery: MySQL rejects LIMIT inside IN (...).
+      def each_record(relation, &block)
+        unless relation.limit_value || relation.offset_value
+          return relation.unscope(:order).find_each(&block)
+        end
+
+        key = relation.klass.primary_key
+        ids = relation.pluck(key)
+        relation.unscope(:order, :limit, :offset).where(key => ids).find_each(&block)
       end
 
       # The validate callbacks every ActiveRecord model carries out of the box

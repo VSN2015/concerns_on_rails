@@ -155,5 +155,60 @@ describe ConcernsOnRails::Support::BatchOps do
         described_class.run(BatchItem.all, label: "Test", message: "failed to soft-delete record") { false }
       end.to raise_error(ActiveRecord::RecordNotSaved, /failed to soft-delete record/)
     end
+
+    # find_each pages by primary key: it dropped the relation's ORDER but kept
+    # its LIMIT, so `order(id: :desc).limit(2)` batched the two LOWEST ids —
+    # not the rows the fast path's update_all touches for the same relation.
+    it "visits exactly the rows an ordered, limited relation selects" do
+      ids = Array.new(4) { BatchItem.create!(state: "new").id }
+
+      count = described_class.run(BatchItem.order(id: :desc).limit(2), label: "Test") { |r| r.update(state: "done") }
+
+      expect(count).to eq(2)
+      expect(BatchItem.where(state: "done").pluck(:id).sort).to eq(ids.last(2))
+    end
+
+    it "honors an offset the same way" do
+      ids = Array.new(5) { BatchItem.create!(state: "new").id }
+
+      described_class.run(BatchItem.order(id: :desc).offset(1).limit(2), label: "Test") { |r| r.update(state: "done") }
+
+      expect(BatchItem.where(state: "done").pluck(:id).sort).to eq(ids[2, 2])
+    end
+
+    it "still applies the relation's own conditions once the limit is resolved" do
+      keep = BatchItem.create!(state: "keep")
+      2.times { BatchItem.create!(state: "new") }
+
+      described_class.run(BatchItem.where(state: "new").order(id: :desc).limit(5), label: "Test") do |r|
+        r.update(state: "done")
+      end
+
+      expect(keep.reload.state).to eq("keep")
+      expect(BatchItem.where(state: "done").count).to eq(2)
+    end
+
+    describe "under error_on_ignored_order" do
+      around do |example|
+        config = ActiveRecord.respond_to?(:error_on_ignored_order=) ? ActiveRecord : ActiveRecord::Base
+        previous = config.error_on_ignored_order
+        config.error_on_ignored_order = true
+        example.run
+      ensure
+        config.error_on_ignored_order = previous
+      end
+
+      # A Sortable model's default_scope ORDER BY made every slow-path verb
+      # raise "Scoped order is ignored" instead of running.
+      it "does not raise for an ordered relation (a default_scope order included)" do
+        ordered = Class.new(TestModel) do
+          self.table_name = "batch_items"
+          default_scope { order(:state) }
+        end
+        2.times { ordered.create!(state: "new") }
+
+        expect(described_class.run(ordered.all, label: "Test") { |r| r.update(state: "done") }).to eq(2)
+      end
+    end
   end
 end

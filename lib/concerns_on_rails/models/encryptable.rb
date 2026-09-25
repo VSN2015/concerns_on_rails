@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/batch_ops"
 require "active_model/type"
 require "bigdecimal"
 require "time"
@@ -353,7 +354,7 @@ module ConcernsOnRails
           return 0 if columns.empty? # e.g. only per-field-keyed fields were named
 
           count = 0
-          needs_reencryption(*columns).find_each do |record|
+          ConcernsOnRails::Support::BatchOps.each_record(needs_reencryption(*columns)) do |record|
             count += 1 if record.reencrypt!(*columns)
           end
           count
