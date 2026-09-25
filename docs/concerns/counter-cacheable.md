@@ -47,7 +47,7 @@ Repeatable — each call maintains another counter. Rules accumulate (reassigned
 |--------|------|---------|-------------|
 | `association` | `Symbol` | — (required) | A non-polymorphic `belongs_to`, declared **before** this macro. |
 | `count:` | `Symbol` | `"<table_name>_count"` | The integer column on the parent table (e.g. `comments` → `comments_count`). Validated to exist when the parent class is loadable. |
-| `if:` | callable or `nil` | `nil` | A zero-arity lambda or a block-style proc is evaluated with `instance_exec` on the record; a lambda taking an argument (`->(c) { c.approved? }`), a symbol proc (`&:approved?`-style `:approved?.to_proc`) or any other callable object is called with the record (bare when its `#call` takes no arguments); the record counts only when it returns truthy. For updates the **previous** state is reconstructed from the changed attributes. |
+| `if:` | callable or `nil` | `nil` | A lambda with no required parameter or a block-style proc is evaluated with `instance_exec` on the record; a lambda taking an argument (`->(c) { c.approved? }`), a symbol proc (`&:approved?`-style `:approved?.to_proc`) or any other callable object is called with the record (bare when its `#call` takes no arguments); the record counts only when it returns truthy. For updates the **previous** state is reconstructed from the changed attributes. |
 | `touch:` | `true` / `false` | `false` | Also bump the parent's `updated_at` when the counter changes. |
 
 ### `recount_counter_caches!(association = nil, parents: <every parent>)`

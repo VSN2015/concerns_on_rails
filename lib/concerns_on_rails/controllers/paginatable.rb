@@ -48,6 +48,12 @@ module ConcernsOnRails
       # The same guard for per_page (see Support::ScalarParam::MAX_PER_PAGE,
       # which both paginators share).
       MAX_PER_PAGE = ConcernsOnRails::Support::ScalarParam::MAX_PER_PAGE
+      # Re-aliasing a DISTINCT select list (see paginatable_realiased_select):
+      # an item's own trailing alias, the tokens a list splits into (quoted
+      # strings/identifiers kept whole), and how parentheses nest.
+      PAGINATABLE_TRAILING_ALIAS = /\s+AS\s+(?:`[^`]*`|"[^"]*"|\[[^\]]*\]|\w+)\s*\z/i
+      PAGINATABLE_SELECT_TOKEN = /'(?:[^']|'')*'|"[^"]*"|`[^`]*`|[(),?]|[^'"`(),?]+|./m
+      PAGINATABLE_PAREN_DEPTH = { "(" => 1, ")" => -1 }.freeze
 
       included do
         class_attribute :paginatable_per_page, default: DEFAULT_PER_PAGE
@@ -255,16 +261,52 @@ module ConcernsOnRails
       def paginatable_distinct_select_total(source)
         connection = source.connection
         subquery = source.except(:order, :limit, :offset)
-        connection.select_value("SELECT COUNT(*) FROM (#{subquery.to_sql}) paginatable_distinct").to_i
+        inner = paginatable_realiased_select(subquery, connection) || subquery
+        connection.select_value("SELECT COUNT(*) FROM (#{inner.to_sql}) paginatable_distinct").to_i
       rescue ActiveRecord::StatementInvalid => e
         raise unless paginatable_mysql_duplicate_column?(connection, e)
 
-        # MySQL alone rejects a derived table whose SELECT list repeats an
-        # output name (`select("a.id, b.id")`, error 1060). MySQL does not
-        # abort the surrounding transaction on it, so fall back to reading
-        # the distinct rows themselves — one narrow column list, never the
-        # every-row count the subquery exists to avoid.
-        connection.select_rows(subquery.to_sql).size
+        # Only a select list that could not be re-aliased (a `table.*`, or an
+        # item we cannot split safely) reaches here on MySQL. Fall back to the
+        # plain count — an over-count, but one COUNT in SQL, never the
+        # distinct rows loaded into memory.
+        source.except(:order, :limit, :offset, :select).count(:all)
+      end
+
+      # MySQL rejects a derived table whose SELECT list repeats an output name
+      # (`select("a.id, b.id")`, error 1060). Re-alias every select item
+      # positionally (`... AS c0, ... AS c1`) — the same expressions, so the
+      # same DISTINCT rows — and the COUNT stays in SQL on every adapter. nil
+      # when the list cannot be split safely: `*` / `table.*`, or an unquoted
+      # bind placeholder.
+      def paginatable_realiased_select(subquery, connection)
+        items = subquery.arel.projections.flat_map do |projection|
+          paginatable_split_select_list(connection.visitor.compile(projection))
+        end
+        return nil unless paginatable_realiasable?(items)
+
+        aliased = items.each_with_index.map do |item, index|
+          "#{item.sub(PAGINATABLE_TRAILING_ALIAS, '')} AS #{connection.quote_column_name("c#{index}")}"
+        end
+        subquery.except(:select).select(Arel.sql(aliased.join(", ")))
+      end
+
+      def paginatable_realiasable?(items)
+        items.any? && items.none? { |item| item.nil? || item.empty? || item.match?(/(\A|\.)\*\z/) }
+      end
+
+      # Split a SELECT list on its top-level commas — not inside parentheses
+      # or quoted strings/identifiers. An unquoted `?` (an uninlined bind)
+      # makes the list unsplittable ([nil]).
+      def paginatable_split_select_list(sql)
+        tokens = sql.scan(PAGINATABLE_SELECT_TOKEN)
+        return [nil] if tokens.include?("?")
+
+        depth = 0
+        tokens.each_with_object([+""]) do |token, items|
+          depth += PAGINATABLE_PAREN_DEPTH.fetch(token, 0)
+          token == "," && depth.zero? ? items << +"" : items.last << token
+        end.map(&:strip)
       end
 
       def paginatable_mysql_duplicate_column?(connection, error)

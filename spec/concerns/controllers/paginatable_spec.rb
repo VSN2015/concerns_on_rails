@@ -703,6 +703,31 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(controller.pagination_meta[:total]).to eq(3)
     end
 
+    # MySQL rejects repeated output names in a derived table (1060); the
+    # select list is re-aliased positionally so COUNT(*) stays in SQL on
+    # every adapter — never the distinct rows loaded into memory.
+    it "re-aliases the select list positionally, keeping commas inside calls and quotes intact" do
+      controller = controller_class.new
+      relation = PaginationMembership
+                 .select(:group_id, "COALESCE(role_id, 0) AS role, 'a,b' AS tag").distinct.except(:order)
+      realiased = controller.send(:paginatable_realiased_select, relation, relation.connection)
+      column = ->(name) { TestDatabase.quoted_column(name) }
+
+      expect(realiased.to_sql).to include("COALESCE(role_id, 0) AS #{column.call('c1')}", "'a,b' AS #{column.call('c2')}")
+      expect(realiased.to_sql).not_to include("AS role")
+      controller.paginated(relation).to_a
+      expect(controller.pagination_meta[:total]).to eq(4)
+    end
+
+    it "leaves a select list it cannot split safely (table.*) to the plain subquery" do
+      controller = controller_class.new
+      relation = PaginationMembership.select("#{TestDatabase.quoted_table('pagination_memberships')}.*").distinct
+
+      expect(controller.send(:paginatable_realiased_select, relation, relation.connection)).to be_nil
+      controller.paginated(relation).to_a
+      expect(controller.pagination_meta[:total]).to eq(6)
+    end
+
     it "keeps counting every row of a plain DISTINCT relation" do
       controller = controller_class.new(params: { per_page: 2 })
       controller.paginated(PaginationMembership.distinct).to_a

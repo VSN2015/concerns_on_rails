@@ -11,14 +11,16 @@ module ConcernsOnRails
     # Dispatch follows Throttleable's `if:` (and Rails' own before_action
     # conditionals), keyed on the Proc's arity:
     #
-    #   * a zero-arity lambda (`-> { request.remote_ip }`) is instance_exec'd
-    #     on the receiver, so its methods resolve inside it;
+    #   * a lambda with no REQUIRED parameter (`-> { request.remote_ip }`,
+    #     `->(*) { ... }`, `->(c = nil) { ... }`) is instance_exec'd on the
+    #     receiver, so its methods resolve inside it — as every Proc was
+    #     before this dispatch existed;
     #   * a block-style (non-lambda) Proc is instance_exec'd too, AND handed
     #     the receiver as its argument (`proc { |c| ... }`: self and c are both
     #     the receiver; a proc ignores arguments it does not declare);
-    #   * a lambda that takes arguments (`->(c) { c.tenant }`) or a symbol proc
-    #     (`:tenant_secret.to_proc`, a lambda of arity -2) is called with the
-    #     receiver, keeping its own self;
+    #   * a lambda with a required parameter (`->(c) { c.tenant }`) or a
+    #     symbol proc (`:tenant_secret.to_proc`, parameters [[:req], [:rest]])
+    #     is called with the receiver, keeping its own self;
     #   * any other callable (an object with #call, a Method) is called with
     #     the receiver, unless its #call takes no arguments, in which case it
     #     is called bare (`secret: SecretStore.method(:current)`).
@@ -33,7 +35,7 @@ module ConcernsOnRails
 
       def invoke_proc(receiver, callable)
         return receiver.instance_exec(receiver, &callable) unless callable.lambda?
-        return receiver.instance_exec(&callable) if callable.arity.zero?
+        return receiver.instance_exec(&callable) if callable.parameters.none? { |kind, _name| kind == :req }
 
         callable.call(receiver)
       end
