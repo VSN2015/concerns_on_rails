@@ -164,13 +164,17 @@ module ConcernsOnRails
       # Guard 2 failing means the concern was configured on a parent and the
       # affix is being declared on a subclass — retiring nothing would hand
       # back an escape hatch that doesn't work, because the parent's colliding
-      # scopes would survive. That raises instead.
-      def retire!(klass, captured, label:)
+      # scopes would survive. That raises instead — unless `inherited: :keep`,
+      # for a concern whose affix is a RENAME rather than a collision escape
+      # (Anonymizable's repeat calls): the inherited names then simply stay.
+      def retire!(klass, captured, label:, inherited: :raise)
         singleton = klass.singleton_class
         captured.each_with_object([]) do |(name, recorded), removed|
           next unless singleton.method_defined?(name)
 
           current = singleton.instance_method(name)
+          next if inherited == :keep && current.owner != singleton
+
           retire_guard_owner!(current, singleton, klass, name, label)
           next unless current == recorded
 
