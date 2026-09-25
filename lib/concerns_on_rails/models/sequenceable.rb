@@ -41,9 +41,9 @@ module ConcernsOnRails
       UNSET = Object.new.freeze
       DEFAULTS = { into: nil, prefix: "", padding: 0, separator: "-", start_at: 1, scope: [],
                    reset: :never, template: nil, assign: :create, time_zone: nil }.freeze
-      # Options a re-declaration may change while still drawing from the
-      # inherited counter (see #sequenceable_owner).
-      OWNERSHIP_NEUTRAL = %i[assign time_zone].freeze
+      # The options that shape the VISIBLE number (see #sequenceable_owner);
+      # assign: never does, time_zone: must match (see #sequenceable_zone_matches!).
+      FORMAT_KEYS = %i[prefix template padding reset scope into separator start_at].freeze
       NORMALIZERS = {
         into: ->(value) { value&.to_sym },
         prefix: :to_s.to_proc, separator: :to_s.to_proc,
@@ -131,26 +131,60 @@ module ConcernsOnRails
         def sequenceable_merged_config(field, given)
           base = sequenceable_config[field]
           options = given.to_h { |key, value| [key, normalize_sequenceable_option(key, value)] }
-          (base || DEFAULTS).merge(options, owner: sequenceable_owner(base, options))
+          merged = (base || DEFAULTS).merge(options)
+          merged.merge(owner: sequenceable_owner(field, merged))
         end
 
-        # A first declaration owns its counter. A re-declaration that changes a
-        # numbering-identity option (prefix, template, padding, reset, scope,
-        # into, separator, start_at) starts its own series, as before. One that
-        # changes only assign: and/or time_zone: — or repeats the inherited
-        # values — keeps drawing from the inherited owner's rows. Taking
-        # ownership there would narrow MAX to the subclass's own type and
-        # reissue numbers the parent already gave out in the SAME format
-        # (INV-1 twice); the wider row set can only cost a gap. time_zone: is
-        # neutral for the same reason: a subclass cutting periods in another
-        # zone still formats "PREFIX<token>-n", so its numbers must be counted
-        # against the parent's — and with into: the stored-token MAX
-        # (SequenceCalculator#sequence_relation) sees across both zones' rows.
-        def sequenceable_owner(base, options)
-          return self if base.nil?
+        # INVARIANT: two classes that render the same visible format for a
+        # field share ONE owner (one MAX over one row set) and ONE zone.
+        # Otherwise each would draw MAX over a different row set or period
+        # range and both would issue "INV-20260925-1".
+        #
+        # Walk up the inherited owners (the declaring parent, then ITS
+        # inherited owner, ...) and compare the full merged format against each
+        # owner's current config. The first identical one keeps the counter.
+        # Only a format that matches none of them starts its own series (a
+        # CN- subclass). Comparing the whole tuple rather than the keys a call
+        # happened to pass means a subclass that went CN- and back to INV-
+        # rejoins the parent's counter instead of silently owning a duplicate
+        # INV- series. assign: is not part of the format: a manual Draft
+        # finalizes into its parent's series. Sibling subclasses that each
+        # declare the same format without a common declaring ancestor are not
+        # detectable here; give them distinct prefixes or scope: :type.
+        def sequenceable_owner(field, cfg)
+          klass = superclass
+          while klass.respond_to?(:sequenceable_config) && (inherited = klass.sequenceable_config[field])
+            owner = inherited[:owner]
+            ref = owner.sequenceable_config.fetch(field)
+            if FORMAT_KEYS.all? { |key| ref[key] == cfg[key] }
+              sequenceable_zone_matches!(field, owner, ref, cfg)
+              return owner
+            end
+            klass = owner.superclass
+          end
+          self
+        end
 
-          changed = options.any? { |key, value| !OWNERSHIP_NEUTRAL.include?(key) && base[key] != value }
-          changed ? self : base[:owner]
+        # Same visible format, different zone: the two classes would cut the
+        # same "20260926" day at different instants over one shared counter,
+        # so a Tokyo row and a UTC row could both read an empty range and
+        # issue "20260926-1" (into:'s stored-token MAX cannot help without
+        # into:). One format needs one zone. Refused at macro time.
+        def sequenceable_zone_matches!(field, owner, ref, cfg)
+          return if cfg[:reset] == :never
+          return if sequenceable_zone_id(ref[:time_zone]) == sequenceable_zone_id(cfg[:time_zone])
+
+          raise ArgumentError, "#{NAME}: #{name || inspect}##{field} renders the same format as " \
+                               "#{owner.name || owner.inspect} but cuts its reset: periods in a different " \
+                               "time_zone:. One visible format needs one zone (both would issue the same " \
+                               "number); use the same time_zone: or a different prefix:/template:"
+        end
+
+        # nil (app default) resolves as #period_time would, so an explicit zone
+        # equal to the default is not a conflict; aliases ("Tokyo" /
+        # "Asia/Tokyo") compare by their TZInfo identifier.
+        def sequenceable_zone_id(zone)
+          (zone || Time.zone_default || ActiveSupport::TimeZone["UTC"]).tzinfo.identifier
         end
 
         def normalize_sequenceable_option(key, value)

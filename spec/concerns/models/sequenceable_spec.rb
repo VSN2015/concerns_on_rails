@@ -900,4 +900,110 @@ describe ConcernsOnRails::Sequenceable do
       end
     end
   end
+
+  describe "one visible format = one counter and one zone (re-review of the fixed-zone PR)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :fmt_invoices, force: true do |t|
+          t.string  :type
+          t.string  :number
+          t.integer :sequence
+          t.integer :account_id
+          t.timestamps
+        end
+      end
+    end
+
+    after { Time.zone = "UTC" }
+
+    def seed(klass, at: Time.utc(2026, 9, 24, 16), **attrs)
+      klass.unscoped.insert_all([{ created_at: at, updated_at: at }.merge(attrs)])
+    end
+
+    def base_class(into: :number, **options)
+      Class.new(TestModel) do
+        self.table_name = "fmt_invoices"
+        self.time_zone_aware_attributes = true
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into:, reset: :day, **options
+      end
+    end
+
+    it "rejoins the parent's counter when a subclass changes its prefix away and back" do
+      stub_const("FmtInv", base_class(prefix: "INV-"))
+      stub_const("FmtSub", Class.new(FmtInv) do
+        sequenceable_by :sequence, prefix: "CN-"
+        sequenceable_by :sequence, prefix: "INV-" # the parent's format again
+      end)
+
+      expect(FmtSub.sequenceable_config[:sequence][:owner]).to eq(FmtInv)
+      first = FmtInv.create!
+      expect(FmtSub.create!.number).not_to eq(first.number)
+    end
+
+    it "walks past an intermediate owner to the ancestor with the same format" do
+      stub_const("FmtInv", base_class(prefix: "INV-"))
+      stub_const("FmtCn", Class.new(FmtInv) { sequenceable_by :sequence, prefix: "CN-" })
+      stub_const("FmtCnInv", Class.new(FmtCn) { sequenceable_by :sequence, prefix: "INV-" })
+
+      expect(FmtCn.sequenceable_config[:sequence][:owner]).to eq(FmtCn)
+      expect(FmtCnInv.sequenceable_config[:sequence][:owner]).to eq(FmtInv)
+      numbers = [FmtInv.create!, FmtCnInv.create!, FmtCn.create!].map(&:number)
+      expect(numbers.uniq.size).to eq(3)
+    end
+
+    it "refuses a re-declaration that keeps the format but changes the zone" do
+      stub_const("FmtInv", base_class(into: nil))
+      expect { stub_const("FmtTokyo", Class.new(FmtInv) { sequenceable_by :sequence, time_zone: "Tokyo" }) }
+        .to raise_error(ArgumentError, /same format as FmtInv.*different time_zone:. One visible format needs one zone/)
+    end
+
+    it "accepts a different zone with a different format, and a zone equal to the default" do
+      stub_const("FmtInv", base_class(prefix: "INV-"))
+      stub_const("FmtJp", Class.new(FmtInv) { sequenceable_by :sequence, prefix: "JP-", time_zone: "Tokyo" })
+      stub_const("FmtUtc", Class.new(FmtInv) { sequenceable_by :sequence, time_zone: "Etc/UTC" })
+
+      expect(FmtJp.sequenceable_config[:sequence][:owner]).to eq(FmtJp)
+      expect(FmtUtc.sequenceable_config[:sequence][:owner]).to eq(FmtInv)
+    end
+
+    it "keeps the config and the counter on a bare subclass re-declaration" do
+      stub_const("FmtInv", base_class(prefix: "INV-"))
+      stub_const("FmtSub", Class.new(FmtInv) { sequenceable_by :sequence })
+      FmtInv.create!
+      expect(FmtSub.create!.number).to end_with("-2")
+    end
+
+    describe "the stored-token MAX" do
+      it "escapes % _ and \\ in the prefix" do
+        klass = base_class(prefix: "A_%\\")
+        seed(klass, sequence: 7, number: "AB%\\20260925-7") # matches if _ were a wildcard
+        seed(klass, sequence: 9, number: "A_x\\20260925-9") # matches if % were a wildcard
+        expect(klass.create!(created_at: Time.utc(2026, 9, 25, 1)).sequence).to eq(1)
+        seed(klass, sequence: 4, number: "A_%\\20260925-4") # a literal match counts
+        expect(klass.create!(created_at: Time.utc(2026, 9, 25, 2)).sequence).to eq(5)
+      end
+
+      it "does not pick up a longer prefix's series (INV- vs INV-EU-)" do
+        klass = base_class(prefix: "INV-")
+        seed(klass, sequence: 9, number: "INV-EU-20260925-9")
+        expect(klass.create!(created_at: Time.utc(2026, 9, 25, 1)).sequence).to eq(1)
+      end
+
+      it "stays inside scope:" do
+        klass = base_class(scope: :account_id)
+        seed(klass, sequence: 9, number: "20260925-9", account_id: 2)
+        expect(klass.create!(account_id: 1, created_at: Time.utc(2026, 9, 25, 1)).sequence).to eq(1)
+        seed(klass, sequence: 3, number: "20260925-3", account_id: 1)
+        expect(klass.create!(account_id: 1, created_at: Time.utc(2026, 9, 25, 2)).sequence).to eq(4)
+      end
+
+      it "takes MAX over the integer column, so a non-numeric stored suffix is harmless" do
+        klass = base_class
+        seed(klass, sequence: 2, number: "20260925-ABC")
+        expect(klass.create!(created_at: Time.utc(2026, 9, 25, 1)).sequence).to eq(3)
+      end
+    end
+  end
 end
