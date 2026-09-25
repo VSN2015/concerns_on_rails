@@ -43,7 +43,7 @@ Key specs may be passed as trailing keyword arguments or as the positional Hash 
 | option | default | meaning |
 |---|---|---|
 | `type:` | `:string` | One of `:string`, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`, `:json` |
-| `default:` | `nil` | Returned while the key is absent — never persisted. A Proc is `instance_exec`'d per read; Hash/Array defaults are deep-duped per read |
+| `default:` | `nil` | Returned while the key is absent — never persisted. A Proc is `instance_exec`'d per read; any other default (Hash, Array, String, …) is deep-duped per read |
 | `in:` | — | Adds a model validation: a present, non-nil value must cast into the set (errors land on the accessor name) |
 | `query:` | `true` | `false` skips this key's `where_<accessor>` scope. The macro option of the same name sets the default for every key in the call |
 

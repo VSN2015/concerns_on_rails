@@ -178,6 +178,82 @@ describe ConcernsOnRails::Models::Normalizable do
       expect(user.valid?).to be true
       expect(user.email).to eq("alice@example.com")
     end
+
+    context "when validation is skipped" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :normalized_accounts, force: true do |t|
+            t.string :email
+            t.string :code
+          end
+        end
+      end
+
+      # Anonymous, on its own table: `users` is reused (with other columns)
+      # across spec files, and an anonymous class's reload can trip over that.
+      let(:model) do
+        Class.new(TestModel) do
+          self.table_name = "normalized_accounts"
+          include ConcernsOnRails::Models::Normalizable
+
+          normalizable :email, with: :email
+          normalizable :code, with: ->(v) { "#{v}!" } # deliberately NOT idempotent
+        end
+      end
+
+      it "still normalizes on update_attribute" do
+        user = model.create!(email: "a@b.com")
+        user.update_attribute(:email, "  NEW@B.COM ")
+        expect(user.reload.email).to eq("new@b.com")
+      end
+
+      it "still normalizes on save(validate: false), for a new record too" do
+        user = model.new(email: "  NEW@B.COM ", code: "x")
+        user.save(validate: false)
+        expect(user.reload.email).to eq("new@b.com")
+        expect(user.code).to eq("x!")
+      end
+
+      it "normalizes a value changed after a (failed) validation" do
+        user = model.new(email: "a@b.com")
+        user.valid?
+        user.email = " LATE@B.COM "
+        user.save(validate: false)
+        expect(user.reload.email).to eq("late@b.com")
+      end
+
+      it "does not run a rule twice in one validated save" do
+        user = model.create!(code: "x")
+        expect(user.reload.code).to eq("x!")
+        user.update!(code: "y")
+        expect(user.reload.code).to eq("y!")
+      end
+
+      it "does not re-run a rule on a save(validate: false) right after a validation" do
+        user = model.new(code: "x")
+        user.valid?
+        user.save(validate: false)
+        expect(user.reload.code).to eq("x!")
+      end
+
+      it "skips a column a partial select did not load" do
+        user = model.create!(email: "a@b.com", code: "x")
+        partial = model.select(:id, :code).find(user.id)
+        expect { partial.update_attribute(:code, "y") }.not_to raise_error
+        expect(user.reload.code).to eq("y!")
+      end
+
+      it "catches an in-place mutation made after validation" do
+        klass = Class.new(model) { after_validation { code << "  x" } }
+        expect(klass.create!(code: "a").reload.code).to eq("a!  x!")
+      end
+
+      it "leaves an unchanged field of a persisted record alone" do
+        user = model.create!(code: "x")
+        user.update_attribute(:email, "a@b.com")
+        expect(user.reload.code).to eq("x!")
+      end
+    end
   end
 
   describe "configuration errors" do

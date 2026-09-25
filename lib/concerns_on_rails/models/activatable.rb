@@ -46,6 +46,9 @@ module ConcernsOnRails
         class_attribute :activatable_scope_names, instance_accessor: false,
                                                   default: { active: :active, inactive: :inactive }.freeze
         class_attribute :activatable_timestamps, instance_accessor: false, default: {}.freeze
+        ConcernsOnRails::Support::Affix.refuse_stateable_names!(
+          self, Activatable.public_instance_methods(false), kind: :instance, label: LABEL
+        )
       end
 
       class_methods do # rubocop:disable Metrics/BlockLength
@@ -65,6 +68,7 @@ module ConcernsOnRails
 
           # Affix the scope names so two concerns that each define `.active`
           # (e.g. SoftDeletable / Expirable) can coexist on one model.
+          ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, activatable_scope_names.values, kind: :scope, label: LABEL)
           scope activatable_scope_names[:active],   -> { where(activatable_field => true) }
           scope activatable_scope_names[:inactive], -> { where(activatable_field => [false, nil]) }
           # ...and the predicates, which collide the same way (Expirable's active?).

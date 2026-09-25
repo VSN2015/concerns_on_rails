@@ -41,7 +41,7 @@ end
 
 ### `counter_cacheable_by(association, count: nil, if: nil, touch: false)`
 
-Repeatable — each call maintains another counter. Rules accumulate (reassigned, never mutated, so subclasses inherit). All errors raise `ArgumentError` at declaration time.
+Repeatable — each call maintains another counter. Rules accumulate (reassigned, never mutated, so subclasses inherit) and are keyed by association + `count:` column: re-declaring the same counter replaces the earlier rule for that class instead of adding a second one, so an STI subclass can narrow an inherited counter with `if:` without double-counting (the parent keeps its own rule). All errors raise `ArgumentError` at declaration time.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -52,7 +52,7 @@ Repeatable — each call maintains another counter. Rules accumulate (reassigned
 
 ### `recount_counter_caches!(association = nil, parents: <every parent>)`
 
-Class method. Recomputes every counter (or only those for one association) from scratch and returns `{ count_column => parents_with_a_nonzero_count }`. Portable across adapters: unconditional counters use `group(fk).count`, conditional counters tally in Ruby.
+Class method. Recomputes every counter (or only those for one association) from scratch and returns `{ count_column => parents_with_a_nonzero_count }`. Portable across adapters: unconditional counters use `group(fk).count`, conditional counters tally in Ruby. On an STI table the counter column is shared by the whole tree, so rows are tallied per stored `type` under that class's own rule for the column (a subclass that narrowed it with `if:` counts only its matching rows) and summed — the result matches the live counts whichever class of the tree the repair is called on.
 
 `parents:` limits the repair to specific parents — ids, records, or a relation of the parent class (`Post.where(...)`) — which are zeroed and re-tallied while every other row is left untouched. A listed parent with no matching children ends at `0`; an empty list/relation is a no-op returning `0` per column. Because the ids belong to one parent table, `parents:` needs the `association` argument when the child declares counters for more than one association (`ArgumentError` otherwise), and records or a relation of a different class are rejected with `ArgumentError` rather than zeroing whichever rows happen to share those ids. So is an `association` no counter was declared for, and an explicit `parents: nil` — omit the option to repair every parent, rather than have a typo or an empty `find_by` silently widen a scoped repair into a full-table rewrite.
 
@@ -121,4 +121,3 @@ Comment.recount_counter_caches!(:post, parents: Post.where(author: me))
 ## Changed in 1.22.0
 
 - `recount_counter_caches!` runs in a transaction (a crash mid-repair can no longer leave every counter zeroed) and groups parents by tally value — O(distinct counts) UPDATE statements instead of one per parent row.
-- `touch: true` raises at macro time on Rails < 6.0, where `update_counters` lacks the option.

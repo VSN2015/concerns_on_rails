@@ -44,6 +44,77 @@ describe ConcernsOnRails::Stateable do
     end
   end
 
+  describe "re-declaring default:" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :redefaulted_tickets, force: true do |t|
+          t.string :type
+          t.string :status
+          t.string :phase, default: "open"
+        end
+      end
+    end
+
+    let(:parent) do
+      Class.new(TestModel) do
+        self.table_name = "redefaulted_tickets"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft open], default: :draft
+      end
+    end
+
+    it "drops the parent's default in a subclass whose declaration gives none" do
+      stub_const("RedefaultedTicket", parent)
+      stub_const("RedefaultedIncident", Class.new(parent) { stateable_by :status, states: %i[open closed] })
+
+      expect(RedefaultedIncident.stateable_default).to be_nil
+      expect(RedefaultedIncident.new.status).to be_nil # "draft" is not even one of its states
+      expect(RedefaultedTicket.new.status).to eq("draft") # the parent keeps its own
+    end
+
+    it "keeps an inherited default that is still one of the subclass's states" do
+      stub_const("RedefaultedTicket", parent)
+      stub_const("RedefaultedBug", Class.new(parent) { stateable_by :status, states: %i[draft open triaged] })
+
+      expect(RedefaultedBug.stateable_default).to eq(:draft)
+      expect(RedefaultedBug.new.status).to eq("draft")
+    end
+
+    it "resets it with an explicit default: nil even when the state is still declared" do
+      stub_const("RedefaultedTicket", parent)
+      stub_const("RedefaultedTask", Class.new(parent) { stateable_by :status, states: %i[draft open], default: nil })
+
+      expect(RedefaultedTask.stateable_default).to be_nil
+      expect(RedefaultedTask.new.status).to be_nil
+      expect(RedefaultedTicket.new.status).to eq("draft")
+    end
+
+    it "keeps the field's own attribute type through the default and its reset" do
+      downcasing = Class.new(ActiveModel::Type::String) { def cast(value) = super&.downcase }.new
+      klass = Class.new(TestModel) do
+        self.table_name = "redefaulted_tickets"
+        attribute :status, downcasing
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft open], default: :draft
+      end
+      expect(klass.new(status: "OPEN").status).to eq("open") # not a forced plain :string
+
+      klass.stateable_by :status, states: %i[open closed]
+      expect(klass.new(status: "CLOSED").status).to eq("closed")
+      expect(klass.new.status).to be_nil
+    end
+
+    it "drops it on a same-class re-declaration, falling back to the column's own default" do
+      parent.stateable_by :phase, states: %i[draft open], default: :draft
+      expect(parent.new.phase).to eq("draft")
+
+      parent.stateable_by :phase, states: %i[open closed]
+      expect(parent.new.phase).to eq("open") # the DB default, not the stale "draft"
+    end
+  end
+
   describe "predicates" do
     it "reflects the current state" do
       ticket = Ticket.new(status: "pending")
@@ -219,6 +290,181 @@ describe ConcernsOnRails::Stateable do
           stateable_by :status, states: %i[draft published], transitions: { published: { to: :published } }
         end
       end.to raise_error(ArgumentError, /clashes with the same-named state setter/)
+    end
+
+    describe "generated-method collisions" do
+      it "refuses an event whose <event>! would override ActiveRecord's lock!" do
+        expect do
+          define_model(:lock_events) do
+            stateable_by :status, states: %i[open locked], default: :open,
+                                  transitions: { lock: { from: :open, to: :locked } }
+          end
+        end.to raise_error(ArgumentError, /'lock!'.*prefix: or suffix:/)
+      end
+
+      it "refuses it under lock: true too (the concern's own row lock calls lock!)" do
+        expect do
+          define_model(:lock_true_events) do
+            stateable_by :status, states: %i[open locked], lock: true,
+                                  transitions: { lock: { from: :open, to: :locked } }
+          end
+        end.to raise_error(ArgumentError, /'lock!'/)
+      end
+
+      it "accepts the same event once prefix:/suffix: moves it off the AR name" do
+        klass = define_model(:affixed_lock_events) do
+          stateable_by :status, states: %i[open locked], default: :open, lock: true, suffix: :thread,
+                                transitions: { lock: { from: :open, to: :locked } }
+        end
+        record = klass.create!
+        record.lock_thread!
+        expect(record.reload.status).to eq("locked")
+        expect { record.with_lock { nil } }.not_to raise_error
+      end
+
+      it "refuses a state whose predicate would override an ActiveRecord method" do
+        expect { define_model(:valid_states) { stateable_by :status, states: %i[valid invalid] } }
+          .to raise_error(ArgumentError, /'valid\?'/)
+      end
+
+      it "refuses a method another concern already defined (SoftDeletable#restore!)" do
+        ActiveRecord::Schema.define do
+          create_table(:restorables, force: true) do |t|
+            t.string :status
+            t.datetime :deleted_at
+          end
+        end
+        expect do
+          Class.new(TestModel) do
+            self.table_name = "restorables"
+            include ConcernsOnRails::SoftDeletable
+            include ConcernsOnRails::Stateable
+
+            stateable_by :status, states: %i[trashed live], transitions: { restore: { to: :live } }
+          end
+        end.to raise_error(ArgumentError, /'restore!'/)
+      end
+
+      it "refuses a scope another concern already defined (Activatable.active)" do
+        ActiveRecord::Schema.define do
+          create_table(:activatable_states, force: true) do |t|
+            t.string :status
+            t.boolean :active
+          end
+        end
+        expect do
+          Class.new(TestModel) do
+            self.table_name = "activatable_states"
+            include ConcernsOnRails::Activatable
+            include ConcernsOnRails::Stateable
+
+            stateable_by :status, states: %i[pending active]
+          end
+        end.to raise_error(ArgumentError, /'active\??'/)
+      end
+
+      it "refuses a scope name the class already answers (a pre-existing class method)" do
+        expect do
+          define_model(:class_method_states) do
+            def self.archived = :mine
+
+            stateable_by :status, states: %i[live archived]
+          end
+        end.to raise_error(ArgumentError, /generated scope 'archived'/)
+      end
+
+      context "when the other concern comes AFTER stateable_by" do
+        before do
+          ActiveRecord::Schema.define do
+            create_table(:reverse_orders, force: true) do |t|
+              t.string :status
+              t.boolean :active
+              t.datetime :expires_at
+              t.datetime :published_at
+            end
+          end
+        end
+
+        def reverse_model(&block)
+          Class.new(TestModel) do
+            self.table_name = "reverse_orders"
+            include ConcernsOnRails::Stateable
+
+            class_eval(&block)
+          end
+        end
+
+        it "refuses including a concern whose methods Stateable's would shadow (Activatable#active?)" do
+          expect do
+            reverse_model do
+              stateable_by :status, states: %i[pending active]
+              include ConcernsOnRails::Activatable
+            end
+          end.to raise_error(ArgumentError, /Activatable: method 'active\?' collides with .*Stateable.*prefix: or suffix:/)
+        end
+
+        it "refuses a Publishable whose publish! a Stateable event already defined" do
+          expect do
+            reverse_model do
+              stateable_by :status, states: %i[pending live], transitions: { publish: { to: :live } }
+              include ConcernsOnRails::Publishable
+            end
+          end.to raise_error(ArgumentError, /Publishable: method 'publish!'/)
+        end
+
+        it "refuses a later scope that would replace Stateable's (Expirable.expiring_within)" do
+          expect do
+            reverse_model do
+              stateable_by :status, states: %i[fresh expiring_within]
+              include ConcernsOnRails::Expirable
+
+              expirable_by
+            end
+          end.to raise_error(ArgumentError, /Expirable: scope 'expiring_within' collides/)
+        end
+
+        it "accepts the pair once stateable_by is affixed" do
+          klass = reverse_model do
+            stateable_by :status, states: %i[pending active], prefix: true
+            include ConcernsOnRails::Activatable
+
+            activatable_by :active
+          end
+          expect(klass.status_active.to_sql).to include(TestDatabase.quoted_column(:status))
+          expect(klass.active.to_sql).not_to include(TestDatabase.quoted_column(:status))
+        end
+      end
+
+      it "exempts column predicates in an STI parent's attribute module, whatever the load order" do
+        ActiveRecord::Schema.define do
+          create_table(:flagged_tickets, force: true) do |t|
+            t.string :type
+            t.string :status
+            t.boolean :flagged
+          end
+        end
+        parent = Class.new(TestModel) do
+          self.table_name = "flagged_tickets"
+          include ConcernsOnRails::Stateable
+
+          stateable_by :status, states: %i[open closed]
+        end
+        stub_const("FlaggedTicket", parent)
+        FlaggedTicket.new # defines flagged? in the PARENT's generated-attribute module
+
+        expect { Class.new(FlaggedTicket) { stateable_by :status, states: %i[open closed flagged] } }
+          .not_to raise_error
+      end
+
+      it "still lets the same class, and a subclass, re-declare its own methods" do
+        klass = define_model(:redeclared_states) do
+          stateable_by :status, states: %i[draft published], transitions: { publish: { to: :published } }
+        end
+        expect { klass.stateable_by :status, states: %i[draft published], transitions: { publish: { to: :published } } }
+          .not_to raise_error
+        expect { Class.new(klass) { stateable_by :status, states: %i[draft published archived] } }
+          .not_to raise_error
+      end
     end
 
     it "raises on unknown options (1.26)" do

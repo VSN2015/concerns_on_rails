@@ -109,10 +109,15 @@ module ConcernsOnRails
       module ClassMethods
         private
 
+        # Surrounding whitespace is stripped in :any mode too — a trailing
+        # space from a search box otherwise became part of the LIKE pattern
+        # (`search("rails ")` => `LIKE '%rails %'`) and missed "Rails".
+        # Interior whitespace is kept: :any matches the query as one phrase.
         def search_terms(query)
-          return [] if query.nil? || query.to_s.strip.empty?
+          text = query.to_s.strip
+          return [] if text.empty?
 
-          searchable_mode == :all ? query.to_s.split : [query.to_s]
+          searchable_mode == :all ? text.split : [text]
         end
 
         # OR the per-field LIKE predicate for a single term.

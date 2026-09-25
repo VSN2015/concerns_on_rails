@@ -54,6 +54,7 @@ module ConcernsOnRails
         end
         predicates = predicates.except(*answered)
         check_predicate_collisions!(klass, predicates.keys, label)
+        refuse_stateable_names!(klass, predicates.keys, kind: :instance, label: label)
 
         registry = predicate_registry(klass)
         inherited = retire_predicates!(klass, registry[label], label)
@@ -137,6 +138,27 @@ module ConcernsOnRails
         klass.table_exists?
       rescue ActiveRecord::ActiveRecordError
         false
+      end
+
+      # Stateable's collision guard only sees what exists when stateable_by
+      # runs, so the REVERSE order — stateable_by, then another concern — is
+      # checked here: every affixing concern calls this with the scopes it is
+      # about to define (`scope` would silently replace Stateable's `.active`)
+      # and, on include, with its public instance methods (Stateable's
+      # class-level `publish!` would silently shadow Publishable's, which its
+      # own batch verbs call). Names an earlier stateable_by generated —
+      # `stateable_owned_methods` — raise; anything else is left alone.
+      def refuse_stateable_names!(klass, names, kind:, label:)
+        return unless klass.respond_to?(:stateable_owned_methods)
+
+        taken = names.map(&:to_sym) & klass.stateable_owned_methods.fetch(kind)
+        return if taken.empty?
+
+        what = kind == :scope ? "scope" : "method"
+        raise ArgumentError,
+              "#{label}: #{what} '#{taken.first}' collides with the one ConcernsOnRails::Models::Stateable " \
+              "generated for a state or event; pass prefix: or suffix: to stateable_by (or to this concern's " \
+              "macro) to rename one of them"
       end
 
       # Snapshot the scopes a concern just defined on `klass`: a

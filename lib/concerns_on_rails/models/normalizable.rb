@@ -9,7 +9,8 @@ require "concerns_on_rails/support/column_guard"
 
 module ConcernsOnRails
   module Models
-    # Declarative attribute normalization that runs in before_validation.
+    # Declarative attribute normalization that runs in before_validation (and,
+    # as a backstop, in before_save for saves that skip validation).
     #
     #   normalizable :email,   with: :email                     # one preset
     #   normalizable :name,    with: %i[squish titleize]        # a chain, applied left to right
@@ -104,6 +105,9 @@ module ConcernsOnRails
       included do
         class_attribute :normalizable_rules, instance_accessor: false, default: {}
         before_validation :apply_normalizations
+        # Backstop for the saves that skip validation — update_attribute,
+        # save(validate: false) — which otherwise stored the raw value.
+        before_save :normalizable_apply_unvalidated
       end
 
       class_methods do
@@ -165,7 +169,42 @@ module ConcernsOnRails
       end
 
       def apply_normalizations
+        # field => the value this pass left it holding, so the before_save
+        # backstop can tell "already normalized" from "changed since".
+        @normalizable_applied = {}
+        normalizable_each_pending_rule do |field, normalizer, value|
+          normalized = normalizer.call(value)
+          self[field] = normalized unless normalized == value
+          # A copy: an in-place mutation after validation (`name << "  x"`)
+          # would otherwise mutate the recorded value too and look normalized.
+          @normalizable_applied[field] = self[field].dup
+        end
+      end
+
+      private
+
+      # Normalize only what before_validation did not: a field it already
+      # handled, still holding the value it produced, is skipped, so a
+      # non-idempotent Proc runs exactly once in a validated save. A field
+      # assigned after that validation (or never validated at all) is
+      # normalized here. The record is cleared for the next save.
+      def normalizable_apply_unvalidated
+        applied = @normalizable_applied || {}
+        @normalizable_applied = nil
+        normalizable_each_pending_rule do |field, normalizer, value|
+          next if applied.key?(field) && applied[field] == value
+
+          normalized = normalizer.call(value)
+          self[field] = normalized unless normalized == value
+        end
+      end
+
+      def normalizable_each_pending_rule
         self.class.normalizable_rules.each do |field, normalizer|
+          # A partial `select` load lacks the column: reading it would raise
+          # MissingAttributeError, and there is nothing to normalize.
+          next unless has_attribute?(field)
+
           value = self[field]
           next if value.nil?
           # Persisted records: a field not part of this save already went
@@ -174,8 +213,7 @@ module ConcernsOnRails
           next if persisted? && respond_to?(:will_save_change_to_attribute?) &&
                   !will_save_change_to_attribute?(field)
 
-          normalized = normalizer.call(value)
-          self[field] = normalized unless normalized == value
+          yield field, normalizer, value
         end
       end
     end
