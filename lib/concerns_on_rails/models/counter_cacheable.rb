@@ -58,7 +58,9 @@ module ConcernsOnRails
     #     associations.
     #   * `recount_counter_caches!` rewrites every parent's counter and, for a
     #     conditional counter, scans the children in Ruby (portable across
-    #     adapters, but O(n)) — a maintenance operation, run it offline.
+    #     adapters, but O(n)) — a maintenance operation, run it offline. On an
+    #     STI table it tallies every class's rows under that class's own rule,
+    #     so it repairs the shared column from whichever class it is called on.
     #   * Reach for the `counter_culture` gem when you need multi-level rollups,
     #     delta columns, or after-commit execution.
     module CounterCacheable
@@ -250,7 +252,6 @@ module ConcernsOnRails
           parent_class = reflection.klass
           key = counter_cacheable_parent_key(reflection)
           column = rule[:count_column]
-          condition = rule[:condition]
 
           # One transaction so a crash mid-repair can't leave every counter at
           # the zeroed intermediate state. A scoped repair locks its (bounded)
@@ -265,9 +266,9 @@ module ConcernsOnRails
               targets.lock.pluck(parent_class.primary_key)
             end
 
-            children = unscoped.where.not(fk => nil)
+            children = base_class.unscoped.where.not(fk => nil)
             children = children.where(fk => parent_ids) if parent_ids
-            counts = condition ? counter_cacheable_recount_tally(children, fk, condition) : children.group(fk).count
+            counts = counter_cacheable_tally(children, fk, rule)
 
             targets.update_all(column => 0)
             counter_cacheable_apply_tally(parent_class, key, column, counts)
@@ -288,6 +289,44 @@ module ConcernsOnRails
 
             parent_class.unscoped.where(key => ids).update_all(column => n)
           end
+        end
+
+        # { parent key => count } for one (association, column) counter. The
+        # column is shared by every class of an STI tree, and each class may
+        # carry its own rule for it (a subclass narrowing it with `if:`), so
+        # the rows are tallied per stored type under THAT class's effective
+        # rule and summed: a recount agrees with the live counts whichever
+        # class of the tree it is called on — the parent no longer counts
+        # subclass rows under its own rule, and a subclass no longer zeroes
+        # the column and re-tallies its own rows only. A table without an
+        # inheritance column is the one-class case.
+        def counter_cacheable_tally(children, foreign_key, rule)
+          type_column = inheritance_column.to_s
+          return counter_cacheable_rule_tally(children, foreign_key, rule) unless base_class.column_names.include?(type_column)
+
+          key = rule.values_at(:association, :count_column)
+          children.distinct.pluck(type_column).each_with_object(Hash.new(0)) do |type, tally|
+            effective = counter_cacheable_rule_for_type(type_column, type, key)
+            next unless effective
+
+            rows = children.where(type_column => type)
+            counter_cacheable_rule_tally(rows, foreign_key, effective).each { |id, n| tally[id] += n }
+          end
+        end
+
+        # The rule the class stored as `type` applies for this counter, or nil.
+        # `instantiate` resolves the type exactly as loading the row would
+        # (blank => the base class; an unknown type raises SubclassNotFound).
+        def counter_cacheable_rule_for_type(type_column, type, key)
+          klass = base_class.instantiate(type_column => type).class
+          return nil unless klass.respond_to?(:counter_cacheable_rules)
+
+          klass.counter_cacheable_rules.find { |candidate| candidate.values_at(:association, :count_column) == key }
+        end
+
+        def counter_cacheable_rule_tally(children, foreign_key, rule)
+          condition = rule[:condition]
+          condition ? counter_cacheable_recount_tally(children, foreign_key, condition) : children.group(foreign_key).count
         end
 
         def counter_cacheable_recount_tally(children, foreign_key, condition)

@@ -327,6 +327,46 @@ describe ConcernsOnRails::Models::CounterCacheable do
       expect(Reply.counter_cacheable_rules.first[:condition]).to be_nil # parent untouched
     end
 
+    context "when recounting an STI-narrowed counter" do
+      before do
+        stub_const("Reply", reply_class)
+        stub_const("ModeratedReply", Class.new(reply_class) do
+          counter_cacheable_by :post, count: :comments_count, if: -> { approved? }
+        end)
+      end
+
+      it "agrees with the live count when called on the parent class" do
+        Reply.create!(post: post)
+        ModeratedReply.create!(post: post, approved: false) # not counted by its own rule
+        expect(post.reload.comments_count).to eq(1)
+
+        Reply.recount_counter_caches!
+        expect(post.reload.comments_count).to eq(1)
+      end
+
+      it "keeps the parent class's rows when called on the subclass" do
+        Reply.create!(post: post)
+        ModeratedReply.create!(post: post, approved: true)
+        expect(post.reload.comments_count).to eq(2)
+
+        ModeratedReply.recount_counter_caches!
+        expect(post.reload.comments_count).to eq(2)
+      end
+
+      it "repairs drift the same way, with parents:, from either class" do
+        Reply.create!(post: post)
+        ModeratedReply.create!(post: post, approved: true)
+        ModeratedReply.create!(post: post, approved: false)
+        Post.where(id: post.id).update_all(comments_count: 99)
+
+        expect(ModeratedReply.recount_counter_caches!(parents: [post])).to eq(comments_count: 1)
+        expect(post.reload.comments_count).to eq(2)
+        Post.where(id: post.id).update_all(comments_count: 0)
+        Reply.recount_counter_caches!(parents: [post])
+        expect(post.reload.comments_count).to eq(2)
+      end
+    end
+
     it "replaces the earlier rule, in place, when the same class re-declares it" do
       stub_const("Reply", reply_class) # the `type` column needs a named class
       reply_class.counter_cacheable_by :post, count: :approved_comments_count, if: -> { approved? }
