@@ -94,7 +94,7 @@ GEM
     parser (3.3.12.0)
       ast (~> 2.4.1)
       racc
-    permittable (0.2.0)
+    permittable (0.7.0)
       activesupport (>= 5.0, < 9)
     pp (0.6.3)
       prettyprint
@@ -150,8 +150,8 @@ GEM
       diff-lcs (>= 1.2.0, < 2.0)
       rspec-support (~> 3.13.0)
     rspec-support (3.13.7)
-    rubocop (1.89.0)
-      json (~> 2.3)
+    rubocop (1.91.0)
+      json (>= 2.3)
       language_server-protocol (~> 3.17.0.2)
       lint_roller (~> 1.1.0)
       parallel (>= 1.10)
@@ -166,7 +166,7 @@ GEM
       prism (~> 1.7)
     ruby-progressbar (1.13.0)
     securerandom (0.4.1)
-    simplecov (1.1.1)
+    simplecov (1.2.0)
     sqlite3 (2.9.6)
       mini_portile2 (~> 2.8.0)
     stringio (3.2.0)
@@ -175,9 +175,9 @@ GEM
     tsort (0.2.0)
     tzinfo (2.0.6)
       concurrent-ruby (~> 1.0)
-    unicode-display_width (3.2.0)
-      unicode-emoji (~> 4.1)
-    unicode-emoji (4.2.0)
+    unicode-display_width (3.3.0)
+      unicode-emoji (~> 4.3)
+    unicode-emoji (4.3.0)
     uri (1.1.1)
     useragent (0.16.11)
     zeitwerk (2.6.18)
@@ -195,8 +195,8 @@ DEPENDENCIES
   railties (>= 6.0, < 9)
   rake
   rspec (~> 3.12)
-  rubocop (~> 1.89)
-  simplecov (~> 1.1)
+  rubocop (~> 1.91)
+  simplecov (~> 1.2)
   sqlite3 (~> 2.9.6)
 
 BUNDLED WITH
