@@ -26,10 +26,13 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
 
   before(:each) do
     ActiveRecord::Schema.define do
+      # NOT NULL on purpose: these columns exercise the plain keyset SQL (row
+      # tuples, `col dir`); nullable ordering columns have their own table
+      # in "NULL ordering values".
       create_table :items, force: true do |t|
-        t.string :name
-        t.integer :score
-        t.datetime :created_at, precision: 6
+        t.string :name, null: false, default: ""
+        t.integer :score, null: false, default: 0
+        t.datetime :created_at, precision: 6, null: false
       end
 
       create_table :widgets, force: true do |t|
@@ -649,22 +652,249 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
     end
   end
 
+  # Nullable ordering columns paginate with their NULLs LAST — whatever the
+  # direction, the adapter's own NULL placement (SQLite/MySQL first
+  # ascending, PostgreSQL first descending) and the page size — every row
+  # exactly once, no errors, no extra queries. A keyset `col > v` is never
+  # TRUE for a NULL, so NULL rows used to vanish (or, briefly, 500).
   describe "NULL ordering values" do
-    it "raises loudly when the page-boundary row has a NULL ordering value" do
-      Item.delete_all
-      # Every row is NULL-scored on purpose. Where the NULL lands in the sort is
-      # adapter-specific — SQLite and MySQL order NULLs first ascending,
-      # PostgreSQL orders them last — so a mixed fixture only puts a NULL on the
-      # page boundary on two of the three. With no non-NULL score anywhere, the
-      # boundary row carries a NULL whichever way the adapter sorts, and the
-      # guard under test fires on every one of them.
-      Item.create!(name: "null-score-a", score: nil)
-      Item.create!(name: "null-score-b", score: nil)
+    before do
+      ActiveRecord::Schema.define do
+        create_table(:nullable_items, force: true) do |t|
+          t.string :name, **(TestDatabase.adapter == "sqlite3" ? { collation: "NOCASE" } : {})
+          t.integer :score
+        end
+      end
+      stub_const("NullableItem", Class.new(TestModel) { self.table_name = "nullable_items" })
+      # NULLs in the first and the secondary column, ties on both, and
+      # case-variant names (equal under a case-insensitive collation).
+      [["a", 3], ["A", nil], ["b", 1], ["B", 1], [nil, 2], [nil, nil], ["c", nil], ["a", 3], ["d", 2], [nil, 1]]
+        .each { |name, score| NullableItem.create!(name: name, score: score) }
+    end
 
+    let(:bidi_class) do
+      Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order: :id, bidirectional: true
+      end
+    end
+
+    def bidi_page(relation, order, per_page, cursor)
+      controller = bidi_class.new(params: { per_page: per_page, cursor: cursor }.compact)
+      [controller.cursor_paginated(relation, order: order).map(&:id), controller.cursor_pagination_meta]
+    end
+
+    # Forward to the end, then back to the start with prev cursors; returns
+    # [forward ids, backward ids (in canonical order)]. Bounded, so a cycling
+    # walk fails instead of hanging.
+    def walk_both_ways(relation, order, per_page:)
+      pages = [bidi_page(relation, order, per_page, nil)]
+      pages << bidi_page(relation, order, per_page, pages.last.last[:next_cursor]) while pages.last.last[:next_cursor] && pages.size < 50
+      back = pages.last.first.dup
+      cursor = pages.last.last[:prev_cursor]
+      30.times do
+        break unless cursor
+
+        ids, meta = bidi_page(relation, order, per_page, cursor)
+        back.unshift(*ids)
+        cursor = meta[:prev_cursor]
+      end
+      [pages.flat_map(&:first), back]
+    end
+
+    orders = {
+      "score asc" => { score: :asc },
+      "score desc" => { score: :desc },
+      "name asc, score desc (NULL secondary)" => { name: :asc, score: :desc },
+      "score desc, name asc (mixed)" => { score: :desc, name: :asc },
+      "name desc" => { name: :desc }
+    }
+    orders.each do |label, order|
+      [1, 2, 3].each do |per_page|
+        it "walks every row exactly once, both ways — #{label}, per_page #{per_page}" do
+          forward, backward = walk_both_ways(NullableItem.all, order, per_page: per_page)
+          all_ids = NullableItem.pluck(:id)
+
+          expect(forward).to match_array(all_ids)
+          expect(forward.uniq.size).to eq(forward.size)
+          expect(backward).to eq(forward)
+        end
+      end
+    end
+
+    it "puts the NULLs last whatever the direction (and the adapter)" do
+      %i[asc desc].each do |dir|
+        ids, = walk_both_ways(NullableItem.all, { score: dir }, per_page: 4)
+        scores = NullableItem.where(id: ids).to_h { |item| [item.id, item.score] }.values_at(*ids)
+
+        expect(scores.last(3)).to all(be_nil), "#{dir}: #{scores.inspect}"
+        expect(scores.first(7).compact).to eq(dir == :asc ? scores.first(7).compact.sort : scores.first(7).compact.sort.reverse)
+      end
+    end
+
+    it "walks DISTINCT and joined relations the same way" do
+      table = TestDatabase.quoted_table("nullable_items")
+      relation = NullableItem.distinct.joins("INNER JOIN #{table} other ON other.id = #{table}.id")
+
+      forward, backward = walk_both_ways(relation, { score: :desc, name: :asc }, per_page: 3)
+      expect(forward).to match_array(NullableItem.pluck(:id))
+      expect(backward).to eq(forward)
+    end
+
+    it "walks client-selected presets the same way" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order_presets: { top: { score: :desc }, alpha: { name: :asc } }, per_page: 2
+      end
+      %w[top alpha].each do |preset|
+        seen = []
+        cursor = nil
+        loop do
+          controller = klass.new(params: { order: preset, cursor: cursor }.compact)
+          seen.concat(controller.cursor_paginated(NullableItem.all).map(&:id))
+          cursor = controller.cursor_pagination_meta[:next_cursor]
+          break unless cursor
+        end
+        expect(seen).to match_array(NullableItem.pluck(:id)), preset
+      end
+    end
+
+    it "encodes a NULL boundary explicitly and rejects null on a NOT NULL column" do
+      NullableItem.where.not(score: nil).delete_all
       controller = make_controller(per_page: 1)
-      expect do
-        controller.cursor_paginated(Item.all, order: :score)
-      end.to raise_error(ArgumentError, /NULL on the page-boundary row/)
+      controller.cursor_paginated(NullableItem.all, order: :score)
+      expect(decode(controller.cursor_pagination_meta[:next_cursor])["v"].first).to be_nil
+
+      tampered = encode("t" => "nullable_items", "o" => ["score:asc", "id:asc"], "v" => [1, nil])
+      expect { make_controller(cursor: tampered).cursor_paginated(NullableItem.all, order: :score) }
+        .to raise_error(described_class::InvalidCursor, /Invalid pagination cursor/)
+    end
+
+    # Regressions of the fail-loudly design this replaced: one NULL row far
+    # past page 1 made page 1 raise, and every page paid an extra
+    # EXISTS (... IS NULL) — a full scan when the column has no NULLs.
+    it "renders page 1 when a NULL row lies far past it" do
+      NullableItem.delete_all
+      1.upto(30) { |i| NullableItem.create!(name: "n#{i}", score: i) }
+      NullableItem.create!(name: "null", score: nil)
+
+      records = make_controller(per_page: 5).cursor_paginated(NullableItem.all, order: { score: :asc })
+      expect(records.map(&:score)).to eq([1, 2, 3, 4, 5])
+    end
+
+    it "runs exactly one query per page, NULL-aware ordering included" do
+      first = make_controller(per_page: 3)
+      first.cursor_paginated(NullableItem.all, order: :score)
+      queries = []
+      callback = ->(*, payload) { queries << payload[:sql] unless payload[:name] == "SCHEMA" }
+
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+        make_controller(per_page: 3, cursor: first.cursor_pagination_meta[:next_cursor])
+          .cursor_paginated(NullableItem.all, order: :score)
+      end
+      expect(queries.size).to eq(1)
+      column = TestDatabase.qualified("nullable_items", "score")
+      placement =
+        TestDatabase.adapter == "postgresql" ? "#{column} ASC NULLS LAST" : "CASE WHEN #{column} IS NULL THEN 1 ELSE 0 END ASC"
+      expect(queries.first).to include(placement)
+    end
+
+    it "keeps the plain ORDER BY (no NULL-placement expression) for NOT NULL columns" do
+      queries = []
+      callback = ->(*, payload) { queries << payload[:sql] unless payload[:name] == "SCHEMA" }
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+        make_controller(per_page: 3).cursor_paginated(Item.all, order: :score)
+      end
+
+      plain = "ORDER BY #{TestDatabase.qualified('items', 'score')} ASC, #{TestDatabase.qualified('items', 'id')} ASC"
+      expect(queries.first).to include(plain)
+      expect(queries.first).not_to match(/CASE|NULLS/)
+    end
+  end
+
+  # A display override (`def name = super.upcase`) is common, and the cursor
+  # boundary used to be read through it: "ITEM-10" sorts before every
+  # lowercase name, so `name > 'ITEM-10'` restarted the walk at page one —
+  # forever. The cursor keys on the stored value the WHERE compares against.
+  describe "an overridden attribute reader" do
+    it "keys the cursor on the stored value, so no row repeats or is skipped" do
+      shouting = Class.new(Item) do
+        def name = super&.upcase
+      end
+
+      seen = []
+      cursor = nil
+      10.times do
+        controller = make_controller({ per_page: 10, cursor: cursor }.compact)
+        seen.concat(controller.cursor_paginated(shouting.all, order: :name).map(&:id))
+        cursor = controller.cursor_pagination_meta[:next_cursor]
+        break unless cursor
+      end
+
+      expect(seen).to eq(Item.order(:name, :id).pluck(:id))
+    end
+  end
+
+  # Every keyword defaulted, so a subclass that re-declared only `order:`
+  # silently reset the rest — including the parent's `signed:`, turning
+  # cursor signing OFF for the whole subtree.
+  describe "re-declaring cursor_paginate_by in a subclass" do
+    let(:parent) do
+      Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order: { id: :asc }, signed: "k" * 32, per_page: 7, max_per_page: 50,
+                           bidirectional: true, predicate: :or, link_header: false
+      end
+    end
+
+    it "inherits every option the subclass does not pass" do
+      child = Class.new(parent) { cursor_paginate_by order: { id: :desc } }
+
+      expect(child.cursor_paginatable_order).to eq([%i[id desc]])
+      expect(child.cursor_paginatable_signed).to eq("k" * 32)
+      expect(child.cursor_paginatable_per_page).to eq(7)
+      expect(child.cursor_paginatable_max_per_page).to eq(50)
+      expect(child.cursor_paginatable_bidirectional).to be(true)
+      expect(child.cursor_paginatable_predicate).to eq(:or)
+      expect(child.cursor_paginatable_link_header).to be(false)
+      expect(parent.cursor_paginatable_order).to eq([%i[id asc]])
+    end
+
+    it "inherits the ordering when the subclass only tunes other options" do
+      child = Class.new(parent) { cursor_paginate_by per_page: 3 }
+
+      expect(child.cursor_paginatable_order).to eq([%i[id asc]])
+      expect(child.cursor_paginatable_per_page).to eq(3)
+      expect(child.cursor_paginatable_signed).to eq("k" * 32)
+    end
+
+    it "still lets a subclass switch an option off explicitly" do
+      child = Class.new(parent) { cursor_paginate_by signed: false, bidirectional: false }
+
+      expect(child.cursor_paginatable_signed).to be(false)
+      expect(child.cursor_paginatable_bidirectional).to be(false)
+    end
+
+    it "replaces the ordering source wholesale: order: over inherited presets, and back" do
+      presets = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order_presets: { newest: { id: :desc }, alpha: { name: :asc } }, default_preset: :alpha
+      end
+      fixed = Class.new(presets) { cursor_paginate_by order: :id }
+      expect(fixed.cursor_paginatable_order).to eq([%i[id asc]])
+      expect(fixed.cursor_paginatable_order_presets).to be_nil
+      expect(fixed.cursor_paginatable_default_preset).to be_nil
+
+      repicked = Class.new(presets) { cursor_paginate_by default_preset: :newest }
+      expect(repicked.cursor_paginatable_default_preset).to eq(:newest)
+      expect(repicked.cursor_paginatable_order_presets.keys).to eq(%i[newest alpha])
+
+      expect { Class.new(fixed) { cursor_paginate_by default_preset: :newest } }
+        .to raise_error(ArgumentError, /default_preset: requires order_presets:/)
     end
   end
 

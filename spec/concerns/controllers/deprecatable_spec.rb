@@ -404,6 +404,32 @@ describe ConcernsOnRails::Controllers::Deprecatable do
       expect(c.captured_tenant).to eq("acme")
     end
 
+    # The macro accepts anything with #call, but notify: was instance_exec'd —
+    # a TypeError on EVERY deprecated request for a non-Proc callable.
+    it "calls a callable object notify: with the controller" do
+      notifier = Class.new do
+        attr_reader :seen
+
+        def call(controller) = (@seen = controller.action_name)
+      end.new
+      klass = deprecatable_class { deprecate_actions :index, deprecated_at: "2025-01-01", notify: notifier }
+      c = instance(klass, action: "index")
+
+      expect { c.apply_api_deprecations }.not_to raise_error
+      expect(notifier.seen).to eq("index")
+      expect(c.response.headers["Deprecation"]).to eq("@1735689600")
+    end
+
+    it "calls a zero-argument callable notify: (a Method) bare" do
+      calls = []
+      metrics = Object.new
+      metrics.define_singleton_method(:ping) { calls << :ping }
+      klass = deprecatable_class { deprecate_actions :index, deprecated_at: "2025-01-01", notify: metrics.method(:ping) }
+
+      instance(klass, action: "index").apply_api_deprecations
+      expect(calls).to eq([:ping])
+    end
+
     it "lets a raising notify propagate (a broken metrics hook must be loud)" do
       klass = deprecatable_class do
         deprecate_actions :index, deprecated_at: "2025-01-01", notify: -> { raise "metrics down" }

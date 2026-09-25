@@ -174,6 +174,19 @@ describe ConcernsOnRails::Models::Monetizable do
         expect(cents_for(klass, garbage)).to be_nil, "#{garbage.inspect} should cast to nil"
       end
     end
+
+    # BigDecimal() accepts Ruby-literal underscores, so "5_5" read as 55 —
+    # while the equally mis-grouped "1,5" is (rightly) garbage.
+    it "rejects underscore-grouped digits like any other mis-grouped amount" do
+      klass = product_class { monetizable :price_cents }
+
+      %w[5_5 1_000 $1_000.00 1_000,50 5.5_0 1e1_0].each do |garbage|
+        expect(cents_for(klass, garbage)).to be_nil, "#{garbage.inspect} should cast to nil"
+        expect(ConcernsOnRails::Support::Money.parse(garbage, {})).to be_nil
+      end
+      expect(cents_for(klass, "1,000.50")).to eq(100_050)
+      expect(cents_for(klass, ".5")).to eq(50)
+    end
   end
 
   describe "options" do

@@ -25,7 +25,10 @@ module ConcernsOnRails
     # Reads params[:cursor] (the opaque token from X-Next-Cursor) and
     # params[:per_page]. The primary key is always appended as a tiebreaker.
     # Ordering columns are chosen in code (never from params), must live on the
-    # base model's table, be selected by the relation, and should be NOT NULL.
+    # base model's table, and be selected by the relation. A column the schema
+    # allows NULL in is paginated with its NULLs LAST, whatever the direction
+    # and adapter (see cursor_order_nodes) — every row exactly once, no
+    # errors and no extra queries; NOT NULL columns keep plain `col dir` SQL.
     #
     # Optional capabilities (all opt-in, defaults unchanged):
     #   * bidirectional: true — mints X-Prev-Cursor / X-Has-Prev alongside the
@@ -62,6 +65,9 @@ module ConcernsOnRails
       VALID_DIRECTIONS = %i[asc desc].freeze
       VALID_PREDICATES = %i[auto row or].freeze
       CURSOR_DIRECTIONS = %w[next prev].freeze
+      # "Option not passed" for cursor_paginate_by, so a re-declaration keeps
+      # (inherits) what it omits — see the macro.
+      UNSET = Object.new.freeze
       # Adapters whose SQL supports row-value (tuple) comparison: (a, b) > (x, y).
       ROW_PREDICATE_ADAPTERS = /postgres|mysql|trilogy|sqlite/i
       # Deliberately mutable: memoizes adapter row-predicate support per model
@@ -169,21 +175,62 @@ module ConcernsOnRails
         #   cursor_paginate_by order_presets: { newest: { created_at: :desc }, top: { score: :desc } },
         #                      default_preset: :newest, bidirectional: true
         # max_per_page: 0 (or negative) disables the per_page cap.
-        def cursor_paginate_by(order: nil, order_presets: nil, default_preset: nil, order_param: :order,
-                               per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE,
-                               bidirectional: false, predicate: :auto, link_header: true, signed: false)
-          self.cursor_paginatable_order = order && CursorPaginatable.normalize_order!(order)
-          self.cursor_paginatable_order_presets = order_presets && CursorPaginatable.normalize_presets!(order_presets)
-          self.cursor_paginatable_default_preset =
-            CursorPaginatable.resolve_default_preset!(cursor_paginatable_order_presets, default_preset, order)
-          self.cursor_paginatable_order_param = order_param.to_sym
-          self.cursor_paginatable_per_page = per_page.to_i
-          self.cursor_paginatable_max_per_page = max_per_page.to_i
-          self.cursor_paginatable_bidirectional = bidirectional ? true : false
-          self.cursor_paginatable_predicate = CursorPaginatable.validate_predicate!(predicate)
-          self.cursor_paginatable_link_header = link_header ? true : false
-          self.cursor_paginatable_signed = CursorPaginatable.validate_signed!(signed)
+        #
+        # Re-declaring (typically in a subclass) changes only what it passes:
+        # every omitted option keeps its current — inherited — value. Every
+        # keyword used to default, so `cursor_paginate_by order: { id: :desc }`
+        # in a subclass silently reset the parent's `signed:` (and per_page,
+        # bidirectional, ...) — cursor signing switched OFF for the subtree.
+        # The ordering source is the exception that stays whole: passing
+        # order: or order_presets: replaces the inherited one (both halves).
+        def cursor_paginate_by(order: nil, order_presets: nil, default_preset: nil, order_param: UNSET,
+                               per_page: UNSET, max_per_page: UNSET,
+                               bidirectional: UNSET, predicate: UNSET, link_header: UNSET, signed: UNSET)
+          # Everything is validated before anything is assigned, so a bad
+          # option never leaves the class half-reconfigured.
+          ordering = CursorPaginatable.resolve_ordering!(self, order, order_presets, default_preset)
+          passed = { order_param:, per_page:, max_per_page:, bidirectional:, predicate:, link_header:, signed: }
+          options = CursorPaginatable.normalize_options!(passed.reject { |_name, value| value.equal?(UNSET) })
+
+          self.cursor_paginatable_order, self.cursor_paginatable_order_presets,
+            self.cursor_paginatable_default_preset = ordering
+          options.each { |name, value| public_send(:"cursor_paginatable_#{name}=", value) }
         end
+      end
+
+      # The passed (non-UNSET) scalar options, validated and coerced.
+      def self.normalize_options!(options)
+        options.to_h do |name, value|
+          normalized =
+            case name
+            when :order_param then value.to_sym
+            when :per_page, :max_per_page then value.to_i
+            when :predicate then validate_predicate!(value)
+            when :signed then validate_signed!(value)
+            else value ? true : false # bidirectional, link_header
+            end
+          [name, normalized]
+        end
+      end
+
+      # [order, order_presets, default_preset] for a cursor_paginate_by call
+      # (nil = "not passed" for all three, as it always was). Passing order:
+      # or order_presets: declares a new ordering source; passing neither
+      # keeps the inherited one — optionally re-picking its default_preset —
+      # and a class with no ordering anywhere still gets the "required" error.
+      def self.resolve_ordering!(klass, order, presets, default_preset)
+        if order || presets
+          normalized_presets = presets && normalize_presets!(presets)
+          return [order && normalize_order!(order), normalized_presets,
+                  resolve_default_preset!(normalized_presets, default_preset, order)]
+        end
+
+        inherited_order = klass.cursor_paginatable_order
+        inherited_presets = klass.cursor_paginatable_order_presets
+        validate_order_sources!(inherited_presets, default_preset, inherited_order)
+        return [inherited_order, inherited_presets, klass.cursor_paginatable_default_preset] if default_preset.nil?
+
+        [inherited_order, inherited_presets, resolve_default_preset!(inherited_presets, default_preset, inherited_order)]
       end
 
       # `signed:` — false, true (the app's secret_key_base), a non-blank String,
@@ -253,8 +300,11 @@ module ConcernsOnRails
       def cursor_fetch_page(relation, pairs, limit, cursor)
         backward = cursor ? cursor[:backward] : false
         effective = backward ? cursor_invert_pairs(pairs) : pairs
-        scoped = relation.reorder(effective.to_h)
-        scoped = scoped.where(cursor_predicate(relation.model, effective, cursor[:values])) if cursor
+        nullable = cursor_nullable_columns(relation.model, pairs)
+        scoped = relation.reorder(cursor_order_nodes(relation.model, effective, nullable, backward))
+        if cursor
+          scoped = scoped.where(cursor_predicate(relation.model, effective, cursor[:values], nullable: nullable, backward: backward))
+        end
         rows = scoped.limit(limit + 1).to_a
 
         page = rows.first(limit)
@@ -264,6 +314,51 @@ module ConcernsOnRails
 
       def cursor_invert_pairs(pairs)
         pairs.map { |col, dir| [col, dir == :asc ? :desc : :asc] }
+      end
+
+      # ----- NULL-aware ordering -----
+      # Ordering columns the SCHEMA allows NULL in. A keyset comparison
+      # (`col > v`) is never TRUE for a NULL, and adapters disagree on where
+      # NULLs sort (SQLite/MySQL first ascending, PostgreSQL last), so such a
+      # column gets one fixed placement — NULLs LAST in the canonical order,
+      # whatever its direction — and a predicate that knows it (see
+      # cursor_or_predicate). NOT NULL columns (the primary key included) are
+      # untouched: same `ORDER BY col dir`, same index use.
+      def cursor_nullable_columns(model, pairs)
+        pairs.filter_map do |col, _dir|
+          column = model.columns_hash[col.to_s]
+          col if column&.null
+        end
+      end
+
+      # Canonical order puts a nullable column's NULLs last; a backward walk
+      # runs the inverted order, so there they come first. PostgreSQL gets its
+      # native `NULLS LAST` / `NULLS FIRST` (it also rejects ORDER BY
+      # expressions outside a DISTINCT select list, and can walk an index in
+      # that order); everything else a portable null-flag sort key,
+      # `CASE WHEN col IS NULL THEN 1 ELSE 0 END`, ahead of `col dir`. With no
+      # nullable column the ORDER BY is exactly the plain Hash form.
+      def cursor_order_nodes(model, effective, nullable, backward)
+        return effective.to_h if nullable.empty?
+
+        table = model.arel_table
+        effective.flat_map do |col, dir|
+          ordered = dir == :asc ? table[col].asc : table[col].desc
+          next [ordered] unless nullable.include?(col)
+
+          cursor_null_placement(model, table[col], dir, nulls_last: !backward)
+        end
+      end
+
+      def cursor_null_placement(model, attribute, dir, nulls_last:)
+        if model.connection.adapter_name.match?(/postgres/i)
+          quoted = "#{model.connection.quote_table_name(model.table_name)}.#{model.connection.quote_column_name(attribute.name)}"
+          return [Arel.sql("#{quoted} #{dir.to_s.upcase} NULLS #{nulls_last ? 'LAST' : 'FIRST'}")]
+        end
+
+        flag = Arel::Nodes::Case.new.when(attribute.eq(nil)).then(1).else(0)
+        [nulls_last ? Arel::Nodes::Ascending.new(flag) : Arel::Nodes::Descending.new(flag),
+         dir == :asc ? attribute.asc : attribute.desc]
       end
 
       # The limit+1 probe detects "more" in the direction of travel; the
@@ -357,7 +452,7 @@ module ConcernsOnRails
           "t" => model.table_name, # pin the table so cross-model replay is rejected
           "o" => pairs.map { |col, dir| "#{col}:#{dir}" },
           "d" => direction,
-          "v" => pairs.map { |col, _dir| serialize_cursor_value(cursor_boundary_value!(record, col)) }
+          "v" => pairs.map { |col, _dir| serialize_cursor_value(cursor_boundary_value!(model, record, col)) }
         }
         token = cursor_base64_encode(JSON.generate(payload))
         cursor_signing_key ? "#{token}.#{cursor_signature(token)}" : token
@@ -410,17 +505,20 @@ module ConcernsOnRails
         payload
       end
 
-      # A NULL boundary value would emit `col > NULL` — never TRUE in SQL
-      # three-valued logic — and silently drop rows from every later page.
-      # Fail loudly instead: this is a data/configuration problem.
-      def cursor_boundary_value!(record, col)
-        value = record.public_send(col)
-        return value unless value.nil?
+      # The STORED value (read_attribute), never the public reader: the WHERE
+      # compares the column, so a display override (`def name = super.upcase`)
+      # keyed the next page on a value the column never holds — "ITEM-10"
+      # sorts before every lowercase name, and the walk restarted at page one
+      # forever. A NULL is a legitimate boundary on a nullable column (encoded
+      # as JSON null; the predicate handles it); on a NOT NULL column it can
+      # only mean the value was never loaded, so it fails loudly.
+      def cursor_boundary_value!(model, record, col)
+        value = record.read_attribute(col)
+        return value unless value.nil? && !model.columns_hash[col.to_s]&.null
 
         raise ArgumentError,
-              "#{CursorPaginatable.name}: ordering column '#{col}' is NULL on the page-boundary row " \
-              "(id: #{record.id.inspect}) — cursor pagination needs non-NULL ordering values; " \
-              "use NOT NULL columns or COALESCE"
+              "#{CursorPaginatable.name}: NOT NULL ordering column '#{col}' read as NULL on the page-boundary " \
+              "row (id: #{record.read_attribute(model.primary_key).inspect}) — is it selected by the relation?"
       end
 
       # Explicit is_a? checks (NOT acts_like?, which needs an un-required
@@ -449,7 +547,7 @@ module ConcernsOnRails
         verify_cursor_scope!(payload, pairs, model)
         direction = cursor_direction!(payload, bidirectional)
         values = payload["v"]
-        raise InvalidCursor, "Invalid pagination cursor." unless valid_cursor_values?(values, pairs.size)
+        raise InvalidCursor, "Invalid pagination cursor." unless valid_cursor_values?(model, values, pairs)
 
         { values: pairs.zip(values).map { |(col, _dir), value| cast_cursor_value!(model, col, value) },
           backward: direction == "prev" }
@@ -464,6 +562,8 @@ module ConcernsOnRails
       # drops unboundable values to 1=0) and a RangeError 500 on 6.0. We never
       # mint any of them, so each is tampering and gets the InvalidCursor 400.
       def cast_cursor_value!(model, col, raw)
+        return nil if raw.nil? # a NULL boundary; valid_cursor_values? only admits it on a nullable column
+
         type = model.type_for_attribute(col.to_s)
         value = type.cast(raw)
         raise InvalidCursor, "Invalid pagination cursor." unless cursor_bindable?(type, value)
@@ -529,12 +629,16 @@ module ConcernsOnRails
         raise InvalidCursor, "Cursor does not match the current pagination configuration."
       end
 
-      # Only non-null JSON scalars may be cast — a tampered Hash/Array value
-      # would cast to nil (silently empty page) or raise adapter-dependent
-      # errors, and we never mint null boundary values (see
-      # cursor_boundary_value!), so a null here is tampering too.
-      def valid_cursor_values?(values, expected_size)
-        values.is_a?(Array) && values.size == expected_size && values.all? { |v| cursor_scalar?(v) }
+      # Only JSON scalars may be cast — a tampered Hash/Array value would cast
+      # to nil (silently empty page) or raise adapter-dependent errors. JSON
+      # null is a NULL boundary, minted only for a column the schema allows
+      # NULL in; anywhere else it is tampering. (Cursors minted before NULL
+      # support never carry null, so they decode exactly as before.)
+      def valid_cursor_values?(model, values, pairs)
+        return false unless values.is_a?(Array) && values.size == pairs.size
+
+        nullable = cursor_nullable_columns(model, pairs)
+        values.zip(pairs).all? { |value, (col, _dir)| cursor_scalar?(value) || (value.nil? && nullable.include?(col)) }
       end
 
       def cursor_scalar?(value)
@@ -549,11 +653,15 @@ module ConcernsOnRails
       #   :row — (c1, c2, id) > (v1, v2, v3) tuple comparison; lets the
       #          planner walk a composite index directly, but only expresses
       #          uniform directions and needs adapter support.
-      def cursor_predicate(model, pairs, values)
-        if cursor_row_predicate?(model, pairs)
+      #
+      # A nullable ordering column always takes the OR-expansion: a row-value
+      # tuple cannot say "NULLs last" (`(c, id) > (v, x)` is never TRUE for a
+      # NULL c), so :auto AND an explicit :row fall back to it.
+      def cursor_predicate(model, pairs, values, nullable: [], backward: false)
+        if nullable.empty? && cursor_row_predicate?(model, pairs)
           cursor_row_predicate(model, pairs, values)
         else
-          cursor_or_predicate(model, pairs, values)
+          cursor_or_predicate(model, pairs, values, nullable: nullable, backward: backward)
         end
       end
 
@@ -591,14 +699,35 @@ module ConcernsOnRails
         pairs.first.last == :asc ? Arel::Nodes::GreaterThan.new(lhs, rhs) : Arel::Nodes::LessThan.new(lhs, rhs)
       end
 
-      def cursor_or_predicate(model, pairs, values)
+      # Branch i: every earlier column EQUAL to the boundary, column i
+      # strictly AFTER it. `pairs` is the effective (travel) order. For a
+      # nullable column, whose NULLs sort last canonically (first on a
+      # backward walk):
+      #
+      #   equal          v present: c = v          v NULL: c IS NULL
+      #   after (fwd)    v present: c cmp v OR c IS NULL
+      #                  v NULL:    nothing — no branch (NULLs are last)
+      #   after (back)   v present: c cmp v        (NULLs are behind us)
+      #                  v NULL:    c IS NOT NULL  (every value precedes NULL)
+      #
+      # The primary key is NOT NULL and always ordered, so a branch remains.
+      def cursor_or_predicate(model, pairs, values, nullable: [], backward: false)
         table = model.arel_table
-        branches = pairs.each_index.map do |i|
-          eqs = (0...i).map { |j| table[pairs[j][0]].eq(values[j]) }
-          cmp = pairs[i][1] == :asc ? table[pairs[i][0]].gt(values[i]) : table[pairs[i][0]].lt(values[i])
-          (eqs + [cmp]).reduce(:and)
+        branches = pairs.each_index.filter_map do |i|
+          after = cursor_after_node(table[pairs[i][0]], pairs[i][1], values[i], nullable.include?(pairs[i][0]), backward)
+          next unless after
+
+          eqs = (0...i).map { |j| table[pairs[j][0]].eq(values[j]) } # eq(nil) is IS NULL
+          (eqs + [after]).reduce(:and)
         end
         branches.reduce(:or)
+      end
+
+      def cursor_after_node(attribute, dir, value, nullable, backward)
+        return (backward ? attribute.not_eq(nil) : nil) if value.nil?
+
+        cmp = dir == :asc ? attribute.gt(value) : attribute.lt(value)
+        nullable && !backward ? Arel::Nodes::Grouping.new(cmp.or(attribute.eq(nil))) : cmp
       end
 
       def apply_cursor_pagination_headers(meta)

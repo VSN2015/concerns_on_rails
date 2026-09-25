@@ -49,9 +49,14 @@ module ConcernsOnRails
       end
 
       # Coerce an untrusted param to Integer, falling back to `default` for
-      # anything non-scalar (Array/Parameters/nil).
+      # anything non-scalar (Array/Parameters/nil) — and for a non-finite
+      # number: a JSON body's `{"page": 1e400}` decodes to Float::INFINITY,
+      # whose `.to_i` (like NaN's) raises FloatDomainError — a 500.
       def to_i(value, default: 0)
-        scalar?(value) ? value.to_i : default
+        return default unless scalar?(value)
+        return default if value.respond_to?(:finite?) && !value.finite?
+
+        value.to_i
       end
     end
   end

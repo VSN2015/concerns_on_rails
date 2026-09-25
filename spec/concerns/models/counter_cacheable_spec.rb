@@ -111,6 +111,41 @@ describe ConcernsOnRails::Models::CounterCacheable do
     end
   end
 
+  # The macro accepts anything with #call, but `if:` was instance_exec'd —
+  # a TypeError on every save for a callable object, an ArgumentError for a
+  # `->(comment)` lambda. Support::Callable dispatches on arity instead.
+  describe "if: callables other than a zero-arity lambda" do
+    def counted_with(condition)
+      stub_const("CallableComment", Class.new(TestModel) do
+        self.table_name = "comments"
+        include ConcernsOnRails::CounterCacheable
+
+        belongs_to :post, optional: true
+        counter_cacheable_by :post, count: :approved_comments_count, if: condition
+      end)
+    end
+
+    {
+      "a callable object" => Class.new { def call(record) = record.approved? }.new,
+      "a one-arg lambda" => ->(record) { record.approved? }, # rubocop:disable Style/SymbolProc -- the lambda form is the point
+      "a symbol proc" => :approved?.to_proc
+    }.each do |label, condition|
+      it "counts, flips and recounts with #{label}" do
+        klass = counted_with(condition)
+        comment = klass.create!(post_id: post.id, approved: true)
+        klass.create!(post_id: post.id, approved: false)
+        expect(post.reload.approved_comments_count).to eq(1)
+
+        comment.update!(approved: false)
+        expect(post.reload.approved_comments_count).to eq(0)
+
+        Post.where(id: post.id).update_all(approved_comments_count: 7)
+        klass.recount_counter_caches!
+        expect(post.reload.approved_comments_count).to eq(0)
+      end
+    end
+  end
+
   describe "update — foreign-key reparent" do
     it "moves the counter from the old parent to the new parent" do
       comment = Comment.create!(post: post, approved: true)

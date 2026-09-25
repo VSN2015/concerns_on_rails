@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/callable"
 
 module ConcernsOnRails
   module Models
@@ -288,7 +289,7 @@ module ConcernsOnRails
         def counter_cacheable_recount_tally(children, foreign_key, condition)
           tally = Hash.new(0)
           children.find_each do |record|
-            tally[record[foreign_key]] += 1 if record.instance_exec(&condition)
+            tally[record[foreign_key]] += 1 if ConcernsOnRails::Support::Callable.invoke(record, condition)
           end
           tally
         end
@@ -419,7 +420,7 @@ module ConcernsOnRails
         condition = rule[:condition]
         return true unless condition
 
-        instance_exec(&condition) ? true : false
+        ConcernsOnRails::Support::Callable.invoke(self, condition) ? true : false
       end
 
       # Evaluate the condition against the record as it was BEFORE this save by
@@ -428,7 +429,7 @@ module ConcernsOnRails
         condition = rule[:condition]
         return true unless condition
 
-        counter_cacheable_with_attributes(counter_cacheable_changes) { instance_exec(&condition) ? true : false }
+        counter_cacheable_with_attributes(counter_cacheable_changes) { ConcernsOnRails::Support::Callable.invoke(self, condition) ? true : false }
       end
 
       # Temporarily put each changed attribute back to the FIRST value of its

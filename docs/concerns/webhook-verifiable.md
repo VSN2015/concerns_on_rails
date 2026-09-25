@@ -39,7 +39,7 @@ Lookup is by **specificity** (no actions = catch-all): a rule that names the cur
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `*actions` | `Symbol`s | none (catch-all) | Actions this rule covers. |
-| `secret:` | `String`, callable, or `Array` | — (required) | Callables are `instance_exec`'d per request (read `params` for multi-tenant secrets); an Array means rotation — any match passes. Resolving **blank at request time raises `ArgumentError`**. |
+| `secret:` | `String`, callable, or `Array` | — (required) | Callables are resolved per request: a lambda with no required parameter or a block-style proc is `instance_exec`'d on the controller (read `params` for multi-tenant secrets); a lambda taking an argument, a symbol proc, or any other callable (an object with `#call`, a `Method`) is passed the controller — or called bare when its `#call` takes no arguments; an Array means rotation — any match passes. Resolving **blank at request time raises `ArgumentError`**. |
 | `scheme:` | `Symbol` | `:hex` | One of the schemes below. |
 | `header:` | `String` | scheme preset | Required for `:hex`/`:base64` (they have no standard header); overrides the preset for the others. |
 | `tolerance:` | positive duration | `300` (Stripe only) | Replay window for `:stripe` — rejects `\|now − t\| > tolerance`. Raises if passed with any other scheme. |

@@ -44,7 +44,7 @@ Link: <https://docs.example.com/v1-migration>; rel="deprecation", <https://api.e
 | `successor:` | `nil` | Replacement endpoint URL → `Link: <…>; rel="successor-version"` |
 | `after_sunset:` | `:headers` | `:headers` never blocks; `:gone` halts with 410 (`endpoint_sunset`) once `sunset_at` is reached (requires `sunset_at:`) |
 | `header_format:` | `:rfc9745` | `:rfc9745` emits `@<unix-timestamp>`; `:legacy` emits the widely-deployed pre-RFC draft literal `true` |
-| `notify:` | `nil` | Callable, `instance_exec`'d per matching request (so `request` / `current_user` resolve). A raising notify **propagates** — broken metrics should be loud |
+| `notify:` | `nil` | Callable, run per matching request: a lambda with no required parameter or a block-style proc is `instance_exec`'d (so `request` / `current_user` resolve); a lambda taking an argument, a symbol proc, or any other callable (an object with `#call`, a `Method`) is passed the controller — or called bare when its `#call` takes no arguments. A raising notify **propagates** — broken metrics should be loud |
 
 The macro is repeatable and rules are inherited by subclasses. **The last matching rule wins** and exactly one rule applies per request — so a `V1::BaseController` catch-all is naturally overridden by a later, action-specific declaration in one controller. All option errors raise `ArgumentError` at declaration time (unparseable dates, `sunset_at` before `deprecated_at`, `:gone` without `sunset_at`, blank URLs, non-callable `notify`).
 
