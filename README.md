@@ -1505,6 +1505,7 @@ unlike Publishable/Expirable/Activatable, this one has no validators gate.
 
 **Notes**
 - The increment is SQL-side (`COALESCE(attempts, 0) + 1` via `update_counters`), so concurrent failures never lose updates and a NULL counter needs no column default; a locked account stops counting.
+- The lock itself is a conditional `UPDATE` (only while the row is unlocked), so concurrent failures crossing the threshold lock once: the loser adopts the existing lock and unlock token and fires no hooks.
 - Expiry is **lazy**: readers and scopes treat a stale lock as unlocked but never write. The column is cleared by the next `unlock_access!` or failed attempt (quietly there — no unlock hooks fire from a failed login).
 - `lock_access!` / `unlock_access!` persist via `update_columns` — validations and AR callbacks deliberately bypassed so an otherwise-invalid record can still be locked (this also skips `updated_at`/`Auditable`). The `before/after_lock`, `before/after_unlock` hooks run in a transaction; `after_lock` is the place for the "account locked" email.
 - Reach for Devise's `lockable` when you need unlock tokens, unlock emails, or per-strategy unlocks.
