@@ -35,9 +35,26 @@ module ConcernsOnRails
       RESET_PERIODS = %i[never year month day].freeze
       ASSIGN_MODES = %i[create manual].freeze
       NAME = "ConcernsOnRails::Models::Sequenceable".freeze
+      # Distinguishes "option not passed" from an explicit nil (into: nil,
+      # time_zone: nil are meaningful), so a re-declaration changes only what
+      # it names.
+      UNSET = Object.new.freeze
+      DEFAULTS = { into: nil, prefix: "", padding: 0, separator: "-", start_at: 1, scope: [],
+                   reset: :never, template: nil, assign: :create, time_zone: nil }.freeze
+      # The options that shape the VISIBLE number (see #sequenceable_owner);
+      # assign: never does, time_zone: must match (see #sequenceable_zone_matches!).
+      FORMAT_KEYS = %i[prefix template padding reset scope into separator start_at].freeze
+      NORMALIZERS = {
+        into: ->(value) { value&.to_sym },
+        prefix: :to_s.to_proc, separator: :to_s.to_proc,
+        padding: :to_i.to_proc, start_at: :to_i.to_proc,
+        scope: ->(value) { Array(value).map(&:to_sym) },
+        reset: :to_sym.to_proc, assign: :to_sym.to_proc
+      }.freeze
 
       included do
         class_attribute :sequenceable_config, instance_accessor: false, default: {}
+        class_attribute :sequenceable_callback_registered, instance_accessor: false, default: false
       end
 
       class_methods do
@@ -54,38 +71,38 @@ module ConcernsOnRails
         #   start_at:  first value per scope/period when no rows exist yet (default 1)
         #   scope:     column or array of columns the counter is scoped to (default nil)
         #   reset:     :never (default) | :year | :month | :day — restart per period (needs created_at)
+        #   time_zone: zone the reset: periods are cut in (name or ActiveSupport::TimeZone). Default:
+        #              the app's config.time_zone (Time.zone_default), else UTC — never the
+        #              per-request Time.zone, so every request agrees on which day/month/year it is
         #   template:  ->(seq, record) { ... } full custom formatter; overrides prefix/padding/period
         #   assign:    :create (default) numbers every record in before_create; :manual leaves the
         #              column NULL until `assign_<field>!` — invoices numbered when finalized
-        def sequenceable_by(field = :sequence, into: nil, prefix: "", padding: 0,
-                            separator: "-", start_at: 1, scope: nil, reset: :never, template: nil, assign: :create)
-          field      = field.to_sym
-          into       = into&.to_sym
-          reset      = reset.to_sym
-          assign     = assign.to_sym
-          scope_cols = Array(scope).map(&:to_sym)
+        #
+        # Re-declaring a field (later on the same class, or on an STI subclass)
+        # MERGES onto its current config: only the options passed change, so
+        # `sequenceable_by :sequence, assign: :manual` keeps the inherited
+        # into:/prefix:/reset:.
+        def sequenceable_by(field = :sequence, into: UNSET, prefix: UNSET, padding: UNSET,
+                            separator: UNSET, start_at: UNSET, scope: UNSET, reset: UNSET,
+                            template: UNSET, assign: UNSET, time_zone: UNSET)
+          field = field.to_sym
+          given = { into:, prefix:, padding:, separator:, start_at:, scope:, reset:, template:, assign:, time_zone: }
+          cfg = sequenceable_merged_config(field, given.reject { |_, value| value.equal?(UNSET) })
 
           ensure_columns!(NAME, field, types: :integer)
-          ensure_columns!(NAME, into, types: :string) if into
-          ensure_columns!(NAME, *scope_cols) unless scope_cols.empty?
-          ensure_columns!(NAME, :created_at, types: :datetime) unless reset == :never
-          validate_sequenceable_options!(reset, template, assign)
+          ensure_columns!(NAME, cfg[:into], types: :string) if cfg[:into]
+          ensure_columns!(NAME, *cfg[:scope]) unless cfg[:scope].empty?
+          ensure_columns!(NAME, :created_at, types: :datetime) unless cfg[:reset] == :never
+          validate_sequenceable_options!(cfg[:reset], cfg[:template], cfg[:assign])
 
-          self.sequenceable_config = sequenceable_config.merge(
-            field => { into: into, prefix: prefix.to_s, padding: padding.to_i,
-                       separator: separator.to_s, start_at: start_at.to_i,
-                       scope: scope_cols, reset: reset, template: template, assign: assign,
-                       # The rows that share this counter: the declaring class and
-                       # its descendants (see SequenceCalculator#sequence_relation).
-                       owner: self }
-          )
+          self.sequenceable_config = sequenceable_config.merge(field => cfg)
 
-          before_create -> { assign_sequenceable_value(field) } if assign == :create
+          register_sequenceable_callback
           define_sequenceable_methods(field)
         end
       end
 
-      class_methods do
+      class_methods do # rubocop:disable Metrics/BlockLength
         private
 
         def define_sequenceable_methods(field)
@@ -108,6 +125,88 @@ module ConcernsOnRails
           scope "pending_#{field}", -> { where(field => nil) }
         end
 
+        # The field's current config (inherited or from an earlier call, else
+        # DEFAULTS) with the passed options normalized over it, plus :owner —
+        # the class whose rows share this counter (SequenceCalculator#sequence_relation).
+        def sequenceable_merged_config(field, given)
+          base = sequenceable_config[field]
+          options = given.to_h { |key, value| [key, normalize_sequenceable_option(key, value)] }
+          merged = (base || DEFAULTS).merge(options)
+          merged.merge(owner: sequenceable_owner(field, merged))
+        end
+
+        # INVARIANT: two classes that render the same visible format for a
+        # field share ONE owner (one MAX over one row set) and ONE zone.
+        # Otherwise each would draw MAX over a different row set or period
+        # range and both would issue "INV-20260925-1".
+        #
+        # Walk up the inherited owners (the declaring parent, then ITS
+        # inherited owner, ...) and compare the full merged format against each
+        # owner's current config. The first identical one keeps the counter.
+        # Only a format that matches none of them starts its own series (a
+        # CN- subclass). Comparing the whole tuple rather than the keys a call
+        # happened to pass means a subclass that went CN- and back to INV-
+        # rejoins the parent's counter instead of silently owning a duplicate
+        # INV- series. assign: is not part of the format: a manual Draft
+        # finalizes into its parent's series. Sibling subclasses that each
+        # declare the same format without a common declaring ancestor are not
+        # detectable here; give them distinct prefixes or scope: :type.
+        def sequenceable_owner(field, cfg)
+          klass = superclass
+          while klass.respond_to?(:sequenceable_config) && (inherited = klass.sequenceable_config[field])
+            owner = inherited[:owner]
+            ref = owner.sequenceable_config.fetch(field)
+            if FORMAT_KEYS.all? { |key| ref[key] == cfg[key] }
+              sequenceable_zone_matches!(field, owner, ref, cfg)
+              return owner
+            end
+            klass = owner.superclass
+          end
+          self
+        end
+
+        # Same visible format, different zone: the two classes would cut the
+        # same "20260926" day at different instants over one shared counter,
+        # so a Tokyo row and a UTC row could both read an empty range and
+        # issue "20260926-1" (into:'s stored-token MAX cannot help without
+        # into:). One format needs one zone. Refused at macro time.
+        def sequenceable_zone_matches!(field, owner, ref, cfg)
+          return if cfg[:reset] == :never
+          return if sequenceable_zone_id(ref[:time_zone]) == sequenceable_zone_id(cfg[:time_zone])
+
+          raise ArgumentError, "#{NAME}: #{name || inspect}##{field} renders the same format as " \
+                               "#{owner.name || owner.inspect} but cuts its reset: periods in a different " \
+                               "time_zone:. One visible format needs one zone (both would issue the same " \
+                               "number); use the same time_zone: or a different prefix:/template:"
+        end
+
+        # nil (app default) resolves as #period_time would, so an explicit zone
+        # equal to the default is not a conflict; aliases ("Tokyo" /
+        # "Asia/Tokyo") compare by their TZInfo identifier.
+        def sequenceable_zone_id(zone)
+          (zone || Time.zone_default || ActiveSupport::TimeZone["UTC"]).tzinfo.identifier
+        end
+
+        def normalize_sequenceable_option(key, value)
+          return sequenceable_time_zone!(value) if key == :time_zone # nil = app default, see #period_time
+
+          NORMALIZERS.fetch(key, :itself.to_proc).call(value)
+        end
+
+        # ONE before_create for every field, registered by the first macro call
+        # (so it keeps that call's position among the host's callbacks) and
+        # inherited by subclasses. It reads the receiving class's config at run
+        # time, so a re-declaration — on the same class or an STI subclass —
+        # that switches a field to assign: :manual really stops numbering it.
+        # (A lambda per call could never be taken back: the :create one kept
+        # firing after a later :manual declaration.)
+        def register_sequenceable_callback
+          return if sequenceable_callback_registered
+
+          before_create :assign_sequenceable_values_on_create
+          self.sequenceable_callback_registered = true
+        end
+
         def validate_sequenceable_options!(reset, template, assign = :create)
           unless RESET_PERIODS.include?(reset)
             raise ArgumentError, "#{NAME}: unknown reset '#{reset}'. Valid values: #{RESET_PERIODS.join(', ')}"
@@ -120,6 +219,23 @@ module ConcernsOnRails
           raise ArgumentError, "#{NAME}: template must be callable (respond to #call)"
         end
       end
+
+      # The anchor instant of this record's reset: period, in the field's FIXED
+      # zone — what the MAX range and the default period token use. A
+      # template: that renders a date should read this rather than
+      # created_at, which tz-aware attributes present in the request's zone.
+      def sequenceable_period_time(field)
+        self.class.send(:period_time, self.class.sequenceable_config.fetch(field.to_sym), self)
+      end
+
+      # The before_create: numbers every field whose CURRENT declaration on this
+      # class is assign: :create. :manual fields wait for assign_<field>!.
+      def assign_sequenceable_values_on_create
+        self.class.sequenceable_config.each do |field, cfg|
+          assign_sequenceable_value(field) if cfg[:assign] == :create
+        end
+      end
+      private :assign_sequenceable_values_on_create
 
       # Assigns the sequence (and, when configured, the formatted string) only when
       # the integer column is blank, so callers can pass an explicit value.

@@ -38,7 +38,25 @@ module ConcernsOnRails
 
         return rel if cfg[:reset] == :never
 
-        rel.where(created_at: period_range(cfg[:reset], base_time(record)))
+        time = period_time(cfg, record)
+        in_period = rel.where(created_at: period_range(cfg[:reset], time))
+        return in_period unless cfg[:into] && cfg[:template].nil?
+
+        in_period.or(rel.where(sequence_stored_token_match(cfg, time)))
+      end
+
+      # Rows whose STORED into: value already carries this period's
+      # "<prefix><token><separator>" stem, whatever their created_at. Before
+      # periods were cut in a fixed zone, a request in another zone stamped a
+      # token its created_at does not fall into (Tokyo's 20260925 on a row
+      # created 2026-09-24 16:00 UTC); counting those rows too means the first
+      # fixed-zone create of that period continues after them instead of
+      # reissuing their number. Over-matching (MySQL _ci collations fold case)
+      # can only leave a gap. Same escaping contract as Taggable/Searchable.
+      def sequence_stored_token_match(cfg, time)
+        stem = "#{cfg[:prefix]}#{period_token(cfg[:reset], time)}#{cfg[:separator]}"
+        escaped = stem.gsub(/[\\%_]/) { |char| "\\#{char}" }
+        arel_table[cfg[:into]].matches("#{escaped}%", "\\", true)
       end
 
       # The declaring class, when it owns this receiver's table. An abstract
@@ -78,8 +96,38 @@ module ConcernsOnRails
         padded = cfg[:padding].positive? ? seq.to_s.rjust(cfg[:padding], "0") : seq.to_s
         return "#{cfg[:prefix]}#{padded}" if cfg[:reset] == :never
 
-        token = period_token(cfg[:reset], base_time(record))
+        token = period_token(cfg[:reset], period_time(cfg, record))
         "#{cfg[:prefix]}#{token}#{cfg[:separator]}#{padded}"
+      end
+
+      # The anchor instant expressed in the field's FIXED period zone. Periods
+      # used to be cut in whatever Time.zone the current request had set
+      # (Timezoneable, around_action Time.use_zone): a Tokyo request and a New
+      # York request disagreed on which day it was, drew MAX over different
+      # ranges and issued the same number; formatted_<field> (no into:) even
+      # rendered a different date depending on the READER's zone. The default
+      # is resolved here, not at macro time, because config.time_zone is
+      # applied by an initializer that may run after the model is loaded.
+      def period_time(cfg, record)
+        zone = cfg[:time_zone] || Time.zone_default || ActiveSupport::TimeZone["UTC"]
+        base_time(record).in_time_zone(zone)
+      end
+
+      # nil (the option omitted) stays nil: the app default is resolved at use.
+      def sequenceable_time_zone!(value)
+        return nil if value.nil?
+
+        zone = value.is_a?(ActiveSupport::TimeZone) ? value : lookup_sequenceable_time_zone(value)
+        return zone if zone
+
+        raise ArgumentError, "#{Models::Sequenceable::NAME}: unknown time_zone '#{value}'. Use an ActiveSupport::TimeZone name " \
+                             "(e.g. \"UTC\", \"Europe/Berlin\") or instance"
+      end
+
+      def lookup_sequenceable_time_zone(value)
+        ActiveSupport::TimeZone[value]
+      rescue ArgumentError
+        nil # TimeZone[] raises on a non-String/Numeric argument
       end
 
       def period_range(reset, time)
