@@ -185,6 +185,12 @@ describe ConcernsOnRails::Storable do
       expect(klass.new.tags).to eq([])
     end
 
+    it "dups a mutable String default so in-place mutation never leaks across instances" do
+      klass = model_class { storable_by :settings, theme: { type: :string, default: +"light" } }
+      klass.new.theme << "-custom"
+      expect(klass.new.theme).to eq("light")
+    end
+
     it "prefers a written value over the default" do
       klass = model_class { storable_by :settings, theme: { default: "light" } }
       record = klass.new(theme: "dark")
