@@ -265,8 +265,7 @@ module ConcernsOnRails
       def soft_delete!(at: Time.zone.now)
         return true if deleted?
 
-        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_soft_delete, after: :after_soft_delete,
-                                                        restore: [self.class.soft_delete_field]) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_soft_delete, after: :after_soft_delete) do
           next false unless soft_delete_write(at)
 
           soft_delete_cascade_dependents!(at)
@@ -279,8 +278,7 @@ module ConcernsOnRails
         return true unless deleted?
 
         stamp = self[self.class.soft_delete_field]
-        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_restore, after: :after_restore,
-                                                        restore: [self.class.soft_delete_field]) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_restore, after: :after_restore) do
           next false unless soft_delete_write(nil)
 
           restore_cascaded_dependents!(stamp)

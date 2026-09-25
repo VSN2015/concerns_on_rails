@@ -208,8 +208,7 @@ module ConcernsOnRails
       def activatable_transition(value, kind)
         before_hook, after_hook = HOOKS.fetch(kind)
         attributes = self.class.activatable_attributes(value, kind)
-        ConcernsOnRails::Support::HookedWrite.run(self, before: before_hook, after: after_hook,
-                                                        restore: attributes.keys) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: before_hook, after: after_hook) do
           update(attributes)
         end
       end

@@ -300,11 +300,12 @@ module ConcernsOnRails
         # aborted (`raise unless ticket.archive!` never fired, and
         # transition_all counted a row it had rolled back). The hooks take
         # arguments, so they run inside the block rather than as before:/after:.
-        # `restore:` puts the state (and its <state>_at stamp) back in memory
-        # on an abort — otherwise memory kept the vetoed state while the row
-        # kept the old one, and a retry's guard raised InvalidTransition.
+        # An abort puts the state (and its <state>_at stamp, and anything
+        # else the write changed in memory) back — otherwise memory kept the
+        # vetoed state while the row kept the old one, and a retry's guard
+        # raised InvalidTransition.
         attributes = stateable_write_attributes(to)
-        ConcernsOnRails::Support::HookedWrite.run(self, restore: attributes.keys) do
+        ConcernsOnRails::Support::HookedWrite.run(self) do
           before_transition(event, current, to)
           stateable_event_hook(:"before_#{name}")
           update!(attributes)

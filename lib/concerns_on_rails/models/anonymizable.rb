@@ -320,8 +320,7 @@ module ConcernsOnRails
         # update_columns already synced are put back.
         payload = anonymizable_payload
         slug = anonymizable_slug_payload!(payload)
-        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_anonymize, after: :after_anonymize,
-                                                        restore: payload.keys) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_anonymize, after: :after_anonymize) do
           anonymizable_write!(payload, slug[:generated])
           anonymizable_delete_slug_history! if slug[:history]
           true
