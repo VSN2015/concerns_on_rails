@@ -28,6 +28,43 @@ RSpec.describe ConcernsOnRails::Support::ScalarParam do
     end
   end
 
+  # The ONE per_page resolver both paginators route through — CursorPaginatable
+  # used to carry its own copy without the absolute ceiling, so its
+  # `max_per_page: 0` ("no cap") let `?per_page=99999999999999999999` reach
+  # LIMIT and 500, a bug Paginatable had already fixed in its own copy.
+  describe ".per_page" do
+    let(:ceiling) { described_class::MAX_PER_PAGE }
+
+    it "reads a positive request, falling back to the default for anything else" do
+      expect(described_class.per_page("7", default: 25, cap: 200)).to eq(7)
+      expect(described_class.per_page(7, default: 25, cap: 200)).to eq(7)
+      expect(described_class.per_page("0", default: 25, cap: 200)).to eq(25)
+      expect(described_class.per_page("-3", default: 25, cap: 200)).to eq(25)
+      expect(described_class.per_page("abc", default: 25, cap: 200)).to eq(25)
+      expect(described_class.per_page(nil, default: 25, cap: 200)).to eq(25)
+      expect(described_class.per_page(["7"], default: 25, cap: 200)).to eq(25)
+    end
+
+    it "applies a positive cap, and ignores a non-positive one" do
+      expect(described_class.per_page("999", default: 25, cap: 200)).to eq(200)
+      expect(described_class.per_page("999", default: 25, cap: 0)).to eq(999)
+      expect(described_class.per_page("999", default: 25, cap: -1)).to eq(999)
+    end
+
+    it "clamps to the absolute ceiling whatever the cap says" do
+      huge = "99999999999999999999"
+
+      expect(described_class.per_page(huge, default: 25, cap: 0)).to eq(ceiling)
+      expect(described_class.per_page(huge, default: 25, cap: 10**30)).to eq(ceiling)
+      expect(described_class.per_page(nil, default: 10**30, cap: 0)).to eq(ceiling)
+    end
+
+    it "is the ceiling Paginatable has always used" do
+      expect(ceiling).to eq(ConcernsOnRails::Controllers::Paginatable::MAX_PER_PAGE)
+      expect(ceiling).to eq(ConcernsOnRails::Controllers::CursorPaginatable::MAX_PER_PAGE)
+    end
+  end
+
   describe ".where_safe?" do
     it "accepts scalars, nil and arrays of scalars (IN queries)" do
       expect(described_class.where_safe?("a")).to be(true)

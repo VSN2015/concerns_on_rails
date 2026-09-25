@@ -32,7 +32,7 @@ end
 |---|---|---|---|
 | `order` | Symbol / Array / Hash | — | Ordering columns: `:created_at`, `[:kind, :created_at]` (all ascending), or `{ created_at: :desc, kind: :asc }` for per-column directions. Columns are chosen **in code** — params can never pick them. The primary key is always appended as a tiebreaker (inheriting the last column's direction) unless you list it yourself. |
 | `per_page` | Integer | `25` | Default page size when the caller supplies no `?per_page=` (or a value below 1). |
-| `max_per_page` | Integer | `200` | Hard cap on `per_page` (`0`/negative disables the cap — same semantics as Paginatable). |
+| `max_per_page` | Integer | `200` | Hard cap on `per_page` (`0`/negative disables the cap — same semantics as Paginatable, including the absolute `MAX_PER_PAGE` ceiling of 1,000,000 that still applies with no cap). |
 | `order_presets` | Hash | — | Named, allow-listed orderings the client selects via `?<order_param>=` (e.g. `{ newest: { created_at: :desc }, top: { score: :desc } }`). Mutually exclusive with `order:` (exactly one is required). Unknown names raise `InvalidOrderPreset` → 400 `invalid_order_preset`; switching presets mid-walk invalidates the cursor. |
 | `default_preset` | Symbol | first preset | Preset used when the param is absent. Must name a configured preset. |
 | `order_param` | Symbol | `:order` | Query param that selects the preset. |
@@ -48,7 +48,7 @@ end
 | Param | Default | Notes |
 |---|---|---|
 | `?cursor=` | — | The opaque token from `X-Next-Cursor`. Omit (or blank) for the first page. |
-| `?per_page=` | value of `cursor_paginatable_per_page` | Values below 1 fall back to the default; values above `max_per_page` are capped. |
+| `?per_page=` | value of `cursor_paginatable_per_page` | Values below 1 fall back to the default; values above `max_per_page` are capped, and in every case — `max_per_page: 0` included — the result is held under `MAX_PER_PAGE` (1,000,000), so `?per_page=99999999999999999999` cannot overflow `LIMIT`. Resolved by the same `Support::ScalarParam.per_page` Paginatable uses. |
 | `?order=` (configurable via `order_param:`) | `default_preset` | Only with `order_presets:` — selects a named ordering from the allow-list. |
 
 ## Methods
@@ -88,6 +88,7 @@ Cursors are URL-safe Base64 of a JSON payload that pins the **table** and the **
 - malformed tokens (bad Base64, non-JSON, non-Hash payloads),
 - cursors minted on another model or under a different `order:` configuration,
 - tampered values (non-scalar entries, wrong value count),
+- boundary values the column cannot hold — ones that cast to `nil` (`1e400` on an integer column, a non-date string on a datetime one) or cannot be bound (an integer beyond the column's range). These used to reach the WHERE as `(col, id) > (NULL, 1)` and return an empty 200 that silently ended the walk,
 - `prev`-direction cursors replayed against a forward-only configuration.
 
 On real controllers a `rescue_from InvalidCursor, with: :render_invalid_cursor` is registered automatically (exactly like ErrorHandleable's handlers), so a garbage `?cursor=` becomes a clean 400 instead of a 500. On bare objects without `rescue_from`, the error propagates.

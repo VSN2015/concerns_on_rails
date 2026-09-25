@@ -184,6 +184,40 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       controller = configured_class.new(params: { per_page: 999 })
       expect(controller.cursor_paginated(Item.all, per_page: 3).size).to eq(3)
     end
+
+    # `max_per_page: 0` is documented as "no cap", and with no cap an
+    # untrusted `?per_page=99999999999999999999` reached LIMIT unclamped —
+    # an unauthenticated 500 Paginatable had already closed with MAX_PER_PAGE.
+    context "when max_per_page is 0 (no cap)" do
+      let(:uncapped_class) do
+        Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::CursorPaginatable
+
+          cursor_paginate_by order: :id, per_page: 5, max_per_page: 0
+        end
+      end
+      let(:huge) { "99999999999999999999" }
+
+      it "clamps an out-of-range per_page to the absolute ceiling instead of 500ing" do
+        controller = uncapped_class.new(params: { per_page: huge })
+
+        expect(controller.cursor_paginated(Item.all).size).to eq(50)
+        expect(controller.response.headers["X-Per-Page"]).to eq(described_class::MAX_PER_PAGE.to_s)
+      end
+
+      it "clamps a per-call per_page too" do
+        controller = uncapped_class.new
+
+        expect(controller.cursor_pagination_meta(Item.all, per_page: 10**30)[:per_page])
+          .to eq(described_class::MAX_PER_PAGE)
+      end
+
+      it "still honors an ordinary per_page far above the default cap" do
+        controller = uncapped_class.new(params: { per_page: 500 })
+
+        expect(controller.cursor_pagination_meta(Item.all)[:per_page]).to eq(500)
+      end
+    end
   end
 
   describe "invalid cursors" do
@@ -235,6 +269,28 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
         expect do
           make_controller(cursor: token).cursor_paginated(Item.all, order: { created_at: :asc })
         end.to raise_error(described_class::InvalidCursor, /Invalid pagination cursor/)
+      end
+    end
+
+    # Values that pass the JSON-scalar check but CAST to nil (1e400 is Float
+    # infinity, which Integer#cast turns into nil; a non-date string on a
+    # datetime column) or cannot be bound on the column (an integer beyond
+    # its range) used to reach the WHERE as `(score, id) > (NULL, 1)` — an
+    # empty 200 that silently ended the client's walk — or a RangeError 500
+    # on Rails 6.0. They are tampering, and get the same 400 as any other.
+    it "rejects boundary values that cast to nil or cannot be bound on the column" do
+      # Hand-written JSON: JSON.generate refuses to emit 1e400 (Infinity).
+      {
+        '{"t":"items","o":["score:asc","id:asc"],"v":[1e400,1]}' => { score: :asc },
+        '{"t":"items","o":["score:asc","id:asc"],"v":[99999999999999999999,1]}' => { score: :asc },
+        '{"t":"items","o":["score:asc","id:asc"],"v":[1,-99999999999999999999]}' => { score: :asc },
+        '{"t":"items","o":["created_at:asc","id:asc"],"v":["not-a-date",1]}' => { created_at: :asc }
+      }.each do |json, order|
+        token = Base64.urlsafe_encode64(json, padding: false)
+
+        expect do
+          make_controller(cursor: token).cursor_paginated(Item.all, order: order)
+        end.to raise_error(described_class::InvalidCursor, /Invalid pagination cursor/), "accepted: #{json}"
       end
     end
 

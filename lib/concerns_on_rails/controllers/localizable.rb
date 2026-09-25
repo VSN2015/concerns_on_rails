@@ -31,9 +31,34 @@ module ConcernsOnRails
     module Localizable
       extend ActiveSupport::Concern
 
+      # rescue_from handlers run in ActionController::Rescue#process_action —
+      # AFTER the around_action has unwound and I18n.with_locale has put the
+      # default back — so every rescued error (ErrorHandleable's 404,
+      # CursorPaginatable's 400, an app's own handler) rendered English under
+      # `Content-Language: fr`. This re-enters the locale switch_locale chose
+      # for exactly the handler's duration; with_locale's ensure restores the
+      # previous locale even when the handler itself raises, so nothing leaks
+      # to the next request on the thread. An exception raised BEFORE
+      # switch_locale ran (an earlier before_action) has no chosen locale and
+      # is handled exactly as before.
+      # RFC 9110 §12.4.2: qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )
+      QVALUE = /\A(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)\z/
+
+      module RescueUnderLocale
+        def rescue_with_handler(exception)
+          locale = @localizable_active_locale
+          return super unless locale
+
+          I18n.with_locale(locale) { super }
+        end
+      end
+
       included do
         class_attribute :localizable_options, instance_accessor: false, default: {}
         around_action :switch_locale
+        # Only where rescue_from exists (real controllers); a bare object
+        # must not suddenly answer rescue_with_handler.
+        include RescueUnderLocale if method_defined?(:rescue_with_handler)
       end
 
       class_methods do
@@ -49,10 +74,13 @@ module ConcernsOnRails
       end
 
       # Public so subclasses can override; writes the response headers, then
-      # runs the action under the resolved locale.
+      # runs the action under the resolved locale — and records it so a
+      # rescue_from handler renders under it too (an override that calls
+      # `super` keeps that).
       def switch_locale(&)
         locale = resolved_locale
         apply_locale_response_headers(locale)
+        @localizable_active_locale = locale
         I18n.with_locale(locale, &)
       end
 
@@ -126,7 +154,9 @@ module ConcernsOnRails
 
       # Language tags from an Accept-Language header (kept whole — see
       # parse_accept_language for region handling), q=0 dropped, highest-q
-      # first (RFC 7231 preference order).
+      # first (RFC 7231 preference order). Ties keep header order: Ruby's
+      # sort_by is NOT stable (from ~8 entries equal keys come back shuffled),
+      # so the header position is an explicit secondary key.
       def ranked_accept_languages(header)
         pairs = header.split(",").filter_map do |part|
           token, *params = part.split(";").map(&:strip)
@@ -136,16 +166,22 @@ module ConcernsOnRails
           lang = token.to_s.strip
           [lang, quality] if lang.present?
         end
-        pairs.sort_by { |(_lang, quality)| -quality }.map(&:first)
+        pairs.each_with_index.sort_by { |(_lang, quality), index| [-quality, index] }.map { |(lang, _q), _i| lang }
       end
 
       # The q-value (relative quality) of an Accept-Language part: 1.0 when
-      # absent, 0.0 when malformed. q=0 means "not acceptable" and is dropped.
+      # absent. q=0 means "not acceptable" and is dropped — and so is a weight
+      # that is not an RFC 9110 qvalue (0 to 1, at most three decimals):
+      # `Float()` used to read q=0x10 as 16, q=1_0 as 10, q=Infinity and q=2
+      # at face value, so a malformed weight outranked every real one.
+      # The parameter name is case-insensitive (RFC 9110 §12.4.2): `Q=0` used
+      # to read as "no weight" (1.0) and turned a refused tag into the winner.
       def accept_language_quality(params)
-        qparam = params.find { |p| p.start_with?("q=") }
+        qparam = params.find { |p| p.match?(/\Aq=/i) }
         return 1.0 unless qparam
 
-        Float(qparam[2..], exception: false) || 0.0
+        weight = qparam[2..].strip
+        QVALUE.match?(weight) ? weight.to_f : 0.0
       end
 
       def match_locale(candidate, allowed)

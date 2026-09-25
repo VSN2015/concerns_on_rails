@@ -196,6 +196,57 @@ describe ConcernsOnRails::Controllers::Timezoneable do
       expect(result.header("X-Time-Zone")).to eq("London")
     end
 
+    # rescue_from handlers run after the around_action has unwound, so a
+    # handler rendering a timestamp (or a 4xx body built from Time.zone.now)
+    # used the app's zone while X-Time-Zone announced the client's.
+    describe "responses rendered by rescue_from" do
+      let(:klass) do
+        IntegrationHarness.build_controller do
+          include ConcernsOnRails::Controllers::Timezoneable
+
+          timezoneable available: %w[UTC London Tokyo], default: "UTC", response_header: true
+
+          rescue_from(ArgumentError) { |_e| render json: { zone: Time.zone.name }, status: :unprocessable_entity }
+          rescue_from(IndexError) { |_e| raise "handler exploded" }
+
+          def fail_arg
+            raise ArgumentError, "boom"
+          end
+
+          def fail_handler
+            raise IndexError, "boom"
+          end
+
+          def show
+            render json: { zone: Time.zone.name }
+          end
+        end
+      end
+
+      it "renders under the resolved zone, and restores the ambient zone afterwards" do
+        result = IntegrationHarness.dispatch(klass, :fail_arg, headers: { "Time-Zone" => "Tokyo" })
+
+        expect(result.status).to eq(422)
+        expect(JSON.parse(result.body)).to eq("zone" => "Tokyo")
+        expect(result.header("X-Time-Zone")).to eq("Tokyo")
+        expect(Time.zone.name).to eq("UTC")
+      end
+
+      it "restores the ambient zone even when the handler itself raises" do
+        expect do
+          IntegrationHarness.dispatch(klass, :fail_handler, query: "time_zone=London")
+        end.to raise_error(RuntimeError, "handler exploded")
+        expect(Time.zone.name).to eq("UTC")
+      end
+
+      it "never leaks the zone into the next request on the thread" do
+        IntegrationHarness.dispatch(klass, :fail_arg, headers: { "Time-Zone" => "Tokyo" })
+        result = IntegrationHarness.dispatch(klass, :show)
+
+        expect(JSON.parse(result.body)).to eq("zone" => "UTC")
+      end
+    end
+
     it "reports which source won through time_zone_source" do
       expect(controller(params: { time_zone: "London" }) { timezoneable }.time_zone_source).to eq(:param)
       expect(controller(time_zone_header: "London") { timezoneable }.time_zone_source).to eq(:header)

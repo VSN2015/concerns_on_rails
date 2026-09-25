@@ -81,6 +81,48 @@ describe ConcernsOnRails::Controllers::Localizable do
       end
       expect(c.resolved_locale).to eq(:fr)
     end
+
+    # Ruby's sort_by is not stable: from about eight entries up, tags sharing a
+    # q-value came back reordered, so the client's own tie-break — header
+    # order — was lost and a later tag won.
+    it "keeps header order among tags with equal q-values, however many there are" do
+      c = controller(accept_language: "de,x1,x2,x3,x4,x5,x6,x7,x8,fr") do
+        localizable available: %i[en fr de], default: :en
+      end
+      expect(c.resolved_locale).to eq(:de)
+
+      weighted = controller(accept_language: "x1;q=0.5,de;q=0.5,x2;q=0.5,x3;q=0.5,x4;q=0.5,x5;q=0.5,x6;q=0.5,x7;q=0.5,fr;q=0.5") do
+        localizable available: %i[en fr de], default: :en
+      end
+      expect(weighted.resolved_locale).to eq(:de)
+    end
+
+    # RFC 9110 §12.4.2: the weight parameter name is case-insensitive, so
+    # `Q=0` is "not acceptable" exactly like `q=0` — it used to be read as an
+    # absent weight (1.0), making the rejected tag the top choice.
+    it "reads the q parameter case-insensitively" do
+      c = controller(accept_language: "fr;Q=0,de") { localizable available: %i[en fr de], default: :en }
+      expect(c.resolved_locale).to eq(:de)
+
+      ranked = controller(accept_language: "fr;q=0.5,de;Q=0.9") { localizable available: %i[en fr de], default: :en }
+      expect(ranked.resolved_locale).to eq(:de)
+    end
+
+    # `Float(...)` read q=0x10 as 16, 1_0 as 10, Infinity as Infinity and 2
+    # as 2, so a malformed or out-of-range weight outranked every real one.
+    # RFC 9110 §12.4.2: qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] ).
+    # Anything else is treated as q=0 — the tag is dropped.
+    it "drops a tag whose q-value is not an RFC 9110 qvalue" do
+      %w[0x10 1_0 Infinity 2 1.5 0.1234 -1 .5].each do |bad|
+        c = controller(accept_language: "fr;q=#{bad},de;q=0.5") { localizable available: %i[en fr de], default: :en }
+        expect(c.resolved_locale).to eq(:de), "q=#{bad} was honoured"
+      end
+
+      c = controller(accept_language: "fr;q=1.000,de;q=0.999") { localizable available: %i[en fr de], default: :en }
+      expect(c.resolved_locale).to eq(:fr)
+      c = controller(accept_language: "fr;q=0.,de;q=0") { localizable available: %i[en fr de], default: :de }
+      expect(c.resolved_locale).to eq(:de)
+    end
   end
 
   describe "#switch_locale" do
@@ -183,6 +225,74 @@ describe ConcernsOnRails::Controllers::Localizable do
       result = IntegrationHarness.dispatch(klass, :show, query: "locale=fr", headers: { "Accept-Language" => "de" })
       expect(result.header("Vary").to_s).not_to include("Accept-Language")
       expect(result.header("Content-Language")).to eq("fr")
+    end
+
+    # rescue_from handlers run in ActionController::Rescue#process_action,
+    # AFTER the around_action has unwound and I18n.with_locale has restored
+    # the default — so ErrorHandleable's 404, CursorPaginatable's 400, any
+    # app handler rendered English details under `Content-Language: fr`.
+    describe "responses rendered by rescue_from" do
+      let(:klass) do
+        IntegrationHarness.build_controller do
+          include ConcernsOnRails::Controllers::Localizable
+
+          localizable available: %i[en fr de], default: :en
+
+          rescue_from(ArgumentError) { |_e| render json: { locale: I18n.locale }, status: :unprocessable_entity }
+          rescue_from(IndexError) { |_e| raise "handler exploded" }
+
+          def fail_arg
+            raise ArgumentError, "boom"
+          end
+
+          def fail_handler
+            raise IndexError, "boom"
+          end
+
+          def show
+            render json: { locale: I18n.locale }
+          end
+        end
+      end
+
+      it "renders under the resolved locale, and restores the default afterwards" do
+        result = IntegrationHarness.dispatch(klass, :fail_arg, headers: { "Accept-Language" => "fr" })
+
+        expect(result.status).to eq(422)
+        expect(JSON.parse(result.body)).to eq("locale" => "fr")
+        expect(result.header("Content-Language")).to eq("fr")
+        expect(I18n.locale).to eq(:en)
+      end
+
+      it "restores the default even when the handler itself raises" do
+        expect do
+          IntegrationHarness.dispatch(klass, :fail_handler, headers: { "Accept-Language" => "de" })
+        end.to raise_error(RuntimeError, "handler exploded")
+        expect(I18n.locale).to eq(:en)
+      end
+
+      it "never leaks the locale into the next request on the thread" do
+        IntegrationHarness.dispatch(klass, :fail_arg, headers: { "Accept-Language" => "fr" })
+        result = IntegrationHarness.dispatch(klass, :show)
+
+        expect(JSON.parse(result.body)).to eq("locale" => "en")
+      end
+
+      it "leaves an exception with no handler propagating as before" do
+        plain = IntegrationHarness.build_controller do
+          include ConcernsOnRails::Controllers::Localizable
+
+          localizable available: %i[en fr], default: :en
+
+          def show
+            raise KeyError, "unhandled"
+          end
+        end
+
+        expect { IntegrationHarness.dispatch(plain, :show, headers: { "Accept-Language" => "fr" }) }
+          .to raise_error(KeyError, "unhandled")
+        expect(I18n.locale).to eq(:en)
+      end
     end
 
     it "is a no-op on a controller without a response object" do
