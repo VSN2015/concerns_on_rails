@@ -191,6 +191,13 @@ describe ConcernsOnRails::Storable do
       expect(klass.new.theme).to eq("light")
     end
 
+    it "hands back a Class default itself, not a copy" do
+      handler = Class.new
+      stub_const("StorableHandler", handler)
+      klass = model_class { storable_by :settings, handler: { type: :json, default: StorableHandler } }
+      expect(klass.new.handler).to equal(StorableHandler)
+    end
+
     it "prefers a written value over the default" do
       klass = model_class { storable_by :settings, theme: { default: "light" } }
       record = klass.new(theme: "dark")

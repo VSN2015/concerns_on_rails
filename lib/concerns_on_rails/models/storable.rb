@@ -501,10 +501,12 @@ module ConcernsOnRails
       # deep-duped per call so one instance's in-place mutation never leaks
       # into another — a Hash/Array, but equally an unfrozen String (`<<`) or
       # a Time. deep_dup leaves non-duplicable values (nil, Integers,
-      # Symbols, true/false) as they are.
+      # Symbols, true/false) as they are. A Class/Module is an identity, not
+      # a value — Rails 6.0's deep_dup would hand back an anonymous copy.
       def storable_default(spec)
         default = spec[:default]
         return instance_exec(&default) if default.is_a?(Proc)
+        return default if default.is_a?(Module)
 
         default.deep_dup
       end
