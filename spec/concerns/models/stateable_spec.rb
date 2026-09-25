@@ -90,6 +90,22 @@ describe ConcernsOnRails::Stateable do
       expect(RedefaultedTicket.new.status).to eq("draft")
     end
 
+    it "keeps the field's own attribute type through the default and its reset" do
+      downcasing = Class.new(ActiveModel::Type::String) { def cast(value) = super&.downcase }.new
+      klass = Class.new(TestModel) do
+        self.table_name = "redefaulted_tickets"
+        attribute :status, downcasing
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft open], default: :draft
+      end
+      expect(klass.new(status: "OPEN").status).to eq("open") # not a forced plain :string
+
+      klass.stateable_by :status, states: %i[open closed]
+      expect(klass.new(status: "CLOSED").status).to eq("closed")
+      expect(klass.new.status).to be_nil
+    end
+
     it "drops it on a same-class re-declaration, falling back to the column's own default" do
       parent.stateable_by :phase, states: %i[draft open], default: :draft
       expect(parent.new.phase).to eq("draft")
@@ -355,6 +371,27 @@ describe ConcernsOnRails::Stateable do
             stateable_by :status, states: %i[live archived]
           end
         end.to raise_error(ArgumentError, /generated scope 'archived'/)
+      end
+
+      it "exempts column predicates in an STI parent's attribute module, whatever the load order" do
+        ActiveRecord::Schema.define do
+          create_table(:flagged_tickets, force: true) do |t|
+            t.string :type
+            t.string :status
+            t.boolean :flagged
+          end
+        end
+        parent = Class.new(TestModel) do
+          self.table_name = "flagged_tickets"
+          include ConcernsOnRails::Stateable
+
+          stateable_by :status, states: %i[open closed]
+        end
+        stub_const("FlaggedTicket", parent)
+        FlaggedTicket.new # defines flagged? in the PARENT's generated-attribute module
+
+        expect { Class.new(FlaggedTicket) { stateable_by :status, states: %i[open closed flagged] } }
+          .not_to raise_error
       end
 
       it "still lets the same class, and a subclass, re-declare its own methods" do

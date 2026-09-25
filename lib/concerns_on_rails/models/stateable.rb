@@ -98,6 +98,9 @@ module ConcernsOnRails
         # Whether stateable_by installed an attribute default for the field,
         # so a re-declaration without default: knows to take it back out.
         class_attribute :stateable_default_applied, instance_accessor: false, default: false
+        # field name => the attribute type captured before Stateable first
+        # redeclared the field (see stateable_cast_type).
+        class_attribute :stateable_cast_types, instance_accessor: false, default: {}.freeze
       end
 
       # Move to any declared state by name, bypassing transition guards.
@@ -297,10 +300,15 @@ module ConcernsOnRails
           [instance.uniq, state_bases.map(&:to_sym)]
         end
 
+        # Column attribute methods are exempt wherever they live: an STI
+        # subclass inherits its parent's generated-attribute module, which
+        # only holds `flagged?` once the parent has been instantiated — so
+        # checking just this class's own module made the guard depend on
+        # load order.
         def stateable_instance_method_taken?(name)
           return false unless method_defined?(name) || private_method_defined?(name)
 
-          instance_method(name).owner != generated_attribute_methods
+          !instance_method(name).owner.is_a?(ActiveRecord::AttributeMethods::GeneratedAttributeMethods)
         end
 
         def stateable_collision_error(name, scope: false)
@@ -344,8 +352,24 @@ module ConcernsOnRails
           # new_record?) for every row materialized from the database. Loaded
           # records keep their stored value; `Model.new(field => nil)` keeps the
           # explicit nil (assign the state or rely on the default, not both).
-          attribute stateable_field, :string, default: stateable_default.to_s
+          attribute stateable_field, stateable_cast_type, default: stateable_default.to_s
           self.stateable_default_applied = true
+        end
+
+        # The field's type as it stood BEFORE Stateable first redeclared it —
+        # the schema's (a PG enum or citext column keeps its OID type) or the
+        # host's own `attribute` — captured once per field and inherited, so
+        # neither the default nor its reset forces a plain :string onto the
+        # column. Without a reachable schema, :string (the old behavior).
+        def stateable_cast_type
+          field = stateable_field.to_s
+          captured = stateable_cast_types[field]
+          return captured if captured
+          return :string unless schema_reachable?
+
+          type = type_for_attribute(field)
+          self.stateable_cast_types = stateable_cast_types.merge(field => type).freeze
+          type
         end
 
         # A re-declaration that drops the default (explicit `default: nil`, or
@@ -356,7 +380,7 @@ module ConcernsOnRails
         # at class-load time.
         def stateable_reset_default
           column = stateable_field.to_s
-          attribute stateable_field, :string, default: -> { columns_hash[column]&.default }
+          attribute stateable_field, stateable_cast_type, default: -> { columns_hash[column]&.default }
           self.stateable_default_applied = false
         end
       end
