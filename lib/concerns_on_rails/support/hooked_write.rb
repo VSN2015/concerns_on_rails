@@ -108,9 +108,15 @@ module ConcernsOnRails
       # Swap the copy back in. The dirty tracker is built over the attribute
       # set it was created for, so it is dropped and rebuilt lazily against
       # the restored one.
+      #
+      # Rails 6.0 applies a rolled-back savepoint's record state LAZILY — on
+      # the record's next persisted?/attribute access, via
+      # sync_with_transaction_state — and that would overwrite everything put
+      # back here (identity included). It is settled first. (Gone on 6.1+.)
       def restore_attributes!(record, snapshot)
         return if record.frozen?
 
+        record.send(:sync_with_transaction_state) if record.respond_to?(:sync_with_transaction_state, true)
         record.instance_variable_set(:@attributes, snapshot[:attributes])
         record.instance_variable_set(:@mutations_from_database, nil)
         record.instance_variable_set(:@mutations_before_last_save, snapshot[:before_last_save])

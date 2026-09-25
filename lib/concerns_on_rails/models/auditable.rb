@@ -198,7 +198,11 @@ module ConcernsOnRails
         entries = auditable_persisted_trail + auditable_build_entries(tracked)
         max = self.class.auditable_max_entries
         entries = entries.last(max) if max
-        self[self.class.auditable_into] = auditable_native_column? ? entries : JSON.generate(entries)
+        self[self.class.auditable_into] = auditable_encode(entries)
+      end
+
+      def auditable_encode(entries)
+        auditable_native_column? ? entries : JSON.generate(entries)
       end
 
       # A native json/jsonb column (or one the host app `serialize`d) encodes

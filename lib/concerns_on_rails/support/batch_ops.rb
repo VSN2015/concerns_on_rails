@@ -102,14 +102,12 @@ module ConcernsOnRails
       # keys the relation selects (order, limit, default scopes and all) are
       # plucked in one query, then iterated with every other condition kept.
       # Plucked rather than a subquery: MySQL rejects LIMIT inside IN (...).
-      def each_record(relation, &block)
-        unless relation.limit_value || relation.offset_value
-          return relation.unscope(:order).find_each(&block)
-        end
+      def each_record(relation, &)
+        return relation.unscope(:order).find_each(&) unless relation.limit_value || relation.offset_value
 
         key = relation.klass.primary_key
         ids = relation.pluck(key)
-        relation.unscope(:order, :limit, :offset).where(key => ids).find_each(&block)
+        relation.unscope(:order, :limit, :offset).where(key => ids).find_each(&)
       end
 
       # The validate callbacks every ActiveRecord model carries out of the box

@@ -229,8 +229,12 @@ module ConcernsOnRails
         return Array.wrap(public_send(name)) if new_record?
 
         rows = duplicable_unfiltered_rows(name)
-        return rows unless association.loaded?
+        association.loaded? ? duplicable_merge_loaded(association, rows) : rows
+      end
 
+      # A loaded has_one's target wins outright; a loaded collection's
+      # records replace their rows by id, and its unsaved ones are appended.
+      def duplicable_merge_loaded(association, rows)
         loaded = Array.wrap(association.target)
         return loaded.first(1).presence || rows.first(1) unless association.reflection.collection?
 

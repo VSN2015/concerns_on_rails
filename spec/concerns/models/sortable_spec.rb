@@ -412,7 +412,11 @@ describe ConcernsOnRails::Sortable do
     end
 
     it "runs a Publishable slow-path publish_all on a Sortable model" do
-      klass = Class.new(TestModel) do
+      # Named before sortable_by runs: acts_as_list builds code from the class
+      # name, which an anonymous class does not have on Rails 6.0.
+      klass = Class.new(TestModel)
+      stub_const("SortedPost", klass)
+      klass.class_eval do
         self.table_name = "sorted_posts"
         include ConcernsOnRails::Sortable
         include ConcernsOnRails::Publishable
