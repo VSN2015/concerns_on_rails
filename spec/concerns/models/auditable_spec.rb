@@ -403,6 +403,69 @@ describe ConcernsOnRails::Auditable do
     end
   end
 
+  # JSON.parse on a native json column's value — already an Array, e.g. from
+  # `default: []` — raised TypeError, so every tracked save failed.
+  describe "a native json trail column" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :audit_docs, force: true do |t|
+          t.string :title
+          # MySQL rejects a literal DEFAULT on a JSON column.
+          if TestDatabase.mysql?
+            t.json :audit_log
+          else
+            t.json :audit_log, default: []
+          end
+        end
+      end
+    end
+
+    let(:klass) do
+      Class.new(TestModel) do
+        self.table_name = "audit_docs"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :title
+      end
+    end
+
+    def stored_trail(record)
+      raw = ActiveRecord::Base.connection.select_value(
+        "SELECT #{TestDatabase.quoted_column('audit_log')} FROM #{TestDatabase.quoted_table('audit_docs')} " \
+        "WHERE #{TestDatabase.quoted_column('id')} = #{record.id}"
+      )
+      raw.is_a?(String) ? JSON.parse(raw) : raw
+    end
+
+    it "records creates and updates on a column that already holds an Array" do
+      doc = klass.new(title: "a")
+      doc.audit_log = [] # what `default: []` hands a new record
+      doc.save!
+      doc.update!(title: "b")
+
+      expect(doc.reload.audit_trail.map { |entry| entry["to"] }).to eq(%w[a b])
+    end
+
+    # Assigning the JSON String to a json attribute stored a JSON *string*
+    # scalar holding the encoded trail, not the array itself.
+    it "stores the trail as a JSON array, not a double-encoded string" do
+      doc = klass.create!(title: "a")
+
+      expect(stored_trail(doc)).to match([hash_including("field" => "title", "to" => "a")])
+    end
+
+    it "still reads (and extends) a trail stored double-encoded by an earlier version" do
+      doc = klass.create!(title: "a")
+      legacy = JSON.generate([{ "field" => "title", "from" => nil, "to" => "a", "at" => Time.now.utc.iso8601(6) }])
+      doc.update_column(:audit_log, legacy) # a String into a json column: stored as a JSON string scalar
+      doc = klass.find(doc.id)
+      expect(doc.audit_trail.map { |entry| entry["to"] }).to eq(%w[a])
+
+      doc.update!(title: "b")
+      expect(klass.find(doc.id).audit_trail.map { |entry| entry["to"] }).to eq(%w[a b])
+    end
+  end
+
   context "with non-finite float values" do
     before do
       ActiveRecord::Schema.define do
