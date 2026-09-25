@@ -73,8 +73,8 @@ module ConcernsOnRails
       included do
         class_attribute :counter_cacheable_rules, instance_accessor: false, default: []
 
-        after_create  :counter_cacheable_run_create
-        after_update  :counter_cacheable_run_update
+        after_create :counter_cacheable_run_create
+        after_update :counter_cacheable_run_update
         # Destroy is handled in #destroy_row (below), not an after_destroy: only
         # there is it known whether the DELETE removed a row.
       end
