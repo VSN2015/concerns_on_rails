@@ -243,6 +243,11 @@ describe ConcernsOnRails::Models::Normalizable do
         expect(user.reload.code).to eq("y!")
       end
 
+      it "catches an in-place mutation made after validation" do
+        klass = Class.new(model) { after_validation { code << "  x" } }
+        expect(klass.create!(code: "a").reload.code).to eq("a!  x!")
+      end
+
       it "leaves an unchanged field of a persisted record alone" do
         user = model.create!(code: "x")
         user.update_attribute(:email, "a@b.com")

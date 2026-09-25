@@ -175,7 +175,9 @@ module ConcernsOnRails
         normalizable_each_pending_rule do |field, normalizer, value|
           normalized = normalizer.call(value)
           self[field] = normalized unless normalized == value
-          @normalizable_applied[field] = self[field]
+          # A copy: an in-place mutation after validation (`name << "  x"`)
+          # would otherwise mutate the recorded value too and look normalized.
+          @normalizable_applied[field] = self[field].dup
         end
       end
 
