@@ -20,6 +20,7 @@ describe ConcernsOnRails::Models::Encryptable do
         t.text :email_bidx
         t.string :name
         t.text :audit_log
+        t.string :slug
         t.datetime :deleted_at
       end
     end
@@ -349,6 +350,66 @@ describe ConcernsOnRails::Models::Encryptable do
           auditable_by :ssn, into: :audit_log
         end
       end.to raise_error(ArgumentError, /Auditable/)
+    end
+
+    # A friendly_id slug is a plaintext derivative of its source: slugging an
+    # encrypted field stored "123-45-6789" in the slug column in clear.
+    describe "Sluggable guard (a slug is plaintext of its source)" do
+      it "raises when the encrypted field is the slug source (Sluggable first)" do
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            sluggable_by :ssn
+            encryptable :ssn
+          end
+        end.to raise_error(ArgumentError, /Sluggable/)
+      end
+
+      it "raises when the slug source is declared after encryption" do
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            encryptable :ssn
+            sluggable_by :ssn
+          end
+        end.to raise_error(ArgumentError, /Sluggable.*:ssn|:ssn.*Sluggable/)
+      end
+
+      it "raises when a slug candidate (nested included) names an encrypted field, either order" do
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            sluggable_by :name, candidates: [:name, %i[name ssn]]
+            encryptable :ssn
+          end
+        end.to raise_error(ArgumentError, /Sluggable/)
+
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            encryptable :ssn
+            sluggable_by :name, candidates: [:name, %i[name ssn]]
+          end
+        end.to raise_error(ArgumentError, /Sluggable/)
+      end
+
+      it "leaves an unrelated slug source alone, and never writes the ciphertext's plaintext to the slug" do
+        klass = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          encryptable :ssn
+          sluggable_by :name
+        end
+        record = klass.create!(name: "Jane Doe", ssn: "123-45-6789")
+        raw = klass.connection.select_value(
+          "SELECT #{TestDatabase.quoted_column('slug')} FROM encryptable_records WHERE id = #{record.id}"
+        )
+        expect(raw).to eq("jane-doe")
+      end
     end
   end
 

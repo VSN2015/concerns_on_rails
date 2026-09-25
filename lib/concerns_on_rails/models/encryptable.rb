@@ -283,6 +283,7 @@ module ConcernsOnRails
           fields.each do |field|
             field = field.to_sym
             encryptable_guard_auditable!(field)
+            encryptable_guard_sluggable!(field)
             bi = encryptable_normalize_blind_index(field, blind_index)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
@@ -483,6 +484,20 @@ module ConcernsOnRails
           raise ArgumentError,
                 "#{LABEL}: ':#{field}' is also declared with Auditable; auditing would persist the " \
                 "decrypted plaintext to the audit column. Remove it from auditable_by."
+        end
+
+        # Macro-time guard for the order Sluggable-first: a friendly_id slug is
+        # plaintext of its source, so slugging an encrypted field would store
+        # the value in clear. Checks sources declared through sluggable_by
+        # (its `candidates:` included); Sluggable mirrors this for the reverse
+        # order.
+        def encryptable_guard_sluggable!(field)
+          return unless respond_to?(:sluggable_declared) && sluggable_declared
+          return unless sluggable_source_fields.include?(field.to_sym)
+
+          raise ArgumentError,
+                "#{LABEL}: ':#{field}' is also a Sluggable source; the slug would store the decrypted " \
+                "plaintext in the slug column. Slug from a non-sensitive field instead."
         end
 
         # Redact encrypted fields from Rails parameter logging. The gem-level

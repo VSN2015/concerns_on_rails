@@ -20,7 +20,7 @@ module ConcernsOnRails
       # instance methods
       LABEL = "ConcernsOnRails::Models::Sluggable".freeze
 
-      included do
+      included do # rubocop:disable Metrics/BlockLength
         # Checked here rather than in sluggable_by: friendly_id's to_param lands
         # on the class at include time, so this is the first moment the clash
         # exists — and it catches a model that includes Sluggable without ever
@@ -34,6 +34,9 @@ module ConcernsOnRails
         # uuid fallback; `max_length:` — word-boundary truncation of the slug.
         class_attribute :sluggable_candidates, instance_accessor: false, default: nil
         class_attribute :sluggable_max_length, instance_accessor: false, default: nil
+        # Whether sluggable_by has run (the :name default above is only a
+        # fallback) — Encryptable's guard checks declared sources only.
+        class_attribute :sluggable_declared, instance_accessor: false, default: false
 
         extend FriendlyId
 
@@ -102,6 +105,8 @@ module ConcernsOnRails
           self.sluggable_field = field.to_sym
           self.sluggable_candidates = sluggable_validate_candidates!(candidates)
           self.sluggable_max_length = sluggable_validate_max_length!(max_length)
+          sluggable_guard_encryptable!
+          self.sluggable_declared = true
           # Validate the slug column too (a missing one used to fail at first save
           # with an opaque friendly_id error); an association scope: is exempt.
           scope_column = scope && reflect_on_association(scope.to_sym) ? nil : scope
@@ -114,7 +119,33 @@ module ConcernsOnRails
                                   reserved_words: reserved_words, finders: finders)
         end
 
+        # The attribute names the slug is built from: the `candidates:` entries
+        # that are Symbols/Strings (nested arrays flattened) when given — they
+        # replace the sluggable field — else the sluggable field. Procs are
+        # opaque and left out.
+        def sluggable_source_fields
+          sources = sluggable_candidates ? Array(sluggable_candidates).flatten : [sluggable_field]
+          sources.filter_map { |source| source.to_sym if source.is_a?(Symbol) || source.is_a?(String) }
+        end
+
         private
+
+        # A slug is a PLAINTEXT derivative of its source ("123-45-6789"), so an
+        # encrypted field must never feed one. Mirror of Encryptable's guard,
+        # covering the reverse order (sluggable_by declared AFTER encryptable).
+        # A method or Proc candidate that reads an encrypted field cannot be
+        # seen from here — keep encrypted values out of those yourself.
+        def sluggable_guard_encryptable!
+          return unless respond_to?(:encryptable_rules)
+
+          overlap = sluggable_source_fields & encryptable_rules.keys
+          return if overlap.empty?
+
+          raise ArgumentError,
+                "#{LABEL}: #{overlap.map { |f| ":#{f}" }.join(', ')} declared with both Encryptable and " \
+                "Sluggable; the slug would store the decrypted plaintext in the slug column. " \
+                "Slug from a non-sensitive field instead."
+        end
 
         # Mirror of Hashable's macro-time guard, covering the reverse
         # declaration order (Hashable declared BEFORE Sluggable) — friendly_id's

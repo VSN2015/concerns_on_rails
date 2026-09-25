@@ -174,6 +174,7 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - **Normalizable** — normalization runs `before_validation` on the plaintext; encryption happens later, at the DB-serialization boundary. So the stored ciphertext is always of the *normalized* value, regardless of `include` order.
 - **Maskable** — `masked_<field>` masks the *decrypted* value; the column stays ciphertext. Order-independent.
 - **Auditable** — auditing an encrypted field would persist its plaintext into the audit column, so declaring a field with **both** `encryptable` and `auditable_by` **raises**. Audit a non-sensitive companion column instead.
+- **Sluggable** — a friendly_id slug is plaintext of its source (`"123-45-6789"`), so an encrypted field named as the `sluggable_by` field or in its `candidates:` (nested arrays included) **raises**, from either declaration order. A method or Proc candidate that reads an encrypted field cannot be detected — keep encrypted values out of those yourself.
 - **Searchable / Filterable** — encrypted columns are **not** searchable: non-deterministic ciphertext (random IV) means the same plaintext never produces the same bytes, so `where(:ssn)`, `LIKE`, and prefix matching cannot work. For exact-match lookups, add a [blind index](#querying-encrypted-fields-blind-index) and query the `<field>_bidx` column (via `find_by_<field>` / `where_<field>`).
 
 ## Security notes
@@ -196,4 +197,4 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - `where_<field>(nil)` / `find_by_<field>(nil)` return `none`/nil instead of matching every row without a fingerprint (`bidx IS NULL`).
 - Encrypted field names register with Rails parameter filtering through a live registry consulted by a proc the gem's railtie appends at boot — redaction now works with boot-time filter snapshots (ActiveRecord `filter_attributes`, lograge-style initializers) and lazily-loaded model classes.
 - PBKDF2-derived keys are memoized (bounded, mutex-guarded); previously every encrypt/decrypt/blind-index call re-ran the 65,536-iteration KDF.
-- The encrypted×audited overlap raises at macro time from both declaration orders.
+- The encrypted×audited and encrypted×slug-source overlaps raise at macro time from both declaration orders.
