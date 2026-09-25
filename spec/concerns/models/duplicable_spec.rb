@@ -310,6 +310,151 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
     end
   end
 
+  describe "children the child model hides or identifies" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :dup_children, force: true do |t|
+          t.integer :dup_invoice_id
+          t.string :body
+          t.datetime :published_at
+          t.datetime :deleted_at
+          t.string :token
+          t.integer :sequence
+          t.string :number
+          t.text :audit_log
+          t.timestamps null: true
+        end
+        add_index :dup_children, :token, unique: true
+      end
+    end
+
+    after { ActiveRecord::Base.connection.drop_table(:dup_children) }
+
+    def parent_with(association, child_class)
+      stub_const("DupChild", child_class)
+      parent = Class.new(TestModel) { self.table_name = "dup_invoices" }
+      stub_const("DupParent", parent)
+      parent.class_eval do
+        include ConcernsOnRails::Models::Duplicable
+
+        public_send(association, :dup_children, class_name: "DupChild", foreign_key: :dup_invoice_id)
+        duplicable_by associations: %i[dup_children]
+      end
+      parent
+    end
+
+    def child_class(&body)
+      Class.new(TestModel) do
+        self.table_name = "dup_children"
+        class_eval(&body)
+      end
+    end
+
+    def copied_bodies(copy)
+      DupChild.unscoped.where(dup_invoice_id: copy.id).order(:id).pluck(:body)
+    end
+
+    # The deep copy iterated the association reader, which carries the
+    # child's default scopes — drafts were silently not copied.
+    describe "a child hidden by its own default scope" do
+      let(:publishable_child) do
+        child_class do
+          include ConcernsOnRails::Models::Publishable
+
+          publishable_by :published_at, default_scope: true
+        end
+      end
+
+      it "copies the drafts along with the published children" do
+        parent = parent_with(:has_many, publishable_child)
+        original = parent.create!(title: "course")
+        DupChild.create!(dup_invoice_id: original.id, body: "live", published_at: 1.day.ago)
+        DupChild.create!(dup_invoice_id: original.id, body: "draft", published_at: nil)
+
+        expect(copied_bodies(original.duplicate!)).to eq(%w[live draft])
+      end
+
+      it "copies a has_one draft" do
+        parent = parent_with(:has_one, publishable_child)
+        original = parent.create!(title: "course")
+        DupChild.create!(dup_invoice_id: original.id, body: "draft", published_at: nil)
+
+        expect(copied_bodies(original.duplicate!)).to eq(%w[draft])
+      end
+
+      it "still carries in-memory edits of an already-loaded association" do
+        parent = parent_with(:has_many, publishable_child)
+        original = parent.create!(title: "course")
+        DupChild.create!(dup_invoice_id: original.id, body: "live", published_at: 1.day.ago)
+        DupChild.create!(dup_invoice_id: original.id, body: "draft", published_at: nil)
+        original.dup_children.load.first.body = "edited"
+
+        expect(copied_bodies(original.duplicate!)).to eq(%w[edited draft])
+      end
+
+      it "re-links has_and_belongs_to_many records the associated model hides" do
+        DupTag.class_eval { default_scope { where.not(name: "hidden") } }
+        original = DupInvoice.create!(title: "Q1")
+        shown = DupTag.create!(name: "shown")
+        hidden = DupTag.unscoped.create!(name: "hidden")
+        ActiveRecord::Base.connection.execute(
+          "INSERT INTO dup_invoices_dup_tags (dup_invoice_id, dup_tag_id) VALUES " \
+          "(#{original.id}, #{shown.id}), (#{original.id}, #{hidden.id})"
+        )
+
+        copy = original.duplicate!
+        linked = ActiveRecord::Base.connection.select_values(
+          "SELECT dup_tag_id FROM dup_invoices_dup_tags WHERE dup_invoice_id = #{copy.id}"
+        )
+        expect(linked.map(&:to_i)).to contain_exactly(shown.id, hidden.id)
+      end
+
+      # A trashed child is not part of the record: the SoftDeletable default
+      # scope (when on) keeps excluding it, exactly as before.
+      it "still leaves out children hidden by a SoftDeletable default scope" do
+        soft = child_class do
+          include ConcernsOnRails::Models::SoftDeletable
+
+          soft_deletable_by :deleted_at
+        end
+        parent = parent_with(:has_many, soft)
+        original = parent.create!(title: "course")
+        DupChild.create!(dup_invoice_id: original.id, body: "kept")
+        DupChild.create!(dup_invoice_id: original.id, body: "trashed").soft_delete!
+
+        expect(copied_bodies(original.duplicate!)).to eq(%w[kept])
+      end
+    end
+
+    # A child without Duplicable only had its timestamps (and counters)
+    # blanked: its token was copied onto the new row — a shared credential,
+    # or RecordNotUnique on the unique index — and likewise its sequence
+    # number and audit trail.
+    it "resets a plain (non-Duplicable) child's identity columns" do
+      plain = child_class do
+        include ConcernsOnRails::Models::Tokenizable
+        include ConcernsOnRails::Models::Sequenceable
+        include ConcernsOnRails::Models::Auditable
+
+        tokenizable_by :token
+        sequenceable_by :sequence, into: :number, prefix: "N-"
+        auditable_by :body, into: :audit_log
+      end
+      parent = parent_with(:has_many, plain)
+      original = parent.create!(title: "p")
+      child = DupChild.create!(dup_invoice_id: original.id, body: "a")
+      child.update!(body: "b")
+
+      copy = nil
+      expect { copy = original.duplicate! }.not_to raise_error
+      copied = copy.dup_children.first
+      expect(copied.token).to be_present
+      expect(copied.token).not_to eq(child.token)
+      expect(copied.number).not_to eq(child.reload.number)
+      expect(copied.audit_trail.length).to eq(1)
+    end
+  end
+
   describe "Sluggable interaction" do
     let(:klass) do
       Class.new(TestModel) do
