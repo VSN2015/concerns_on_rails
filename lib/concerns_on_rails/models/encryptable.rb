@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "active_model/type"
 require "bigdecimal"
@@ -492,14 +493,23 @@ module ConcernsOnRails
         # (ActiveRecord filter_attributes, lograge-style initializers) see the
         # proc. The direct append remains as a fallback for apps that require
         # the gem after boot and for non-String param values.
+        #
+        # Only that best-effort fallback is rescued. The registry write is the
+        # load-bearing half and must never be swallowed — a blanket rescue
+        # once hid a NoMethodError here (the concern required without the
+        # gem's loader), and the field silently went unfiltered.
         def encryptable_register_filter_parameter(field)
           ConcernsOnRails.filter_parameter_registry.add(field)
           return unless defined?(Rails) && Rails.respond_to?(:application) && Rails.application
 
-          filters = Rails.application.config.filter_parameters
-          filters << field unless filters.include?(field)
-        rescue StandardError
-          nil
+          begin
+            filters = Rails.application.config.filter_parameters
+            filters << field unless filters.include?(field)
+          rescue NameError
+            raise
+          rescue StandardError
+            nil # e.g. a filter list frozen after boot — the registry covers it
+          end
         end
       end
 

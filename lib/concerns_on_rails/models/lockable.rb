@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
@@ -229,11 +230,10 @@ module ConcernsOnRails
         # time by the proc ConcernsOnRails::Railtie appends to
         # config.filter_parameters at boot, so a model class that loads later
         # (lazy loading in development) is still covered. Mirrors
-        # Models::Encryptable.
+        # Models::Encryptable. Deliberately unrescued: a failure here means
+        # the token would be logged in clear, which must not pass silently.
         def lockable_register_filter_parameter(field)
           ConcernsOnRails.filter_parameter_registry.add(field)
-        rescue StandardError
-          nil
         end
 
         def validate_lockable!(attempts, locked_at, max_attempts:, unlock_in:, unlock_token: nil)

@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/vary_header"
+require "active_support/core_ext/integer/time" # DEFAULT_PERSIST's 1.year
 
 module ConcernsOnRails
   module Controllers

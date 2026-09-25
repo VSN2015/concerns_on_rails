@@ -37,7 +37,10 @@ Model concerns live in `lib/concerns_on_rails/models/<name>.rb`, controller conc
 `lib/concerns_on_rails/controllers/<name>.rb`, and shared internal helpers in
 `lib/concerns_on_rails/support/<name>.rb`. `lib/concerns_on_rails.rb` is the loader —
 fully autoload-based since the post-1.22 DX wave (each concern file requires the support
-helpers it uses, so direct requires still work). `friendly_id`/`acts_as_list` load lazily
+helpers it uses, plus `concerns_on_rails/core` — `MissingDependency` and the gem-level
+singletons `deprecator`/`config`/`setup`/`encryption`/`filter_parameter_registry` — when it
+touches one, so direct requires still work; `spec/concerns/direct_require_spec.rb` requires
+every model/controller file alone in a subprocess). `friendly_id`/`acts_as_list` load lazily
 with Sluggable/Sortable (absent gem → `ConcernsOnRails::MissingDependency`, a LoadError
 subclass). Top-level aliases for the pre-1.6 module paths (e.g. `ConcernsOnRails::Sluggable`)
 resolve lazily via `const_missing` in `lib/concerns_on_rails/legacy_aliases.rb`. Gem-wide
