@@ -276,7 +276,12 @@ and a subclass never rips a scope out from under its parent), `BatchOps` (the ho
 fast-path predicate — every named instance method still owned by the concern, i.e.
 unoverridden — plus the transactional `find_each` batch runner shared by every `*_all` verb:
 Integer count, DB-side filtering for idempotency, rollback via `ActiveRecord::RecordNotSaved`
-on a failed record), `VaryHeader` (the shared `Vary` appender behind Localizable's
+on a failed record — and `each_record`, the ONLY way to `find_each` a relation: it strips the
+ORDER (error_on_ignored_order) and resolves a LIMIT/OFFSET to plucked PKs first, since bare
+`find_each` keeps the limit but pages by PK), `HookedWrite` (the hooked-verb savepoint; on abort
+restores the WHOLE AttributeSet via deep_dup — never by reading values, which decrypts),
+`AssociationScope` (`unfiltered(record, name)`: an association's rows without the TARGET's
+default scopes — built inside `klass.unscoped { }` — for cascades/deep copies), `VaryHeader` (the shared `Vary` appender behind Localizable's
 `Accept-Language` and Timezoneable's `Time-Zone`: appends, de-duplicates case-insensitively,
 leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —
 seeds `Accept` itself whenever Rails' own `_set_vary_header` would have, since that only

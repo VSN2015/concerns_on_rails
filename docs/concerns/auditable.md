@@ -32,7 +32,7 @@ A single text column is required (the tracked fields are your existing columns).
 
 | Column | Type | Required | Notes |
 |--------|------|----------|-------|
-| `audit_log` (or your chosen `into:` column) | `text` | Yes | Stores the JSON array of entries; stays `NULL` until a tracked field first changes |
+| `audit_log` (or your chosen `into:` column) | `text` (or native `json`/`jsonb`) | Yes | Stores the JSON array of entries; stays `NULL` until a tracked field first changes. A native json column (`t.json :audit_log, default: []`) is written the array itself |
 
 ```ruby
 class AddAuditLogToProducts < ActiveRecord::Migration[7.1]
