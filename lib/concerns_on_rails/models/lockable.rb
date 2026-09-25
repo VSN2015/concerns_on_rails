@@ -345,13 +345,16 @@ module ConcernsOnRails
       # request locked it) used to pass the in-memory idempotency guard, mint
       # a fresh unlock token over the one after_lock had already mailed, and
       # fire after_lock again. Now it loses the claim, adopts the lock that is
-      # there, fires no hooks, and returns true (the account IS locked).
+      # there, fires no hooks, and returns true (the account IS locked) — or
+      # false when the row has gone. Like update_columns, a readonly! record
+      # raises ReadOnlyRecord and a destroyed one ActiveRecordError.
       # before_lock therefore runs after the claim, inside the same savepoint:
       # a hook that raises or vetoes with Rollback still undoes the lock.
       def lock_access!
         lockable_guard_persisted!("lock_access!")
         return true if access_locked?
 
+        lockable_guard_writable!
         field = self.class.lockable_locked_at_field
         attributes = { field => Time.zone.now }.merge(self.class.lockable_token_attributes(SecureRandom.urlsafe_base64(32)))
         claimed = false
@@ -498,14 +501,29 @@ module ConcernsOnRails
         send(:clear_attribute_changes, attributes.keys.map(&:to_s))
       end
 
+      # update_columns' preconditions, which the raw claim UPDATE would
+      # otherwise skip: a readonly! record must not be locked behind the
+      # caller's back, and a destroyed one has no row to lock.
+      def lockable_guard_writable!
+        raise ActiveRecord::ReadOnlyRecord, "#{self.class} is marked as readonly" if readonly?
+        raise ActiveRecord::ActiveRecordError, "cannot update a destroyed record" if destroyed?
+      end
+
       # Lost the lock_access! claim: another request locked the row first.
       # Read its lock (and token) back so this instance agrees with the
-      # database. true — the account is locked either way.
+      # database. A LOCKING read (FOR UPDATE; a no-op on SQLite): under
+      # MySQL's REPEATABLE READ a plain SELECT inside the caller's
+      # transaction can return the snapshot taken before the winner
+      # committed — the unlocked row the claim just failed against — while a
+      # locking read sees the latest committed version, like the UPDATE did.
+      # true — the account is locked; false when the row is gone.
       def lockable_adopt_current_lock!
         klass = self.class
         columns = [klass.lockable_locked_at_field, klass.lockable_unlock_token_field].compact
-        current = klass.unscoped.where(klass.primary_key => id).select(*columns).first
-        lockable_sync_columns(columns.to_h { |column| [column, current[column]] }) if current
+        current = klass.unscoped.where(klass.primary_key => id).select(klass.primary_key, *columns).lock.first
+        return false unless current
+
+        lockable_sync_columns(columns.to_h { |column| [column, current[column]] })
         true
       end
 

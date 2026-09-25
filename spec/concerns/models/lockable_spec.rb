@@ -349,6 +349,34 @@ describe ConcernsOnRails::Lockable do
       expect(LockUser.find(user.id).locked_at).to eq(locked_at)
     end
 
+    # The claim is a raw conditional UPDATE, so update_columns' own
+    # preconditions are replicated rather than silently lost.
+    it "raises ReadOnlyRecord on a readonly! record and writes nothing" do
+      user = LockUser.create!(email: "a@b.c")
+      readonly = LockUser.find(user.id)
+      readonly.readonly!
+
+      expect { readonly.lock_access! }.to raise_error(ActiveRecord::ReadOnlyRecord)
+      expect(LockUser.find(user.id).locked_at).to be_nil
+      expect(readonly.events).to be_nil
+    end
+
+    it "raises on a destroyed record instead of reporting a lock" do
+      user = LockUser.create!(email: "a@b.c")
+      user.destroy
+
+      expect { user.lock_access! }.to raise_error(ActiveRecord::ActiveRecordError, /destroyed/)
+    end
+
+    it "returns false (no hooks) when the row was deleted behind the instance's back" do
+      user = LockUser.create!(email: "a@b.c")
+      LockUser.where(id: user.id).delete_all
+
+      expect(user.lock_access!).to be(false)
+      expect(user.events).to be_nil
+      expect(user.locked_at).to be_nil
+    end
+
     it "locks a record that fails validations (update_columns bypass)" do
       klass = Class.new(TestModel) do
         self.table_name = "lock_users"
@@ -943,6 +971,25 @@ describe ConcernsOnRails::Lockable do
       expect(stale.lock_access!).to be(true)
       expect(stale.unlock_token).to eq(token)
       expect(klass.find(user.id).unlock_token).to eq(token)
+    end
+
+    it "a before_lock Rollback veto undoes the claim and restores memory exactly" do
+      vetoing = Class.new(TestModel) do
+        self.table_name = "token_lock_users"
+        include ConcernsOnRails::Lockable
+
+        lockable_by max_attempts: 2, unlock_token: :unlock_token
+
+        def before_lock = raise(ActiveRecord::Rollback)
+      end
+      record = vetoing.create!(email: "veto-lock@x.com")
+
+      expect(record.lock_access!).to be(false)
+      expect(record.locked_at).to be_nil
+      expect(record.unlock_token).to be_nil
+      expect(record.changed?).to be(false)
+      expect(vetoing.find(record.id).locked_at).to be_nil
+      expect(vetoing.find(record.id).unlock_token).to be_nil
     end
 
     it "lock_access! still re-locks (fresh token) over a lapsed lock a stale instance saw as live" do
