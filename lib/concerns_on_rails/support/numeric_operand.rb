@@ -156,15 +156,36 @@ module ConcernsOnRails
       end
 
       def float_operand(raw)
-        value =
-          case raw
-          when String then numeric_string?(raw) ? raw.strip.to_f : nil
-          when Numeric then raw.to_f
-          end
+        value = float_value(raw)
         return UNCASTABLE if value.nil? || value.nan?
         return out_of_range(value) unless value.finite?
+        return underflow(raw) if value.zero? && !written_zero?(raw)
 
         Operand.new(:exact, value)
+      end
+
+      # A nonzero literal below the smallest subnormal ("1e-400") reads as
+      # 0.0 — a DIFFERENT number, so binding it as :exact made `= 1e-400`
+      # match every 0.0 row and `< 1e-400` miss them. No Float can equal it:
+      # it is :inexact, floored to the largest Float below it (0.0 for a
+      # positive literal, the negative subnormal nearest zero for a negative
+      # one), which keeps `> v` / `>= v` as `> floor` and `< v` / `<= v` as
+      # `<= floor` exact, like every other inexact operand.
+      def underflow(raw)
+        negative = raw.is_a?(String) ? raw.strip.start_with?("-") : raw.negative?
+        Operand.new(:inexact, decimal_value(raw) || raw, negative ? 0.0.prev_float : 0.0)
+      end
+
+      # Only reached for a numeric_string? String or a finite Numeric.
+      def written_zero?(raw)
+        raw.is_a?(String) ? raw.strip.to_d.zero? : raw.zero?
+      end
+
+      def float_value(raw)
+        case raw
+        when String then numeric_string?(raw) ? raw.strip.to_f : nil
+        when Numeric then raw.to_f
+        end
       end
 
       def out_of_range(value)
