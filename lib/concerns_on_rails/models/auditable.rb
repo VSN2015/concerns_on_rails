@@ -7,7 +7,8 @@ module ConcernsOnRails
   module Models
     # Lightweight change history ("paper_trail-lite") stored as JSON entries in
     # a single text column on the same table — no extra tables, no versioning
-    # engine — so it works on any database, including SQLite.
+    # engine — so it works on any database, including SQLite. A native
+    # json/jsonb column works too (the trail is stored as a JSON array).
     #
     #   class Product < ApplicationRecord
     #     include ConcernsOnRails::Auditable
@@ -197,7 +198,25 @@ module ConcernsOnRails
         entries = auditable_persisted_trail + auditable_build_entries(tracked)
         max = self.class.auditable_max_entries
         entries = entries.last(max) if max
-        self[self.class.auditable_into] = JSON.generate(entries)
+        self[self.class.auditable_into] = auditable_encode(entries)
+      end
+
+      def auditable_encode(entries)
+        auditable_native_column? ? entries : JSON.generate(entries)
+      end
+
+      # A native json/jsonb column (or one the host app `serialize`d) encodes
+      # the value itself, so it is handed the Array: assigning the generated
+      # String stored a JSON string scalar wrapping the encoded trail. The
+      # same detection Models::Storable uses for its column.
+      def auditable_native_column?
+        name = self.class.auditable_into.to_s
+        type = self.class.type_for_attribute(name)
+        return true if defined?(ActiveRecord::Type::Serialized) && type.is_a?(ActiveRecord::Type::Serialized)
+
+        %i[json jsonb].include?(self.class.columns_hash[name]&.type)
+      rescue StandardError
+        false
       end
 
       # Cheap pre-check before materializing the full changes hash — most saves
@@ -307,8 +326,13 @@ module ConcernsOnRails
       end
 
       # Tolerant decode: blank, invalid JSON or non-array payloads become [].
+      # A native json column hands back the already-decoded Array (JSON.parse
+      # on it raised TypeError, failing every tracked save); a String is the
+      # text-column form — or a trail an earlier version stored in a json
+      # column as a JSON string scalar, which decodes back to that String.
       def auditable_decode(raw)
-        return [] if raw.nil? || raw.to_s.strip.empty?
+        return raw.grep(Hash) if raw.is_a?(Array)
+        return [] unless raw.is_a?(String) && !raw.strip.empty?
 
         parsed = JSON.parse(raw)
         parsed.is_a?(Array) ? parsed.grep(Hash) : []

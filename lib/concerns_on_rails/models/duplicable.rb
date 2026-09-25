@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/association_scope"
 
 module ConcernsOnRails
   module Models
@@ -44,10 +45,18 @@ module ConcernsOnRails
     #     children are never copied. A counter kept by a child with no
     #     has_many/has_one on this class is invisible here — list it in
     #     `reset:` (nil) or `on_duplicate`.
+    # A plain (non-Duplicable) child copy gets all of the above for its OWN
+    # class too — a copied child never shares a token, slug or number.
     # Business state (Publishable/Stateable/Activatable/...) is a judgment
     # call, so it is NOT auto-reset — list those columns in `reset:`.
     #
     # Associations (`associations:` allow-list, declared before the macro):
+    #   * Children are read WITHOUT the child model's default scopes, so a
+    #     draft hidden by `publishable_by ..., default_scope: true` is copied
+    #     too. The one exception is a SoftDeletable child whose default scope
+    #     is on: its soft-deleted rows stay out of the copy (trash is not part
+    #     of the record). An already-loaded association keeps its in-memory
+    #     edits and unsaved children.
     #   * has_many / has_one — children are deep-copied. A child whose class
     #     also includes Duplicable is copied via ITS OWN `duplicate` (own
     #     resets, own nested associations) — recursive graphs stay declarative.
@@ -177,11 +186,10 @@ module ConcernsOnRails
       end
 
       def duplicable_reset_attributes(copy)
-        (duplicable_auto_reset_columns + self.class.duplicable_config[:reset]).each do |column|
+        self.class.duplicable_config[:reset].each do |column|
           copy[column] = nil if copy.class.column_names.include?(column.to_s)
         end
-        copy[self.class.lockable_attempts_field] = 0 if duplicable_concern?(Lockable)
-        Duplicable.zero_counter_cache_columns(copy)
+        Duplicable.reset_identity_columns(copy)
       end
 
       def duplicable_apply_suffixes(copy)
@@ -190,85 +198,89 @@ module ConcernsOnRails
         end
       end
 
-      # Identity-bearing columns owned by sibling concerns (see module docs).
-      def duplicable_auto_reset_columns
-        columns = TIMESTAMP_COLUMNS.dup
-        columns.concat(duplicable_generator_columns)
-        columns << self.class.auditable_into if duplicable_concern?(Auditable)
-        columns << self.class.soft_delete_field if duplicable_concern?(SoftDeletable)
-        columns.concat(duplicable_lockable_columns) if duplicable_concern?(Lockable)
-        columns
-      end
-
-      # Columns whose values are generated per record (slug, tokens, sequence
-      # numbers) — each concern regenerates them on the copy's save.
-      def duplicable_generator_columns
-        columns = []
-        columns << self.class.friendly_id_config.slug_column if duplicable_concern?(Sluggable)
-        columns.concat(duplicable_token_columns) if duplicable_concern?(Tokenizable)
-        columns << self.class.hashable_field if duplicable_concern?(Hashable) && self.class.hashable_field
-        columns.concat(duplicable_sequence_columns) if duplicable_concern?(Sequenceable)
-        columns
-      end
-
-      # A token and its `expires_in:` stamp must be cleared together. Blanking
-      # only the token leaves the copy with a fresh secret carrying the
-      # original's expiry — often already in the past, so the copy's token is
-      # born dead.
-      def duplicable_token_columns
-        self.class.tokenizable_fields.flat_map do |field, config|
-          next field unless config[:expires_in]
-
-          [field, self.class.tokenizable_expiry_column(field)]
-        end
-      end
-
-      # The lock stamp AND the unlock token: a copy is born unlocked, so it must
-      # not inherit a live unlock link. Leaving the token would also put the
-      # same secret on two rows, and unlock_by_token's lookup would then pick
-      # an arbitrary one.
-      def duplicable_lockable_columns
-        [self.class.lockable_locked_at_field, self.class.lockable_unlock_token_field].compact
-      end
-
-      def duplicable_sequence_columns
-        self.class.sequenceable_config.flat_map do |field, cfg|
-          [field, cfg[:into]].compact
-        end
-      end
-
-      def duplicable_concern?(concern)
-        self.class.include?(concern)
-      end
-
       def duplicable_copy_associations(copy, associations)
         associations.each do |name|
           reflection = self.class.reflect_on_association(name)
+          children = duplicable_source_records(name)
           case reflection.macro
           when :has_many
-            public_send(name).each { |child| copy.public_send(name) << duplicable_child_copy(child) }
+            children.each { |child| copy.public_send(name) << duplicable_child_copy(child) }
           when :has_one
-            child = public_send(name)
-            copy.public_send("#{name}=", duplicable_child_copy(child)) if child
+            copy.public_send("#{name}=", duplicable_child_copy(children.first)) if children.first
           when :has_and_belongs_to_many
-            copy.public_send("#{name}=", public_send(name).to_a)
+            copy.public_send("#{name}=", children)
           end
         end
       end
 
+      # The children to copy. Reading the association itself applied the
+      # child model's default scopes, so a draft hidden by Publishable's
+      # `default_scope: true` was silently left out of the copy; the rows
+      # come from Support::AssociationScope instead (the association's own
+      # conditions, no default scopes). A SoftDeletable child's default scope
+      # is re-applied — a trashed child is not part of the record, and
+      # skipping it is what the copy always did.
+      #
+      # An unsaved owner has no rows to query (its FK is nil, which would
+      # match orphans), and an already-loaded association may hold unsaved
+      # edits or children: its in-memory records win over their rows. When
+      # the child model declares no default scope at all, a loaded target is
+      # already every row, so it is used without the extra query.
+      def duplicable_source_records(name)
+        association = association(name)
+        return Array.wrap(public_send(name)) if new_record?
+        return Array.wrap(association.target) if association.loaded? && association.klass.default_scopes.empty?
+
+        rows = duplicable_unfiltered_rows(name)
+        association.loaded? ? duplicable_merge_loaded(association, rows) : rows
+      end
+
+      # A loaded has_one's target wins outright; a loaded collection's
+      # records replace their rows by id, and its unsaved ones are appended.
+      def duplicable_merge_loaded(association, rows)
+        loaded = Array.wrap(association.target)
+        return loaded.first(1).presence || rows.first(1) unless association.reflection.collection?
+
+        by_id = loaded.reject(&:new_record?).index_by(&:id)
+        rows.map { |row| by_id.fetch(row.id, row) } + loaded.select(&:new_record?)
+      end
+
+      def duplicable_unfiltered_rows(name)
+        rows = ConcernsOnRails::Support::AssociationScope.unfiltered(self, name)
+        klass = rows.klass
+        if klass.respond_to?(:soft_delete_default_scope) && klass.soft_delete_default_scope
+          rows = rows.public_send(klass.soft_delete_scope_names.fetch(:without_deleted))
+        end
+        rows.to_a
+      end
+
       # A child that is itself Duplicable copies by its OWN rules; anything
-      # else gets a dup with the timestamps blanked (AR preserves a present
-      # created_at on save).
+      # else gets a dup with its own class's identity columns blanked —
+      # timestamps (AR preserves a present created_at on save), counters, and
+      # every sibling concern's token/slug/number/trail — so a plain child
+      # regenerates them on save instead of sharing a credential with the
+      # original or colliding with its unique index.
       def duplicable_child_copy(child)
         return child.duplicate if child.class.include?(Duplicable)
 
         plain = child.dup
-        TIMESTAMP_COLUMNS.each { |column| plain[column] = nil if plain.class.column_names.include?(column) }
-        Duplicable.zero_counter_cache_columns(plain)
+        Duplicable.reset_identity_columns(plain)
         plain
       end
 
       class << self
+        # Blank the identity-bearing columns of `record`'s OWN class (see the
+        # module docs) — the copy itself, or a plain child copy — so each
+        # sibling concern regenerates them on save.
+        def reset_identity_columns(record)
+          klass = record.class
+          auto_reset_columns(klass).each do |column|
+            record[column] = nil if klass.column_names.include?(column.to_s)
+          end
+          record[klass.lockable_attempts_field] = 0 if concern?(klass, :Lockable)
+          zero_counter_cache_columns(record)
+        end
+
         # Zero every counter-cache column on `record`'s class (see the module
         # docs): the copy's children re-increment it on save.
         def zero_counter_cache_columns(record)
@@ -316,6 +328,62 @@ module ConcernsOnRails
         end
 
         private
+
+        # Identity-bearing columns owned by sibling concerns (see module docs).
+        def auto_reset_columns(klass)
+          columns = TIMESTAMP_COLUMNS.dup
+          columns.concat(generator_columns(klass))
+          columns << klass.auditable_into if concern?(klass, :Auditable)
+          columns << klass.soft_delete_field if concern?(klass, :SoftDeletable)
+          columns.concat(lockable_columns(klass)) if concern?(klass, :Lockable)
+          columns
+        end
+
+        # Columns whose values are generated per record (slug, tokens, sequence
+        # numbers) — each concern regenerates them on the copy's save.
+        def generator_columns(klass)
+          columns = []
+          columns << klass.friendly_id_config.slug_column if concern?(klass, :Sluggable)
+          columns.concat(token_columns(klass)) if concern?(klass, :Tokenizable)
+          columns << klass.hashable_field if concern?(klass, :Hashable) && klass.hashable_field
+          columns.concat(sequence_columns(klass)) if concern?(klass, :Sequenceable)
+          columns
+        end
+
+        # A token and its `expires_in:` stamp must be cleared together. Blanking
+        # only the token leaves the copy with a fresh secret carrying the
+        # original's expiry — often already in the past, so the copy's token is
+        # born dead.
+        def token_columns(klass)
+          klass.tokenizable_fields.flat_map do |field, config|
+            next field unless config[:expires_in]
+
+            [field, klass.tokenizable_expiry_column(field)]
+          end
+        end
+
+        # The lock stamp AND the unlock token: a copy is born unlocked, so it must
+        # not inherit a live unlock link. Leaving the token would also put the
+        # same secret on two rows, and unlock_by_token's lookup would then pick
+        # an arbitrary one.
+        def lockable_columns(klass)
+          [klass.lockable_locked_at_field, klass.lockable_unlock_token_field].compact
+        end
+
+        def sequence_columns(klass)
+          klass.sequenceable_config.flat_map do |field, cfg|
+            [field, cfg[:into]].compact
+          end
+        end
+
+        # A concern still behind its autoload was never loaded, so no class
+        # includes it — answered without loading it (Sluggable's autoload
+        # would otherwise require friendly_id just to say "no").
+        def concern?(klass, name)
+          return false if ConcernsOnRails::Models.autoload?(name)
+
+          klass.include?(ConcernsOnRails::Models.const_get(name))
+        end
 
         def counter_cacheable_columns(klass, child)
           return [] unless defined?(ConcernsOnRails::Models::CounterCacheable) &&

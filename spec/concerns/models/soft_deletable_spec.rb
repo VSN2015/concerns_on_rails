@@ -1063,6 +1063,50 @@ describe ConcernsOnRails::SoftDeletable do
       expect(deleted_at(CascComment, other_comment)).to be_nil
     end
 
+    # The cascade loaded dependents through the association's scope, which
+    # merges in EVERY default scope of the child — so a child hiding its
+    # drafts (Publishable default_scope: true) kept them live under a
+    # soft-deleted parent, and a restore could not bring them back.
+    describe "into a child with another default_scope" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :casc_drafts, force: true do |t|
+            t.integer :casc_post_id
+            t.datetime :published_at
+            t.datetime :deleted_at, precision: 6
+          end
+        end
+        stub_const("CascDraft", Class.new(ActiveRecord::Base) do
+          self.table_name = "casc_drafts"
+          include ConcernsOnRails::SoftDeletable
+          include ConcernsOnRails::Publishable
+
+          soft_deletable_by :deleted_at
+          publishable_by :published_at, default_scope: true
+          belongs_to :casc_post
+        end)
+        CascPost.has_many :casc_drafts
+        CascPost.soft_deletable_by :deleted_at, cascade: :casc_drafts
+      end
+
+      after { ActiveRecord::Base.connection.drop_table(:casc_drafts) }
+
+      it "soft-deletes and restores the children that default scope hides" do
+        draft = CascDraft.create!(casc_post: post, published_at: nil)
+        live = CascDraft.create!(casc_post: post, published_at: 1.day.ago)
+        other = CascDraft.create!(casc_post: CascPost.create!(title: "q"), published_at: nil)
+
+        post.soft_delete!
+        expect(deleted_at(CascDraft, draft)).to eq(deleted_at(CascPost, post))
+        expect(deleted_at(CascDraft, live)).to eq(deleted_at(CascPost, post))
+        expect(deleted_at(CascDraft, other)).to be_nil
+
+        post.restore!
+        expect(deleted_at(CascDraft, draft)).to be_nil
+        expect(deleted_at(CascDraft, live)).to be_nil
+      end
+    end
+
     it "exposes the configured cascade" do
       expect(CascPost.soft_delete_cascade).to eq(%i[casc_comments casc_cover])
       expect(CascCover.soft_delete_cascade).to eq([])

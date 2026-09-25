@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/association_scope"
 require "concerns_on_rails/support/hooked_write"
 
 module ConcernsOnRails
@@ -264,8 +265,7 @@ module ConcernsOnRails
       def soft_delete!(at: Time.zone.now)
         return true if deleted?
 
-        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_soft_delete, after: :after_soft_delete,
-                                                        restore: [self.class.soft_delete_field]) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_soft_delete, after: :after_soft_delete) do
           next false unless soft_delete_write(at)
 
           soft_delete_cascade_dependents!(at)
@@ -278,8 +278,7 @@ module ConcernsOnRails
         return true unless deleted?
 
         stamp = self[self.class.soft_delete_field]
-        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_restore, after: :after_restore,
-                                                        restore: [self.class.soft_delete_field]) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_restore, after: :after_restore) do
           next false unless soft_delete_write(nil)
 
           restore_cascaded_dependents!(stamp)
@@ -351,16 +350,21 @@ module ConcernsOnRails
 
       # Yields the records of every cascade association matching `deleted:`
       # (false → not deleted, a timestamp → deleted at exactly that time).
-      # The association's default scope is peeled off so deleted rows are
-      # reachable; has_one is handled through the same relation.
+      # The target's default scopes are left out entirely (Support::
+      # AssociationScope) — not only its own SoftDeletable one, so deleted
+      # rows are reachable, but every other one too: a child hidden by, say,
+      # Publishable's `default_scope: true` still belongs to the parent, and
+      # the cascade used to leave its drafts live under a deleted parent. The
+      # association's own conditions still apply; has_one is handled through
+      # the same relation.
       def soft_delete_each_dependent(deleted:, &block)
         self.class.soft_delete_cascade.each do |name|
           reflection = self.class.reflect_on_association(name)
           self.class.send(:soft_delete_check_cascade_target!, name, reflection)
           field = reflection.klass.soft_delete_field
-          relation = association(name).scope.unscope(where: field)
+          relation = ConcernsOnRails::Support::AssociationScope.unfiltered(self, name).unscope(where: field)
           relation = deleted ? relation.where(field => deleted) : relation.where(field => nil)
-          relation.find_each(&block)
+          ConcernsOnRails::Support::BatchOps.each_record(relation, &block)
         end
       end
     end

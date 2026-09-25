@@ -387,4 +387,48 @@ describe ConcernsOnRails::Sortable do
       expect(klass.pluck(:priority)).to eq([3, 2, 1])
     end
   end
+
+  # The default_scope ORDER BY every Sortable model carries reached the batch
+  # verbs' find_each, which raises under error_on_ignored_order — so every
+  # slow-path *_all verb (a validator on the model) was fatal on these models.
+  describe "batch verbs under error_on_ignored_order" do
+    around do |example|
+      config = ActiveRecord.respond_to?(:error_on_ignored_order=) ? ActiveRecord : ActiveRecord::Base
+      previous = config.error_on_ignored_order
+      config.error_on_ignored_order = true
+      example.run
+    ensure
+      config.error_on_ignored_order = previous
+    end
+
+    before do
+      ActiveRecord::Schema.define do
+        create_table :sorted_posts, force: true do |t|
+          t.string :name
+          t.integer :position
+          t.datetime :published_at
+        end
+      end
+    end
+
+    it "runs a Publishable slow-path publish_all on a Sortable model" do
+      # Named before sortable_by runs: acts_as_list builds code from the class
+      # name, which an anonymous class does not have on Rails 6.0.
+      klass = Class.new(TestModel)
+      stub_const("SortedPost", klass)
+      klass.class_eval do
+        self.table_name = "sorted_posts"
+        include ConcernsOnRails::Sortable
+        include ConcernsOnRails::Publishable
+
+        sortable_by :position
+        publishable_by :published_at
+        validates :name, presence: true # the per-record (find_each) path
+      end
+      %w[a b].each { |name| klass.create!(name: name) }
+
+      expect(klass.publish_all).to eq(2)
+      expect(klass.published.count).to eq(2)
+    end
+  end
 end

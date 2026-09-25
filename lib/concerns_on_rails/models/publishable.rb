@@ -292,7 +292,7 @@ module ConcernsOnRails
       def publishable_write_with_hooks(value, kind)
         field = self.class.publishable_field
         before, after = kind == :publish ? %i[before_publish after_publish] : %i[before_unpublish after_unpublish]
-        ConcernsOnRails::Support::HookedWrite.run(self, before: before, after: after, restore: [field]) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: before, after: after) do
           update(field => value)
         end
       end

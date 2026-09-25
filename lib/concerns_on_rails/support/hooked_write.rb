@@ -19,14 +19,20 @@ module ConcernsOnRails
     #   rolls the savepoint back too, so a before-hook's own side effects
     #   never commit for a write that did not happen. The after-hook is
     #   skipped and the result is false.
-    # * On any abort — false write, Rollback, or an exception — the
-    #   `restore:` attributes are put back to their pre-write in-memory
-    #   values. A database rollback never undoes the attribute cache
-    #   (update_column(s) syncs it immediately; `update` leaves the new value
-    #   assigned), and the concerns' idempotency guards (`return true if
-    #   deleted?`) would otherwise turn every retry into a silent no-op.
-    #   An attribute that was already dirty before the call is restored as
-    #   dirty against its database value, so unsaved edits are not lost.
+    # * On any abort — false write, Rollback, or an exception — EVERY
+    #   attribute is put back to its pre-write in-memory state, dirty
+    #   tracking included. A database rollback never undoes the attribute
+    #   cache (update_column(s) syncs it immediately; `update` leaves the new
+    #   values assigned and marks them saved), and the concerns' idempotency
+    #   guards (`return true if deleted?`) would otherwise turn every retry
+    #   into a silent no-op. Restoring only the verb's own column was not
+    #   enough: whatever else the write changed in memory — the entry
+    #   Auditable's before_save appended to the trail, a before-hook's
+    #   assignment — stayed behind, clean or dirty, and the next unrelated
+    #   save persisted it (a phantom "draft -> published" audit entry for a
+    #   vetoed transition). An attribute that was already dirty before the
+    #   call is restored as dirty against its database value, so unsaved
+    #   edits are not lost.
     #
     # The block performs the write and returns truthy on success. Hooks are
     # method names sent to the record (so private overrides work); either may
@@ -34,8 +40,8 @@ module ConcernsOnRails
     module HookedWrite
       module_function
 
-      def run(record, before: nil, after: nil, restore: [])
-        snapshot = snapshot(record, restore)
+      def run(record, before: nil, after: nil)
+        snapshot = attribute_snapshot(record)
         identity = identity_snapshot(record)
         completed = false
         begin
@@ -48,7 +54,7 @@ module ConcernsOnRails
           end
         ensure
           unless completed
-            restore!(record, snapshot)
+            restore_attributes!(record, snapshot)
             restore_identity!(record, identity)
           end
         end
@@ -83,67 +89,48 @@ module ConcernsOnRails
         record.send(:clear_attribute_changes, Array(record.class.primary_key).map(&:to_s))
       end
 
-      # [name, value, dirty?, database value] per attribute, taken before
-      # anything is written. Reading an attribute runs its type's
-      # deserializer — for an Encryptable field that DECRYPTS, which an
-      # erasure must never do just to take a snapshot (and which raises
-      # DecryptionError for ciphertext that no longer decrypts). So an
-      # attribute still exactly as loaded (from the database, never read,
-      # never assigned) is snapshotted RAW without deserializing:
-      # [name, :raw, value_before_type_cast]. A value already in memory
-      # keeps the typed path; one that still cannot be read falls back to raw.
-      def snapshot(record, names)
-        names.map do |name|
-          name = name.to_s
-          next raw_snapshot(record, name) if unread_from_database?(record, name)
-
-          begin
-            [name, record[name], record.attribute_changed?(name), record.attribute_in_database(name)]
-          rescue StandardError
-            raw_snapshot(record, name)
-          end
-        end
+      # The record's whole attribute set, copied before anything is written —
+      # at the AttributeSet level, the way Rails' own transaction rollback
+      # state keeps it, and never by READING the attributes: reading runs the
+      # type's deserializer, which for an Encryptable field DECRYPTS (an
+      # erasure must never load old PII just to take a snapshot, and
+      # ciphertext that no longer decrypts would raise DecryptionError). A
+      # deep_dup copies each Attribute object, so an unread value stays
+      # unread, and the ORIGINAL value each one is dirty against is carried
+      # along with it. The last save's mutations are kept too: `update`
+      # inside the aborted write would otherwise leave saved_changes
+      # reporting a save that was rolled back.
+      #
+      # Forced changes (`title_will_change!`) live in the dirty tracker, not
+      # the attribute set — a Set of names on Rails 6.0, a name => original
+      # value Hash later — so they are copied from it and replayed onto the
+      # rebuilt tracker.
+      def attribute_snapshot(record)
+        tracker = record.instance_variable_get(:@mutations_from_database)
+        { attributes: record.instance_variable_get(:@attributes).deep_dup,
+          before_last_save: record.instance_variable_get(:@mutations_before_last_save),
+          forced_changes: tracker&.instance_variable_get(:@forced_changes).dup }
       end
 
-      def raw_snapshot(record, name)
-        [name, :raw, record.read_attribute_before_type_cast(name)]
-      end
-
-      # True for an attribute loaded from the database and neither read nor
-      # assigned since — its value has never been deserialized. Checking this
-      # deserializes nothing (Attribute#has_been_read? only tests @value).
-      # Matched by class NAME: Attribute::FromDatabase is a private constant
-      # on newer Rails and cannot be referenced directly.
-      def unread_from_database?(record, name)
-        attribute = record.instance_variable_get(:@attributes)&.[](name)
-        return false unless attribute.respond_to?(:has_been_read?)
-
-        attribute.class.name.to_s.end_with?("::FromDatabase") && !attribute.has_been_read?
-      end
-
-      def restore!(record, snapshot)
+      # Swap the copy back in. The dirty tracker is built over the attribute
+      # set it was created for, so it is dropped and rebuilt lazily against
+      # the restored one.
+      #
+      # Rails 6.0 applies a rolled-back savepoint's record state LAZILY — on
+      # the record's next persisted?/attribute access, via
+      # sync_with_transaction_state — and that would overwrite everything put
+      # back here (identity included). It is settled first. (Gone on 6.1+.)
+      def restore_attributes!(record, snapshot)
         return if record.frozen?
 
-        snapshot.each do |name, value, dirty, in_database|
-          next restore_raw!(record, name, dirty) if value == :raw
-
-          record[name] = dirty ? in_database : value
-          record.send(:clear_attribute_changes, [name])
-          record[name] = value if dirty
-        end
+        record.send(:sync_with_transaction_state) if record.respond_to?(:sync_with_transaction_state, true)
+        record.instance_variable_set(:@attributes, snapshot[:attributes])
+        record.instance_variable_set(:@mutations_from_database, nil)
+        record.instance_variable_set(:@mutations_before_last_save, snapshot[:before_last_save])
+        forced = snapshot[:forced_changes]
+        record.send(:mutations_from_database).instance_variable_set(:@forced_changes, forced) if forced.present?
       end
-
-      # Put a raw snapshot back as a LAZY from-database value: nothing is
-      # decrypted, and the attribute ends exactly as it was loaded. A fresh
-      # from-database attribute is already clean, so changes are only
-      # cleared when something still reports one — on Rails 6.0
-      # clear_attribute_changes re-reads (and so decrypts) the value.
-      def restore_raw!(record, name, raw)
-        record.instance_variable_get(:@attributes).write_from_database(name, raw)
-        record.send(:clear_attribute_changes, [name]) if record.attribute_changed?(name)
-      end
-      private_class_method :snapshot, :restore!, :restore_raw!, :raw_snapshot, :unread_from_database?,
-                           :identity_snapshot, :restore_identity!
+      private_class_method :attribute_snapshot, :restore_attributes!, :identity_snapshot, :restore_identity!
     end
   end
 end

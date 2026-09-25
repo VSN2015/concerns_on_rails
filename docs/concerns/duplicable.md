@@ -36,7 +36,7 @@ duplicable_by(associations: [], reset: [], suffix: {})
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `associations:` | Array of Symbols | `[]` | Allow-list of associations to copy. Must be declared **before** the macro; validated at macro time. `has_many`/`has_one` children are deep-copied; `has_and_belongs_to_many` links the copy to the *same* records; `belongs_to` and `has_many :through` are rejected with an explanation. |
+| `associations:` | Array of Symbols | `[]` | Allow-list of associations to copy. Must be declared **before** the macro; validated at macro time. `has_many`/`has_one` children are deep-copied; `has_and_belongs_to_many` links the copy to the *same* records. Children are read **without their model's default scopes**, so a draft hidden by `publishable_by ..., default_scope: true` is copied too — except that a SoftDeletable child's soft-deleted rows stay out while its default scope is on (trash is not part of the record). An already-loaded association keeps its in-memory edits and unsaved children; `belongs_to` and `has_many :through` are rejected with an explanation. |
 | `reset:` | Array of Symbols | `[]` | Columns blanked on the copy (business state: `published_at`, `approved_at`, …). Validated against the schema. |
 | `suffix:` | Hash `{ field => text }` | `{}` | Appended to the copy's value when present (`title: " (copy)"`). Validated against the schema. |
 
@@ -88,7 +88,7 @@ copy = invoice.duplicate!
 copy.line_items.first.fulfillment_batch_id  # => nil (LineItem's own reset rule)
 ```
 
-A child whose class includes Duplicable is copied via **its own** `duplicate` — its resets, its suffixes, its nested associations — so recursive graphs stay declarative.
+A child whose class includes Duplicable is copied via **its own** `duplicate` — its resets, its suffixes, its nested associations — so recursive graphs stay declarative. A plain child (no Duplicable) still gets every automatic identity reset for **its own** class — timestamps, counters, and its Sluggable / Tokenizable / Hashable / Sequenceable / Auditable / SoftDeletable / Lockable columns — so a copied share link gets a fresh token instead of the original's secret (or a `RecordNotUnique` on its unique index).
 
 **Templates with a hook:**
 
