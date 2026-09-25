@@ -206,5 +206,5 @@ ticket.transition_to!(:nope)
 
 ## Changed in 1.22.0
 
-- Guarded `<event>!` transitions wrap hooks and the state write in one transaction — a raising `after_transition` rolls the state change back.
+- Guarded `<event>!` transitions wrap hooks and the state write in their own savepoint. A raising `after_transition` rolls the state change back, and so does one calling `raise ActiveRecord::Rollback`, which makes the event return `false`. After any aborted transition, the state column and its `<state>_at` stamp go back to their previous in-memory values, so a retry's guard sees the real state instead of raising `InvalidTransition`.
 - The `default:` state uses an attribute-level default instead of an `after_initialize` that ran for every row loaded from the database. Edge: `Model.new(field => nil)` now keeps the explicit nil.

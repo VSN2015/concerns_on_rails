@@ -56,6 +56,9 @@ module ConcernsOnRails
 
       DEFAULT_PER_PAGE = 25
       DEFAULT_MAX_PER_PAGE = 200
+      # Absolute per_page ceiling, applied even under `max_per_page: 0` ("no
+      # cap") — shared with Paginatable via Support::ScalarParam.
+      MAX_PER_PAGE = ConcernsOnRails::Support::ScalarParam::MAX_PER_PAGE
       VALID_DIRECTIONS = %i[asc desc].freeze
       VALID_PREDICATES = %i[auto row or].freeze
       CURSOR_DIRECTIONS = %w[next prev].freeze
@@ -333,13 +336,15 @@ module ConcernsOnRails
         raise InvalidOrderPreset, "Unknown order preset '#{raw}'. Available: #{presets.keys.join(', ')}."
       end
 
+      # The resolver Paginatable uses too (ScalarParam.per_page): `?per_page[]=50`
+      # arrives as an Array and .to_i on it was a 500, and with
+      # `max_per_page: 0` an unclamped `?per_page=99999999999999999999`
+      # overflowed LIMIT — both closed in one place for both paginators.
       def cursor_per_page(override)
-        # ScalarParam: `?per_page[]=50` arrives as an Array and .to_i on it was
-        # a 500 (mirrors Paginatable).
-        requested = ConcernsOnRails::Support::ScalarParam.to_i(override || params[:per_page], default: 0)
-        requested = self.class.cursor_paginatable_per_page if requested < 1
-        cap = self.class.cursor_paginatable_max_per_page
-        cap.positive? ? [requested, cap].min : requested
+        ConcernsOnRails::Support::ScalarParam.per_page(
+          override || params[:per_page],
+          default: self.class.cursor_paginatable_per_page, cap: self.class.cursor_paginatable_max_per_page
+        )
       end
 
       # ----- cursor encode/decode -----
@@ -446,8 +451,39 @@ module ConcernsOnRails
         values = payload["v"]
         raise InvalidCursor, "Invalid pagination cursor." unless valid_cursor_values?(values, pairs.size)
 
-        { values: pairs.zip(values).map { |(col, _dir), value| model.type_for_attribute(col.to_s).cast(value) },
+        { values: pairs.zip(values).map { |(col, _dir), value| cast_cursor_value!(model, col, value) },
           backward: direction == "prev" }
+      end
+
+      # A JSON scalar can still be one the column cannot hold: 1e400 parses to
+      # Float infinity and Integer#cast turns it into nil, a non-date string
+      # casts to nil on a datetime column, and an integer beyond the column's
+      # range casts fine but cannot be bound. The first two reached the WHERE
+      # as `(score, id) > (NULL, 1)` — never true, so an empty 200 silently
+      # ended the walk; the third was the same empty page on Rails 6.1+ (Arel
+      # drops unboundable values to 1=0) and a RangeError 500 on 6.0. We never
+      # mint any of them, so each is tampering and gets the InvalidCursor 400.
+      def cast_cursor_value!(model, col, raw)
+        type = model.type_for_attribute(col.to_s)
+        value = type.cast(raw)
+        raise InvalidCursor, "Invalid pagination cursor." unless cursor_bindable?(type, value)
+
+        value
+      end
+
+      # `serializable?` is the Rails 6.1+ range probe; on 6.0 only serialize
+      # itself knows, raising ActiveModel::RangeError (a ::RangeError). A
+      # non-finite Float/BigDecimal is refused outright: it is never minted
+      # and adapters disagree on how (or whether) to quote it.
+      def cursor_bindable?(type, value)
+        return false if value.nil?
+        return false if (value.is_a?(Float) || value.is_a?(BigDecimal)) && !value.finite?
+        return type.serializable?(value) if type.respond_to?(:serializable?)
+
+        type.serialize(value)
+        true
+      rescue ::RangeError
+        false
       end
 
       # Pre-bidirectional cursors carry no "d" — they are forward cursors and

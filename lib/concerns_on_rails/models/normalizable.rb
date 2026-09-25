@@ -40,13 +40,16 @@ module ConcernsOnRails
       # humanize(underscore(v)), which rewrites "Jean-Luc" to "Jean Luc" and
       # drops the suffix of "customer_id" outright.
       TITLEIZE_WORD = /(?<![[:alnum:]'])[[:alpha:]]+/
+      # Leading/trailing Unicode whitespace (plus NUL, which String#strip also
+      # removed), for the stripping presets.
+      EDGE_SPACE = /\A[[:space:]\0]+|[[:space:]\0]+\z/
 
       # `:url` — strip, default the scheme to https://, lowercase the scheme and
       # host (the case-insensitive parts) and leave path/query alone. Input that
       # carries a non-http(s) scheme, or that doesn't parse as a URI, comes back
       # stripped but otherwise untouched, so a format validator can reject it.
       def self.normalize_url(value)
-        stripped = value.strip
+        stripped = strip(value)
         return stripped if stripped.empty?
 
         scheme = stripped[URL_SCHEME, 1]
@@ -58,6 +61,15 @@ module ConcernsOnRails
         uri.to_s
       rescue URI::InvalidURIError, URI::InvalidComponentError
         stripped
+      end
+
+      # String#strip only removes ASCII whitespace (and NUL): a pasted no-break
+      # space, em space or ideographic space survived it. Strip every
+      # Unicode space from both ends instead (String#squish already collapses
+      # [[:space:]]); :nullify_blank uses it too, so a value of nothing but
+      # no-break spaces is blank.
+      def self.strip(value)
+        value.gsub(EDGE_SPACE, "")
       end
 
       # `host=` also clears the userinfo on uri >= 1.1 (Ruby 3.2's bundled
@@ -75,17 +87,17 @@ module ConcernsOnRails
       # Built-in normalization presets. Each is string-safe — non-string values
       # pass through unchanged so callers don't have to guard themselves.
       PRESETS = {
-        email: ->(v) { v.is_a?(String) ? v.strip.downcase : v },
+        email: ->(v) { v.is_a?(String) ? Normalizable.strip(v).downcase : v },
         phone: ->(v) { v.is_a?(String) ? v.gsub(/\D/, "") : v },
-        whitespace: ->(v) { v.is_a?(String) ? v.strip : v },
-        strip: ->(v) { v.is_a?(String) ? v.strip : v },
+        whitespace: ->(v) { v.is_a?(String) ? Normalizable.strip(v) : v },
+        strip: ->(v) { v.is_a?(String) ? Normalizable.strip(v) : v },
         squish: ->(v) { v.is_a?(String) ? v.squish : v },
         downcase: ->(v) { v.is_a?(String) ? v.downcase : v },
         upcase: ->(v) { v.is_a?(String) ? v.upcase : v },
         capitalize: ->(v) { v.is_a?(String) ? v.capitalize : v },
         titleize: ->(v) { v.is_a?(String) ? v.gsub(TITLEIZE_WORD, &:capitalize) : v },
         parameterize: ->(v) { v.is_a?(String) ? v.parameterize : v },
-        nullify_blank: ->(v) { v.is_a?(String) && v.strip.empty? ? nil : v },
+        nullify_blank: ->(v) { v.is_a?(String) && Normalizable.strip(v).empty? ? nil : v },
         url: ->(v) { v.is_a?(String) ? Normalizable.normalize_url(v) : v }
       }.freeze
 

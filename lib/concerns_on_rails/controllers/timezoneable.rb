@@ -38,9 +38,29 @@ module ConcernsOnRails
       DEFAULT_RESPONSE_HEADER = "X-Time-Zone".freeze
       DEFAULT_PERSIST = { expires: 1.year }.freeze
 
+      # rescue_from handlers run AFTER the around_action has unwound and
+      # Time.use_zone has put the ambient zone back, so a rescued error
+      # rendered its timestamps in the app's zone while X-Time-Zone announced
+      # the client's (Localizable had the same gap for I18n.locale). This
+      # re-enters the zone switch_time_zone chose for exactly the handler's
+      # duration; use_zone's ensure restores the previous zone even when the
+      # handler itself raises, so nothing leaks to the next request on the
+      # thread. An exception raised BEFORE switch_time_zone ran has no chosen
+      # zone and is handled exactly as before.
+      module RescueUnderTimeZone
+        def rescue_with_handler(exception)
+          zone = @timezoneable_active_zone
+          return super unless zone
+
+          Time.use_zone(zone) { super }
+        end
+      end
+
       included do
         class_attribute :timezoneable_options, instance_accessor: false, default: {}
         around_action :switch_time_zone
+        # Only where rescue_from exists (real controllers).
+        include RescueUnderTimeZone if method_defined?(:rescue_with_handler)
       end
 
       module ClassMethods
@@ -87,11 +107,14 @@ module ConcernsOnRails
 
       # Public so subclasses can override; runs the action under the resolved
       # zone. UNGUARDED on purpose — it touches `Time` globally, not the response
-      # (mirrors Localizable#switch_locale).
+      # (mirrors Localizable#switch_locale). The zone is recorded so a
+      # rescue_from handler renders under it too (an override that calls
+      # `super` keeps that).
       def switch_time_zone(&)
         zone = resolved_time_zone
         persist_time_zone(zone)
         apply_time_zone_response_header(zone)
+        @timezoneable_active_zone = zone
         # Skip the wrapper when it would be a no-op — with nothing configured
         # (or the client asking for the current zone) every action used to run
         # inside a pointless Time.use_zone block.

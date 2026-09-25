@@ -49,7 +49,7 @@ Call once per model. Validates that the column exists at class-load time and reg
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `field` (positional) | `Symbol` | `:tags` | The database column that stores the delimiter-joined tag string. |
-| `delimiter:` | `String` | `","` | The character used to join and split tags in the stored column. A tag value must not contain this character. |
+| `delimiter:` | `String` | `","` | The character used to join and split tags in the stored column. A tag value must not contain this character. An empty (or `nil`) delimiter raises `ArgumentError`. |
 | `downcase:` | `Boolean` | `false` | When `true`, every tag is lowercased on write, making all matching case-insensitive. |
 
 ## Scopes
@@ -90,6 +90,18 @@ Returns a sorted array of every distinct tag currently stored across all rows in
 ```ruby
 Article.all_tags  # => ["api", "go", "rails", "ruby"]
 ```
+
+#### `.normalize_tags! → Integer`
+
+Rewrites every tagged row in the current scope to the normalized column form — the form the `before_validation` hook writes and the form `.tagged_with` matches. The repair tool for rows written around the callbacks (`update_column`, `update_all`, raw SQL, imports, data that predates the concern): a row stored as `"ruby, rails"` is found by `tagged_with?("rails")` but not by `tagged_with("rails")` until it is normalized.
+
+```ruby
+Article.normalize_tags!                  # => 42 (rows rewritten)
+Article.where(imported: true).normalize_tags!
+Article.unscoped.normalize_tags!         # include rows a default_scope hides
+```
+
+One `update_columns` per row whose value actually changes, inside one transaction — deliberately no validations, callbacks or `updated_at` bump (the same contract as Sanitizable's `sanitize_all!`). Idempotent: a second run returns `0`. A row that vanishes mid-sweep raises `ActiveRecord::RecordNotSaved` and rolls the batch back.
 
 #### `.taggable_split(raw) → Array<String>`
 
@@ -215,6 +227,7 @@ Post.tagged_with("rails")        # => [p]
 - **`before_validation` normalization covers direct assignment.** If you assign the raw column directly (`record.tags = "a, b"`), the `before_validation` hook strips, splits, and de-duplicates the value before saving. You do not have to go through `tag_list=` for normalization to apply.
 - **Boundary-safe SQL matching.** The `tagged_with` scope builds four OR-ed patterns per tag against the delimiter-joined column: the whole column (a single-tag row) plus three that pin the tag to a delimiter boundary — `tag<delim>%` (tag first), `%<delim>tag` (tag last), and `%<delim>tag<delim>%` (tag in the middle). Each carries an explicit `ESCAPE` clause, so tags containing `_` or `%` are escaped and will not behave as SQL wildcards, and a search for `"rail"` will not match `"rails"`. The predicate is built with Arel `matches` rather than a hand-written SQL string, so the adapter quotes the escape character itself — an inlined `ESCAPE '\'` is a syntax error on MySQL, where a backslash escapes its own closing quote inside a string literal.
 - **Case-insensitive on every adapter.** The same Arel predicate asks for a case-insensitive match, which becomes `ILIKE` on PostgreSQL (whose `LIKE`, unlike SQLite's and unlike MySQL's under a default `_ci` collation, is case-sensitive). Before this, `tagged_with("elixir")` found a record tagged `"Elixir"` on SQLite and MySQL but not on PostgreSQL. **PostgreSQL users upgrading from ≤ 1.28.8 get broader matches than before** — if you were relying on case-sensitive tag lookups there, store canonical tags with `downcase: true` and downcase at the call site. Exactly which non-ASCII characters fold remains the database collation's business.
+- **`tagged_with` matches the normalized column form only.** Its patterns pin each tag to the bare delimiter (`"ruby,rails"`), so a row whose raw column reads `"ruby, rails"` — written by `update_column`, `update_all`, raw SQL or an import, all of which skip the normalization hook — does not match `tagged_with("rails")`, even though `tagged_with?`, `tag_list` and `all_tags` (which split in Ruby) see the tag. The column must hold normalized values: run `Model.normalize_tags!` after such writes.
 - **`tagged_with` with no arguments returns `all`.** An empty tag array short-circuits to `all`, so the result is safely chainable without a conditional guard.
 - **No external gem dependencies.** Unlike `acts-as-taggable-on`, this concern requires no additional gems. The trade-off is that it has no support for tag contexts, ownership, or polymorphic tags shared across multiple model types (`tag_counts` covers clouds). Reach for `acts-as-taggable-on` when those features are needed.
 - **Delimiter must not appear inside a tag value.** Tags containing the configured delimiter character produce incorrect split behavior. Choose a delimiter that cannot appear in your tag vocabulary, or sanitize tag input before assigning.

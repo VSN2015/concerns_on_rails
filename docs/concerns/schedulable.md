@@ -63,6 +63,7 @@ schedulable_by starts_at: nil, ends_at: :expires_at    # no start gate
 |---|---|---|---|
 | `starts_at:` | `Symbol` or `nil` | `:starts_at` | The datetime column that marks the beginning of the active window. Pass `nil` to omit the start gate — records are considered started at all times. |
 | `ends_at:` | `Symbol` or `nil` | `:ends_at` | The datetime column that marks the end of the active window. Pass `nil` for open-ended records that never expire. |
+| `prefix:` / `suffix:` | `Symbol` / `true` | `nil` | Affix the scope names (`.window_current`, …) **and** define affixed predicates: `window_active_at?(time)`, `window_current?`, `window_upcoming?`, `window_expired?`, `window_overlaps?(from, to)`. These always give Schedulable's answer. Expirable also defines `expired?`, and on a model with both, the concern included last owns the plain name. |
 
 Passing `nil` for both options simultaneously raises `ArgumentError`. Passing a column name that does not exist in the table also raises `ArgumentError` (raised by `ConcernsOnRails::Support::ColumnGuard`).
 

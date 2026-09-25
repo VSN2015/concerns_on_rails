@@ -138,12 +138,29 @@ module ConcernsOnRails
           # a Range works too, and `from..to` makes the end inclusive.
           # Unstarted records (nil starts_at) never overlap, matching active_at.
           scope schedulable_scope_names[:overlapping], ->(from, to = nil) { schedulable_overlapping(from, to) }
+
+          # The affix covers the predicates too: Expirable defines the same
+          # plain `expired?`, and the concern included last wins it.
+          ConcernsOnRails::Support::Affix.define_predicates(
+            self, { active_at: :schedulable_active_at?, current: :schedulable_current?,
+                    upcoming: :schedulable_upcoming?, expired: :schedulable_expired?,
+                    overlaps: :schedulable_overlaps? },
+            prefix: prefix, suffix: suffix, label: "ConcernsOnRails::Models::Schedulable"
+          )
         end
       end # rubocop:enable Metrics/BlockLength
 
+      # The public predicates keep their plain names for compatibility. On a
+      # model that also includes Expirable (`expired?`), the concern included
+      # LAST owns a shared name; configure `prefix:`/`suffix:` and use the
+      # affixed predicates (`window_expired?`, …) to keep Schedulable's
+      # answer reachable. They delegate as they always have (`current?` is
+      # `active_at?(now)`, so overriding `active_at?` moves both); the
+      # affixed predicates call the private unaffixed checks instead.
+
       # Is the record active at the given time? Inclusive start, exclusive end.
       def active_at?(time)
-        schedulable_started_by?(time) && schedulable_not_ended_at?(time)
+        schedulable_active_at?(time)
       end
 
       def current?
@@ -153,24 +170,15 @@ module ConcernsOnRails
       # Does this record's window intersect [from, to)? Mirrors the
       # `overlapping` scope — boundaries, nil sides and Ranges included.
       def overlaps?(from, to = nil)
-        from, to, inclusive_end = self.class.schedulable_window(from, to)
-        schedulable_starts_before?(to, inclusive_end) && schedulable_ends_after?(from)
+        schedulable_overlaps?(from, to)
       end
 
       def upcoming?
-        field = self.class.schedulable_starts_at_field
-        value = field && self[field]
-        return false unless value
-
-        value > Time.zone.now
+        schedulable_upcoming?
       end
 
       def expired?
-        field = self.class.schedulable_ends_at_field
-        value = field && self[field]
-        return false unless value
-
-        value <= Time.zone.now
+        schedulable_expired?
       end
 
       def start!(time = Time.zone.now)
@@ -209,6 +217,40 @@ module ConcernsOnRails
       # Postfix private — the keyword form trips RuboCop's scope analysis
       # against the `private` inside the class_methods block (Publishable's
       # pattern).
+      def schedulable_active_at?(time)
+        schedulable_started_by?(time) && schedulable_not_ended_at?(time)
+      end
+      private :schedulable_active_at?
+
+      def schedulable_current?
+        schedulable_active_at?(Time.zone.now)
+      end
+      private :schedulable_current?
+
+      def schedulable_overlaps?(from, to = nil)
+        from, to, inclusive_end = self.class.schedulable_window(from, to)
+        schedulable_starts_before?(to, inclusive_end) && schedulable_ends_after?(from)
+      end
+      private :schedulable_overlaps?
+
+      def schedulable_upcoming?
+        field = self.class.schedulable_starts_at_field
+        value = field && self[field]
+        return false unless value
+
+        value > Time.zone.now
+      end
+      private :schedulable_upcoming?
+
+      def schedulable_expired?
+        field = self.class.schedulable_ends_at_field
+        value = field && self[field]
+        return false unless value
+
+        value <= Time.zone.now
+      end
+      private :schedulable_expired?
+
       def schedulable_started_by?(time)
         field = self.class.schedulable_starts_at_field
         return true unless field

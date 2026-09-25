@@ -153,6 +153,8 @@ end
 
 - **No `timezoneable` call needed.** If `timezoneable` is never called, `timezoneable_options` defaults to `{}` and `resolved_time_zone` returns the current `Time.zone` unchanged on every request. The `around_action` is still registered but behaves as a no-op.
 
+- **`rescue_from` handlers render under the resolved zone.** Rails runs them after the `around_action` has unwound and `Time.use_zone` has restored the ambient zone, so a rescued error used to render its timestamps in the app's zone while `X-Time-Zone` announced the client's. The zone `switch_time_zone` chose is re-entered for the handler's duration and the previous zone is always restored afterwards, even when the handler raises.
+
 - **`switch_time_zone` is public by design.** Subclasses can override it to add logging, metrics, or additional fallback logic while still calling `super` to retain the zone-switching behavior.
 
 - **`persist:` writes only param-sourced zones.** Header- and cookie-sourced zones are never written back: the header is the client's per-request statement, and re-writing the cookie with its own value would just refresh it on every hit. The write happens in `switch_time_zone` before the action runs, so the cookie is set even when the action renders nothing.

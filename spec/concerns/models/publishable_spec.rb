@@ -512,4 +512,258 @@ describe ConcernsOnRails::Publishable do
       expect(invalid.reload.published_at).to be_nil
     end
   end
+
+  # A hook vetoing the write with ActiveRecord::Rollback used to be swallowed
+  # by a bare `transaction` that JOINED the caller's: nothing rolled back,
+  # publish! returned true, and publish_all counted (and committed) the row.
+  describe "ActiveRecord::Rollback from a lifecycle hook" do
+    before do
+      stub_const("VetoedArticle", Class.new(TestModel) do
+        self.table_name = "articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+
+        cattr_accessor :veto
+        self.veto = nil
+
+        def after_publish
+          raise ActiveRecord::Rollback if self.class.veto == :publish
+        end
+
+        def after_unpublish
+          raise ActiveRecord::Rollback if self.class.veto == :unpublish
+        end
+      end)
+    end
+
+    it "publish! returns false and leaves the row (and the record) unpublished" do
+      VetoedArticle.veto = :publish
+      article = VetoedArticle.create!(title: "t")
+
+      expect(article.publish!).to be(false)
+      expect(article.published_at).to be_nil
+      expect(article.reload.published_at).to be_nil
+    end
+
+    it "publish_at! returns false and schedules nothing" do
+      VetoedArticle.veto = :publish
+      article = VetoedArticle.create!(title: "t")
+
+      expect(article.publish_at!(1.day.ago)).to be(false)
+      expect(article.reload.published_at).to be_nil
+    end
+
+    it "unpublish! returns false and leaves the row published" do
+      VetoedArticle.veto = :unpublish
+      article = VetoedArticle.create!(title: "t", published_at: 1.day.ago)
+
+      expect(article.unpublish!).to be(false)
+      expect(article.reload.published_at).not_to be_nil
+    end
+
+    it "rolls the write back inside a caller's transaction, keeping the caller's own writes" do
+      VetoedArticle.veto = :publish
+      article = VetoedArticle.create!(title: "t")
+      other = VetoedArticle.create!(title: "other")
+
+      ActiveRecord::Base.transaction do
+        other.update!(title: "renamed")
+        article.publish!
+      end
+
+      expect(other.reload.title).to eq("renamed")
+      expect(article.reload.published_at).to be_nil
+    end
+
+    it "publish_all raises RecordNotSaved and commits nothing" do
+      VetoedArticle.veto = :publish
+      VetoedArticle.create!(title: "a")
+      VetoedArticle.create!(title: "b")
+
+      expect { VetoedArticle.publish_all }.to raise_error(ActiveRecord::RecordNotSaved, /failed to publish/)
+      expect(VetoedArticle.where.not(published_at: nil).count).to eq(0)
+    end
+
+    it "unpublish_all raises RecordNotSaved and commits nothing" do
+      VetoedArticle.veto = :unpublish
+      VetoedArticle.create!(title: "a", published_at: 1.day.ago)
+
+      expect { VetoedArticle.unpublish_all }.to raise_error(ActiveRecord::RecordNotSaved, /failed to unpublish/)
+      expect(VetoedArticle.where(published_at: nil).count).to eq(0)
+    end
+  end
+
+  # Rails 6.0 reset a record created earlier in the caller's transaction to
+  # new_record? (id nil) when the verb's savepoint rolled back, so the next
+  # save INSERTed a duplicate.
+  describe "a record created in the caller's transaction, then a failed verb" do
+    before do
+      stub_const("TxArticle", Class.new(TestModel) do
+        self.table_name = "articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+        validates :title, presence: true
+
+        cattr_accessor :veto
+
+        def after_publish
+          raise ActiveRecord::Rollback if self.class.veto
+        end
+      end)
+    end
+
+    it "keeps one row after a validation failure" do
+      Article.transaction do
+        post = TxArticle.create!(title: "t")
+        post.title = nil
+        expect(post.publish!).to be(false)
+        post.title = "x"
+        post.save!
+      end
+
+      expect(TxArticle.pluck(:title)).to eq(["x"])
+    end
+
+    it "keeps one row after a hook veto" do
+      TxArticle.veto = true
+      Article.transaction do
+        post = TxArticle.create!(title: "t")
+        expect(post.publish!).to be(false)
+        post.update!(title: "x")
+      end
+
+      expect(TxArticle.pluck(:title, :published_at)).to eq([["x", nil]])
+    end
+  end
+
+  # `update` returning false (validation) used to leave the before-hook's own
+  # writes committed: the hook ran inside a transaction nothing rolled back.
+  describe "a failed write rolls the before-hook's side effects back" do
+    before do
+      stub_const("GuardedArticle", Class.new(TestModel) do
+        self.table_name = "articles"
+        include ConcernsOnRails::Publishable
+
+        publishable_by
+        validates :title, presence: true
+
+        def before_publish
+          self.class.where(id: id).update_all(is_published: true)
+        end
+      end)
+    end
+
+    it "returns false and undoes the before_publish write" do
+      article = GuardedArticle.create!(title: "t")
+      article.title = nil
+
+      expect(article.publish!).to be(false)
+      expect(article.errors[:title]).not_to be_empty
+      expect(article.reload.is_published).to be_nil
+      expect(article.published_at).to be_nil
+    end
+  end
+
+  # A boolean column's `published` scope was a hash condition, which Rails
+  # copies onto records built through the scope — so with default_scope: true
+  # every NEW record was created already published.
+  describe "boolean column with default_scope: true" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :flag_posts, force: true do |t|
+          t.string :title
+          t.boolean :is_published
+        end
+      end
+
+      stub_const("FlagPost", Class.new(TestModel) do
+        self.table_name = "flag_posts"
+        include ConcernsOnRails::Publishable
+
+        publishable_by :is_published, default_scope: true
+      end)
+    end
+
+    it "creates new records unpublished" do
+      post = FlagPost.create!(title: "new")
+
+      expect(post.is_published).to be_nil
+      expect(post.published?).to be false
+      expect(FlagPost.unscoped.find(post.id).is_published).to be_nil
+    end
+
+    it "builds new records unpublished" do
+      expect(FlagPost.new.is_published).to be_nil
+    end
+
+    it "still hides unpublished rows and keeps them reachable" do
+      FlagPost.create!(title: "live", is_published: true)
+      FlagPost.create!(title: "draft")
+
+      expect(FlagPost.all.map(&:title)).to eq(["live"])
+      expect(FlagPost.draft.map(&:title)).to eq(["draft"])
+      expect(FlagPost.unpublished.map(&:title)).to eq(["draft"])
+    end
+
+    it "partitions every row, NULL included, between .published and .unpublished" do
+      FlagPost.create!(title: "on", is_published: true)
+      FlagPost.create!(title: "off", is_published: false)
+      FlagPost.create!(title: "null")
+
+      expect(FlagPost.published.map(&:title)).to eq(["on"])
+      expect(FlagPost.unpublished.map(&:title)).to match_array(%w[off null])
+      expect(FlagPost.unscoped.published.count + FlagPost.unscoped.unpublished.count).to eq(3)
+    end
+
+    # `<> FALSE` (the first cut of this fix) defeats an index / PG partial
+    # index on `published = TRUE`. A Grouping around the equality keeps the
+    # `= TRUE` form while hiding it from scope_for_create. Rails 6.0 cannot
+    # `unscope` a Grouping, so it alone keeps the `<> FALSE` form.
+    it "keeps the = TRUE predicate form", min_rails: "6.1" do
+      sql = FlagPost.unscoped.published.to_sql
+      column = TestDatabase.quoted_column("is_published")
+
+      expect(sql).to match(/#{Regexp.escape(column)} = (TRUE|1)\b/i)
+      expect(sql).not_to match(/<>|!=/)
+    end
+
+    it "publishes via publish! and publish_all" do
+      post = FlagPost.create!(title: "a")
+      FlagPost.create!(title: "b")
+
+      expect(post.publish!).to be true
+      expect(FlagPost.unpublished.publish_all).to eq(1)
+      expect(FlagPost.count).to eq(2)
+    end
+  end
+
+  # The timestamp branch's default scope is an Arel `<=` node, which Rails
+  # never copies, so a new record there was always a draft — pinned here so
+  # the boolean fix above cannot regress it.
+  describe "timestamp column with default_scope: true" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :scoped_posts, force: true do |t|
+          t.string :title
+          t.datetime :published_at
+        end
+      end
+
+      stub_const("ScopedDraftPost", Class.new(TestModel) do
+        self.table_name = "scoped_posts"
+        include ConcernsOnRails::Publishable
+
+        publishable_by :published_at, default_scope: true
+      end)
+    end
+
+    it "creates new records as drafts" do
+      post = ScopedDraftPost.create!(title: "new")
+
+      expect(post.published_at).to be_nil
+      expect(post.draft?).to be true
+    end
+  end
 end

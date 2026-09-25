@@ -460,6 +460,159 @@ describe ConcernsOnRails::SoftDeletable do
     end
   end
 
+  # A bare `transaction` JOINED the caller's (and BatchOps.run's), so Rails
+  # swallowed an ActiveRecord::Rollback from a hook with nothing rolled back:
+  # the change committed, soft_delete!/restore! returned true, and the batch
+  # verbs counted the row.
+  describe 'ActiveRecord::Rollback from a lifecycle hook' do
+    %i[touch no_touch].each do |variant|
+      context "with #{variant == :touch ? 'touch: true (update)' : 'touch: false (update_column)'}" do
+        let(:vetoing_class) do
+          touch = variant == :touch
+          Class.new(ActiveRecord::Base) do
+            self.table_name = 'dummy_soft_deletables'
+            include ConcernsOnRails::SoftDeletable
+
+            soft_deletable_by :deleted_at, touch: touch, default_scope: false
+
+            cattr_accessor :veto
+
+            def after_soft_delete
+              raise ActiveRecord::Rollback if self.class.veto == :soft_delete
+            end
+
+            def after_restore
+              raise ActiveRecord::Rollback if self.class.veto == :restore
+            end
+          end
+        end
+
+        it 'soft_delete! returns false, leaves the row live, and restores the in-memory stamp' do
+          vetoing_class.veto = :soft_delete
+          rec = vetoing_class.create!(name: 'v')
+
+          expect(rec.soft_delete!).to be(false)
+          expect(rec.reload.deleted_at).to be_nil
+        end
+
+        # Without restoring the attribute cache the idempotency guard
+        # (`return true if deleted?`) turned every retry into a silent no-op.
+        it 'lets a retry after a veto actually write' do
+          vetoing_class.veto = :soft_delete
+          rec = vetoing_class.create!(name: 'v')
+          rec.soft_delete!
+
+          expect(rec).not_to be_deleted
+          vetoing_class.veto = nil
+          expect(rec.soft_delete!).to be(true)
+          expect(rec.reload.deleted_at).to be_present
+        end
+
+        it 'restore! returns false and leaves the row deleted' do
+          vetoing_class.veto = :restore
+          rec = vetoing_class.create!(name: 'v', deleted_at: 1.hour.ago)
+
+          expect(rec.restore!).to be(false)
+          expect(rec).to be_deleted
+          expect(rec.reload.deleted_at).to be_present
+        end
+
+        it 'rolls the change back inside a caller transaction, keeping the caller writes' do
+          vetoing_class.veto = :soft_delete
+          rec = vetoing_class.create!(name: 'v')
+          other = vetoing_class.create!(name: 'other')
+
+          ActiveRecord::Base.transaction do
+            other.update!(name: 'renamed')
+            rec.soft_delete!
+          end
+
+          expect(other.reload.name).to eq('renamed')
+          expect(rec.reload.deleted_at).to be_nil
+        end
+
+        # Rails 6.0 reset a record created earlier in the caller's transaction
+        # to new_record? when the savepoint rolled back → duplicate INSERT.
+        it 'keeps one row when a record created in the caller transaction is vetoed' do
+          vetoing_class.veto = :soft_delete
+          vetoing_class.delete_all
+
+          ActiveRecord::Base.transaction do
+            rec = vetoing_class.create!(name: 'v')
+            expect(rec.soft_delete!).to be(false)
+            rec.update!(name: 'renamed')
+          end
+
+          expect(vetoing_class.pluck(:name, :deleted_at)).to eq([['renamed', nil]])
+        end
+
+        it 'soft_delete_all raises RecordNotSaved and commits nothing' do
+          vetoing_class.veto = :soft_delete
+          vetoing_class.delete_all
+          vetoing_class.create!(name: 'a')
+          vetoing_class.create!(name: 'b')
+
+          expect { vetoing_class.soft_delete_all }.to raise_error(ActiveRecord::RecordNotSaved, /failed to soft-delete/)
+          expect(vetoing_class.where.not(deleted_at: nil).count).to eq(0)
+        end
+
+        it 'restore_all raises RecordNotSaved and commits nothing' do
+          vetoing_class.veto = :restore
+          vetoing_class.delete_all
+          vetoing_class.create!(name: 'a', deleted_at: 1.hour.ago)
+
+          expect { vetoing_class.restore_all }.to raise_error(ActiveRecord::RecordNotSaved, /failed to restore/)
+          expect(vetoing_class.where(deleted_at: nil).count).to eq(0)
+        end
+      end
+    end
+  end
+
+  # `update` returning false (validation) used to leave the before hook's own
+  # writes committed — they ran in a transaction nothing rolled back.
+  describe 'a failed write rolls the before hook side effects back' do
+    # TestModel, not ActiveRecord::Base: an anonymous class needs its
+    # model_name fallback to render a validation error on Rails 6.0.
+    let(:guarded_class) do
+      Class.new(TestModel) do
+        self.table_name = 'dummy_soft_deletables'
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, default_scope: false
+        validates :name, presence: true
+
+        def before_soft_delete
+          self.class.where(id: id).update_all(updated_at: Time.utc(2000, 1, 1))
+        end
+      end
+    end
+
+    it 'returns false and undoes the before_soft_delete write' do
+      rec = guarded_class.create!(name: 'g')
+      rec.name = nil
+
+      expect(rec.soft_delete!).to be(false)
+      expect(rec).not_to be_deleted
+      expect(rec.reload.updated_at).not_to eq(Time.utc(2000, 1, 1))
+      expect(rec.deleted_at).to be_nil
+    end
+  end
+
+  # A NEW record built under the default scope inherits its hash condition:
+  # `deleted_at IS NULL` is copied as `deleted_at: nil`, which is exactly the
+  # live state a new record should have. Pinned so it stays that way.
+  it 'builds new records live under the default scope' do
+    klass = Class.new(ActiveRecord::Base) do
+      self.table_name = 'dummy_soft_deletables'
+      include ConcernsOnRails::SoftDeletable
+
+      soft_deletable_by :deleted_at
+    end
+
+    expect(klass.new.deleted_at).to be_nil
+    expect(klass.create!(name: 'n')).not_to be_deleted
+  end
+
   describe "scope affixing" do
     before do
       ActiveRecord::Schema.define do
@@ -817,6 +970,23 @@ describe ConcernsOnRails::SoftDeletable do
       expect(deleted_at(CascComment, comment)).to eq(stamp)
       expect(deleted_at(CascCover, cover)).to eq(stamp)
       expect(deleted_at(CascLike, like)).to eq(stamp) # through the comment's own cascade
+    end
+
+    # A dependent's after hook vetoing with ActiveRecord::Rollback used to be
+    # swallowed (its bare transaction joined the parent's), so the dependent
+    # reported success, stayed deleted, and the cascade carried on.
+    it "aborts the whole cascade when a dependent's hook vetoes with ActiveRecord::Rollback" do
+      CascComment.class_eval do
+        def after_soft_delete
+          raise ActiveRecord::Rollback
+        end
+      end
+
+      expect { post.soft_delete! }.to raise_error(ActiveRecord::RecordNotSaved, /failed to cascade soft-delete/)
+      expect(deleted_at(CascPost, post)).to be_nil
+      expect(deleted_at(CascComment, comment)).to be_nil
+      expect(deleted_at(CascLike, like)).to be_nil
+      expect(post).not_to be_deleted
     end
 
     it "runs the dependents' own hooks" do

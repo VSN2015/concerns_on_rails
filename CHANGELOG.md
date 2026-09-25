@@ -1,6 +1,6 @@
 <!-- CHANGELOG.md -->
 
-## Unreleased
+## 1.29.0 (2026-09-21)
 
 CI now runs **every Rails line the gemspec admits** — 6.0, 6.1, 7.0, 7.1, 7.2, 8.0 and 8.1 —
 where it previously ran 7.0 through 8.0. Extending the matrix downwards found 201 failures

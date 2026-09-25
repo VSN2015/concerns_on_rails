@@ -56,13 +56,15 @@ module ConcernsOnRails
           # `.to_i.positive?` check but was stored raw — the writer's
           # `BigDecimal * "100"` then raised TypeError (swallowed to nil by the
           # form-garbage rescue) and the reader's division raised outright.
-          subunit_to_unit = subunit_to_unit.to_i
-          unless subunit_to_unit.positive?
-            raise ArgumentError, "ConcernsOnRails::Models::Monetizable: :subunit_to_unit must be a positive integer"
-          end
+          # :precision likewise ("2" works; "two" raises). Per-call format
+          # overrides go through the same coercion.
+          config = ConcernsOnRails::Support::Money.coerce_numeric_options(
+            { unit: unit, precision: precision, delimiter: delimiter, separator: separator, subunit_to_unit: subunit_to_unit },
+            LABEL
+          ).freeze
+          ConcernsOnRails::Support::Money.validate_unit!(config, LABEL)
 
           ensure_columns!("ConcernsOnRails::Models::Monetizable", fields, types: :integer)
-          config = { unit: unit, precision: precision, delimiter: delimiter, separator: separator, subunit_to_unit: subunit_to_unit }
           fields.each do |cents_field|
             name = money_name(cents_field.to_sym, as)
             define_money_accessors(cents_field.to_sym, name, config)
@@ -83,20 +85,15 @@ module ConcernsOnRails
             cents.nil? ? nil : BigDecimal(cents.to_s) / subunit
           end
 
+          # Strings are read canonically ("19.99") or in this field's display
+          # format ("$1,234.50", "€1.234,50"), so formatted output round-trips.
+          # Form garbage ("abc", ""), non-finite numbers (NaN, Infinity) and
+          # absurdly large or long input cast to nil — the ActiveModel
+          # convention Storable/Encryptable follow — instead of raising out of
+          # the setter before validation.
           define_method("#{name}=") do |amount|
-            self[cents_field] = if amount.nil?
-                                  nil
-                                else
-                                  begin
-                                    (BigDecimal(amount.to_s) * subunit).round
-                                  rescue ArgumentError, TypeError
-                                    # Form garbage ("abc", "") casts to nil — the
-                                    # ActiveModel convention Storable/Encryptable
-                                    # follow — instead of raising out of the
-                                    # setter before validation can run.
-                                    nil
-                                  end
-                                end
+            decimal = amount.nil? ? nil : ConcernsOnRails::Support::Money.parse(amount, config)
+            self[cents_field] = decimal && ConcernsOnRails::Support::Money.subunits(decimal, subunit)
           end
 
           define_method("formatted_#{name}") do |**overrides|

@@ -74,7 +74,10 @@ module ConcernsOnRails
           self.sequenceable_config = sequenceable_config.merge(
             field => { into: into, prefix: prefix.to_s, padding: padding.to_i,
                        separator: separator.to_s, start_at: start_at.to_i,
-                       scope: scope_cols, reset: reset, template: template, assign: assign }
+                       scope: scope_cols, reset: reset, template: template, assign: assign,
+                       # The rows that share this counter: the declaring class and
+                       # its descendants (see SequenceCalculator#sequence_relation).
+                       owner: self }
           )
 
           before_create -> { assign_sequenceable_value(field) } if assign == :create
@@ -140,14 +143,44 @@ module ConcernsOnRails
       # into: string, save!d when the record is persisted and left for the
       # caller's save when new. false (nothing rewritten) when already
       # numbered, so a "finalize" action can be retried safely.
+      #
+      # A failed save! (RecordNotUnique from a concurrent writer, a failed
+      # validation) puts the field and the into: column back before
+      # re-raising: otherwise the drawn number stays in memory, and a retry —
+      # UniqueRetry.with_retries { invoice.assign_sequence! } — would see it
+      # "already numbered" and return false with nothing saved. The save runs
+      # in its own savepoint (requires_new) so a failed UPDATE inside a
+      # caller's transaction does not poison it on PostgreSQL.
       def sequenceable_assign!(field)
         return false if self[field].present?
 
+        previous = sequenceable_written_columns(field).to_h { |column| [column, self[column]] }
         assign_sequenceable_value(field)
-        save! unless new_record?
-        true
+        return true if new_record?
+
+        sequenceable_save_or_restore!(previous)
       end
       private :sequenceable_assign!
+
+      # The columns assign_sequenceable_value may write: the field, into:, and
+      # created_at (sequenceable_pin_created_at stamps it under reset:).
+      def sequenceable_written_columns(field)
+        cfg = self.class.sequenceable_config.fetch(field)
+        [field, cfg[:into], (:created_at unless cfg[:reset] == :never)].compact
+      end
+      private :sequenceable_written_columns
+
+      def sequenceable_save_or_restore!(previous)
+        saved = false
+        begin
+          self.class.transaction(requires_new: true) { saved = save! }
+        ensure
+          # Also covers an ActiveRecord::Rollback the savepoint swallowed.
+          previous.each { |column, value| self[column] = value } unless saved
+        end
+        saved ? true : false
+      end
+      private :sequenceable_save_or_restore!
 
       # Pin the row inside the period its number is drawn from: with reset:
       # enabled the period is computed from "now" during before_create, but

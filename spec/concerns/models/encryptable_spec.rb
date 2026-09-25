@@ -20,6 +20,7 @@ describe ConcernsOnRails::Models::Encryptable do
         t.text :email_bidx
         t.string :name
         t.text :audit_log
+        t.datetime :deleted_at
       end
     end
   end
@@ -119,6 +120,64 @@ describe ConcernsOnRails::Models::Encryptable do
       expect(record.ssn_ciphertext).to be_a(String)
       expect(record.ssn_ciphertext).not_to include("999-88-7777")
       expect(record.ssn_encrypted?).to be(true)
+    end
+
+    # Rails 6.0-7.0 do not memoize Attribute#value_for_database: after a save
+    # the in-memory "raw" value is a SECOND serialize (fresh IV), so the reader
+    # returned ciphertext that was never written, and reencrypt! on the
+    # just-saved instance failed its own guard.
+    describe "matches what is actually stored after a write" do
+      def stored_ssn(id)
+        klass.connection.select_value(
+          "SELECT #{TestDatabase.quoted_column('ssn')} FROM #{TestDatabase.quoted_table('encryptable_records')} " \
+          "WHERE #{TestDatabase.quoted_column('id')} = #{Integer(id)}"
+        )
+      end
+
+      it "after create" do
+        record = klass.create!(ssn: "111-22-3333")
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+        expect(record.ssn).to eq("111-22-3333")
+      end
+
+      it "after an update of the encrypted field" do
+        record = klass.create!(ssn: "111-22-3333")
+        record.update!(ssn: "999-88-7777")
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+        expect(record.ssn).to eq("999-88-7777")
+      end
+
+      it "after a save that changed only another column" do
+        record = klass.create!(ssn: "111-22-3333").reload
+        record.update!(name: "renamed")
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+      end
+
+      it "after touch" do
+        record = klass.create!(ssn: "111-22-3333").reload
+        record.touch
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+      end
+
+      it "after update_columns" do
+        record = klass.create!(ssn: "111-22-3333").reload
+        record.update_columns(ssn: "444-55-6666")
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+        expect(record.ssn).to eq("444-55-6666")
+      end
+
+      it "lets reencrypt! rotate the instance that was just saved" do
+        record = klass.create!(ssn: "111-22-3333")
+        ConcernsOnRails.configure_encryption do |c|
+          c.key = "concerns-on-rails-encryptable-rotated-key"
+          c.key_id = 1
+          c.previous_keys = { 0 => TEST_KEY }
+        end
+
+        expect(record.reencrypt!).to be(true)
+        expect(record.ssn_key_id).to eq(1)
+        expect(record.ssn_ciphertext).to eq(stored_ssn(record.id))
+      end
     end
 
     it "is nil for a persisted record whose value was never set" do
@@ -595,6 +654,77 @@ describe ConcernsOnRails::Models::Encryptable do
       expect(klass.needs_reencryption.count).to eq(0)
       expect(klass.find(legacy.id).ssn).to eq("111-11-1111")
       expect(klass.find(legacy.id).ssn_key_id).to eq(26)
+    end
+
+    describe "rows hidden by a default_scope" do
+      # The documented rotation is "reencrypt_all!, then drop the old id from
+      # previous_keys". A sweep that ran through the default scope never saw a
+      # soft-deleted (or unpublished) row, so dropping the key made exactly
+      # those rows undecryptable — restore! brought back an unreadable record.
+      let(:klass) do
+        model_class do
+          include ConcernsOnRails::Models::SoftDeletable
+
+          soft_deletable_by :deleted_at
+          encryptable :ssn
+        end
+      end
+
+      it "reencrypt_all! on the model rotates soft-deleted rows too, so the old key can be dropped" do
+        visible = klass.create!(ssn: "111-11-1111")
+        hidden = klass.create!(ssn: "222-22-2222")
+        hidden.soft_delete!
+
+        rotate!
+        expect(klass.reencrypt_all!).to eq(2)
+        expect(klass.unscoped.needs_reencryption.count).to eq(0)
+
+        rotate!(previous: {}) # the documented last step: forget the old key
+        expect(klass.find(visible.id).ssn).to eq("111-11-1111")
+        expect(klass.unscoped.find(hidden.id).ssn).to eq("222-22-2222")
+        expect(klass.unscoped.find(hidden.id).ssn_key_id).to eq(1)
+      end
+
+      it "needs_reencryption on the model reports hidden stale rows, so the 'nothing left' check is honest" do
+        visible = klass.create!(ssn: "111-11-1111")
+        hidden = klass.create!(ssn: "222-22-2222")
+        hidden.soft_delete!
+        rotate!
+
+        expect(klass.needs_reencryption.order(:id).map(&:id)).to eq([visible.id, hidden.id])
+        expect(klass.needs_reencryption.exists?).to be(true)
+      end
+
+      it "honours an explicit relation: a chained call covers exactly that relation" do
+        visible = klass.create!(ssn: "111-11-1111")
+        hidden = klass.create!(ssn: "222-22-2222")
+        hidden.soft_delete!
+        rotate!
+
+        # A chain is the caller's own selection — the default scope included.
+        expect(klass.where(id: [visible.id, hidden.id]).needs_reencryption.map(&:id)).to eq([visible.id])
+        expect(klass.unscoped.where(id: hidden.id).needs_reencryption.map(&:id)).to eq([hidden.id])
+        expect(klass.unscoped.where(id: hidden.id).reencrypt_all!).to eq(1)
+        expect(klass.unscoped.find(hidden.id).ssn_key_id).to eq(1)
+        expect(klass.find(visible.id).ssn_key_id).to eq(0)
+      end
+
+      it "also covers rows hidden by Publishable's default_scope" do
+        ActiveRecord::Base.connection.add_column :encryptable_records, :published_at, :datetime
+        published_klass = model_class do
+          include ConcernsOnRails::Models::Publishable
+
+          publishable_by :published_at, default_scope: true
+          encryptable :ssn
+        end
+        draft = published_klass.create!(ssn: "333-33-3333")
+        expect(published_klass.where(id: draft.id)).to be_empty
+
+        rotate!
+        expect(published_klass.reencrypt_all!).to eq(1)
+        rotate!(previous: {})
+        expect(published_klass.unscoped.find(draft.id).ssn).to eq("333-33-3333")
+      end
     end
 
     it "refuses to overwrite ciphertext it could not decrypt, even when errors are swallowed" do

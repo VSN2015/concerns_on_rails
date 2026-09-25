@@ -405,4 +405,105 @@ describe ConcernsOnRails::Tokenizable do
       expect(account.reload.reset_token_expires_at).to eq(Time.utc(2026, 6, 1, 12))
     end
   end
+
+  describe "1.29 audit regressions" do
+    def capture_sql
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") { |*args| statements << args.last[:sql].to_s }
+      yield
+      statements
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscriber)
+    end
+
+    context "STI subclasses sharing the column" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :sti_keys, force: true do |t|
+            t.string :type
+            t.string :api_token
+          end
+          add_index :sti_keys, :api_token, unique: true
+        end
+        Object.const_set(:StiKey, Class.new(TestModel) do
+          self.table_name = "sti_keys"
+          include ConcernsOnRails::Tokenizable
+
+          tokenizable_by :api_token
+        end)
+        Object.const_set(:StiReadKey, Class.new(StiKey))
+        Object.const_set(:StiWriteKey, Class.new(StiKey))
+      end
+
+      after do
+        %i[StiReadKey StiWriteKey StiKey].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+      end
+
+      it "prechecks uniqueness across the whole table, not just the subclass" do
+        StiReadKey.create!(api_token: "taken")
+        allow(StiWriteKey).to receive(:generate_tokenizable_value).and_return("taken", "fresh")
+
+        expect(StiWriteKey.create!.api_token).to eq("fresh")
+      end
+    end
+
+    context "regenerate_<field>! inside a caller's transaction" do
+      before do
+        ActiveRecord::Base.connection.add_index(:accounts, :api_token, unique: true)
+      end
+
+      it "retries each candidate in its own savepoint (PostgreSQL aborts the transaction otherwise)" do
+        taken = Account.create!
+        account = Account.create!
+        allow(account).to receive(:tokenizable_unique_value).and_call_original
+        allow(account).to receive(:tokenizable_unique_value).with(:api_token).and_return(taken.api_token, "fresh")
+
+        statements = capture_sql do
+          Account.transaction do
+            Account.create!(name: "before") # materialize the outer transaction
+            account.regenerate_api_token!
+            Account.create!(name: "after")
+          end
+        end
+
+        expect(account.reload.api_token).to eq("fresh")
+        expect(Account.where(name: %w[before after]).count).to eq(2)
+        expect(statements.grep(/\AROLLBACK TO SAVEPOINT/i).size).to eq(1)
+      end
+    end
+
+    context "declared on one STI subclass only (review of #111)" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :sti_grants, force: true do |t|
+            t.string :type
+            t.string :api_token
+          end
+          add_index :sti_grants, :api_token, unique: true
+        end
+        Object.const_set(:StiGrant, Class.new(TestModel) { self.table_name = "sti_grants" })
+        Object.const_set(:StiApiGrant, Class.new(StiGrant) do
+          include ConcernsOnRails::Tokenizable
+
+          tokenizable_by :api_token
+        end)
+      end
+
+      after do
+        %i[StiApiGrant StiGrant].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+      end
+
+      it "generates, prechecks table-wide and regenerates on the declaring subclass" do
+        StiGrant.create!(api_token: "taken")
+        allow(StiApiGrant).to receive(:generate_tokenizable_value).and_return("taken", "fresh", "rolled")
+
+        grant = StiApiGrant.create!
+        expect(grant.api_token).to eq("fresh")
+        expect(StiGrant.create!.api_token).to be_nil
+        grant.regenerate_api_token!
+        expect(grant.reload.api_token).to eq("rolled")
+        expect(StiApiGrant.authenticate_by_api_token("rolled")).to eq(grant)
+      end
+    end
+  end
 end

@@ -41,7 +41,11 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Models::Addressable".freeze
 
       included do
-        class_attribute :addressable_fields, instance_accessor: false, default: {}
+        # The resolved part => column map is read through `addressable_fields`
+        # (below), which resolves a mapping deferred while the schema was
+        # unreachable at declaration time.
+        class_attribute :addressable_field_map, instance_accessor: false, default: {}.freeze
+        class_attribute :addressable_pending_mapping, instance_accessor: false, default: nil
         class_attribute :addressable_required, instance_accessor: false, default: [].freeze
         class_attribute :addressable_default_country, instance_accessor: false, default: "US"
         class_attribute :addressable_validate_state, instance_accessor: false, default: false
@@ -50,6 +54,8 @@ module ConcernsOnRails
         class_attribute :addressable_allow_blank, instance_accessor: false, default: [].freeze
         class_attribute :addressable_normalize_country, instance_accessor: false, default: false
         class_attribute :addressable_validation_registered, instance_accessor: false, default: false
+        # { if: ..., unless: ... } from the most recent addressable_by on this class.
+        class_attribute :addressable_validation_condition, instance_accessor: false, default: {}.freeze
         class_attribute :addressable_fingerprint_column, instance_accessor: false, default: nil
 
         # `validate :validate_address` is registered by `addressable_by` (not here) so it can
@@ -76,7 +82,7 @@ module ConcernsOnRails
                            validate_state: false, verify_with: nil,
                            lengths: {}, allow_blank: false, normalize_country: false, fingerprint: nil, **mapping)
           condition = extract_validation_condition!(mapping)
-          self.addressable_fields = resolve_addressable_fields(mapping)
+          overrides = normalize_address_overrides(mapping)
           self.addressable_required = Array(required).map(&:to_sym)
           self.addressable_default_country = default_country.to_s.upcase
           self.addressable_validate_state = validate_state
@@ -85,9 +91,23 @@ module ConcernsOnRails
           self.addressable_allow_blank = resolve_allow_blank(allow_blank)
           self.addressable_normalize_country = normalize_country
           self.addressable_fingerprint_column = resolve_fingerprint_column(fingerprint)
-          ensure_required_columns!
+          install_addressable_fields(overrides)
           register_address_validation(condition)
           define_address_changed_alias
+        end
+
+        # part => column for the columns this table actually has. Declared
+        # while the schema was unreachable (db:create, an unmigrated table,
+        # assets:precompile), the mapping is resolved here on first use once
+        # the schema is reachable — override columns and required parts are
+        # validated then, exactly as addressable_by would have — and is {}
+        # (maps nothing) until it can be.
+        def addressable_fields
+          pending = addressable_pending_mapping
+          return addressable_field_map if pending.nil? || !schema_reachable?
+
+          install_addressable_fields(pending)
+          addressable_field_map
         end
 
         # Records stored with the same address fingerprint as `value` (a record,
@@ -131,17 +151,31 @@ module ConcernsOnRails
           column
         end
 
-        def resolve_addressable_fields(mapping)
+        def normalize_address_overrides(mapping)
           unknown = mapping.keys.map(&:to_sym) - DEFAULT_FIELDS.keys
           raise ArgumentError, "#{LABEL}: unknown address part(s): #{unknown.join(', ')}" if unknown.any?
 
-          overrides = mapping.to_h { |part, column| [part.to_sym, column.to_sym] }
-          ensure_columns!(LABEL, overrides.values, types: :string)
-          DEFAULT_FIELDS.merge(overrides).select { |_part, column| column_names.include?(column.to_s) }
+          mapping.to_h { |part, column| [part.to_sym, column.to_sym] }.freeze
         end
 
-        def ensure_required_columns!
-          missing = addressable_required.reject { |part| addressable_fields.key?(part) }
+        # Resolve against the live schema now, or — when ensure_columns!
+        # reports it unreachable (column_names would raise) — park the
+        # overrides for addressable_fields to resolve on first use.
+        def install_addressable_fields(overrides)
+          unless ensure_columns!(LABEL, overrides.values, types: :string)
+            self.addressable_pending_mapping = overrides
+            self.addressable_field_map = {}.freeze
+            return
+          end
+
+          fields = DEFAULT_FIELDS.merge(overrides).select { |_part, column| column_names.include?(column.to_s) }
+          ensure_required_columns!(fields)
+          self.addressable_field_map = fields.freeze
+          self.addressable_pending_mapping = nil
+        end
+
+        def ensure_required_columns!(fields)
+          missing = addressable_required.reject { |part| fields.key?(part) }
           return if missing.empty?
 
           raise ArgumentError,
@@ -216,14 +250,19 @@ module ConcernsOnRails
           { if: mapping.delete(:if), unless: mapping.delete(:unless) }.compact
         end
 
-        # Register `validate :validate_address` once, forwarding any if:/unless: condition
-        # straight to Rails so it behaves like a normal conditional validation. Normalization
-        # (before_validation) is unconditional; the condition only gates the validations.
+        # Register `validate :validate_address` once (unconditionally) and store the
+        # if:/unless: condition per class, evaluated inside the validation. Handing
+        # the condition to Rails pinned the FIRST call's: the callback is registered
+        # once and inherited, so a later addressable_by or a subclass could never
+        # change it. The class_attribute writer keeps a subclass's condition off
+        # its parent. Normalization (before_validation) is unconditional; the
+        # condition only gates the validations.
         def register_address_validation(condition)
+          self.addressable_validation_condition = condition.freeze
           return if addressable_validation_registered
 
           self.addressable_validation_registered = true
-          validate :validate_address, **condition
+          validate :validate_address
         end
       end
 
@@ -247,6 +286,8 @@ module ConcernsOnRails
       # --- Validation -----------------------------------------------------------
 
       def validate_address
+        return unless address_validation_condition_met?
+
         validate_required_parts
         validate_lengths
         validate_country_code
@@ -319,6 +360,35 @@ module ConcernsOnRails
       end
 
       private
+
+      # Rails' conditional-validation semantics: every if: condition must hold
+      # and no unless: condition may hold; each accepts a Symbol, Proc or Array.
+      def address_validation_condition_met?
+        condition = self.class.addressable_validation_condition
+        Array(condition[:if]).all? { |cond| address_condition_value(cond) } &&
+          Array(condition[:unless]).none? { |cond| address_condition_value(cond) }
+      end
+
+      # Symbol/String: a method on the record. Proc: instance_exec'd with the
+      # arguments ActiveSupport::Callbacks gives a condition of that arity —
+      # (record, nil) for arity 2, (record) for 1 / -2, none otherwise — so a
+      # condition written for a stock Rails validation behaves the same here.
+      # Anything else callable is called with the record.
+      def address_condition_value(cond)
+        case cond
+        when Symbol, String then send(cond)
+        when Proc then instance_exec(*address_condition_args(cond.arity), &cond)
+        else cond.respond_to?(:call) ? cond.call(self) : cond
+        end
+      end
+
+      def address_condition_args(arity)
+        case arity
+        when 2 then [self, nil]
+        when 1, -2 then [self]
+        else []
+        end
+      end
 
       # Something beyond the country must be present — a country alone is not
       # an address, and the default country is always "present".

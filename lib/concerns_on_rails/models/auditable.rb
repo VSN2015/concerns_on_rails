@@ -156,11 +156,20 @@ module ConcernsOnRails
       end
 
       # Entries recorded at or after `time`, oldest first. Entries whose "at"
-      # is missing or unparseable are excluded.
+      # is missing or unparseable are excluded. "at" carries microseconds
+      # (after 1.29.0), so two edits in the same second are told apart. An
+      # entry written by 1.29.0 or earlier has second precision — it only says
+      # "during that second" — so it is compared against `time` truncated to
+      # the second rather than silently dropped by a sub-second cutoff.
       def audited_changes_since(time)
+        cutoff = time.to_time
+        whole_second = Time.at(cutoff.to_i).utc
         audit_trail.select do |entry|
-          at = auditable_parse_time(entry["at"])
-          at && at >= time
+          raw = entry["at"]
+          at = auditable_parse_time(raw)
+          next false unless at
+
+          at >= (auditable_fractional_stamp?(raw) ? cutoff : whole_second)
         end
       end
 
@@ -210,8 +219,10 @@ module ConcernsOnRails
         auditable_decode(raw)
       end
 
+      # Microsecond precision: at second precision two saves within the same
+      # second were indistinguishable to audited_changes_since.
       def auditable_build_entries(tracked)
-        at = Time.now.utc.iso8601
+        at = Time.now.utc.iso8601(6)
         by = auditable_resolve_actor
         tracked.map do |field, (from, to)|
           entry = { "field" => field, "from" => auditable_entry_value(from), "to" => auditable_entry_value(to), "at" => at }
@@ -288,6 +299,11 @@ module ConcernsOnRails
         Time.iso8601(raw.to_s)
       rescue ArgumentError, TypeError
         nil
+      end
+
+      # "…T12:00:00.123456Z" vs an older (<= 1.29.0) "…T12:00:00Z".
+      def auditable_fractional_stamp?(raw)
+        raw.to_s.match?(/T\d{2}:\d{2}:\d{2}\.\d/)
       end
 
       # Tolerant decode: blank, invalid JSON or non-array payloads become [].

@@ -40,6 +40,14 @@ module ConcernsOnRails
     #     record.association(:source), and only the source macro installs
     #     callbacks — dependent:, counter_cache, autosave and validations
     #     run exactly once.
+    #   * accepts_nested_attributes_for :alias works like it does for the
+    #     source (create, update, _destroy, reject_if, limit). It turns
+    #     autosave on for the SOURCE association (the two names share one
+    #     cache, so they cannot differ), and child validation errors are
+    #     keyed under the source name (e.g. "books.title"). Declared in a
+    #     subclass, it sets autosave on the INHERITED source reflection, so
+    #     the parent class autosaves that association too — exactly what
+    #     stock Rails nested attributes do for an inherited association.
     #   * Query SQL: a bare joins(:sections) joins "chapters" directly; when
     #     paired with where(sections: {...}) Rails aliases the join as
     #     "sections" (INNER JOIN "chapters" "sections"). A where-hash key
@@ -146,7 +154,35 @@ module ConcernsOnRails
           new_name
         end
 
+        # accepts_nested_attributes_for :alias works exactly like it does for
+        # the source. Stock Rails flips autosave on (and adds the validation
+        # callback to) the reflection it looks up — here the renamed COPY,
+        # which has no save callbacks of its own. The SOURCE's save callbacks
+        # (installed when the association was built) do run, but they read
+        # autosave from the source reflection, so without this only brand-new
+        # children were saved: updates and _destroy of existing ones were
+        # silently dropped. Both names share one loaded association, so
+        # autosave cannot differ between them — it is turned on for the
+        # source, and the source's callbacks save/validate each record once.
+        # The <alias>_attributes= writer and nested_attributes_options stay
+        # keyed by the alias (no <source>_attributes= is generated).
+        def accepts_nested_attributes_for(*attr_names)
+          names = attr_names.grep_v(Hash)
+          super.tap { aliasable_share_nested_autosave(names) }
+        end
+
         private
+
+        def aliasable_share_nested_autosave(names)
+          names.each do |name|
+            source = aliasable_aliases[name.to_sym]
+            next unless source
+
+            reflection = _reflect_on_association(source)
+            reflection.autosave = true
+            define_autosave_validation_callbacks(reflection)
+          end
+        end
 
         def aliasable_guard_repoint!(new_name, source)
           existing = aliasable_aliases[new_name]

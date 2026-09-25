@@ -18,7 +18,7 @@ module ConcernsOnRails
     #     verify_webhook :github,  secret: -> { ENV["GITHUB_WEBHOOK_SECRET"] },  scheme: :github
     #     verify_webhook :shopify, secret: [NEW_SECRET, OLD_SECRET],             scheme: :shopify
     #     verify_webhook :custom,  secret: "s3cr3t", scheme: :hex, header: "X-Acme-Signature"
-    #     # verify_webhook secret: ...    # no actions = catch-all (declare specific rules first)
+    #     # verify_webhook secret: ...    # no actions = catch-all (used only when no rule names the action)
     #
     #     def stripe; ...; end
     #   end
@@ -94,13 +94,25 @@ module ConcernsOnRails
       included do
         class_attribute :webhook_rules, instance_accessor: false, default: []
         before_action :verify_webhook_signature!
+        # The around filter MUST be declared before the after_action so the
+        # after_action runs inside it: the after_action promotes a completed
+        # delivery's claim, and the around's ensure releases whatever claim is
+        # still pending once the chain unwinds — a later before_action halted
+        # (after_actions are skipped), the action raised, or it threw.
+        around_action :guard_webhook_replay_claim if respond_to?(:around_action)
         after_action :commit_webhook_replay_claim
       end
 
       module ClassMethods
         # Declare signature verification for the given actions (none =
-        # catch-all). Each call appends a rule; the FIRST rule matching the
-        # current action wins, so declare specific rules before a catch-all.
+        # catch-all). Lookup is by SPECIFICITY: a rule that names the current
+        # action always beats a catch-all, whichever class declared either.
+        # Among rules naming the action — and, failing those, among
+        # catch-alls — the most-derived declaring class wins, then
+        # declaration order within a class. So a subclass rule is never
+        # shadowed by a parent's catch-all, and a subclass catch-all for its
+        # new actions never takes over an action its parent named (nor drops
+        # that rule's replay:/tolerance:/scheme).
         #
         # `replay:` adds replay protection for schemes that carry no timestamp
         # (GitHub, Shopify, plain hex/base64 — Stripe's `tolerance:` only bounds
@@ -126,10 +138,19 @@ module ConcernsOnRails
                    tolerance: scheme == :stripe ? (tolerance || STRIPE_DEFAULT_TOLERANCE).to_i : nil,
                    digest: digest,
                    replay: replay, replay_ttl: replay ? (replay_ttl || DEFAULT_REPLAY_TTL).to_i : nil }
-          self.webhook_rules = webhook_rules + [rule]
+          append_webhook_rule!(rule)
         end
 
         private
+
+        # Stored most-derived declaring class first (own rules, then the
+        # inherited ones — already in that order, by induction), declaration
+        # order within a class, so both halves of the specificity lookup are a
+        # plain first match. A NEW array: the parent's is never mutated.
+        def append_webhook_rule!(rule)
+          own, inherited = webhook_rules.partition { |existing| existing[:owner].equal?(self) }
+          self.webhook_rules = own + [rule.merge(owner: self)] + inherited
+        end
 
         # false is "off", not a bad store — `replay: Rails.env.production?`
         # must not blow up the class body in development.
@@ -225,24 +246,6 @@ module ConcernsOnRails
         !!@webhook_verified
       end
 
-      # Promote the short claim to the configured replay_ttl once the action
-      # has run (the after_action half of the replay check). A 5xx means the
-      # delivery was not processed, so release the claim outright and let the
-      # provider retry immediately. An action that raises never reaches here,
-      # so its claim simply expires.
-      def commit_webhook_replay_claim
-        claim = @webhook_replay_claim
-        return unless claim
-
-        @webhook_replay_claim = nil
-        store = claim[:store]
-        if webhook_response_status.to_i >= 500
-          store.delete(claim[:key]) if store.respond_to?(:delete)
-        else
-          store.write(claim[:key], 1, expires_in: claim[:ttl])
-        end
-      end
-
       # Single funnel for all failure outcomes (override point). Uses
       # Respondable's render_error when available, otherwise the same inline
       # envelope as Throttleable / Idempotentable.
@@ -262,6 +265,56 @@ module ConcernsOnRails
       end
 
       private
+
+      # Promote the short claim to the configured replay_ttl once the action
+      # has run (the after_action half of the replay check). A 5xx means the
+      # delivery was not processed, so release the claim outright and let the
+      # provider retry immediately. Private (callbacks are dispatched with
+      # send) so it is never an action method. NOTE: `skip_after_action
+      # :commit_webhook_replay_claim` disables replay protection — every claim
+      # is then released by guard_webhook_replay_claim.
+      def commit_webhook_replay_claim
+        return unless @webhook_replay_claim
+        return release_webhook_replay_claim if webhook_response_status.to_i >= 500
+
+        claim = @webhook_replay_claim
+        @webhook_replay_claim = nil
+        claim[:store].write(claim[:key], 1, expires_in: claim[:ttl])
+      end
+
+      # around_action wrapping everything after the signature check. Rails
+      # skips after_action callbacks when a LATER before_action halts, and
+      # when the action raises — and in both cases the delivery was never
+      # processed, yet the claim written by verify_webhook_signature! would
+      # have sat there for REPLAY_CLAIM_TTL, answering the provider's retry
+      # with 409. Whatever commit_webhook_replay_claim did not consume is
+      # released here. A store without #delete falls back to the claim's
+      # short expiry.
+      def guard_webhook_replay_claim
+        yield
+      ensure
+        release_webhook_replay_claim
+      end
+
+      # Runs from an ensure, so it must never raise: a failing #delete would
+      # replace the action's own exception, or turn a filter's halt into a
+      # 500. Worst case the claim expires on its own after REPLAY_CLAIM_TTL.
+      def release_webhook_replay_claim
+        claim = @webhook_replay_claim
+        return unless claim
+
+        @webhook_replay_claim = nil
+        claim[:store].delete(claim[:key]) if claim[:store].respond_to?(:delete)
+      rescue StandardError => e
+        webhook_log_release_failure(e)
+      end
+
+      def webhook_log_release_failure(error)
+        log = respond_to?(:logger, true) ? send(:logger) : nil
+        log ||= Rails.logger if defined?(Rails) && Rails.respond_to?(:logger)
+        log&.error("#{LABEL}: could not release the replay claim (#{error.class}: #{error.message}); " \
+                   "it expires in #{REPLAY_CLAIM_TTL}s")
+      end
 
       # Mirrors the render path in Support::ErrorEnvelope: a render_error
       # override is enough on its own, so a controller that supplies one but no
@@ -290,7 +343,8 @@ module ConcernsOnRails
         # webhook was accepted without a signature check.
         return webhook_unresolvable_action_rule(rules) if action.nil?
 
-        rules.find { |rule| rule[:actions].empty? || rule[:actions].include?(action) }
+        # Specificity first: a rule naming the action beats any catch-all.
+        rules.find { |rule| rule[:actions].include?(action) } || rules.find { |rule| rule[:actions].empty? }
       end
 
       # Which rule to verify against when the action cannot be resolved. A
@@ -343,7 +397,8 @@ module ConcernsOnRails
         key = "webhook_replay:#{webhook_replay_scope}:#{webhook_replay_digest(rule)}"
 
         # Claim for a SHORT window only. The full replay_ttl is written by
-        # commit_webhook_replay_claim once the action has actually completed.
+        # commit_webhook_replay_claim once the action has actually completed;
+        # guard_webhook_replay_claim releases it when the action never did.
         # Writing replay_ttl here would mean one handler that 500s locks the
         # provider's identical retries out for the whole window — and for the
         # timestamp-less schemes this targets, every retry of the same body
