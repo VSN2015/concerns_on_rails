@@ -54,8 +54,9 @@ module ConcernsOnRails
     #     class already has — an AR method (`valid?`, `lock!`) or another
     #     concern's (`.active`, `restore!`) — raises ArgumentError at macro
     #     time; use prefix:/suffix: to disambiguate.
-    #   * Re-declaring (same class or an STI subclass) replaces the config; one
-    #     without default: drops the earlier default.
+    #   * Re-declaring (same class or an STI subclass) replaces the config. An
+    #     omitted default: keeps the earlier one while it is still a declared
+    #     state (else, or with `default: nil`, the column's DB default applies).
     #   * Guarded transitions check the in-memory state: two processes firing the
     #     same <event>! concurrently can both pass the guard (check-then-write).
     #     `lock: true` closes that race — each <event>! takes a row lock
@@ -176,13 +177,24 @@ module ConcernsOnRails
 
           self.stateable_field = field.to_sym
           self.stateable_states = Array(states).map(&:to_sym)
-          self.stateable_default = options[:default]&.to_sym
+          self.stateable_default = stateable_resolve_default(options)
           self.stateable_transitions = options[:transitions] || {}
           self.stateable_prefix = stateable_affix(options[:prefix])
           self.stateable_suffix = stateable_affix(options[:suffix])
           self.stateable_lock = options[:lock] ? true : false
           self.stateable_timestamps = stateable_timestamp_states(options[:timestamps])
           ensure_columns!(LABEL, stateable_field, types: :string)
+        end
+
+        # An explicit default: (nil included) wins. Omitted, the earlier or
+        # inherited default is kept while it is still one of the declared
+        # states — an STI subclass re-declaring only to add a state keeps it —
+        # and dropped when it is not (it would start records in a state the
+        # new declaration does not list).
+        def stateable_resolve_default(options)
+          return options[:default]&.to_sym if options.key?(:default)
+
+          stateable_states.include?(stateable_default) ? stateable_default : nil
         end
 
         # timestamps: true => every state; an Array => those states (validated
@@ -336,9 +348,9 @@ module ConcernsOnRails
           self.stateable_default_applied = true
         end
 
-        # A re-declaration without default: (same class, or an STI subclass)
-        # must not keep the earlier attribute default — possibly a state the
-        # new declaration does not even list. Omitting `default:` from
+        # A re-declaration that drops the default (explicit `default: nil`, or
+        # an omitted one no longer among the states) must not keep the earlier
+        # attribute default. Omitting `default:` from
         # `attribute` keeps the previous one, so hand back the column's own
         # database default, read lazily (per new record) so it needs no schema
         # at class-load time.

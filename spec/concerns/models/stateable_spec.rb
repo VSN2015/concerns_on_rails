@@ -44,7 +44,7 @@ describe ConcernsOnRails::Stateable do
     end
   end
 
-  describe "re-declaring without default:" do
+  describe "re-declaring default:" do
     before do
       ActiveRecord::Schema.define do
         create_table :redefaulted_tickets, force: true do |t|
@@ -71,6 +71,23 @@ describe ConcernsOnRails::Stateable do
       expect(RedefaultedIncident.stateable_default).to be_nil
       expect(RedefaultedIncident.new.status).to be_nil # "draft" is not even one of its states
       expect(RedefaultedTicket.new.status).to eq("draft") # the parent keeps its own
+    end
+
+    it "keeps an inherited default that is still one of the subclass's states" do
+      stub_const("RedefaultedTicket", parent)
+      stub_const("RedefaultedBug", Class.new(parent) { stateable_by :status, states: %i[draft open triaged] })
+
+      expect(RedefaultedBug.stateable_default).to eq(:draft)
+      expect(RedefaultedBug.new.status).to eq("draft")
+    end
+
+    it "resets it with an explicit default: nil even when the state is still declared" do
+      stub_const("RedefaultedTicket", parent)
+      stub_const("RedefaultedTask", Class.new(parent) { stateable_by :status, states: %i[draft open], default: nil })
+
+      expect(RedefaultedTask.stateable_default).to be_nil
+      expect(RedefaultedTask.new.status).to be_nil
+      expect(RedefaultedTicket.new.status).to eq("draft")
     end
 
     it "drops it on a same-class re-declaration, falling back to the column's own default" do
