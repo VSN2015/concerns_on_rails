@@ -84,6 +84,10 @@ module ConcernsOnRails
 
         # Declare one counter. Repeatable — each call maintains another column
         # (rules accumulate, reassigned never mutated, so subclasses inherit).
+        # A rule is keyed by (association, count column): re-declaring the same
+        # counter REPLACES that rule, in place, for this class — so an STI
+        # subclass can narrow an inherited counter with `if:` — where appending
+        # a second rule made both fire and double-count every row.
         # `count:` defaults to "<table_name>_count" (e.g. comments → comments_count).
         def counter_cacheable_by(association, count: nil, touch: false, **options)
           association = association.to_sym
@@ -97,10 +101,10 @@ module ConcernsOnRails
           count_column = (count || "#{table_name}_count").to_sym
           counter_cacheable_ensure_parent_column!(reflection, count_column)
 
-          self.counter_cacheable_rules = counter_cacheable_rules + [{
+          counter_cacheable_store_rule(
             association: association, count_column: count_column,
             condition: condition, touch: touch ? true : false
-          }]
+          )
         end
 
         # Recompute every (or one) counter from scratch — drift repair / backfill.
@@ -120,6 +124,13 @@ module ConcernsOnRails
         end
 
         private
+
+        def counter_cacheable_store_rule(rule)
+          key = rule.values_at(:association, :count_column)
+          rules = counter_cacheable_rules
+          index = rules.index { |existing| existing.values_at(:association, :count_column) == key }
+          self.counter_cacheable_rules = index ? rules.dup.tap { |copy| copy[index] = rule } : rules + [rule]
+        end
 
         # An association nobody declared a counter for would otherwise filter the
         # rules down to nothing and report a silent success — or, with `parents:`,
@@ -217,12 +228,6 @@ module ConcernsOnRails
 
         def validate_counter_cacheable_touch!(touch)
           raise ArgumentError, "#{LABEL}: :touch must be true or false" unless [true, false].include?(touch)
-          return unless touch && ActiveRecord::VERSION::MAJOR < 6
-
-          # `update_counters(..., touch: true)` exists on Rails 6.0+; on 5.x the
-          # option would be read as a counter column literally named `touch` and
-          # produce a SQL error at runtime — fail loudly at macro time instead.
-          raise ArgumentError, "#{LABEL}: `touch: true` requires Rails >= 6.0"
         end
 
         # Validate the column on the PARENT table when its class is already

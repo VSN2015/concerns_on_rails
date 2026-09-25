@@ -41,7 +41,7 @@ end
 
 ### `counter_cacheable_by(association, count: nil, if: nil, touch: false)`
 
-Repeatable — each call maintains another counter. Rules accumulate (reassigned, never mutated, so subclasses inherit). All errors raise `ArgumentError` at declaration time.
+Repeatable — each call maintains another counter. Rules accumulate (reassigned, never mutated, so subclasses inherit) and are keyed by association + `count:` column: re-declaring the same counter replaces the earlier rule for that class instead of adding a second one, so an STI subclass can narrow an inherited counter with `if:` without double-counting (the parent keeps its own rule). All errors raise `ArgumentError` at declaration time.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -121,4 +121,3 @@ Comment.recount_counter_caches!(:post, parents: Post.where(author: me))
 ## Changed in 1.22.0
 
 - `recount_counter_caches!` runs in a transaction (a crash mid-repair can no longer leave every counter zeroed) and groups parents by tally value — O(distinct counts) UPDATE statements instead of one per parent row.
-- `touch: true` raises at macro time on Rails < 6.0, where `update_counters` lacks the option.

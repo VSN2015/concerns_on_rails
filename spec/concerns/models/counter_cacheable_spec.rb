@@ -289,6 +289,58 @@ describe ConcernsOnRails::Models::CounterCacheable do
     end
   end
 
+  # A rule is keyed by (association, count column): re-declaring the same
+  # counter replaces it rather than appending a second rule that double-counts.
+  describe "re-declaring the same counter" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :replies, force: true do |t|
+          t.string :type
+          t.integer :post_id
+          t.boolean :approved, default: false
+        end
+      end
+    end
+
+    let(:reply_class) do
+      Class.new(TestModel) do
+        self.table_name = "replies"
+        include ConcernsOnRails::CounterCacheable
+
+        belongs_to :post, optional: true
+        counter_cacheable_by :post, count: :comments_count
+      end
+    end
+
+    it "lets an STI subclass narrow an inherited counter without double-counting" do
+      stub_const("Reply", reply_class)
+      stub_const("ModeratedReply", Class.new(reply_class) do
+        counter_cacheable_by :post, count: :comments_count, if: -> { approved? }
+      end)
+
+      ModeratedReply.create!(post: post, approved: true)
+      ModeratedReply.create!(post: post, approved: false)
+      Reply.create!(post: post)
+
+      expect(post.reload.comments_count).to eq(2)
+      expect(ModeratedReply.counter_cacheable_rules.size).to eq(1)
+      expect(Reply.counter_cacheable_rules.first[:condition]).to be_nil # parent untouched
+    end
+
+    it "replaces the earlier rule, in place, when the same class re-declares it" do
+      stub_const("Reply", reply_class) # the `type` column needs a named class
+      reply_class.counter_cacheable_by :post, count: :approved_comments_count, if: -> { approved? }
+      reply_class.counter_cacheable_by :post, count: :comments_count, touch: true
+
+      rules = reply_class.counter_cacheable_rules
+      expect(rules.map { |rule| rule[:count_column] }).to eq(%i[comments_count approved_comments_count])
+      expect(rules.first[:touch]).to be(true)
+
+      reply_class.create!(post: post)
+      expect(reload_counts(post)).to eq([1, 0])
+    end
+  end
+
   describe "statement batching (1.26)" do
     def capture_post_updates
       updates = []
