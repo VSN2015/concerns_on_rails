@@ -83,6 +83,7 @@ module ConcernsOnRails
     autoload :LinkHeader,              "concerns_on_rails/support/link_header"
     autoload :VaryHeader,              "concerns_on_rails/support/vary_header"
     autoload :NumericOperand,          "concerns_on_rails/support/numeric_operand"
+    autoload :SlugSources,             "concerns_on_rails/support/slug_sources"
   end
 end
 

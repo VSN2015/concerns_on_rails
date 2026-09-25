@@ -397,6 +397,64 @@ describe ConcernsOnRails::Models::Encryptable do
         end.to raise_error(ArgumentError, /Sluggable/)
       end
 
+      # The macro-time guards cannot see every shape; a save-time backstop
+      # refuses to write a slug resolved from an encrypted field.
+      def raw_slug(klass, id)
+        klass.connection.select_value(
+          "SELECT #{TestDatabase.quoted_column('slug')} FROM encryptable_records WHERE id = #{id}"
+        )
+      end
+
+      it "refuses to save when Sluggable is included WITHOUT sluggable_by and slugs the encrypted :name (either order)" do
+        sluggable_first = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          encryptable :name
+        end
+        encryptable_first = model_class do
+          encryptable :name
+          include ConcernsOnRails::Models::Sluggable
+        end
+        stub_const("EncSlugImplicit", sluggable_first)
+        stub_const("EncSlugImplicitLate", encryptable_first)
+
+        [sluggable_first, encryptable_first].each do |klass|
+          expect { klass.create!(name: "Jane Smith") }.to raise_error(ArgumentError, /:name.*slug source/)
+          expect(klass.connection.select_value("SELECT COUNT(*) FROM encryptable_records").to_i).to eq(0)
+        end
+      end
+
+      it "raises for a bare friendly_id model whose base is encrypted (friendly_id first: macro time; after: save time)" do
+        expect do
+          model_class do
+            extend FriendlyId
+
+            friendly_id :ssn, use: :slugged
+            encryptable :ssn
+          end
+        end.to raise_error(ArgumentError, /:ssn.*slug source/)
+
+        late = model_class do
+          encryptable :ssn
+          extend FriendlyId
+
+          friendly_id :ssn, use: :slugged
+        end
+        stub_const("EncBareFriendlyLate", late)
+        expect { late.create!(ssn: "123-45-6789") }.to raise_error(ArgumentError, /:ssn.*slug source/)
+      end
+
+      it "a refused sluggable_by leaves the previous slug configuration in place" do
+        klass = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          encryptable :ssn
+        end
+        expect { klass.sluggable_by(:ssn) }.to raise_error(ArgumentError)
+        expect(klass.sluggable_field).to eq(:name)
+        expect(klass.sluggable_declared).to be(false)
+      end
+
       it "leaves an unrelated slug source alone, and never writes the ciphertext's plaintext to the slug" do
         klass = model_class do
           include ConcernsOnRails::Models::Sluggable
@@ -405,10 +463,7 @@ describe ConcernsOnRails::Models::Encryptable do
           sluggable_by :name
         end
         record = klass.create!(name: "Jane Doe", ssn: "123-45-6789")
-        raw = klass.connection.select_value(
-          "SELECT #{TestDatabase.quoted_column('slug')} FROM encryptable_records WHERE id = #{record.id}"
-        )
-        expect(raw).to eq("jane-doe")
+        expect(raw_slug(klass, record.id)).to eq("jane-doe")
       end
     end
   end

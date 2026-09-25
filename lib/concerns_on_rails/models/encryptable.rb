@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/slug_sources"
 require "active_model/type"
 require "bigdecimal"
 require "time"
@@ -90,6 +91,11 @@ module ConcernsOnRails
         # declaration orders — here and in Auditable#auditable_by — so no
         # per-save backstop is needed.)
         before_save :encryptable_refresh_blind_indexes
+        # The slug guard DOES need one: a slug is plaintext of its source, and
+        # the macro-time checks cannot see every shape — Sluggable included
+        # without sluggable_by (it slugs the implicit :name), or friendly_id
+        # declared after `encryptable`. Checked before the row is written.
+        before_save :encryptable_guard_slug_source!
       end
 
       # Rails < 7.1 does not memoize ActiveModel::Attribute#value_for_database,
@@ -491,13 +497,19 @@ module ConcernsOnRails
         # the value in clear. Checks sources declared through sluggable_by
         # (its `candidates:` included); Sluggable mirrors this for the reverse
         # order.
+        # A bare friendly_id model (`friendly_id :ssn, use: :slugged`) is
+        # checked here too; Sluggable's implicit :name default is left to the
+        # save-time backstop, since a sluggable_by may still follow.
         def encryptable_guard_sluggable!(field)
-          return unless respond_to?(:sluggable_declared) && sluggable_declared
-          return unless sluggable_source_fields.include?(field.to_sym)
+          return if respond_to?(:sluggable_declared) && !sluggable_declared
+          return unless ConcernsOnRails::Support::SlugSources.names(self).include?(field.to_sym)
 
-          raise ArgumentError,
-                "#{LABEL}: ':#{field}' is also a Sluggable source; the slug would store the decrypted " \
-                "plaintext in the slug column. Slug from a non-sensitive field instead."
+          raise ArgumentError, encryptable_slug_source_message(field)
+        end
+
+        def encryptable_slug_source_message(field)
+          "#{LABEL}: ':#{field}' is also a slug source (Sluggable / friendly_id); the slug would store " \
+            "the decrypted plaintext in the slug column. Slug from a non-sensitive field instead."
         end
 
         # Redact encrypted fields from Rails parameter logging. The gem-level
@@ -650,6 +662,18 @@ module ConcernsOnRails
 
           self[bi[:column]] = ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, public_send(field))
         end
+      end
+
+      # Save-time backstop for the macro-time slug guards: raise (nothing is
+      # written) when the model's friendly_id slug is resolved from an
+      # encrypted field — whatever the declaration order, including
+      # Sluggable's implicit :name default and a method named like a field.
+      def encryptable_guard_slug_source!
+        klass = self.class
+        overlap = ConcernsOnRails::Support::SlugSources.names(klass) & klass.encryptable_rules.keys
+        return if overlap.empty?
+
+        raise ArgumentError, klass.send(:encryptable_slug_source_message, overlap.first)
       end
     end
   end

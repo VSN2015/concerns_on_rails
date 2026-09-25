@@ -3,6 +3,7 @@ require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/slug_sources"
 require "concerns_on_rails/support/unique_retry"
 require "digest"
 require "securerandom"
@@ -229,9 +230,7 @@ module ConcernsOnRails
         # Every declared slug source, columns or not (see
         # anonymizable_slug_source_columns).
         def anonymizable_slug_sources
-          return Array(friendly_id_config.base).flatten unless respond_to?(:sluggable_field)
-
-          sluggable_candidates ? Array(sluggable_candidates).flatten : [sluggable_field]
+          ConcernsOnRails::Support::SlugSources.sources(self)
         end
 
         def anonymizable_random_hex(length)

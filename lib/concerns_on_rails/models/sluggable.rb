@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/slug_sources"
 
 # Loaded here — with the concern, on first use — rather than at gem boot, so
 # apps that never include Sluggable never load friendly_id.
@@ -102,10 +103,15 @@ module ConcernsOnRails
         #   sluggable_by :title, max_length: 60                        # truncate at a word boundary
         def sluggable_by(field, history: false, scope: nil, reserved_words: nil, finders: false,
                          candidates: nil, max_length: nil)
-          self.sluggable_field = field.to_sym
-          self.sluggable_candidates = sluggable_validate_candidates!(candidates)
-          self.sluggable_max_length = sluggable_validate_max_length!(max_length)
-          sluggable_guard_encryptable!
+          # Validated before anything is assigned: a refused declaration must
+          # not leave the class slugging from the field it was refused for.
+          field = field.to_sym
+          candidates = sluggable_validate_candidates!(candidates)
+          max_length = sluggable_validate_max_length!(max_length)
+          sluggable_guard_encryptable!(sluggable_source_fields(field, candidates))
+          self.sluggable_field = field
+          self.sluggable_candidates = candidates
+          self.sluggable_max_length = max_length
           self.sluggable_declared = true
           # Validate the slug column too (a missing one used to fail at first save
           # with an opaque friendly_id error); an association scope: is exempt.
@@ -123,9 +129,8 @@ module ConcernsOnRails
         # that are Symbols/Strings (nested arrays flattened) when given — they
         # replace the sluggable field — else the sluggable field. Procs are
         # opaque and left out.
-        def sluggable_source_fields
-          sources = sluggable_candidates ? Array(sluggable_candidates).flatten : [sluggable_field]
-          sources.filter_map { |source| source.to_sym if source.is_a?(Symbol) || source.is_a?(String) }
+        def sluggable_source_fields(field = sluggable_field, candidates = sluggable_candidates)
+          ConcernsOnRails::Support::SlugSources.symbolize(ConcernsOnRails::Support::SlugSources.declared(field, candidates))
         end
 
         private
@@ -135,10 +140,12 @@ module ConcernsOnRails
         # covering the reverse order (sluggable_by declared AFTER encryptable).
         # A method or Proc candidate that reads an encrypted field cannot be
         # seen from here — keep encrypted values out of those yourself.
-        def sluggable_guard_encryptable!
+        # Encryptable also re-checks at save time (the implicit :name default
+        # and later declarations included).
+        def sluggable_guard_encryptable!(sources)
           return unless respond_to?(:encryptable_rules)
 
-          overlap = sluggable_source_fields & encryptable_rules.keys
+          overlap = sources & encryptable_rules.keys
           return if overlap.empty?
 
           raise ArgumentError,
