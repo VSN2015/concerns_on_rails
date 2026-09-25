@@ -784,6 +784,7 @@ User.find_by(email: User.normalize(:email, params[:email]))
 - `with:` takes a preset, a Proc, or an Array of them (applied in order); every entry is validated at class load.
 - `nil` values are skipped — no `nil → ""` coercion (use `:nullify_blank` for the opposite direction).
 - Preset normalizers pass non-string values through unchanged.
+- "Whitespace" is Unicode whitespace: `:strip`/`:whitespace`/`:email`/`:url` strip a pasted no-break space, em space or ideographic space from both ends (plain `String#strip` does not), `:squish` collapses them, and `:nullify_blank` treats a value of only such spaces as blank.
 - Works on Rails 6.0+ (no dependency on Rails 7.1's built-in `normalizes`).
 
 ---
@@ -1142,7 +1143,7 @@ end
 | `normalize_country:` | `false`                           | When `true`, canonicalize the country to its ISO 3166-1 alpha-2 code: an English name (`"Canada"`, `"United States"`) or a 3-letter alpha-3 (`"CAN"`, `"USA"`) maps to the alpha-2 (`"CA"`, `"US"`); unrecognized values are left untouched. This also lets postal/state validation recognize a named country. |
 | `verify_with:`    | `nil`                                | A callable for real-world verification (see below).                 |
 | `fingerprint:`    | `nil`                                | A `string` column to store `address_fingerprint` in (stamped in `before_validation`, after normalization) so duplicates are one indexed query away: `Location.with_address(record)`. |
-| `if:` / `unless:` | `nil`                                | Standard Rails validation conditions (Symbol, Proc, or Array) gating the address **validations** — e.g. `if: :on_addresses?`. Normalization still runs unconditionally. |
+| `if:` / `unless:` | `nil`                                | Standard Rails validation conditions (Symbol, Proc, or Array) gating the address **validations** — e.g. `if: :on_addresses?`. Normalization still runs unconditionally. Per class: a later `addressable_by` (or a subclass's) replaces the condition. Procs get Rails' callback arguments for their arity (`-> {}`, `->(record) {}`, `->(record, _) {}`). |
 
 **What it normalizes** (in `before_validation`)
 - Text parts: `strip` + `squish`.
@@ -1209,19 +1210,21 @@ Article.tagged_with("ruby", "rails")          # records carrying BOTH tags
 Article.tagged_with("ruby", "go", any: true)  # records carrying ANY tag
 Article.all_tags                               # => sorted unique tags in use
 Article.published.tag_counts(limit: 20)        # => { "ruby" => 12, "rails" => 7, ... } — a tag cloud, relation-aware
+Article.normalize_tags!                        # repair rows written around the callbacks → count rewritten
 ```
 
 **Options**
 
 | Option       | Default | Purpose                                                          |
 |--------------|---------|------------------------------------------------------------------|
-| `delimiter:` | `","`   | Character joining the stored tags (a tag must not contain it).    |
+| `delimiter:` | `","`   | Character joining the stored tags (a tag must not contain it; an empty delimiter raises). |
 | `downcase:`  | `false` | Case-fold tags on write so matching is case-insensitive.          |
 
 **Notes**
 - Matching is **boundary-safe** — searching `rail` does not match `rails`. An explicit SQL `ESCAPE` clause makes tags containing `_` / `%` match literally on every adapter.
 - `tagged_with` matches **case-insensitively on every adapter** — `LIKE` on SQLite and MySQL, `ILIKE` on PostgreSQL — so one call means one thing everywhere (how non-ASCII characters fold is still the database collation's business). The Ruby-side helpers (`tagged_with?`, `all_tags`, `tag_counts`) compare exactly, so `downcase: true` — which folds on write — is what makes the scope and the helpers agree.
 - Tags are normalized in `before_validation`, so a direct `record.tags = "a, b"` assignment is cleaned too. An empty list stores `NULL`.
+- `tagged_with` matches the **normalized** column form (`"ruby,rails"`) — which every write through the model produces. A row written around the callbacks (`update_column`, `update_all`, raw SQL, an import) as `"ruby, rails"` is found by `tagged_with?` but not by `tagged_with`; run `Model.normalize_tags!` (relation-aware, one `update_columns` per changed row in a transaction, no validations/callbacks, returns the count; `unscoped` to include default-scoped-away rows) to rewrite such rows.
 - `tag_counts` runs one `GROUP BY` on the raw column — identical tag strings ship once with their row count and are split in Ruby — so it scales with distinct tag strings, not rows; ordered by count desc then name, `limit:` keeps the top N.
 - Reach for [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) when you need tag contexts, ownership, or polymorphic tags shared across models.
 
@@ -1279,6 +1282,7 @@ Article.where(legacy: true).sanitize_all!(:body)   # scope-aware, subset of fiel
 **Notes**
 - `on: :read` (default) is **non-destructive**: it adds a `sanitized_<field>` reader and leaves the stored column untouched.
 - `on: :write` overwrites the column in `before_validation` — **lossy and irreversible** (never use it on code, Markdown, math, or prices), and bypassed by `update_column` / `update_all` / raw SQL.
+- `with: :strip, on: :write` stores **plain text**, not HTML-escaped text: `"<b>Tom</b> & Jerry"` is stored as `"Tom & Jerry"` (so `<%= %>` shows it once, not as `Tom &amp;amp; Jerry`). `&lt;` / `&gt;` are deliberately kept encoded — the stored value can never become markup, even rendered with `raw` — so a typed `a < b` is stored as `a &lt; b`. An `&amp;` that would read back as a character reference (a literal `&amp;copy;`) also stays encoded (a static, linear-time rule: `&` followed by `#`, a `name;`, or an HTML5 semicolon-less legacy name), so re-saving and `sanitize_all!` are idempotent. `sanitize_all!` uses the same plain-text form, and repairs rows stored double-escaped by earlier versions. The `on: :read` reader and `sanitized:` serialization still return HTML-escaped text.
 - `sanitize_all!` is the repair tool for that bypass (and for rows written before the concern was added): one `update_columns` per row that actually changes, skipping validations/callbacks on purpose, inside a transaction. A bare call repairs the `on: :write` fields only — with none declared it returns `0` without a query.
 - `sanitized:` sanitizes the **serialized** value, so it composes with [Maskable](#-maskable) in either include order: `as_json(masked: true, sanitized: true)` never falls back to the raw column.
 - For full user-authored rich text, prefer [Action Text](https://guides.rubyonrails.org/action_text_overview.html).
@@ -1311,7 +1315,7 @@ end
 | `:all`         | mask every character (the default)          |
 | `Proc`         | used as-is (you own the non-String guard)   |
 
-`mask:` sets the mask character (default `*`). Nil and non-string values pass through untouched. To strip dangerous HTML instead, see [Sanitizable](#-sanitizable).
+`mask:` sets the mask character (default `*`). Nil and non-string values pass through untouched. The presets fail closed: a String without the expected shape — no `@` for `:email`, four or fewer digits for `:phone` / `:credit_card` — gets the full `:all` mask, never the raw value. To strip dangerous HTML instead, see [Sanitizable](#-sanitizable).
 
 **Serialization** — mask in the response, not just in the view
 
@@ -1348,7 +1352,7 @@ product.formatted_price # => "$19.99"
 | Method            | Returns                                       |
 |-------------------|-----------------------------------------------|
 | `price`           | the amount as a `BigDecimal` (cents ÷ 100)    |
-| `price=`          | assign in major units; rounded to whole cents |
+| `price=`          | assign in major units; rounded to whole cents. Strings are read as plain decimals (`"19.99"`) or in the field's own display format (`"$1,234.50"`, `"€1.234,50"` with `separator: ","`), so `formatted_price` round-trips. The unit is only recognized at the start or end; in a `delimiter: "."` field with another separator, `"1.234"` means 1234 (like `"€1.234"`). Garbage, NaN, Infinity and oversized input (over 64 characters, a 3-digit exponent, or ≥ 10^24 — a parse-cost bound, far above a `bigint` column's ~9.2e18 subunits, so the database may still reject a large amount at save) become `nil` |
 | `formatted_price` | a display string (`"$1,234.56"`); accepts per-call overrides: `formatted_price(unit: "€", delimiter: ".", separator: ",")` |
 
 **Aggregates** — class methods that follow the current scope, exact and float-free:
@@ -1359,7 +1363,7 @@ Product.in_stock.average_price         # average_ / minimum_ / maximum_ too — 
 Order.paid.formatted_sum_total         # => "€3.500,50"  every aggregate has a formatted_ twin (overrides accepted)
 ```
 
-**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors.
+**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors. A `unit:` containing the `delimiter:` or `separator:` raises (formatted output could not be read back). `precision:` and `subunit_to_unit:` are coerced (`"2"` works, `"two"` raises) at the macro and in per-call `formatted_` overrides alike.
 
 ---
 
@@ -1479,6 +1483,7 @@ Book.joins(:sections).where(sections: { title: "Intro" })
 
 **Notes**
 - One loaded cache under two names: `record.association(:alias)` IS `record.association(:source)`, and only the source macro installs callbacks — `dependent:`, counter caches, autosave and validations run exactly once.
+- `accepts_nested_attributes_for :alias` behaves exactly like it does for the source (create, update, `_destroy`, `reject_if:`, `limit:`; each child saved once). It turns autosave on for the source association, and child validation errors are keyed under the source name. Declared in a subclass, it sets autosave on the inherited source reflection, so the parent autosaves too — the same as stock Rails nested attributes on an inherited association.
 - The where-hash key must match the name you joined under (stock-Rails rule): `joins(:sections).where(sections: {...})` works; `joins(:chapters).where(sections: {...})` does not.
 - The `belongs_to` foreign-key **attribute** is not aliased — pair with `alias_attribute :writer_id, :author_id` if you need it.
 - `has_and_belongs_to_many` cannot be aliased (use `has_many :through`). `has_many`/`has_one :through` **can** — the copy pins `source:` so it is not re-derived from the alias name; if your classes load lazily and the through model names the source differently (e.g. `belongs_to :author` behind `has_many :authors`), declare `source:` explicitly on the original association. Aliases are inherited by subclasses.

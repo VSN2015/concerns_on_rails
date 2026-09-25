@@ -54,6 +54,8 @@ module ConcernsOnRails
         class_attribute :addressable_allow_blank, instance_accessor: false, default: [].freeze
         class_attribute :addressable_normalize_country, instance_accessor: false, default: false
         class_attribute :addressable_validation_registered, instance_accessor: false, default: false
+        # { if: ..., unless: ... } from the most recent addressable_by on this class.
+        class_attribute :addressable_validation_condition, instance_accessor: false, default: {}.freeze
         class_attribute :addressable_fingerprint_column, instance_accessor: false, default: nil
 
         # `validate :validate_address` is registered by `addressable_by` (not here) so it can
@@ -248,14 +250,19 @@ module ConcernsOnRails
           { if: mapping.delete(:if), unless: mapping.delete(:unless) }.compact
         end
 
-        # Register `validate :validate_address` once, forwarding any if:/unless: condition
-        # straight to Rails so it behaves like a normal conditional validation. Normalization
-        # (before_validation) is unconditional; the condition only gates the validations.
+        # Register `validate :validate_address` once (unconditionally) and store the
+        # if:/unless: condition per class, evaluated inside the validation. Handing
+        # the condition to Rails pinned the FIRST call's: the callback is registered
+        # once and inherited, so a later addressable_by or a subclass could never
+        # change it. The class_attribute writer keeps a subclass's condition off
+        # its parent. Normalization (before_validation) is unconditional; the
+        # condition only gates the validations.
         def register_address_validation(condition)
+          self.addressable_validation_condition = condition.freeze
           return if addressable_validation_registered
 
           self.addressable_validation_registered = true
-          validate :validate_address, **condition
+          validate :validate_address
         end
       end
 
@@ -279,6 +286,8 @@ module ConcernsOnRails
       # --- Validation -----------------------------------------------------------
 
       def validate_address
+        return unless address_validation_condition_met?
+
         validate_required_parts
         validate_lengths
         validate_country_code
@@ -351,6 +360,35 @@ module ConcernsOnRails
       end
 
       private
+
+      # Rails' conditional-validation semantics: every if: condition must hold
+      # and no unless: condition may hold; each accepts a Symbol, Proc or Array.
+      def address_validation_condition_met?
+        condition = self.class.addressable_validation_condition
+        Array(condition[:if]).all? { |cond| address_condition_value(cond) } &&
+          Array(condition[:unless]).none? { |cond| address_condition_value(cond) }
+      end
+
+      # Symbol/String: a method on the record. Proc: instance_exec'd with the
+      # arguments ActiveSupport::Callbacks gives a condition of that arity —
+      # (record, nil) for arity 2, (record) for 1 / -2, none otherwise — so a
+      # condition written for a stock Rails validation behaves the same here.
+      # Anything else callable is called with the record.
+      def address_condition_value(cond)
+        case cond
+        when Symbol, String then send(cond)
+        when Proc then instance_exec(*address_condition_args(cond.arity), &cond)
+        else cond.respond_to?(:call) ? cond.call(self) : cond
+        end
+      end
+
+      def address_condition_args(arity)
+        case arity
+        when 2 then [self, nil]
+        when 1, -2 then [self]
+        else []
+        end
+      end
 
       # Something beyond the country must be present — a country alone is not
       # an address, and the default country is always "present".
