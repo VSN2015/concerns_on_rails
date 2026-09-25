@@ -373,6 +373,68 @@ describe ConcernsOnRails::Stateable do
         end.to raise_error(ArgumentError, /generated scope 'archived'/)
       end
 
+      context "when the other concern comes AFTER stateable_by" do
+        before do
+          ActiveRecord::Schema.define do
+            create_table(:reverse_orders, force: true) do |t|
+              t.string :status
+              t.boolean :active
+              t.datetime :expires_at
+              t.datetime :published_at
+            end
+          end
+        end
+
+        def reverse_model(&block)
+          Class.new(TestModel) do
+            self.table_name = "reverse_orders"
+            include ConcernsOnRails::Stateable
+
+            class_eval(&block)
+          end
+        end
+
+        it "refuses including a concern whose methods Stateable's would shadow (Activatable#active?)" do
+          expect do
+            reverse_model do
+              stateable_by :status, states: %i[pending active]
+              include ConcernsOnRails::Activatable
+            end
+          end.to raise_error(ArgumentError, /Activatable: method 'active\?' collides with .*Stateable.*prefix: or suffix:/)
+        end
+
+        it "refuses a Publishable whose publish! a Stateable event already defined" do
+          expect do
+            reverse_model do
+              stateable_by :status, states: %i[pending live], transitions: { publish: { to: :live } }
+              include ConcernsOnRails::Publishable
+            end
+          end.to raise_error(ArgumentError, /Publishable: method 'publish!'/)
+        end
+
+        it "refuses a later scope that would replace Stateable's (Expirable.expiring_within)" do
+          expect do
+            reverse_model do
+              stateable_by :status, states: %i[fresh expiring_within]
+              include ConcernsOnRails::Expirable
+
+              expirable_by
+            end
+          end.to raise_error(ArgumentError, /Expirable: scope 'expiring_within' collides/)
+        end
+
+        it "accepts the pair once stateable_by is affixed" do
+          klass = reverse_model do
+            stateable_by :status, states: %i[pending active], prefix: true
+            include ConcernsOnRails::Activatable
+
+            activatable_by :active
+          end
+          expect(klass.status_active.to_sql).to include(TestDatabase.quoted_column(:status))
+          expect(klass.active.to_sql).not_to include(TestDatabase.quoted_column(:status))
+        end
+      end
+
       it "exempts column predicates in an STI parent's attribute module, whatever the load order" do
         ActiveRecord::Schema.define do
           create_table(:flagged_tickets, force: true) do |t|

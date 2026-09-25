@@ -120,6 +120,9 @@ module ConcernsOnRails
         class_attribute :anonymizable_clear_audit, instance_accessor: false, default: true
         class_attribute :anonymizable_scopes_defined, instance_accessor: false, default: false
         class_attribute :anonymizable_slug, instance_accessor: false, default: :auto
+        ConcernsOnRails::Support::Affix.refuse_stateable_names!(
+          self, Anonymizable.public_instance_methods(false), kind: :instance, label: LABEL
+        )
       end
 
       module ClassMethods
@@ -273,10 +276,12 @@ module ConcernsOnRails
           self.anonymizable_scopes_defined = true
           prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: anonymizable_stamp)
           suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: anonymizable_stamp)
-          scope ConcernsOnRails::Support::Affix.name(:anonymized, prefix: prefix, suffix: suffix),
-                -> { where.not(anonymizable_stamp => nil) }
-          scope ConcernsOnRails::Support::Affix.name(:not_anonymized, prefix: prefix, suffix: suffix),
-                -> { where(anonymizable_stamp => nil) }
+          anonymized, not_anonymized = %i[anonymized not_anonymized].map do |base|
+            ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)
+          end
+          ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, [anonymized, not_anonymized], kind: :scope, label: LABEL)
+          scope anonymized, -> { where.not(anonymizable_stamp => nil) }
+          scope not_anonymized, -> { where(anonymizable_stamp => nil) }
         end
       end
 

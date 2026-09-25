@@ -24,6 +24,9 @@ module ConcernsOnRails
         # false) sets it, a call omitting it keeps the current value.
         class_attribute :publishable_default_scope, instance_accessor: false, default: false
 
+        ConcernsOnRails::Support::Affix.refuse_stateable_names!(
+          self, Publishable.public_instance_methods(false), kind: :instance, label: "ConcernsOnRails::Models::Publishable"
+        )
         define_publishable_scopes(nil, nil)
         self.publishable_captured_scopes =
           ConcernsOnRails::Support::Affix.capture(self, SCOPE_BASES).freeze
@@ -168,6 +171,7 @@ module ConcernsOnRails
           self.publishable_scope_names = SCOPE_BASES.to_h do |base|
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
+          ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, publishable_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::Publishable")
 
           # See publishable_true_predicate for why the boolean branch is not
           # `where(field => true)`. (The timestamp branch is an Arel `<=`,

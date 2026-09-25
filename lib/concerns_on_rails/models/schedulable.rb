@@ -18,6 +18,9 @@ module ConcernsOnRails
                                                   default: SCOPE_BASES.to_h { |b| [b, b] }.freeze
         class_attribute :schedulable_captured_scopes, instance_accessor: false, default: {}.freeze
 
+        ConcernsOnRails::Support::Affix.refuse_stateable_names!(
+          self, Schedulable.public_instance_methods(false), kind: :instance, label: "ConcernsOnRails::Models::Schedulable"
+        )
         define_schedulable_scopes(nil, nil)
         self.schedulable_captured_scopes =
           ConcernsOnRails::Support::Affix.capture(self, SCOPE_BASES).freeze
@@ -105,6 +108,7 @@ module ConcernsOnRails
           end.freeze
 
           active_at_name = schedulable_scope_names.fetch(:active_at)
+          ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, schedulable_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::Schedulable")
 
           scope active_at_name, lambda { |time|
             starts_field = schedulable_starts_at_field
