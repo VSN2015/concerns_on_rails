@@ -23,7 +23,14 @@ require "tempfile"
 # defined only in the loader, so a direct require raised NoMethodError — or,
 # worse, Encryptable/Lockable swallowed it and silently skipped registering
 # the sensitive field with filter_parameters.
+#
+# SQLite only: the model runner needs a private in-memory database (on
+# PostgreSQL/MySQL it would share the suite's database and its table names),
+# and the PG/MySQL CI bundles don't carry the sqlite3 gem. Loading a file is
+# adapter-independent, so the SQLite cells of the matrix cover it.
 RSpec.describe "requiring a single concern file directly", :subprocess do
+  before { skip "runs on the SQLite matrix cells only" unless TestDatabase.sqlite? }
+
   lib_dir = File.expand_path("../../lib", __dir__)
 
   # Boots `ARGV[0]`, then runs every job of the JSON file `ARGV[1]` (name =>
