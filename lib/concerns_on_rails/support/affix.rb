@@ -23,6 +23,122 @@ module ConcernsOnRails
         option == true ? default.to_s : option.to_s
       end
 
+      # Define affixed twins of a concern's instance predicates on `klass`:
+      # `{ active: :expirable_live? }` with `prefix: "term"` defines
+      # `term_active?`, which calls the concern's private `expirable_live?`
+      # (never the public plain predicate, which another concern included
+      # later may have replaced). A no-op without an affix. The methods live
+      # in a fresh module included into `klass` — the way Rails generates
+      # attribute methods — so a predicate the model defines itself still
+      # wins. Returns the defined names.
+      #
+      # Because that module sits ABOVE Rails' generated attribute methods, a
+      # predicate named like a column's query method (`flag_active?` for a
+      # boolean `flag_active` column) would silently shadow it; that raises
+      # ArgumentError at macro time instead. Re-declaring the macro retires
+      # the predicates of the previous declaration (keyed by `label`, one
+      # set per concern): the class's own earlier ones are removed, and a
+      # subclass hides the ones it inherited without touching its parent.
+      #
+      # `column_answers:` names the concern's own column for a base whose
+      # question that column's query method already answers — Activatable's
+      # `{ active: :account_active }`. When the affixed name IS that column
+      # (`activatable_by :account_active, prefix: :account`), the predicate
+      # is left to the column instead of raising; a collision with any OTHER
+      # attribute still raises.
+      def define_predicates(klass, mapping, prefix:, suffix:, label:, column_answers: {})
+        predicates = affixed_predicates(mapping, prefix, suffix)
+        answered = column_answers.filter_map do |base, column|
+          predicate = :"#{name(base, prefix: prefix, suffix: suffix)}?"
+          predicate if predicates.key?(predicate) && predicate == :"#{column}?"
+        end
+        predicates = predicates.except(*answered)
+        check_predicate_collisions!(klass, predicates.keys, label)
+
+        registry = predicate_registry(klass)
+        inherited = retire_predicates!(klass, registry[label], label)
+        stale = inherited ? inherited[:names] - predicates.keys - answered : []
+        if predicates.empty? && stale.empty?
+          registry.delete(label)
+          return []
+        end
+
+        registry[label] = { module: predicate_module(predicates, inherited, stale), names: predicates.keys }
+        klass.include(registry[label][:module])
+        predicates.keys
+      end
+
+      # { affixed_name? => private target }, or {} without an affix.
+      def affixed_predicates(mapping, prefix, suffix)
+        return {} unless prefix || suffix
+
+        mapping.to_h { |base, target| [:"#{name(base, prefix: prefix, suffix: suffix)}?", target] }
+      end
+
+      # A fresh module defining `predicates` and hiding the `stale` names a
+      # subclass inherited. undef_method needs the name reachable from the
+      # module itself, so it includes the ancestor's module before hiding.
+      def predicate_module(predicates, inherited, stale)
+        mod = Module.new
+        predicates.each { |predicate, target| mod.send(:define_method, predicate) { |*args| send(target, *args) } }
+        mod.include(inherited[:module]) if stale.any?
+        stale.each { |predicate| mod.send(:undef_method, predicate) }
+        mod
+      end
+
+      # The class's OWN registry of affixed-predicate modules (an ivar, so
+      # subclasses never share it).
+      def predicate_registry(klass)
+        klass.instance_variable_get(:@concerns_on_rails_affixed_predicates) ||
+          klass.instance_variable_set(:@concerns_on_rails_affixed_predicates, {})
+      end
+
+      # Removes this class's own earlier predicates, then returns the nearest
+      # ancestor's registry entry — the inherited predicates a new
+      # declaration must hide. Looked up even after removing the class's own:
+      # a subclass that first re-declared its parent's affix and then another
+      # would otherwise reach the parent's copies again through inheritance.
+      def retire_predicates!(klass, own, label)
+        remove_own_predicates!(own) if own
+        inherited_predicates(klass, label)
+      end
+
+      def remove_own_predicates!(own)
+        own[:names].each do |predicate|
+          own[:module].send(:remove_method, predicate) if own[:module].method_defined?(predicate, false)
+        end
+      end
+
+      # The nearest ancestor's registry entry for `label`, or nil.
+      def inherited_predicates(klass, label)
+        klass.ancestors.drop(1).grep(Class).each do |ancestor|
+          entry = ancestor.instance_variable_get(:@concerns_on_rails_affixed_predicates)&.[](label)
+          return entry if entry
+        end
+        nil
+      end
+
+      def check_predicate_collisions!(klass, predicates, label)
+        return if predicates.empty? || !predicate_schema_reachable?(klass)
+
+        predicates.each do |predicate|
+          attribute = predicate.to_s.chomp("?")
+          next unless klass.attribute_names.include?(attribute) || klass.attribute_alias?(attribute)
+
+          raise ArgumentError,
+                "#{label}: the affix would define #{predicate}, which shadows the query method of the " \
+                "'#{attribute}' column on #{klass.name || klass}. Choose a different prefix:/suffix:."
+        end
+      end
+
+      # Mirrors ColumnGuard#schema_reachable?: skip the check (never raise)
+      # while the schema cannot be inspected, e.g. during db:create.
+      def predicate_schema_reachable?(klass)
+        klass.table_exists?
+      rescue ActiveRecord::ActiveRecordError
+        false
+      end
+
       # Snapshot the scopes a concern just defined on `klass`: a
       # name => UnboundMethod map, captured immediately after definition.
       # Names that aren't defined are skipped (a concern may generate a scope
@@ -74,7 +190,10 @@ module ConcernsOnRails
               "Declare the prefix:/suffix: option on #{owner} itself — affixing here would leave " \
               "#{owner}'s unaffixed scopes in place and the collision unresolved."
       end
-      private_class_method :retire_guard_owner!
+      private_class_method :retire_guard_owner!, :predicate_registry, :retire_predicates!,
+                           :check_predicate_collisions!, :predicate_schema_reachable?,
+                           :affixed_predicates, :predicate_module, :remove_own_predicates!,
+                           :inherited_predicates
     end
   end
 end

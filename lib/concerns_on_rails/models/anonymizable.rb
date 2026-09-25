@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/hooked_write"
 require "concerns_on_rails/support/unique_retry"
 require "digest"
 require "securerandom"
@@ -186,7 +187,10 @@ module ConcernsOnRails
         # Streams in PK batches (find_each) rather than loading the relation,
         # filters stamped rows DB-side, and skips the per-record reload —
         # the batch discards its instances, so reloading each one would cost
-        # a wasted SELECT per row.
+        # a wasted SELECT per row. Deliberately NOT Support::BatchOps: an
+        # erasure batch maximises progress. Each record runs in its own
+        # savepoint, so one whose hook vetoes (a legal hold) is skipped
+        # without undoing the others, and only records actually erased count.
         def anonymize_all!
           relation = anonymizable_stamp ? all.where(anonymizable_stamp => nil) : all
           transaction do
@@ -194,8 +198,7 @@ module ConcernsOnRails
             relation.find_each do |record|
               next if record.anonymized?
 
-              record.send(:anonymize_record!)
-              count += 1
+              count += 1 if record.send(:anonymize_record!)
             end
             count
           end
@@ -283,9 +286,12 @@ module ConcernsOnRails
       def after_anonymize; end
 
       # Erase the configured fields in a single UPDATE (see the module docs for
-      # why validations and callbacks are deliberately skipped). Returns true.
+      # why validations and callbacks are deliberately skipped). Returns true,
+      # or false when a hook vetoed the erasure with ActiveRecord::Rollback
+      # (nothing is written, even inside a caller's transaction).
       def anonymize!
-        anonymize_record!
+        return false unless anonymize_record!
+
         # update_columns leaves DB-serialized values (e.g. ciphertext) in the
         # in-memory attributes; reload so readers decode through the types.
         reload
@@ -306,13 +312,17 @@ module ConcernsOnRails
       def anonymize_record!
         raise ArgumentError, "#{LABEL}: anonymize! cannot be called on a new record" if new_record?
 
+        # Support::HookedWrite: own savepoint (a hook's Rollback is honored
+        # inside a caller's transaction and anonymize_all!), true only once
+        # after_anonymize has returned, and on any abort the in-memory values
+        # update_columns already synced are put back.
         payload = anonymizable_payload
         slug = anonymizable_slug_payload!(payload)
-        transaction do
-          before_anonymize
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_anonymize, after: :after_anonymize,
+                                                        restore: payload.keys) do
           anonymizable_write!(payload, slug[:generated])
           anonymizable_delete_slug_history! if slug[:history]
-          after_anonymize
+          true
         end
       end
 

@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/hooked_write"
 
 module ConcernsOnRails
   module Models
@@ -36,6 +37,7 @@ module ConcernsOnRails
         # validations (see Support::BatchOps.fast_path?) — then it streams
         # per record so the hooks run.
         def expire_all(time = Time.zone.now)
+          time = expirable_cast_time(time)
           active = all.public_send(expirable_scope_names.fetch(:active))
           if expirable_batch_fast_path?
             return active.update_all(
@@ -48,6 +50,23 @@ module ConcernsOnRails
             label: "ConcernsOnRails::Models::Expirable",
             message: "failed to expire record"
           ) { |record| record.expire!(time) }
+        end
+
+        # The expiry time `expire!` / `expire_all` will write. nil or blank
+        # (false, "", [] included) means now — the verbs' own default. Anything
+        # else is cast through the column's attribute type, and a value that
+        # casts to nothing raises BEFORE any hook runs: the write used to go
+        # ahead, AR stored nil, and the record "expired" to never-expires.
+        # (Internal: public only so the instance verbs can reach it.)
+        def expirable_cast_time(time)
+          return Time.zone.now if time.blank?
+
+          cast = type_for_attribute(expirable_field.to_s).cast(time)
+          return cast if cast.acts_like?(:time) || cast.acts_like?(:date)
+
+          raise ArgumentError,
+                "ConcernsOnRails::Models::Expirable: #{time.inspect} cannot be parsed as a time for " \
+                "'#{expirable_field}' — pass a Time, a parseable String, or nil for now"
         end
 
         private
@@ -82,19 +101,30 @@ module ConcernsOnRails
             now = Time.zone.now
             where(column.gt(now)).where(column.lteq(now + duration))
           }
+
+          # The affix covers the predicates too: Activatable (`active?`) and
+          # Schedulable (`expired?`) define the same plain names, and the
+          # concern included last wins them.
+          ConcernsOnRails::Support::Affix.define_predicates(
+            self, { active: :expirable_live?, expired: :expirable_expired? },
+            prefix: prefix, suffix: suffix, label: "ConcernsOnRails::Models::Expirable"
+          )
         end
       end
 
+      # Plain names kept for compatibility, delegating as they always have
+      # (`active?` is `!expired?`, so overriding `expired?` moves both). On a
+      # model that also includes Activatable or Schedulable, the concern
+      # included LAST owns these; configure `prefix:`/`suffix:` and use the
+      # affixed predicates (`term_active?`, `term_expired?`), which always
+      # give Expirable's own answer.
       def active?
         !expired?
       end
 
       # nil means never expires; equal-to-now is treated as expired (exclusive boundary).
       def expired?
-        value = self[self.class.expirable_field]
-        return false if value.nil?
-
-        value <= Time.zone.now
+        expirable_expired?
       end
 
       # Lifecycle hooks — override in the model. Fired when a write actually
@@ -107,19 +137,21 @@ module ConcernsOnRails
       def before_expire; end
       def after_expire; end
 
-      # Write the expiry (default: now, i.e. expire immediately). The hooks and
-      # the write share one transaction, so a raising after_expire rolls the
-      # expiry back (SoftDeletable's pattern); a failed write (validation)
-      # returns false and skips after_expire.
+      # Write the expiry (default: now, i.e. expire immediately; nil or blank
+      # also means now, and an unparseable value raises ArgumentError before
+      # any hook runs). The hooks and the write share one savepoint
+      # (Support::HookedWrite): a raising after_expire — or one vetoing with
+      # ActiveRecord::Rollback, even inside a caller's transaction or
+      # expire_all — rolls the expiry back and returns false. A failed write
+      # (validation) returns false, skips after_expire, and rolls back
+      # before_expire's own side effects.
       def expire!(time = Time.zone.now)
-        hooks = !expirable_scheduled?(time)
-        result = false
-        transaction do
-          before_expire if hooks
-          result = update(self.class.expirable_field => time)
-          after_expire if result && hooks
+        time = self.class.expirable_cast_time(time)
+        hooks = time.to_time > Time.zone.now ? {} : { before: :before_expire, after: :after_expire }
+        field = self.class.expirable_field
+        ConcernsOnRails::Support::HookedWrite.run(self, restore: [field], **hooks) do
+          update(field => time)
         end
-        result
       end
 
       # Set an absolute lifetime from now — `token.expire_in!(15.minutes)` —
@@ -168,16 +200,21 @@ module ConcernsOnRails
         value.nil? || value <= now ? now : value
       end
 
-      # A write dated in the future schedules expiry rather than performing it.
-      def expirable_scheduled?(time)
-        return false if time.blank?
+      # The unaffixed checks behind the public predicates. Internal logic and
+      # the affixed predicates call these, never `active?` / `expired?`,
+      # which a sibling concern may own.
+      def expirable_expired?
+        value = self[self.class.expirable_field]
+        return false if value.nil?
 
-        time.to_time > Time.zone.now
-      rescue StandardError
-        false # unparseable input: treat it as an immediate expiry, as before
+        value <= Time.zone.now
       end
 
-      private :expiry_extension_base, :expirable_scheduled?
+      def expirable_live?
+        !expirable_expired?
+      end
+
+      private :expiry_extension_base, :expirable_expired?, :expirable_live?
     end
   end
 end

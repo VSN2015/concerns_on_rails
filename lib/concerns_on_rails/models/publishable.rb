@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/hooked_write"
 
 module ConcernsOnRails
   module Models
@@ -53,6 +54,26 @@ module ConcernsOnRails
           return false unless schema_reachable?
 
           @publishable_boolean_column = columns_hash[publishable_field.to_s]&.type == :boolean
+        end
+
+        # The boolean `.published` predicate. Rails' scope_for_create copies
+        # every top-level `Arel::Nodes::Equality` in a where clause (a hash
+        # condition or `arel_table[f].eq`) onto records built through the
+        # scope, so under `default_scope: true` the old `where(field => true)`
+        # made every NEW record start out published. Wrapping the equality in
+        # a Grouping hides it from that extraction while keeping the
+        # index-friendly `= TRUE` form (a partial index `WHERE published =
+        # true` still matches), and `unscope(where: field)` still peels it —
+        # on Rails 6.1+. Rails 6.0 cannot unscope a Grouping (the negative
+        # scopes would stop working under the default scope) and also copies
+        # `In`, so there it falls back to `<> FALSE`: same rows (NULL <> FALSE
+        # is NULL), never copied, peelable. (Public only because scope
+        # lambdas resolve methods through the relation.)
+        def publishable_true_predicate
+          column = arel_table[publishable_field]
+          return column.not_eq(false) if ActiveRecord.gem_version < Gem::Version.new("6.1")
+
+          Arel::Nodes::Grouping.new(column.eq(true))
         end
 
         # Publish every not-currently-published record in the relation.
@@ -127,9 +148,12 @@ module ConcernsOnRails
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
 
+          # See publishable_true_predicate for why the boolean branch is not
+          # `where(field => true)`. (The timestamp branch is an Arel `<=`,
+          # which Rails never copies onto new records.)
           scope publishable_scope_names[:published], lambda {
             if publishable_boolean_column?
-              where(publishable_field => true)
+              where(publishable_true_predicate)
             else
               where(arel_table[publishable_field].lteq(Time.zone.now))
             end
@@ -258,19 +282,19 @@ module ConcernsOnRails
         publishable_write_with_hooks(time, :publish)
       end
 
-      # Shared write path: hooks and the timestamp write in ONE transaction, so
-      # a raising hook rolls the change back (SoftDeletable's pattern). Before
-      # 1.22 a raising after_publish left the record published with the side
-      # effect half-done. (Postfix private — the keyword form trips RuboCop's
-      # scope analysis against the `private` inside the class_methods block.)
+      # Shared write path: hooks and the write in their own savepoint via
+      # Support::HookedWrite, so a raising hook — or one vetoing with
+      # ActiveRecord::Rollback, even inside a caller's transaction or
+      # publish_all — rolls the change back and returns false; a failed
+      # validation rolls back the before-hook's side effects too. (Postfix
+      # private — the keyword form trips RuboCop's scope analysis against the
+      # `private` inside the class_methods block.)
       def publishable_write_with_hooks(value, kind)
-        result = false
-        transaction do
-          kind == :publish ? before_publish : before_unpublish
-          result = update(self.class.publishable_field => value)
-          (kind == :publish ? after_publish : after_unpublish) if result
+        field = self.class.publishable_field
+        before, after = kind == :publish ? %i[before_publish after_publish] : %i[before_unpublish after_unpublish]
+        ConcernsOnRails::Support::HookedWrite.run(self, before: before, after: after, restore: [field]) do
+          update(field => value)
         end
-        result
       end
       private :publishable_write_with_hooks
     end

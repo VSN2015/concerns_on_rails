@@ -465,6 +465,34 @@ describe ConcernsOnRails::Stateable do
       expect(RollbackTicket.pluck(:status)).to eq(["draft"])
     end
 
+    # Memory used to keep the vetoed state while the row kept the old one, so
+    # a retry's guard read the NEW state and raised InvalidTransition.
+    it "puts the in-memory state back so a retry after the veto works" do
+      stub_const("VetoOnceTicket", Class.new(TestModel) do
+        self.table_name = "tickets"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft published], default: :draft,
+                              transitions: { publish: { from: :draft, to: :published } }
+
+        cattr_accessor :veto
+
+        def after_transition(*)
+          raise ActiveRecord::Rollback if self.class.veto
+        end
+      end)
+      VetoOnceTicket.veto = true
+      t = VetoOnceTicket.create!(title: "t")
+
+      expect(t.publish!).to be(false)
+      expect(t.status).to eq("draft")
+      expect(t.changed?).to be(false)
+
+      VetoOnceTicket.veto = false
+      expect(t.publish!).to be(true)
+      expect(t.reload.status).to eq("published")
+    end
+
     it "leaves the caller's own writes in the enclosing transaction intact" do
       t = RollbackTicket.create!(title: "t")
       other = RollbackTicket.create!(title: "other")
@@ -505,6 +533,19 @@ describe ConcernsOnRails::Stateable do
                                              publish: { from: %i[draft review], to: :published },
                                              archive: { to: :archived } }
       end
+    end
+
+    it "puts a vetoed transition's <state>_at stamp back in memory too" do
+      vetoing = Class.new(stamped) do
+        def after_transition(*)
+          raise ActiveRecord::Rollback
+        end
+      end
+      post = vetoing.create!
+
+      expect(post.publish!).to be(false)
+      expect([post.status, post.published_at]).to eq(["draft", nil])
+      expect(post.reload.published_at).to be_nil
     end
 
     it "stamps <state>_at in the same write as a guarded transition" do

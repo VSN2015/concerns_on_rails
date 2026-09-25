@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/hooked_write"
 
 module ConcernsOnRails
   module Models
@@ -253,41 +254,37 @@ module ConcernsOnRails
 
       # `at:` sets the timestamp (default now) — it is what the cascade uses to
       # hand the parent's exact timestamp down, and lets callers backdate.
+      #
+      # The hooks, the write and the cascade share one savepoint
+      # (Support::HookedWrite): a raising hook — or one vetoing with
+      # ActiveRecord::Rollback, even inside a caller's transaction or
+      # soft_delete_all — rolls everything back and returns false, and the
+      # in-memory stamp is put back so a retry is not swallowed by the
+      # `deleted?` guard. A failed validation rolls back the before hook too.
       def soft_delete!(at: Time.zone.now)
         return true if deleted?
 
-        result = false
-        # Wrap the timestamp change and its hooks in a transaction so a raising
-        # before/after hook rolls the change back instead of leaving a half-applied state.
-        transaction do
-          before_soft_delete
-          result = if self.class.soft_delete_touch
-                     update(self.class.soft_delete_field => at)
-                   else
-                     update_column(self.class.soft_delete_field, at)
-                   end
-          soft_delete_cascade_dependents!(at) if result
-          after_soft_delete if result
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_soft_delete, after: :after_soft_delete,
+                                                        restore: [self.class.soft_delete_field]) do
+          next false unless soft_delete_write(at)
+
+          soft_delete_cascade_dependents!(at)
+          true
         end
-        result
       end
 
+      # Mirror of soft_delete!, same HookedWrite contract.
       def restore!
         return true unless deleted?
 
         stamp = self[self.class.soft_delete_field]
-        result = false
-        transaction do
-          before_restore
-          result = if self.class.soft_delete_touch
-                     update(self.class.soft_delete_field => nil)
-                   else
-                     update_column(self.class.soft_delete_field, nil)
-                   end
-          restore_cascaded_dependents!(stamp) if result
-          after_restore if result
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_restore, after: :after_restore,
+                                                        restore: [self.class.soft_delete_field]) do
+          next false unless soft_delete_write(nil)
+
+          restore_cascaded_dependents!(stamp)
+          true
         end
-        result
       end
 
       # bypasses AR callbacks and validations — use when you want a true hard delete
@@ -310,6 +307,16 @@ module ConcernsOnRails
       end
 
       private
+
+      # `touch: true` goes through `update` (validations, callbacks,
+      # updated_at); `touch: false` through update_column (none of those).
+      def soft_delete_write(value)
+        if self.class.soft_delete_touch
+          update(self.class.soft_delete_field => value)
+        else
+          update_column(self.class.soft_delete_field, value)
+        end
+      end
 
       # Soft-delete every not-yet-deleted dependent with the parent's timestamp.
       # Goes through each record's own soft_delete! so its hooks and its own
