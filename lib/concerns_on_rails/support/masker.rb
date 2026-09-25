@@ -69,14 +69,23 @@ module ConcernsOnRails
         "#{mask * 4} #{mask * 4} #{mask * 4} #{digits[-4..]}"
       end
 
-      # nil, or the value as a String. A BigDecimal renders in plain notation
-      # ("12345.67"), not BigDecimal#to_s's scientific "0.1234567e5".
+      # nil, or the value as a String. A BigDecimal / Float renders the way
+      # it reads: an integral one without the ".0" (123456789, so :last4
+      # keeps the real last digits), anything else in plain notation
+      # ("12345.67", never BigDecimal#to_s's "0.1234567e5" or 1.5e-07).
       def stringify(value)
         case value
         when nil, String then value
-        when BigDecimal then value.to_s("F")
+        when BigDecimal, Float then stringify_decimal(value)
         else value.to_s
         end
+      end
+
+      def stringify_decimal(value)
+        return value.to_s unless value.finite? # NaN / Infinity
+        return value.to_i.to_s if value == value.truncate
+
+        BigDecimal(value.to_s).to_s("F")
       end
     end
   end

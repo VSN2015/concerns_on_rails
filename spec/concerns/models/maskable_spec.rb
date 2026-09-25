@@ -156,8 +156,15 @@ describe ConcernsOnRails::Models::Maskable do
       expect(user.pin).to eq(123_456_789) # the attribute itself is untouched
     end
 
-    it "stringifies a BigDecimal in plain notation, not scientific" do
+    it "stringifies a BigDecimal / Float in plain notation, not scientific" do
       expect(ConcernsOnRails::Support::Masker.last4(BigDecimal("12345.67"))).to eq("****5.67")
+      expect(ConcernsOnRails::Support::Masker.all(1.5e-7)).to eq("*" * "0.00000015".length)
+    end
+
+    # "123456789.0" would make :last4 show "89.0" — the wrong digits.
+    it "drops the '.0' of an integral BigDecimal / Float, so :last4 keeps the real last digits" do
+      expect(ConcernsOnRails::Support::Masker.last4(BigDecimal("123456789"))).to eq("*****6789")
+      expect(ConcernsOnRails::Support::Masker.last4(123_456_789.0)).to eq("*****6789")
     end
   end
 

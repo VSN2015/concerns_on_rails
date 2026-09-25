@@ -29,7 +29,7 @@ The fully-qualified alias `ConcernsOnRails::Models::Maskable` also works and is 
 
 `Maskable` reads existing columns but never writes to them. No new columns are added. Each field passed to `maskable` must already exist in the model's database table, or an `ArgumentError` is raised at class-load time (see [Notes & gotchas](#notes--gotchas)).
 
-The concern works with any column type. `nil` stays `nil`; every other non-`String` value (an integer SSN, a `bigint` phone number) is converted to a `String` before a built-in preset masks it — a `BigDecimal` in plain notation — so a preset never displays the raw value.
+The concern works with any column type. `nil` stays `nil`; every other non-`String` value (an integer SSN, a `bigint` phone number) is converted to a `String` before a built-in preset masks it — an integral `BigDecimal`/`Float` without its `.0` (so `:last4` keeps the real last digits), any other in plain notation — so a preset never displays the raw value.
 
 ## Configuration
 
