@@ -38,7 +38,25 @@ module ConcernsOnRails
 
         return rel if cfg[:reset] == :never
 
-        rel.where(created_at: period_range(cfg[:reset], period_time(cfg, record)))
+        time = period_time(cfg, record)
+        in_period = rel.where(created_at: period_range(cfg[:reset], time))
+        return in_period unless cfg[:into] && cfg[:template].nil?
+
+        in_period.or(rel.where(sequence_stored_token_match(cfg, time)))
+      end
+
+      # Rows whose STORED into: value already carries this period's
+      # "<prefix><token><separator>" stem, whatever their created_at. Before
+      # periods were cut in a fixed zone, a request in another zone stamped a
+      # token its created_at does not fall into (Tokyo's 20260925 on a row
+      # created 2026-09-24 16:00 UTC); counting those rows too means the first
+      # fixed-zone create of that period continues after them instead of
+      # reissuing their number. Over-matching (MySQL _ci collations fold case)
+      # can only leave a gap. Same escaping contract as Taggable/Searchable.
+      def sequence_stored_token_match(cfg, time)
+        stem = "#{cfg[:prefix]}#{period_token(cfg[:reset], time)}#{cfg[:separator]}"
+        escaped = stem.gsub(/[\\%_]/) { |char| "\\#{char}" }
+        arel_table[cfg[:into]].matches("#{escaped}%", "\\", true)
       end
 
       # The declaring class, when it owns this receiver's table. An abstract

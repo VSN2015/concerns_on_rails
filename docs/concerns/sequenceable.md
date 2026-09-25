@@ -55,7 +55,9 @@ end
 
 ## Configuration
 
-`sequenceable_by` is the configuration macro. It may be called once per model (or multiple times with different `field` names). All options except the positional `field` argument are keyword arguments.
+`sequenceable_by` is the configuration macro. Call it once per `field`; several fields may each have their own call. All options except the positional `field` argument are keyword arguments.
+
+**Re-declaring a field merges.** A later `sequenceable_by` for the same field, on the same class or on an STI subclass, changes only the options it passes. Every other option keeps its current (inherited or earlier) value. So `sequenceable_by :sequence, assign: :manual` on a `Draft` subclass keeps the parent's `into:`, `prefix:` and `reset:`. Omitting an option is different from passing `nil`: `into: nil` removes the column, `time_zone: nil` resets to the app default.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
@@ -103,6 +105,15 @@ Because the callback reads the configuration at run time, re-declaring a field c
 Numbers the record now: computes the next value for its scope (and period), writes the integer and the `into:` string, and — when the record is persisted — `save!`s. On a new record the attributes are set and left for your own save. Returns `true` when a number was assigned and `false` when the record already had one (nothing is rewritten), so a "finalize" action can be retried safely. Available in both modes; it is the only way to number a record under `assign: :manual`.
 
 The `save!` runs in its own savepoint, and when it fails — `ActiveRecord::RecordNotUnique` from a concurrent writer that took the same number, a failed validation — the integer and `into:` columns are put back before the error propagates. So `ConcernsOnRails::Support::UniqueRetry.with_retries { invoice.assign_sequence! }` retries with a freshly drawn number instead of finding the record "already numbered", and a failure inside your own transaction does not abort it on PostgreSQL.
+
+**`sequenceable_period_time(field)`**
+
+The instant that anchors this record's `reset:` period, expressed in the field's fixed zone. It is the same value the `MAX` range and the default period token use. Read it from a `template:` that renders a date: `created_at` comes back in the *request's* zone under time-zone-aware attributes, so a template built on it can print a period the counter did not use.
+
+```ruby
+sequenceable_by :sequence, into: :number, reset: :year,
+  template: ->(seq, record) { "#{record.sequenceable_period_time(:sequence).year}/#{seq}" }
+```
 
 **`<field>_assigned?`**
 
@@ -211,7 +222,24 @@ draft.number                             # => "INV-00001"
 
 ## Notes & gotchas
 
-**Concurrency is best-effort.** The next value is determined by `MAX(field) + 1` within the scope/period. Two concurrent inserts can read the same `MAX` and both attempt to use the same value. The concern includes an increment-and-retry loop (up to 10 attempts, `MAX_GENERATION_ATTEMPTS`) that can resolve post-insert races, but the only reliable guarantee is a **scoped unique index** on the sequence column (and on the `into:` column, if used).
+**Concurrency is best-effort.** The next value is `MAX(field) + 1` within the scope/period, read in one `SELECT` just before the `INSERT`. The concern has no retry loop of its own. Two concurrent creates can read the same `MAX` and both try to use the same value. The only reliable guarantee is a **scoped unique index** on the sequence column (and on the `into:` column, if used). With the index in place, the losing write raises `ActiveRecord::RecordNotUnique`, and `ConcernsOnRails::Support::UniqueRetry.with_retries` turns that into a fresh attempt:
+
+```ruby
+# Retries the whole create (3 attempts by default); each attempt draws a new MAX.
+UniqueRetry.with_retries { Invoice.create!(attrs) }
+
+# Inside your own transaction, give each attempt a savepoint so a rejected
+# INSERT does not abort the transaction on PostgreSQL:
+Invoice.transaction do
+  UniqueRetry.with_retries(savepoint: Invoice) { Invoice.create!(attrs) }
+end
+
+# assign_<field>! already saves in its own savepoint and puts the number back
+# on failure, so it can be retried directly:
+UniqueRetry.with_retries { invoice.assign_sequence! }
+```
+
+The block must draw a fresh value on every attempt; re-saving a record whose number is already set just fails `limit` times. `RecordNotUnique` does not say which index was violated, so a clash on an unrelated unique index also triggers a retry. Those retries are wasted, but bounded by `limit:`.
 
 **Caller-supplied values are not overwritten.** Passing an explicit integer (e.g. `Invoice.create!(sequence: 99)`) bypasses auto-assignment entirely. The `into:` column is still populated from the supplied integer, so the formatted string is always consistent.
 
@@ -227,7 +255,7 @@ sequenceable_by :sequence, into: :number, reset: :day, time_zone: "Asia/Tokyo"
 Invoice.create!.number   # => "20260925-0001"
 ```
 
-Apps that never change `Time.zone` per request see no change, because the default is the zone they already run in. Apps that did change it per request may hold rows numbered under a request zone that now fall into a different fixed-zone period, so add a unique index on `into:` (and on the scope columns plus the field) before upgrading. A reissued number then fails loudly instead of being issued twice.
+Apps that never change `Time.zone` per request see no change, because the default is the zone they already run in. Apps that did change it per request may hold rows numbered under a request zone that now fall outside the matching fixed-zone period. With `into:` (and no `template:`) this is handled: the `MAX` also counts rows whose **stored** `into:` value starts with this period's `prefix + token + separator` (a LIKE with the prefix escaped), so the first fixed-zone number of that period continues after them. The cost is at most a gap, never a reissue. Without `into:` there is no stored token to read, so add a unique index before upgrading.
 
 **`template:` completely overrides built-in formatting.** When `template:` is set, `prefix`, `padding`, `separator`, and the period token are all ignored. The lambda receives `(seq, record)` where `seq` is the raw integer and `record` is the model instance.
 
@@ -240,7 +268,8 @@ Apps that never change `Time.zone` per request see no change, because the defaul
 - Declared on the STI **base** — every subclass draws from one table-wide counter, so `Credit` and `Debit` rows sharing a unique `sequence` column never collide.
 - Declared on **each subclass** (`Invoice` with `prefix: "INV-"`, `CreditNote` with `prefix: "CN-"`) — each keeps its own gap-free sequence, INV-0001, INV-0002, CN-0001.
 - A subclass that merely inherits a parent's declaration shares the parent's counter.
-- A subclass that **re-declares** `sequenceable_by` numbers its own series (with its descendants). The parent's `MAX` still spans every row of the table, so the parent series may show a **gap** after those rows — never a duplicate, even when a subclass starts declaring its own sequence after a deploy.
+- A subclass that **re-declares** `sequenceable_by` with a different format (`prefix`, `template`, `padding`, `reset`, `scope`, `into`, `separator` or `start_at` changed) numbers its own series (with its descendants). The parent's `MAX` still spans every row of the table, so the parent series may show a **gap** after those rows — never a duplicate, even when a subclass starts declaring its own sequence after a deploy.
+- A re-declaration that changes only `assign:` and/or `time_zone:`, or repeats the parent's values, keeps the **parent's counter**. A `Draft < Invoice` with `sequenceable_by :sequence, assign: :manual` finalizes into the same `INV-` series without reissuing a number. `time_zone:` is neutral because a subclass cutting periods in another zone still prints `PREFIX<token>-n`, so its numbers have to be counted against the parent's rows.
 - Declared on an **abstract** class, each concrete table (and its STI subtree) keeps its own counter.
 - `scope: :type` on the base partitions one declaration per type.
 

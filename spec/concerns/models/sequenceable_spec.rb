@@ -672,13 +672,19 @@ describe ConcernsOnRails::Sequenceable do
       issued = [RdBase.create!, RdInv.create!, RdInv.create!].map(&:number)
       expect(issued).to eq(%w[INV-1 INV-2 INV-3])
 
-      # The deploy: RdInv now declares its own series.
+      # The deploy: RdInv re-declares the SAME format. Identical numbering
+      # options keep the inherited counter (review of the fixed-zone PR): a
+      # subclass-only MAX would hand out INV-4 twice.
       RdInv.sequenceable_by :sequence, into: :number, prefix: "INV-"
 
       next_base = RdBase.create!.number
       expect(issued).not_to include(next_base)
       expect(next_base).to eq("INV-4")
-      expect(RdInv.create!.number).to eq("INV-4") # its own series continues from its own rows
+      expect(RdInv.create!.number).to eq("INV-5")
+
+      # A different format does start its own series.
+      RdInv.sequenceable_by :sequence, prefix: "RI-"
+      expect(RdInv.create!.number).to eq("RI-6") # MAX over RdInv's own rows (2, 3, 5)
     end
   end
 
@@ -686,13 +692,13 @@ describe ConcernsOnRails::Sequenceable do
     # Every Rails app has time_zone_aware_attributes on (the AR railtie sets
     # it); the bare harness does not, which is how the per-request zone leak
     # slipped past this suite.
-    def zoned_invoice_class(**options)
+    def zoned_invoice_class(reset: :day, **options)
       Class.new(TestModel) do
         self.table_name = "invoices"
         self.time_zone_aware_attributes = true
         include ConcernsOnRails::Sequenceable
 
-        sequenceable_by :sequence, reset: :day, padding: 4, **options
+        sequenceable_by :sequence, reset:, padding: 4, **options
       end
     end
 
@@ -741,6 +747,30 @@ describe ConcernsOnRails::Sequenceable do
       Time.zone_default = previous
     end
 
+    it "continues after a number stored under a request zone before the upgrade (no reissue)" do
+      klass = zoned_invoice_class(into: :number, prefix: "INV_")
+      # Numbered pre-fix by a Tokyo request: token 20260925, but created on
+      # the UTC day 2026-09-24, outside the fixed-zone range for 09-25.
+      klass.unscoped.insert_all([{ sequence: 1, number: "INV_20260925-0001",
+                                   created_at: Time.utc(2026, 9, 24, 16), updated_at: Time.utc(2026, 9, 24, 16) }])
+      # A LIKE-special prefix is escaped: "INV_" must not match "INVX".
+      klass.unscoped.insert_all([{ sequence: 7, number: "INVX20260925-0007",
+                                   created_at: Time.utc(2026, 9, 24, 16), updated_at: Time.utc(2026, 9, 24, 16) }])
+
+      expect(klass.create!(created_at: Time.utc(2026, 9, 25, 1)).number).to eq("INV_20260925-0002")
+      travel_to(Time.utc(2026, 9, 25, 2)) { expect(klass.next_sequence).to eq(3) }
+    end
+
+    it "exposes the fixed-zone period instant to template: via sequenceable_period_time" do
+      klass = zoned_invoice_class(into: :number, reset: :year,
+                                  template: ->(seq, r) { "#{r.sequenceable_period_time(:sequence).year}-#{seq}" })
+      Time.zone = "Tokyo"
+      a = klass.create!(created_at: Time.utc(2026, 12, 31, 16)) # 2027 in Tokyo, 2026 in UTC
+      b = klass.create!(created_at: Time.utc(2027, 1, 1, 1))
+      expect([a.number, b.number]).to eq(%w[2026-1 2027-1])
+      expect(a.sequenceable_period_time(:sequence).time_zone.name).to eq("UTC")
+    end
+
     it "rejects an unknown time_zone: at macro time" do
       expect { zoned_invoice_class(time_zone: "Mars/Olympus") }
         .to raise_error(ArgumentError, %r{unknown time_zone 'Mars/Olympus'})
@@ -784,7 +814,7 @@ describe ConcernsOnRails::Sequenceable do
         sequenceable_by :sequence, into: :number, prefix: "INV-"
       end
       stub_const("ManualStiInvoice", parent)
-      stub_const("ManualStiDraft", Class.new(parent) { sequenceable_by :sequence, into: :number, assign: :manual })
+      stub_const("ManualStiDraft", Class.new(parent) { sequenceable_by :sequence, assign: :manual })
       stub_const("ManualStiCredit", Class.new(parent))
 
       draft = ManualStiDraft.create!
@@ -793,10 +823,49 @@ describe ConcernsOnRails::Sequenceable do
       expect(ManualStiInvoice.create!.number).to eq("INV-1")
       expect(ManualStiCredit.create!.number).to eq("INV-2") # inherits :create
       expect(ManualStiInvoice.sequenceable_config[:sequence][:assign]).to eq(:create)
-      # Finalizing the draft later continues its own series without ever
-      # reusing a number the parent series issued (its MAX sees its own rows).
+      # Only assign: changed, so the draft keeps the inherited into:/prefix:
+      # AND the parent's counter: finalizing continues the INV- series.
+      expect(ManualStiDraft.sequenceable_config[:sequence]).to include(into: :number, prefix: "INV-", owner: parent)
       expect(draft.assign_sequence!).to be(true)
-      expect(ManualStiInvoice.pluck(:number)).to match_array(%w[INV-1 INV-2 1])
+      expect(draft.reload.number).to eq("INV-3")
+      expect(ManualStiInvoice.create!.number).to eq("INV-4")
+    end
+
+    it "never reissues a parent number when the subclass repeats the parent's format with assign: :manual" do
+      parent = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+      end
+      stub_const("ManualStiInvoice", parent)
+      stub_const("ManualStiDraft", Class.new(parent) do
+        sequenceable_by :sequence, into: :number, prefix: "INV-", assign: :manual, time_zone: "Tokyo"
+      end)
+
+      ManualStiInvoice.create!
+      ManualStiInvoice.create!
+      draft = ManualStiDraft.create!
+      draft.assign_sequence!
+
+      expect(ManualStiInvoice.unscoped.pluck(:number)).to match_array(%w[INV-1 INV-2 INV-3])
+    end
+
+    it "takes ownership when a re-declaration changes the numbering format" do
+      parent = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+      end
+      stub_const("ManualStiInvoice", parent)
+      stub_const("ManualStiDraft", Class.new(parent) { sequenceable_by :sequence, prefix: "DR-", assign: :manual })
+
+      ManualStiInvoice.create!
+      draft = ManualStiDraft.create!
+      draft.assign_sequence!
+      expect(ManualStiDraft.sequenceable_config[:sequence]).to include(into: :number, owner: ManualStiDraft)
+      expect(draft.number).to eq("DR-1")
     end
 
     it "flips back to :create when a manual declaration is re-declared with assign: :create" do
@@ -805,9 +874,12 @@ describe ConcernsOnRails::Sequenceable do
         include ConcernsOnRails::Sequenceable
 
         sequenceable_by :sequence, assign: :manual
-        sequenceable_by :sequence
+        sequenceable_by :sequence # passes nothing, so changes nothing
       end
-      expect(klass.create!.sequence).to eq(1)
+      expect(klass.create!.sequence).to be_nil
+
+      klass.sequenceable_by :sequence, assign: :create
+      expect(klass.create!.sequence).to eq(1) # the manual row is still NULL
     end
 
     it "registers ONE before_create however many fields and re-declarations there are" do
