@@ -618,6 +618,62 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(controller.paginated(Widget.all).to_a.size).to eq(25)
       expect(controller.pagination_meta[:page]).to eq(2)
     end
+
+    # A JSON body's `{"page": 1e400}` decodes to Float::INFINITY, and
+    # Infinity.to_i raised FloatDomainError — a 500 the string form never hit.
+    it "treats a non-finite JSON number (1e400, NaN) as junk and falls back to the default" do
+      expect(ActiveSupport::JSON.decode('{"page": 1e400}')["page"]).to eq(Float::INFINITY)
+
+      [Float::INFINITY, -Float::INFINITY, Float::NAN].each do |junk|
+        controller = controller_class.new(params: { page: junk, per_page: junk })
+
+        expect(controller.paginated(Widget.all).to_a.size).to eq(25)
+        expect(controller.pagination_meta).to include(page: 1, per_page: 25)
+      end
+    end
+  end
+
+  # `select(:x).distinct` returns one row per distinct value, but the total
+  # stripped the SELECT list and COUNTed every underlying row: 6 rows across 3
+  # distinct values reported X-Total-Count 6 and advertised pages that were
+  # empty.
+  describe "total of a DISTINCT relation with a custom SELECT list" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table(:pagination_memberships, force: true) do |t|
+          t.integer :group_id
+          t.integer :role_id
+        end
+      end
+      stub_const("PaginationMembership", Class.new(TestModel) { self.table_name = "pagination_memberships" })
+      [[1, 1], [1, 1], [1, 2], [2, 1], [2, 1], [3, 1]].each do |group_id, role_id|
+        PaginationMembership.create!(group_id: group_id, role_id: role_id)
+      end
+    end
+
+    it "counts the distinct values the relation returns, not every row" do
+      controller = controller_class.new(params: { per_page: 2 })
+      relation = PaginationMembership.select(:group_id).distinct
+
+      expect(controller.paginated(relation).to_a.size).to eq(2)
+      expect(controller.response.headers["X-Total-Count"]).to eq("3")
+      expect(controller.response.headers["X-Total-Pages"]).to eq("2")
+    end
+
+    it "counts distinct multi-column tuples portably (no COUNT(DISTINCT a, b))" do
+      controller = controller_class.new(params: { per_page: 2 })
+      relation = PaginationMembership.select(:group_id, :role_id).distinct.order(:group_id)
+
+      expect(controller.paginated(relation).to_a.size).to eq(2)
+      expect(controller.pagination_meta[:total]).to eq(4)
+    end
+
+    it "keeps counting every row of a plain DISTINCT relation" do
+      controller = controller_class.new(params: { per_page: 2 })
+      controller.paginated(PaginationMembership.distinct).to_a
+
+      expect(controller.pagination_meta[:total]).to eq(6)
+    end
   end
 
   describe "paginate_by validation" do

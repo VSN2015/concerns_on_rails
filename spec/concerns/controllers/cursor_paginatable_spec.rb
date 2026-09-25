@@ -666,6 +666,164 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
         controller.cursor_paginated(Item.all, order: :score)
       end.to raise_error(ArgumentError, /NULL on the page-boundary row/)
     end
+
+    # Where NULLs sort is adapter-specific (SQLite/MySQL: first ascending,
+    # last descending; PostgreSQL the opposite), so each example asks the
+    # adapter which direction puts them LAST (where a keyset walk would lose
+    # them) and FIRST (where it already returned them).
+    def nulls_last_direction
+      Item.order(score: :desc, id: :desc).first.score.nil? ? :asc : :desc
+    end
+
+    def nulls_first_direction
+      nulls_last_direction == :asc ? :desc : :asc
+    end
+
+    def walk(order, per_page:)
+      seen = []
+      cursor = nil
+      10.times do
+        controller = make_controller({ per_page: per_page, cursor: cursor }.compact)
+        seen.concat(controller.cursor_paginated(Item.all, order: order).map(&:id))
+        cursor = controller.cursor_pagination_meta[:next_cursor]
+        break unless cursor
+      end
+      seen
+    end
+
+    def seed_scores(*scores)
+      Item.delete_all
+      scores.each_with_index { |score, i| Item.create!(name: "n#{i}", score: score) }
+    end
+
+    # `score < 1` (and `(score, id) < (1, x)`) is never TRUE for a NULL score,
+    # so NULL rows sorting after the last non-NULL one were dropped without a
+    # word when the NULL row was only the limit+1 probe: page 1 had_more, page
+    # 2 came back empty, and the walk "ended".
+    it "fails loudly when the row after the page boundary (the probe) is NULL" do
+      seed_scores(1, 2, 3, nil, nil)
+
+      controller = make_controller(per_page: 3)
+      expect do
+        controller.cursor_paginated(Item.all, order: { score: nulls_last_direction })
+      end.to raise_error(ArgumentError, /ordering column 'score' is NULL on the row after the page boundary/)
+    end
+
+    it "fails loudly on the last page when NULL rows lie beyond it (never ends the walk short)" do
+      seed_scores(4, 3, 2, 1, nil)
+      direction = nulls_last_direction
+
+      expect { walk({ score: direction }, per_page: 3) }
+        .to raise_error(ArgumentError, /ordering column 'score' has NULL rows the cursor walk would skip/)
+    end
+
+    it "walks NULL rows that sort before every boundary without complaint" do
+      seed_scores(nil, 1, 2, 3)
+
+      expect(walk({ score: nulls_first_direction }, per_page: 2).sort).to eq(Item.pluck(:id).sort)
+    end
+
+    it "costs nothing extra when the ordering columns are NOT NULL" do
+      ActiveRecord::Schema.define do
+        create_table(:strict_scores, force: true) { |t| t.integer :score, null: false }
+      end
+      stub_const("StrictScore", Class.new(TestModel) { self.table_name = "strict_scores" })
+      [1, 2, 3].each { |score| StrictScore.create!(score: score) }
+      first = make_controller(per_page: 2)
+      first.cursor_paginated(StrictScore.all, order: :score)
+      last = make_controller(per_page: 2, cursor: first.cursor_pagination_meta[:next_cursor])
+
+      queries = []
+      callback = ->(*, payload) { queries << payload[:sql] unless payload[:name] == "SCHEMA" }
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+        last.cursor_paginated(StrictScore.all, order: :score)
+      end
+      expect(queries.size).to eq(1)
+    end
+  end
+
+  # A display override (`def name = super.upcase`) is common, and the cursor
+  # boundary used to be read through it: "ITEM-10" sorts before every
+  # lowercase name, so `name > 'ITEM-10'` restarted the walk at page one —
+  # forever. The cursor keys on the stored value the WHERE compares against.
+  describe "an overridden attribute reader" do
+    it "keys the cursor on the stored value, so no row repeats or is skipped" do
+      shouting = Class.new(Item) do
+        def name = super&.upcase
+      end
+
+      seen = []
+      cursor = nil
+      10.times do
+        controller = make_controller({ per_page: 10, cursor: cursor }.compact)
+        seen.concat(controller.cursor_paginated(shouting.all, order: :name).map(&:id))
+        cursor = controller.cursor_pagination_meta[:next_cursor]
+        break unless cursor
+      end
+
+      expect(seen).to eq(Item.order(:name, :id).pluck(:id))
+    end
+  end
+
+  # Every keyword defaulted, so a subclass that re-declared only `order:`
+  # silently reset the rest — including the parent's `signed:`, turning
+  # cursor signing OFF for the whole subtree.
+  describe "re-declaring cursor_paginate_by in a subclass" do
+    let(:parent) do
+      Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order: { id: :asc }, signed: "k" * 32, per_page: 7, max_per_page: 50,
+                           bidirectional: true, predicate: :or, link_header: false
+      end
+    end
+
+    it "inherits every option the subclass does not pass" do
+      child = Class.new(parent) { cursor_paginate_by order: { id: :desc } }
+
+      expect(child.cursor_paginatable_order).to eq([%i[id desc]])
+      expect(child.cursor_paginatable_signed).to eq("k" * 32)
+      expect(child.cursor_paginatable_per_page).to eq(7)
+      expect(child.cursor_paginatable_max_per_page).to eq(50)
+      expect(child.cursor_paginatable_bidirectional).to be(true)
+      expect(child.cursor_paginatable_predicate).to eq(:or)
+      expect(child.cursor_paginatable_link_header).to be(false)
+      expect(parent.cursor_paginatable_order).to eq([%i[id asc]])
+    end
+
+    it "inherits the ordering when the subclass only tunes other options" do
+      child = Class.new(parent) { cursor_paginate_by per_page: 3 }
+
+      expect(child.cursor_paginatable_order).to eq([%i[id asc]])
+      expect(child.cursor_paginatable_per_page).to eq(3)
+      expect(child.cursor_paginatable_signed).to eq("k" * 32)
+    end
+
+    it "still lets a subclass switch an option off explicitly" do
+      child = Class.new(parent) { cursor_paginate_by signed: false, bidirectional: false }
+
+      expect(child.cursor_paginatable_signed).to be(false)
+      expect(child.cursor_paginatable_bidirectional).to be(false)
+    end
+
+    it "replaces the ordering source wholesale: order: over inherited presets, and back" do
+      presets = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::CursorPaginatable
+
+        cursor_paginate_by order_presets: { newest: { id: :desc }, alpha: { name: :asc } }, default_preset: :alpha
+      end
+      fixed = Class.new(presets) { cursor_paginate_by order: :id }
+      expect(fixed.cursor_paginatable_order).to eq([%i[id asc]])
+      expect(fixed.cursor_paginatable_order_presets).to be_nil
+      expect(fixed.cursor_paginatable_default_preset).to be_nil
+
+      repicked = Class.new(presets) { cursor_paginate_by default_preset: :newest }
+      expect(repicked.cursor_paginatable_default_preset).to eq(:newest)
+      expect(repicked.cursor_paginatable_order_presets.keys).to eq(%i[newest alpha])
+
+      expect { Class.new(fixed) { cursor_paginate_by default_preset: :newest } }
+        .to raise_error(ArgumentError, /default_preset: requires order_presets:/)
+    end
   end
 
   describe "datetime precision" do

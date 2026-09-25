@@ -233,9 +233,26 @@ module ConcernsOnRails
       # (group => count); the meaningful total is the number of groups.
       def paginatable_total(source)
         return source.size if source.is_a?(Array)
+        return paginatable_distinct_select_total(source) if paginatable_distinct_select?(source)
 
         counted = source.except(:order, :limit, :offset, :select).count(:all)
         counted.is_a?(Hash) ? counted.length : counted
+      end
+
+      # `select(:group_id).distinct` is distinct over the SELECT list, so
+      # stripping that list COUNTed every underlying row (6 rows over 3
+      # distinct values paginated as 6). Such a relation is counted as a
+      # subquery instead — SELECT COUNT(*) FROM (SELECT DISTINCT ...) — which,
+      # unlike COUNT(DISTINCT a, b), every adapter accepts for any number of
+      # columns. `unscoped` because the subquery already carries the
+      # relation's scoping (a default_scope re-applied outside it would
+      # reference a table the outer query does not have).
+      def paginatable_distinct_select?(source)
+        source.distinct_value && source.select_values.any? && source.group_values.empty?
+      end
+
+      def paginatable_distinct_select_total(source)
+        source.model.unscoped.from(source.except(:order, :limit, :offset), :paginatable_distinct).count(:all)
       end
 
       # Both readers route through ScalarParam: `?page[]=1` / `?page[x]=1`

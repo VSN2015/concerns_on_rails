@@ -379,6 +379,43 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       expect { c.verify_webhook_signature! }.to raise_error(ArgumentError, /secret resolved blank/)
     end
 
+    # valid_webhook_secret? accepts anything with #call, but the secret was
+    # instance_exec'd — a TypeError (a 500 any sender could trigger) for a
+    # non-Proc callable.
+    it "resolves a callable object secret, handing it the controller" do
+      tenant_secrets = Class.new { def call(controller) = "secret-#{controller.params[:tenant]}" }.new
+      klass = verifiable_class { verify_webhook :receive, secret: tenant_secrets, scheme: :hex, header: "X-Sig" }
+      c = instance(klass, headers: { "X-Sig" => hex_hmac("secret-acme", WH_BODY) }, params: { tenant: "acme" })
+
+      c.verify_webhook_signature!
+      expect(c.webhook_verified?).to be(true)
+    end
+
+    it "resolves a zero-argument callable (a Method) and callables inside a rotation Array" do
+      vault = Class.new { def self.current = "new-secret" }
+      old = Class.new { def call(_controller) = "old-secret" }.new
+      klass = verifiable_class { verify_webhook :receive, secret: [vault.method(:current), old], scheme: :hex, header: "X-Sig" }
+
+      %w[new-secret old-secret].each do |secret|
+        c = instance(klass, headers: { "X-Sig" => hex_hmac(secret, WH_BODY) })
+        c.verify_webhook_signature!
+        expect(c.webhook_verified?).to be(true), "expected #{secret} to verify"
+      end
+    end
+
+    it "verifies a callable object secret end to end through a real controller" do
+      secret = Class.new { def call(*) = "s3cr3t" }.new
+      klass = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::WebhookVerifiable
+
+        verify_webhook :receive, secret: secret, scheme: :hex, header: "X-Sig"
+        def receive = head(:ok)
+      end
+      env = Rack::MockRequest.env_for("/", method: "POST", input: WH_BODY, "HTTP_X_SIG" => hex_hmac("s3cr3t", WH_BODY))
+
+      expect(klass.action(:receive).call(env).first).to eq(200)
+    end
+
     it "raises ArgumentError when the secret resolves to an empty string" do
       klass = verifiable_class { verify_webhook :receive, secret: -> { "" }, scheme: :hex, header: "X-Sig" }
       c = instance(klass, headers: { "X-Sig" => "anything" })

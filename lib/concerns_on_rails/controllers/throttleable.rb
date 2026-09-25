@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
+require "concerns_on_rails/support/callable"
 require "active_support/notifications"
 
 module ConcernsOnRails
@@ -48,7 +49,8 @@ module ConcernsOnRails
 
       module ClassMethods
         # Declare a rate-limit rule. `limit` requests per `period` (a Duration or
-        # seconds), bucketed by `by:` (a callable, default per-IP). `only:`/
+        # seconds), bucketed by `by:` (a callable, default per-IP; a Proc is
+        # instance_exec'd, any other callable is passed the controller). `only:`/
         # `except:` scope it to a subset of actions (mutually exclusive). `if:`/
         # `unless:` (a Symbol naming a controller method, or a callable — a
         # zero-arity Proc is instance_exec'd, anything else is handed the
@@ -248,8 +250,11 @@ module ConcernsOnRails
         end
       end
 
+      # A Proc `by:` is instance_exec'd; any other callable is handed the
+      # controller (Support::Callable) — it used to be instance_exec'd too,
+      # a TypeError on every request for the objects the macro accepts.
       def throttle_discriminator(rule)
-        value = instance_exec(&rule[:by])
+        value = ConcernsOnRails::Support::Callable.invoke(self, rule[:by])
         if value.blank?
           # A nil/blank discriminator (e.g. `-> { current_user&.id }` for an
           # anonymous request) would collapse every client into ONE shared

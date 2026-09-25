@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
+require "concerns_on_rails/support/callable"
 require "active_support/notifications"
 require "date"
 require "time"
@@ -183,15 +184,16 @@ module ConcernsOnRails
 
       # Public override point + instrumentation seam. Default: emit an
       # ActiveSupport::Notifications event and run the rule's `notify:` callable
-      # (instance_exec'd, so it can read controller state). A raising `notify`
-      # propagates by design.
+      # (a Proc is instance_exec'd, so it can read controller state; any other
+      # callable is passed the controller). A raising `notify` propagates by
+      # design.
       def on_deprecated_access(rule)
         ActiveSupport::Notifications.instrument(
           "deprecated_endpoint.concerns_on_rails",
           controller: deprecation_controller_name, action: deprecation_action_name,
           deprecated_at: rule[:deprecated_at], sunset_at: rule[:sunset_at]
         )
-        instance_exec(&rule[:notify]) if rule[:notify]
+        ConcernsOnRails::Support::Callable.invoke(self, rule[:notify]) if rule[:notify]
       end
 
       # True when some rule covers the current action.
