@@ -180,9 +180,9 @@ describe ConcernsOnRails::Publishable do
     end
   end
 
-  # The default scope is registered once and reads a flag, so the LAST
-  # publishable_by call decides it (SoftDeletable/Sortable's pattern) — a
-  # permanent default_scope block per `true` call could never be undone.
+  # The default scope is registered once and reads a flag (SoftDeletable/
+  # Sortable's pattern) — a permanent default_scope block per `true` call
+  # could never be undone. An explicit value sets it; omitting keeps it.
   describe "re-declaring default_scope:" do
     before do
       ActiveRecord::Schema.define do
@@ -209,6 +209,15 @@ describe ConcernsOnRails::Publishable do
       RedeclaredPreviewPost.create!(published_at: nil)
       expect(RedeclaredPreviewPost.count).to eq(1)
       expect(RedeclaredPost.count).to eq(0)
+    end
+
+    it "keeps an inherited default_scope: true when a subclass omits the option" do
+      stub_const("RedeclaredPost", parent)
+      stub_const("RedeclaredNewsPost", Class.new(parent) { publishable_by :published_at })
+
+      RedeclaredNewsPost.create!(published_at: nil)
+      live = RedeclaredNewsPost.create!(published_at: 1.day.ago)
+      expect(RedeclaredNewsPost.all.to_a).to eq([live]) # drafts stay hidden
     end
 
     it "lets a later call on the same class turn it off" do

@@ -10,6 +10,9 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       SCOPE_BASES = %i[published unpublished scheduled draft].freeze
+      # Distinguishes an omitted `default_scope:` (keep the current setting)
+      # from an explicit false (turn it off).
+      UNSET = Object.new.freeze
 
       included do
         class_attribute :publishable_field, instance_accessor: false, default: :published_at
@@ -17,8 +20,8 @@ module ConcernsOnRails
                                                   default: SCOPE_BASES.to_h { |b| [b, b] }.freeze
         class_attribute :publishable_captured_scopes, instance_accessor: false, default: {}.freeze
         # Whether `.all` hides unpublished rows. OFF unless publishable_by
-        # passes `default_scope: true`; every call sets it, so the last call
-        # (or an STI subclass's own call) decides.
+        # passes `default_scope: true`; a call passing it explicitly (true or
+        # false) sets it, a call omitting it keeps the current value.
         class_attribute :publishable_default_scope, instance_accessor: false, default: false
 
         define_publishable_scopes(nil, nil)
@@ -42,9 +45,11 @@ module ConcernsOnRails
         # Pass `default_scope: true` to hide unpublished records by default
         # (`.all` then returns only published). The negative scopes
         # (.unpublished/.scheduled/.draft) unscope the field, so they still work.
-        # Every call sets it: re-declaring without `default_scope: true` (on
-        # the same class or an STI subclass) turns it back off.
-        def publishable_by(field = nil, default_scope: false, prefix: nil, suffix: nil)
+        # Omitting `default_scope:` keeps the current (possibly inherited)
+        # setting — an STI subclass re-declaring only to change prefix: must not
+        # silently expose drafts; only an explicit `default_scope: false` turns
+        # it off.
+        def publishable_by(field = nil, default_scope: UNSET, prefix: nil, suffix: nil)
           self.publishable_field = field || :published_at
           @publishable_boolean_column = nil
           ensure_columns!("ConcernsOnRails::Models::Publishable", publishable_field, types: :datetime)
@@ -55,7 +60,7 @@ module ConcernsOnRails
                                                     label: "ConcernsOnRails::Models::Publishable")
           end
 
-          self.publishable_default_scope = default_scope ? true : false
+          self.publishable_default_scope = default_scope ? true : false unless default_scope.equal?(UNSET)
         end
 
         # True when the configured column is a boolean (vs a datetime timestamp);

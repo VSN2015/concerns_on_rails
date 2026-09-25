@@ -451,7 +451,7 @@ in memory.
 
 **Notes**
 - "Published" means `published_at` is set **and** in the past — so future-dated posts stay unpublished until their time arrives.
-- No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`). The last `publishable_by` call decides: an STI subclass (or a later call) without `default_scope: true` turns it off again.
+- No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`). An explicit `default_scope: false` on a later call or an STI subclass turns it off again; omitting the option keeps the current (inherited) setting.
 - A boolean publishable column works too (`publishable_by :is_published`). Its `.published` scope is `(is_published = TRUE)`, wrapped in parentheses (an Arel Grouping) so that Rails does not copy the condition onto new records built through the scope. So with `default_scope: true` a new record still starts unpublished, and so does `Post.published.new`. The predicate stays in the index-friendly `= TRUE` form, so a partial index `WHERE published = true` still matches. On Rails 6.0, which cannot `unscope` a Grouping, the scope uses `is_published <> FALSE` instead; it selects the same rows.
 
 ---

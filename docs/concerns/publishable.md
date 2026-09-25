@@ -177,7 +177,7 @@ Post.unscoped.count         # => 3
 
 - **`publish!` and `publish_at!` delegate to `update`.** Any `before_validation` or `before_save` callbacks on the model run normally. If those callbacks halt the chain, the timestamp is not persisted and the method returns `false`.
 
-- **`publishable_by` can be called multiple times.** Each subsequent call overwrites `publishable_field`. Only the final configuration is active. `default_scope:` is a flag read by one lazily evaluated `default_scope` registered at include time, so every call sets it and the last one wins: repeating `default_scope: true` does not stack a second predicate, and a later call (or an STI subclass's own call) without `default_scope: true` turns the default scope off for that class.
+- **`publishable_by` can be called multiple times.** Each subsequent call overwrites `publishable_field`. Only the final configuration is active. `default_scope:` is a flag read by one lazily evaluated `default_scope` registered at include time, so repeating `default_scope: true` does not stack a second predicate. A call that passes it explicitly sets it for that class — `default_scope: false` on a later call or an STI subclass turns it off — while a call that omits it keeps the current (inherited) value, so a subclass re-declaring for another reason never silently exposes drafts.
 
 - **No persistence of transition history.** The concern stores only the current timestamp; it does not record a log of publish/unpublish events. Pair with an auditing gem if a history trail is required.
 
