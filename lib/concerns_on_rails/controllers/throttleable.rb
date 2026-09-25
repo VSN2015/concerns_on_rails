@@ -54,8 +54,12 @@ module ConcernsOnRails
         # zero-arity Proc is instance_exec'd, anything else is handed the
         # controller, as Rails' own before_action conditionals do) skip the rule
         # per request — staff accounts, internal IPs, feature flags; both may be
-        # given, and both must pass. `name:` disambiguates the counter key when
-        # several rules share a discriminator.
+        # given, and both must pass. `name:` is the counter's identity: rules
+        # that share a name (and a discriminator value) share ONE budget, even
+        # across controllers — so an explicit name is how two endpoints pool a
+        # limit. Without it the name defaults to "<DeclaringController>#rule<n>",
+        # so unrelated controllers never collide while a rule declared on a
+        # parent is still one budget across all of its subclasses.
         def throttle_by(limit:, period:, by: nil, only: nil, except: nil, name: nil, if: nil, unless: nil)
           # `if`/`unless` are keywords, so the parameters are read via binding.
           if_condition = binding.local_variable_get(:if)
@@ -71,12 +75,25 @@ module ConcernsOnRails
             except: except && Array(except).map(&:to_s),
             if: if_condition,
             unless: unless_condition,
-            name: (name || "rule#{throttleable_rules.size}").to_s
+            name: (name || default_throttle_rule_name).to_s
           }
           self.throttleable_rules = throttleable_rules + [rule]
         end
 
         private
+
+        # The default used to be a bare "rule#{index}", which every controller
+        # shares: the first unnamed rule on ArticlesController and on
+        # SessionsController wrote the SAME counter per client, so browsing one
+        # spent the other's budget. The declaring class is fixed at declaration
+        # time, so subclasses inherit the parent's name (and budget) verbatim.
+        # An anonymous class has no name to use; its object_id keeps it apart
+        # in-process (such counters are per-process — name the rule if that
+        # matters).
+        def default_throttle_rule_name
+          owner = name.to_s.empty? ? "anonymous-#{object_id}" : name
+          "#{owner}#rule#{throttleable_rules.size}"
+        end
 
         def validate_throttle!(limit:, period:, by:, only:, except:, if_condition:, unless_condition:)
           prefix = "ConcernsOnRails::Controllers::Throttleable"

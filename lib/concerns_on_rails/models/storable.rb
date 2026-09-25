@@ -162,6 +162,13 @@ module ConcernsOnRails
           if spec[:type] == :json
             raise ArgumentError, "#{LABEL}: where_#{spec[:accessor]}: :json keys are not queryable (equality on a scalar only)"
           end
+          # Checked here, at query time, so the declaration order of
+          # `encryptable` and `storable_by` does not matter.
+          if storable_encrypted_column?(column)
+            raise ArgumentError,
+                  "#{LABEL}: where_#{spec[:accessor]}: '#{column}' is encrypted (Encryptable), so the column holds " \
+                  "ciphertext the adapter's JSON functions cannot read — filter loaded records in Ruby, or pass query: false"
+          end
           unless storable_queryable_column?(column)
             raise ArgumentError,
                   "#{LABEL}: where_#{spec[:accessor]}: '#{column}' is serialized with a non-JSON coder, " \
@@ -195,6 +202,17 @@ module ConcernsOnRails
           storable_json_coder?(coder)
         rescue StandardError
           true
+        end
+
+        # A column that is also `encryptable` stores an AES-GCM envelope: on
+        # SQLite json_valid is false for every row, so a value matches nothing
+        # and `nil` matches EVERYTHING (fail open); PostgreSQL/MySQL abort the
+        # query. Detected from Encryptable's rules and, as a backstop, from the
+        # attribute type itself.
+        def storable_encrypted_column?(column)
+          return true if respond_to?(:encryptable_rules) && encryptable_rules.key?(column.to_sym)
+
+          type_for_attribute(column.to_s).class.name.to_s == "ConcernsOnRails::Models::Encryptable::EncryptedType"
         end
 
         def storable_json_coder?(coder)

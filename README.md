@@ -623,7 +623,8 @@ Order.find_by(public_id: params[:id]) || Order.find(params[:id])
 - A `regenerate_<field>!` instance method is defined dynamically.
 - `prefix:` is prepended to every generated value (string types only — not `:integer`); the uniqueness check sees the full prefixed value.
 - `to_param: true` overrides `to_param` to return the hashed field, falling back to the id while it is blank — pair it with `find_by!(field: params[:id])`, or with `find_by(field: params[:id]) || find(params[:id])` while a backfill is still in flight (a blank field puts an integer in the URL). Raises at class load alongside Sluggable, in either declaration order — friendly_id overrides `to_param` too.
-- `unique: true` prechecks for collisions and retries a bounded number of times (still add a unique index — that is the real guarantee).
+- `unique: true` prechecks for collisions (across the whole table — an STI subclass sees its siblings' values) and retries a bounded number of times (still add a unique index — that is the real guarantee). `regenerate_<field>!` retries a `RecordNotUnique` from that index in its own savepoint, so it also works inside your transaction on PostgreSQL.
+- A `:custom` alphabet needs at least 2 distinct characters (`ArgumentError` otherwise). A repeated character would silently be drawn more often, so duplicates are removed and `ConcernsOnRails.deprecator` warns — this will raise in 2.0.
 - For fixed-width numeric codes (e.g. `000042`), use a **string** column — integer columns drop leading zeros.
 - If your model has `validates :<field>, presence: true`, switch this concern's hook to `before_validation` in your model — it uses `before_create` by default.
 
@@ -838,6 +839,7 @@ User.find_by(email: User.normalize(:email, params[:email]))
 - `with:` takes a preset, a Proc, or an Array of them (applied in order); every entry is validated at class load.
 - `nil` values are skipped — no `nil → ""` coercion (use `:nullify_blank` for the opposite direction).
 - Preset normalizers pass non-string values through unchanged.
+- "Whitespace" is Unicode whitespace: `:strip`/`:whitespace`/`:email`/`:url` strip a pasted no-break space, em space or ideographic space from both ends (plain `String#strip` does not), `:squish` collapses them, and `:nullify_blank` treats a value of only such spaces as blank.
 - Works on Rails 6.0+ (no dependency on Rails 7.1's built-in `normalizes`).
 
 ---
@@ -984,7 +986,7 @@ User.reset_password_token_expired         # scope: rows whose expiry has passed 
 **Notes**
 - URL-safe by default (`A–Z`, `a–z`, `0–9`, `-`, `_`) — drop straight into URLs and headers.
 - Caller-supplied values are respected: `User.create!(api_token: "preset")` won't be overwritten.
-- Generation does a best-effort uniqueness check before insert and retries up to 10 times. Pair with a `unique` DB index for real safety, especially for short alphanumeric/numeric codes.
+- Generation does a best-effort uniqueness check before insert (across the whole table — an STI subclass sees its siblings' tokens) and retries up to 10 times. Pair with a `unique` DB index for real safety, especially for short alphanumeric/numeric codes; `regenerate_<field>!` retries a `RecordNotUnique` from that index in its own savepoint, so it also works inside your transaction on PostgreSQL.
 - `.authenticate_by_<field>` uses `ActiveSupport::SecurityUtils.secure_compare` to avoid leaking partial matches via response timing, and returns `nil` once an `expires_in:` token has expired.
 - `.consume_<field>(value)` (every field) is the single-use verb — password resets, invite codes, magic links: it authenticates, then revokes with a **conditional `UPDATE`** keyed on the token still being present, so two concurrent consumers cannot both succeed; the loser gets `nil`. An expired token is refused and left in place.
 - A caller-supplied token on an `expires_in:` field gets the configured lifetime **on create** unless the caller also sets `<field>_expires_at`. Assigning one to an already-persisted row (`user.update!(reset_password_token: "preset")`) stamps nothing, and a row whose expiry is `nil` never expires — rotate with `regenerate_<field>!` (which stamps a fresh expiry) or set `<field>_expires_at` yourself.
@@ -1054,7 +1056,8 @@ Invoice.next_sequence(account_id: 1)   # => 4  (peek the next value, without cre
 - The next value is `MAX(<field>) + 1` within the scope (and period), so numbering is dense and ordered — not random.
 - Caller-supplied values are respected: `Invoice.create!(sequence: 100)` is not overwritten (and its `into:` string is still formatted from `100`).
 - With `assign: :manual`, numbering follows **assignment** order (the first invoice finalized is #1, whenever it was drafted); with `reset:` the period is still taken from the row's `created_at`, exactly as on create.
-- Generation reads `MAX` then inserts, so two concurrent inserts can race. It's **best-effort** — add a **scoped unique index** on `<field>` (and on `into:`) for a real guarantee, the same way you would for any `MAX`-based numbering.
+- Generation reads `MAX` then inserts, so two concurrent inserts can race. It's **best-effort** — add a **scoped unique index** on `<field>` (and on `into:`) for a real guarantee, the same way you would for any `MAX`-based numbering, and wrap the write in `ConcernsOnRails::Support::UniqueRetry.with_retries { … }` (pass `savepoint: Invoice` when it runs inside your own transaction, so a rejected attempt rolls back to a savepoint instead of aborting it on PostgreSQL). `assign_<field>!` saves in its own savepoint and puts the number back when the save fails, so a retried `assign_<field>!` draws a fresh one.
+- With STI, the rows that share a counter are those of the class that **declared** `sequenceable_by` (and its subclasses): declared on the base, every subclass draws from one table-wide counter; declared on each subclass (`INV-` / `CN-`), each keeps its own sequence. A subclass that re-declares the macro under a declaring parent numbers its own series, while the parent's MAX still spans the whole table: the parent series may show a **gap**, never a duplicate. For independent per-type series without gaps, use `scope: :type`. Declared on an abstract class, each concrete table gets its own counter. `next_<field>` previews exactly what the receiving class's next `create!` gets in each of these setups. Per-subclass series share one integer column, so index `(type, <field>)` rather than the column alone.
 - `reset:` requires a `created_at` column; the period is taken from each row's creation time.
 - For fixed-width display (`00042`), make the `into:` column a **string** — integer columns drop leading zeros.
 - Distinct from `Hashable` / `Tokenizable`, which generate *random* values; reach for those when the identifier must be unguessable.
@@ -1199,7 +1202,7 @@ end
 | `normalize_country:` | `false`                           | When `true`, canonicalize the country to its ISO 3166-1 alpha-2 code: an English name (`"Canada"`, `"United States"`) or a 3-letter alpha-3 (`"CAN"`, `"USA"`) maps to the alpha-2 (`"CA"`, `"US"`); unrecognized values are left untouched. This also lets postal/state validation recognize a named country. |
 | `verify_with:`    | `nil`                                | A callable for real-world verification (see below).                 |
 | `fingerprint:`    | `nil`                                | A `string` column to store `address_fingerprint` in (stamped in `before_validation`, after normalization) so duplicates are one indexed query away: `Location.with_address(record)`. |
-| `if:` / `unless:` | `nil`                                | Standard Rails validation conditions (Symbol, Proc, or Array) gating the address **validations** — e.g. `if: :on_addresses?`. Normalization still runs unconditionally. |
+| `if:` / `unless:` | `nil`                                | Standard Rails validation conditions (Symbol, Proc, or Array) gating the address **validations** — e.g. `if: :on_addresses?`. Normalization still runs unconditionally. Per class: a later `addressable_by` (or a subclass's) replaces the condition. Procs get Rails' callback arguments for their arity (`-> {}`, `->(record) {}`, `->(record, _) {}`). |
 
 **What it normalizes** (in `before_validation`)
 - Text parts: `strip` + `squish`.
@@ -1266,19 +1269,21 @@ Article.tagged_with("ruby", "rails")          # records carrying BOTH tags
 Article.tagged_with("ruby", "go", any: true)  # records carrying ANY tag
 Article.all_tags                               # => sorted unique tags in use
 Article.published.tag_counts(limit: 20)        # => { "ruby" => 12, "rails" => 7, ... } — a tag cloud, relation-aware
+Article.normalize_tags!                        # repair rows written around the callbacks → count rewritten
 ```
 
 **Options**
 
 | Option       | Default | Purpose                                                          |
 |--------------|---------|------------------------------------------------------------------|
-| `delimiter:` | `","`   | Character joining the stored tags (a tag must not contain it).    |
+| `delimiter:` | `","`   | Character joining the stored tags (a tag must not contain it; an empty delimiter raises). |
 | `downcase:`  | `false` | Case-fold tags on write so matching is case-insensitive.          |
 
 **Notes**
 - Matching is **boundary-safe** — searching `rail` does not match `rails`. An explicit SQL `ESCAPE` clause makes tags containing `_` / `%` match literally on every adapter.
 - `tagged_with` matches **case-insensitively on every adapter** — `LIKE` on SQLite and MySQL, `ILIKE` on PostgreSQL — so one call means one thing everywhere (how non-ASCII characters fold is still the database collation's business). The Ruby-side helpers (`tagged_with?`, `all_tags`, `tag_counts`) compare exactly, so `downcase: true` — which folds on write — is what makes the scope and the helpers agree.
 - Tags are normalized in `before_validation`, so a direct `record.tags = "a, b"` assignment is cleaned too. An empty list stores `NULL`.
+- `tagged_with` matches the **normalized** column form (`"ruby,rails"`) — which every write through the model produces. A row written around the callbacks (`update_column`, `update_all`, raw SQL, an import) as `"ruby, rails"` is found by `tagged_with?` but not by `tagged_with`; run `Model.normalize_tags!` (relation-aware, one `update_columns` per changed row in a transaction, no validations/callbacks, returns the count; `unscoped` to include default-scoped-away rows) to rewrite such rows.
 - `tag_counts` runs one `GROUP BY` on the raw column — identical tag strings ship once with their row count and are split in Ruby — so it scales with distinct tag strings, not rows; ordered by count desc then name, `limit:` keeps the top N.
 - Reach for [`acts-as-taggable-on`](https://github.com/mbleigh/acts-as-taggable-on) when you need tag contexts, ownership, or polymorphic tags shared across models.
 
@@ -1336,6 +1341,7 @@ Article.where(legacy: true).sanitize_all!(:body)   # scope-aware, subset of fiel
 **Notes**
 - `on: :read` (default) is **non-destructive**: it adds a `sanitized_<field>` reader and leaves the stored column untouched.
 - `on: :write` overwrites the column in `before_validation` — **lossy and irreversible** (never use it on code, Markdown, math, or prices), and bypassed by `update_column` / `update_all` / raw SQL.
+- `with: :strip, on: :write` stores **plain text**, not HTML-escaped text: `"<b>Tom</b> & Jerry"` is stored as `"Tom & Jerry"` (so `<%= %>` shows it once, not as `Tom &amp;amp; Jerry`). `&lt;` / `&gt;` are deliberately kept encoded — the stored value can never become markup, even rendered with `raw` — so a typed `a < b` is stored as `a &lt; b`. An `&amp;` that would read back as a character reference (a literal `&amp;copy;`) also stays encoded (a static, linear-time rule: `&` followed by `#`, a `name;`, or an HTML5 semicolon-less legacy name), so re-saving and `sanitize_all!` are idempotent. `sanitize_all!` uses the same plain-text form, and repairs rows stored double-escaped by earlier versions. The `on: :read` reader and `sanitized:` serialization still return HTML-escaped text.
 - `sanitize_all!` is the repair tool for that bypass (and for rows written before the concern was added): one `update_columns` per row that actually changes, skipping validations/callbacks on purpose, inside a transaction. A bare call repairs the `on: :write` fields only — with none declared it returns `0` without a query.
 - `sanitized:` sanitizes the **serialized** value, so it composes with [Maskable](#-maskable) in either include order: `as_json(masked: true, sanitized: true)` never falls back to the raw column.
 - For full user-authored rich text, prefer [Action Text](https://guides.rubyonrails.org/action_text_overview.html).
@@ -1368,7 +1374,7 @@ end
 | `:all`         | mask every character (the default)          |
 | `Proc`         | used as-is (you own the non-String guard)   |
 
-`mask:` sets the mask character (default `*`). Nil and non-string values pass through untouched. To strip dangerous HTML instead, see [Sanitizable](#-sanitizable).
+`mask:` sets the mask character (default `*`). Nil and non-string values pass through untouched. The presets fail closed: a String without the expected shape — no `@` for `:email`, four or fewer digits for `:phone` / `:credit_card` — gets the full `:all` mask, never the raw value. To strip dangerous HTML instead, see [Sanitizable](#-sanitizable).
 
 **Serialization** — mask in the response, not just in the view
 
@@ -1405,7 +1411,7 @@ product.formatted_price # => "$19.99"
 | Method            | Returns                                       |
 |-------------------|-----------------------------------------------|
 | `price`           | the amount as a `BigDecimal` (cents ÷ 100)    |
-| `price=`          | assign in major units; rounded to whole cents |
+| `price=`          | assign in major units; rounded to whole cents. Strings are read as plain decimals (`"19.99"`) or in the field's own display format (`"$1,234.50"`, `"€1.234,50"` with `separator: ","`), so `formatted_price` round-trips. The unit is only recognized at the start or end; in a `delimiter: "."` field with another separator, `"1.234"` means 1234 (like `"€1.234"`). Garbage, NaN, Infinity and oversized input (over 64 characters, a 3-digit exponent, or ≥ 10^24 — a parse-cost bound, far above a `bigint` column's ~9.2e18 subunits, so the database may still reject a large amount at save) become `nil` |
 | `formatted_price` | a display string (`"$1,234.56"`); accepts per-call overrides: `formatted_price(unit: "€", delimiter: ".", separator: ",")` |
 
 **Aggregates** — class methods that follow the current scope, exact and float-free:
@@ -1416,7 +1422,7 @@ Product.in_stock.average_price         # average_ / minimum_ / maximum_ too — 
 Order.paid.formatted_sum_total         # => "€3.500,50"  every aggregate has a formatted_ twin (overrides accepted)
 ```
 
-**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors.
+**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors. A `unit:` containing the `delimiter:` or `separator:` raises (formatted output could not be read back). `precision:` and `subunit_to_unit:` are coerced (`"2"` works, `"two"` raises) at the macro and in per-call `formatted_` overrides alike.
 
 ---
 
@@ -1439,7 +1445,7 @@ ConcernsOnRails.setup { |config| config.audit_actor = -> { Current.user&.id } }
 
 product.update!(price: 200)
 product.audit_trail
-# => [{"field"=>"price", "from"=>100, "to"=>200, "at"=>"2026-06-10T12:34:56Z", "by"=>"admin@shop.com"}]
+# => [{"field"=>"price", "from"=>100, "to"=>200, "at"=>"2026-06-10T12:34:56.123456Z", "by"=>"admin@shop.com"}]
 product.last_change_for(:price)            # newest entry for one field
 product.audited_changes_since(1.day.ago)   # recent entries, oldest first
 product.clear_audit_trail!                 # wipe the column (skips callbacks)
@@ -1452,6 +1458,7 @@ One entry is recorded **per changed field per save** (creates record `"from" => 
 **Notes**
 - Writes that skip callbacks (`update_column(s)`, `touch`, `increment!`) are **not** audited; `save(validate: false)` is.
 - Values are JSON-coerced (times → ISO8601 UTC strings, `BigDecimal` → precision-safe numeric string); a corrupt column decodes as `[]` and is replaced on the next tracked save.
+- `"at"` is ISO8601 UTC with **microseconds**, so `audited_changes_since` tells apart two edits in the same second. Second-precision entries written by 1.29.0 and earlier still parse; they only say "during that second", so they match any cutoff within it.
 - Per-record and bounded by design — reach for [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) when you need reify/undo or audit queries across models.
 
 ---
@@ -1535,6 +1542,7 @@ Book.joins(:sections).where(sections: { title: "Intro" })
 
 **Notes**
 - One loaded cache under two names: `record.association(:alias)` IS `record.association(:source)`, and only the source macro installs callbacks — `dependent:`, counter caches, autosave and validations run exactly once.
+- `accepts_nested_attributes_for :alias` behaves exactly like it does for the source (create, update, `_destroy`, `reject_if:`, `limit:`; each child saved once). It turns autosave on for the source association, and child validation errors are keyed under the source name. Declared in a subclass, it sets autosave on the inherited source reflection, so the parent autosaves too — the same as stock Rails nested attributes on an inherited association.
 - The where-hash key must match the name you joined under (stock-Rails rule): `joins(:sections).where(sections: {...})` works; `joins(:chapters).where(sections: {...})` does not.
 - The `belongs_to` foreign-key **attribute** is not aliased — pair with `alias_attribute :writer_id, :author_id` if you need it.
 - `has_and_belongs_to_many` cannot be aliased (use `has_many :through`). `has_many`/`has_one :through` **can** — the copy pins `source:` so it is not re-derived from the alias name; if your classes load lazily and the through model names the source differently (e.g. `belongs_to :author` behind `has_many :authors`), declare `source:` explicitly on the original association. Aliases are inherited by subclasses.
@@ -1577,7 +1585,7 @@ Account.where_theme(nil)         # unset key, explicit null, or NULL column
 - nil vs unset: a written `nil` (explicit JSON null) reads back as `nil` and does **not** fall back to the default; `reset_<key>` removes the key so the default applies again. `:decimal` is stored as a precision-safe string, `:date`/`:datetime` as ISO8601 (datetime in UTC at microsecond precision).
 - Writing one key dirties (and saves) the **whole column** — concurrent writers to different keys are last-write-wins on the hash. Undeclared keys are preserved. `:json` readers return a dup: reassign, don't mutate in place.
 - Generated names are collision-checked against existing methods and columns at macro time (`ArgumentError`; affix to escape). Read-side casting never raises — corrupt column JSON decodes as `{}`, garbage values cast to `nil`.
-- **Querying**: every key gets a `where_<accessor>(value)` equality scope — `json_extract` on SQLite, `->>` on PostgreSQL (a `text` column is cast to `jsonb`), `JSON_UNQUOTE(JSON_EXTRACT())` on MySQL/MariaDB, which also gets a `JSON_TYPE` predicate so a stored JSON `null` is never confused with the string `"null"`. The value is cast exactly as the writer stores it (`where_items_per_page("50")` works; one that will not cast raises), and `where_<key>(nil)` matches an unset key, an explicit JSON null and a `NULL` column on all three. Defaults are **not** queryable (a never-written key is absent in the DB). `:json` keys and other adapters raise; `query: false` opts out, and a `where_<accessor>` the model already defines is left alone with a deprecation warning rather than overwritten. A row holding blank or corrupt JSON reads as an unset key on SQLite (`json_valid` guard) but aborts the whole query on PostgreSQL and MySQL — there is no portable guard. Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) for jsonb operators, ranges or containment queries.
+- **Querying**: every key gets a `where_<accessor>(value)` equality scope — `json_extract` on SQLite, `->>` on PostgreSQL (a `text` column is cast to `jsonb`), `JSON_UNQUOTE(JSON_EXTRACT())` on MySQL/MariaDB, which also gets a `JSON_TYPE` predicate so a stored JSON `null` is never confused with the string `"null"`. The value is cast exactly as the writer stores it (`where_items_per_page("50")` works; one that will not cast raises), and `where_<key>(nil)` matches an unset key, an explicit JSON null and a `NULL` column on all three. Defaults are **not** queryable (a never-written key is absent in the DB). `:json` keys, other adapters and a column that is also `encryptable` (ciphertext, not JSON — either declaration order) raise; `query: false` opts out, and a `where_<accessor>` the model already defines is left alone with a deprecation warning rather than overwritten. A row holding blank or corrupt JSON reads as an unset key on SQLite (`json_valid` guard) but aborts the whole query on PostgreSQL and MySQL — there is no portable guard. Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) for jsonb operators, ranges or containment queries.
 
 ---
 
@@ -1603,7 +1611,7 @@ Comment.recount_counter_caches!    # repair drift / backfill every counter
 Comment.recount_counter_caches!(:post, parents: imported_posts)   # repair just these parents (ids, records or a relation)
 ```
 
-Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose.
+Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose. A destroy decrements only when its DELETE actually removed the row (as Rails' native counter cache does) — destroying a stale second instance, or a never-saved record, writes nothing — and it reads the parent and the `if:` verdict from the **persisted** values, so an unsaved reparent or condition flip can't redirect it. A `belongs_to ..., primary_key: :code` is honoured: parents are addressed by that key (live adjustments and `recount_counter_caches!` alike), never by `id`. A child destroyed by its parent's own `has_many ..., dependent: :destroy` does not decrement that parent (as with Rails' native counter cache) — the row is going away, and bumping it first would trip the parent's `lock_version`. A `has_one` replacement, where the parent survives, still decrements. With `lock_version` on the parent, two pre-existing cases can still raise `StaleObjectError`: destroying a parent whose counted child hangs off a `has_one ..., dependent: :destroy`, and a `has_many :through ..., dependent: :destroy` (Rails deletes the join rows without `destroyed_by_association`).
 
 **Options** (`counter_cacheable_by association, …`, repeatable): `count:` (the parent column; default `"<table_name>_count"`), `if:` (a callable evaluated against the record — counts only when truthy; the previous state is reconstructed for updates), `touch:` (`false`; also bump the parent's `updated_at`).
 
@@ -1654,12 +1662,14 @@ patient.ssn_key_id                      # => 1
 # then remove `0 =>` from previous_keys
 ```
 
+On the model itself both sweep the **whole table**, bypassing `default_scope` — soft-deleted and unpublished rows are rotated too, so dropping the old key cannot strand them. On a relation (`Patient.where(org_id: 1).reencrypt_all!`) they cover exactly that relation; chain from `unscoped` to include hidden rows in a subset.
+
 Reads pick the key by the envelope's id, so old and new rows coexist; `find_by_<field>` / `where_<field>` match blind-index digests under the current **and** previous keys during the window. Per-field `key:` fields sit outside rotation.
 
 **Notes**
 - The declared column must be `text`/binary (it stores an opaque envelope, not the logical type); a blind-index column holds a 64-char hex digest — add an index on it.
 - Ciphertext is non-deterministic (random IV), so `where(ssn: ...)` matches nothing — query through a blind index. `nil` stays `nil`; presence checks work normally.
-- `ssn_ciphertext` is `nil` while the field has an unsaved change (so it can never return the plaintext you just assigned), and `ssn_encrypted?` asks whether what is stored really is an envelope.
+- `ssn_ciphertext` is `nil` while the field has an unsaved change (so it can never return the plaintext you just assigned), and `ssn_encrypted?` asks whether what is stored really is an envelope. After a save or `update_columns` it is exactly what was written (on Rails 6.0–7.0, which re-serialize in memory with a fresh IV, that costs one raw `SELECT` of the encrypted columns per write).
 - `update_column(s)` on an encrypted field DOES encrypt (the value still serializes through the attribute type), but it skips validations, callbacks, dirty tracking and the blind-index refresh — so a value written that way is unsearchable until the row is saved normally. Declaring a field with both `encryptable` and `auditable_by` raises (either order).
 - Wrong key / tampered ciphertext / malformed envelope raise `Encryption::DecryptionError`. Encrypted field names are auto-registered with Rails' `filter_parameters` (via the gem's railtie), so they're redacted from request logs.
 - Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` streams with `find_each` and rewrites each row with one UPDATE — no validations/callbacks (only the ciphertext changes), guarded on the ciphertext it read so a concurrent write is never reverted, and skipping any field with an unsaved change. A row whose key id is no longer configured raises `DecryptionError` naming the id.
@@ -1695,6 +1705,8 @@ User.where(...).anonymize_all!     # batch; returns the count, skips stamped rec
 - Deliberately `update_columns`: erasure is never blocked by validations and never runs callbacks that could copy old values elsewhere. Values still serialize through the attribute types, so an `encryptable` field stores a fresh ciphertext envelope — never plaintext.
 - `before_anonymize`/`after_anonymize` hooks run inside the write's own savepoint; the record reloads afterwards (erasure is terminal for the instance). A hook that raises, or vetoes with `raise ActiveRecord::Rollback`, undoes the erasure and restores the in-memory values. `anonymize!` then returns `false`, even inside your own transaction.
 - `anonymize_all!` makes as much progress as it can. Each record is erased in its own savepoint, so a record whose hook vetoes (for example, one under a legal hold) is skipped and the others are still erased. The return value counts only the records actually erased. A hook that *raises* an exception is still an error: it propagates and rolls the batch back.
+- Never blocked by crypto state: `:nullify` reads nothing, `:redact`/`:email`/`:random_hex` only check presence (from the stored ciphertext for an encrypted field — no decryption), and `:hash`/callables write a fresh random 64-hex value (cast through the field's type) when an encrypted value cannot be decrypted — random per row, so unique indexes survive — and one bad row never rolls back `anonymize_all!`.
+- Slugs (`slug: :auto` default / `true` / `false`): a friendly_id slug built from an anonymized **column** (`sluggable_by` field, or the `candidates:` columns when given; a bare friendly_id model's base column) is replaced in the same UPDATE by a random slug sized to the slug column's `limit` (at least 16 random hex characters, or `anonymize!` raises naming `slug: false`; a unique-index collision is retried with a fresh slug in a savepoint), and the record's friendly_id history rows are deleted in the same transaction. `:auto` does not see through methods or Procs — declare `slug: true` when your slug derives from PII that way.
 - `:hash` is pseudonymization — use `:nullify`/`:random_hex` for true erasure. Backups/replicas/logs are out of scope.
 
 ---
@@ -1720,6 +1732,8 @@ copy = invoice.duplicate!(only: [])                     # shallow copy — attri
 ```
 
 **Auto-reset identity columns** (no configuration): `created_at`/`updated_at`, Sluggable slug, Tokenizable/Hashable tokens, Sequenceable sequence + `into:` columns, Auditable trail, SoftDeletable timestamp, Lockable attempts/locked_at. Business state (Publishable, Stateable, …) is a judgment call — list it in `reset:`.
+
+**Counter-cache columns start at 0**: a column on the copy's class maintained by a child — CounterCacheable rules or a native `belongs_to ..., counter_cache:` (polymorphic `as:` included), found through the class's `has_many`/`has_one` reflections — is zeroed, and each child the copy actually carries re-increments it on save. A deep copy of a post with two comments therefore counts 2 (not 4), a shallow copy 0. Plain (non-Duplicable) child copies get the same treatment for their own counters, since their children are never copied. A has_many with no inverse (a scoped one) makes Rails bump the copy's in-memory counter as children are attached; that bump is undone before the INSERT, so the result is right with partial inserts on or off, and `duplicate!` re-reads the counters after saving. (After a plain `duplicate` + your own `save!`, the in-memory counter stays at 0 until `reload`; the row is correct.) A counter kept by a child with no `has_many`/`has_one` on the parent is invisible to this — set it in `on_duplicate`.
 
 **Associations** (`associations:` allow-list, declared before the macro, validated at macro time): `has_many`/`has_one` children are deep-copied — a child that also includes Duplicable copies via **its own** rules, so nested graphs stay declarative; `has_and_belongs_to_many` re-links the *same* records; `belongs_to` and `has_many :through` are rejected with an explanation.
 
@@ -1854,7 +1868,7 @@ end
 | Param        | Default | Notes                                                    |
 |--------------|---------|----------------------------------------------------------|
 | `?cursor=`   | —       | The opaque token from `X-Next-Cursor` (omit for page 1)  |
-| `?per_page=` | `25`    | Capped at `max_per_page` (default 200; `0` disables the cap) |
+| `?per_page=` | `25`    | Capped at `max_per_page` (default 200; `0` disables the configured cap, but never the absolute 1,000,000 ceiling it shares with Paginatable) |
 | `?order=`    | first preset | With `order_presets:` only — selects a named ordering from the allow-list (unknown names → 400 `invalid_order_preset`) |
 
 **Response headers**: `X-Per-Page`, `X-Count` (rows on **this** page — totals are deliberately not computed), `X-Has-More`, `X-Next-Cursor` (only while more pages exist). With `bidirectional: true`: also `X-Has-Prev`, `X-Prev-Cursor`. Plus an RFC 8288 `Link` header: `rel="next"` carries the next-cursor URL, `rel="prev"` the prev-cursor URL (bidirectional), `rel="first"` the current URL with the cursor dropped (once a cursor is in play); `per_page` and the order preset are preserved. `cursor_paginate_by link_header: false` turns it off.
@@ -1897,14 +1911,40 @@ accepted as a suffix `?price_gte=10` or in bracket form `?price[gte]=10&price[lt
 | `gt` `gte` `lt` `lte` | `?price_gte=10`       | `price >= 10` (cast through the column type) |
 | `in` `not_in` | `?status_in=a,b` or `?status_in[]=a` | `status IN ('a','b')`         |
 | `null`   | `?deleted_at_null=true`            | `deleted_at IS NULL` (`false` → `IS NOT NULL`) |
-| `contains` `starts_with` | `?title_contains=rails` | `title LIKE '%rails%'` (wildcards escaped; ILIKE on PostgreSQL) |
+| `contains` `starts_with` | `?title_contains=rails` | `title LIKE '%rails%'` (wildcards escaped; ILIKE on PostgreSQL; string/text columns only) |
 
-Comparison values are cast the way ActiveRecord casts them (the column's own type), or through `type:`
-(any ActiveModel type name); `type:` also pre-casts the value handed to a `with:` lambda. Blank values
+Comparison values are cast through the column's own type, or through `type:` (any ActiveModel type
+name) — except numbers, which are read exactly rather than through ActiveModel's lossy numeric casts
+(see below). `type:` also pre-casts the value handed to a `with:` lambda; a numeric `type:` does it with
+the same strict reader, so `?min_stock=1e1` hands the lambda `10` (not `1`), and a value the type cannot
+represent exactly (`abc`, or `5.5` for `:integer`) fails the filter closed without calling the lambda.
+Range limits only ever come from a real numeric column, never from a declared `type:`. Blank values
 are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`/`lte` value the type
 cannot represent (`?price_gte=abc`) matches **nothing** rather than silently comparing against `0` —
-nothing raises at request time. `contains`/`starts_with` are case-insensitive on PostgreSQL, MySQL and
-SQLite alike. For strict, validated contracts reach for `Permittable`.
+nothing raises at request time. For strict, validated contracts reach for `Permittable`.
+
+Numeric columns are read **strictly, never truncated**, in every form (direct `?stock=`, suffix, bracket,
+`in`/`not_in` lists):
+
+- Every operand is read as an exact decimal, then bound through the **column** (whatever numeric `type:`
+  is declared). On an integer column `?stock_gt=1e3` is `stock > 1000` and `?stock=1e1` is `stock = 10`
+  — they used to run `stock > 1` / `stock = 1`.
+- A value finer than the column's scale — `5.5` on an integer column, `99.985` on a scale-2 decimal —
+  compares exactly (`?stock_gt=5.5` is `stock >= 6`, `?stock_lte=5.5` is `stock <= 5`; `?price_gt=99.985`
+  keeps the `99.99` row) and equals nothing: `?stock=5.5` matches no row, drops out of an `in` list, and
+  `not`/`not_in` on it exclude nothing but NULLs.
+- Only non-numeric garbage (`abc`, `0x10`, `1_000`) fails closed, as do operands longer than 100
+  characters or with an exponent beyond ±1000 (a bounded read — `1e99999999` on an unconstrained
+  `numeric` column would otherwise expand to hundreds of megabytes).
+- A value beyond what the column can hold is answered per operator: `gt`/`gte` above the maximum (or
+  `lt`/`lte` below the minimum) match nothing, the opposite direction matches every non-NULL row; for
+  equality it matches nothing (and drops out of an `in` list), for `not`/`not_in` it excludes nothing
+  but NULLs.
+
+`contains`/`starts_with` apply to string/text columns only; on any other column (integer, decimal,
+datetime, uuid, a PostgreSQL array, …) they match **nothing** — PostgreSQL has no `LIKE` for those types. Matching is
+case-insensitive on PostgreSQL (`ILIKE`), on SQLite (ASCII letters only) and on MySQL under the default
+`_ci` collations; a MySQL column with a `_bin`/`_cs` collation compares case-sensitively.
 
 **Modes**
 
@@ -2217,7 +2257,7 @@ end
 
 Resolution order: `params[param]` → first match in `Accept-Language` → `default` → `I18n.default_locale`. The chosen locale is always validated against `I18n.available_locales`, so a stray param or a mismatched `available:` list can never raise `I18n::InvalidLocale`.
 
-Every response carries **`Content-Language: <resolved locale>`** (BCP 47 form — `pt_BR` → `pt-BR`) and, when `Accept-Language` is a locale source, **`Vary: Accept-Language`** appended to any existing `Vary` (de-duplicated) so shared caches key on the header. Both are written *before* the action runs, so a `rescue_from`-rendered error still carries them; `response_headers: false` turns them off.
+Every response carries **`Content-Language: <resolved locale>`** (BCP 47 form — `pt_BR` → `pt-BR`) and, when `Accept-Language` is a locale source, **`Vary: Accept-Language`** appended to any existing `Vary` (de-duplicated) so shared caches key on the header. Both are written *before* the action runs, so a `rescue_from`-rendered error still carries them; `response_headers: false` turns them off. `rescue_from` handlers — which Rails runs after the `around_action` has already unwound — also render **under the resolved locale** (so an ErrorHandleable 404 or a CursorPaginatable 400 is localized to match its `Content-Language`), and the previous locale is always restored afterwards, even when the handler raises. `Accept-Language` tags that share a q-value keep header order, the `q` parameter is read case-insensitively, and a weight that is not an RFC 9110 qvalue (`0`–`1`, at most three decimals — so not `0x10`, `1_0`, `Infinity` or `2`) is treated as `q=0`: that tag is dropped.
 
 **Options**: `available:` (allow-list for matching; defaults to `I18n.available_locales`), `default:`, `param:` (default `:locale`), `header:` (default `true`), `response_headers:` (default `true`).
 
@@ -2283,7 +2323,7 @@ end
 
 Fixed-window counter: the key embeds a floored time bucket (`epoch / period`) so each window starts clean and `X-RateLimit-Reset` is exact.
 
-**Options**: `limit:` (positive integer), `period:` (a `Duration` or seconds), `by:` (discriminator lambda, default per-IP), `only:` / `except:` (mutually exclusive action scoping), `if:` / `unless:` (a Symbol naming a controller method or a callable, evaluated per request — staff accounts, internal IPs, feature flags; both must pass when both given), `name:` (disambiguates the counter key).
+**Options**: `limit:` (positive integer), `period:` (a `Duration` or seconds), `by:` (discriminator lambda, default per-IP), `only:` / `except:` (mutually exclusive action scoping), `if:` / `unless:` (a Symbol naming a controller method or a callable, evaluated per request — staff accounts, internal IPs, feature flags; both must pass when both given), `name:` (the counter's identity — rules sharing a name share one budget, even across controllers; defaults to `"<DeclaringController>#rule<n>"`, so unrelated controllers never share a counter while subclasses share their parent's).
 
 When several rules apply to one request the `X-RateLimit-*` headers describe the **tightest** one (fewest requests remaining, ties going to the rule that resets last), so a client sees the budget that runs out first. A throttled request instruments `rate_limited.concerns_on_rails` (payload: `rule`, `discriminator`, `count`, `limit`, `period`, `reset_at`, `retry_after`, `controller`, `action`) via the public `on_rate_limited(rule, result)` hook before the 429 is rendered — subscribe to alert on abusive clients, or override it (call `super` to keep the event). Note `discriminator` is the **raw** client IP (or user id) — personal data that `filter_parameters` does not reach, so hash, truncate or drop it in `on_rate_limited` if subscribers persist it.
 
@@ -2316,6 +2356,7 @@ Resolution order: `params[param]` → `Time-Zone` header → cookie (if enabled)
 
 **Notes**
 - An unknown `available:` / `default:` zone raises `ArgumentError` at declaration time (fail-fast on misconfiguration); so does `persist:` without `cookie:`.
+- `rescue_from` handlers render under the resolved zone too (Rails runs them after the `around_action` has unwound), and the previous zone is always restored afterwards — even when the handler raises.
 - `time_zone_source` tells you which source won (`:param`, `:header`, `:cookie`, `:default`, `:current`) — handy for a "times shown in London (from your browser)" hint.
 - Pairs naturally with the model concerns that read the clock (`Schedulable`, `Publishable`, `Expirable`, `SoftDeletable`).
 
@@ -2337,13 +2378,14 @@ end
 
 Per-key lifecycle: claim atomically (`write unless_exist`, TTL `lock_ttl:`) → run action → cache 2xx–4xx responses for `ttl:`; 5xx and raised exceptions release the claim so the client can retry. Replays carry `X-Idempotency-Replayed: true` **and the original's `Location` / `Content-Location` / `ETag` / `Last-Modified` / `Link` headers** (captured with the cached response — a replayed 201 still says where the resource lives; tune the allow-list with `headers:`, `[]` to capture none); duplicates in flight get 409 + `Retry-After`; reusing a key with a **different payload** gets 422 (`idempotency_key_reuse`, fingerprint overridable via `idempotency_fingerprint`).
 
-**Options**: `*actions` (allow-list, required), `ttl:` (`24.hours`), `lock_ttl:` (`1.minute`), `header:` (`"Idempotency-Key"`), `required:` (`false`), `headers:` (response headers replayed with the cached response; default `%w[Location Content-Location ETag Last-Modified Link]` — an allow-list on purpose: `Set-Cookie`, `Date`, request ids and rate-limit headers describe the original exchange and are never replayed).
+**Options**: `*actions` (allow-list, required), `ttl:` (`24.hours`), `lock_ttl:` (`1.minute`), `header:` (`"Idempotency-Key"`), `required:` (`false`), `headers:` (response headers replayed with the cached response; default `%w[Location Content-Location ETag Last-Modified Link]` — an allow-list on purpose: `Set-Cookie`, `Date`, request ids and rate-limit headers describe the original exchange and are never replayed), `on_store_unavailable:` (`:reject` default | `:proceed`).
 
 **Notes**
 - Cache keys are scoped per `controller#action` and the client key is SHA256-hashed, so the same key on different endpoints never collides.
 - The scope carries **no principal**: with client-chosen keys, two users sending the same key and payload to one endpoint share a record (the second is served the first's response, `Location` included). Override `idempotency_scope` — `def idempotency_scope = "#{super}:#{current_user&.id}"`.
 - There is **no in-process default store** on purpose: the first keyed request raises `ArgumentError` until you set `idempotency_store` (or the gem-wide fallback `ConcernsOnRails.setup { |c| c.cache_store = -> { Rails.cache } }`).
-- When `Respondable` is included, the 400/409/422 bodies delegate to `render_error`.
+- **Fails closed when the store is unreachable.** Rails' Redis and memcached stores swallow connection errors (`#write` → false, `#read` → nil); a lost claim with nothing to read back is retried once (so a lock that merely expired is won), and if it fails again the request gets **503 `idempotency_store_unavailable`** with `Retry-After: 5` — the action does not run. Payments are the use case: with no store there is no way to know whether a retry's original already ran, and a 503 costs latency where a duplicate costs a double charge. `on_store_unavailable: :proceed` runs the action without deduplication instead. "Unreachable" means both claims failed *and* both reads returned nil, so a key whose stored value cannot be deserialized (the store reads it as nil but refuses the claim) also gets 503 until that entry's TTL expires.
+- When `Respondable` is included, the 400/409/422/503 bodies delegate to `render_error`.
 - Declare halting filters (authentication, `Throttleable`) **before** including this concern — a 401/403 rendered by an inner filter would be cached and replayed for the full TTL. Responses rendered by `rescue_from` handlers are never cached.
 - Keys must be ≤255 chars with no control characters (the raw key is echoed in `X-Idempotency-Key`); set `lock_ttl:` above the slowest declared action's worst case.
 
@@ -2361,7 +2403,7 @@ class WebhooksController < ApplicationController
   verify_webhook :github,  secret: -> { ENV["GITHUB_WEBHOOK_SECRET"] },    scheme: :github
   verify_webhook :shopify, secret: [ENV["NEW_SECRET"], ENV["OLD_SECRET"]], scheme: :shopify  # rotation
   verify_webhook :custom,  secret: "s3cr3t", scheme: :hex, header: "X-Acme-Signature"
-  # verify_webhook secret: ...   # no actions = catch-all (declare specific rules first)
+  # verify_webhook secret: ...   # no actions = catch-all (used only when no rule names the action)
 
   def stripe
     event = JSON.parse(request.raw_post)   # parse the raw body — it is what was signed
@@ -2377,12 +2419,12 @@ end
 | `:stripe` | `Stripe-Signature` | `t=<unix>,v1=<hex>[,v1=…]` — signs `"#{t}.#{body}"`, every `v1` tried, `tolerance:` rejects stale **and** future timestamps |
 | `:hex` / `:base64` | — (`header:` required) | plain hex / strict Base64 HMAC of the body |
 
-**Options**: `*actions` (none = catch-all; the first matching rule wins), `secret:` (String, callable `instance_exec`'d per request, or Array for rotation — any match passes), `scheme:` (`:hex`), `header:` (overrides the preset), `tolerance:` (Stripe only, `300`s default), `digest:` (`:sha256`; `:sha1`/`:sha512` for `:hex`/`:base64` only), `replay:` (`true` = the gem-wide `cache_store`, a store object, or `false`/`nil` for off) + `replay_ttl:` (`24.hours`) — replay protection for the schemes that carry no timestamp.
+**Options**: `*actions` (none = catch-all). Lookup is by **specificity**: a rule naming the action always beats a catch-all, whichever class declared either; ties go to the most-derived declaring class, then declaration order. So a parent's catch-all never shadows a subclass rule, and a subclass catch-all for its new actions never takes over (or strips the `replay:`/`tolerance:` of) an action its parent named. `secret:` (String, callable `instance_exec`'d per request, or Array for rotation — any match passes), `scheme:` (`:hex`), `header:` (overrides the preset), `tolerance:` (Stripe only, `300`s default), `digest:` (`:sha256`; `:sha1`/`:sha512` for `:hex`/`:base64` only), `replay:` (`true` = the gem-wide `cache_store`, a store object, or `false`/`nil` for off) + `replay_ttl:` (`24.hours`) — replay protection for the schemes that carry no timestamp.
 
 **Notes**
 - Comparison is constant-time and the attacker-controlled header is **never decoded** — garbage (including invalid UTF-8 bytes) just fails with 401, it cannot raise.
 - A secret that resolves **blank at request time raises `ArgumentError`** — a misconfigured endpoint should page you, not 401 into the provider's silent retry loop.
-- **Replay protection** (`replay:`): GitHub, Shopify and plain-HMAC signatures carry no timestamp, so a captured delivery verifies forever. After a signature verifies, a SHA256 of what identifies the delivery — the signature header, or for Stripe the signed `"#{t}.#{body}"` payload, since unknown `v0=` keys and stray whitespace let a captured Stripe header be mutated without invalidating it — is written to the store with `unless_exist:` (atomic — memcached `add` / Redis `SET NX` via `Rails.cache`); a second delivery with the same signature within `replay_ttl:` is rejected with **409 `webhook_replayed`**. Forged traffic never consumes a slot; the key is scoped per controller action. The store must answer `#write(key, value, expires_in:, unless_exist:)` and `#read(key)` (`#delete(key)` is optional but recommended) — `Rails.cache` does. The marker is a short 60-second claim until the action finishes, then promoted to `replay_ttl:` — so a handler that 500s releases it at once, and one that raises (or a filter that halts after verification) leaves only the 60-second claim to expire, either way the provider's retry (identical body, identical signature) gets through. If the store is unreachable the check fails **open**: Rails' Redis and memcached stores return false from `#write` on a connection error, and rejecting every inbound delivery during a cache blip would be worse than accepting a rare duplicate. A per-process `MemoryStore` gives no protection across workers. Stripe's own retries re-sign with a new `t=`, so they pass; a manual GitHub redelivery has the identical signature and is treated as a replay — override `webhook_verification_failed` if you'd rather answer 200.
+- **Replay protection** (`replay:`): GitHub, Shopify and plain-HMAC signatures carry no timestamp, so a captured delivery verifies forever. After a signature verifies, a SHA256 of what identifies the delivery — the signature header, or for Stripe the signed `"#{t}.#{body}"` payload, since unknown `v0=` keys and stray whitespace let a captured Stripe header be mutated without invalidating it — is written to the store with `unless_exist:` (atomic — memcached `add` / Redis `SET NX` via `Rails.cache`); a second delivery with the same signature within `replay_ttl:` is rejected with **409 `webhook_replayed`**. Forged traffic never consumes a slot; the key is scoped per controller action. The store must answer `#write(key, value, expires_in:, unless_exist:)` and `#read(key)` (`#delete(key)` is optional but recommended) — `Rails.cache` does. The marker is a short 60-second claim until the action finishes, then promoted to `replay_ttl:` (an `after_action`). When the delivery was **not** processed the claim is released at once so the provider's retry (identical body, identical signature) gets through: a handler that 5xxs, one that raises (even when `rescue_from` renders a 4xx), and a later `before_action` that halts — the last two skip every `after_action`, so an `around_action` (`guard_webhook_replay_claim`) releases whatever claim is still pending. Without `#delete` — or if `#delete` raises, which is logged and never masks the original outcome — the 60-second claim simply expires. `skip_after_action :commit_webhook_replay_claim` disables replay protection (every claim is then released). If the store is unreachable the check fails **open**: Rails' Redis and memcached stores return false from `#write` on a connection error, and rejecting every inbound delivery during a cache blip would be worse than accepting a rare duplicate. A per-process `MemoryStore` gives no protection across workers. Stripe's own retries re-sign with a new `t=`, so they pass; a manual GitHub redelivery has the identical signature and is treated as a replay — override `webhook_verification_failed` if you'd rather answer 200.
 - Failure codes: `webhook_signature_missing` / `webhook_signature_invalid` / `webhook_timestamp_stale` → 401; `webhook_signature_malformed` (unparseable Stripe header) → 400; `webhook_replayed` → 409. With `Respondable`, bodies delegate to `render_error`; override `webhook_verification_failed` to customize.
 - Declare **before** `Idempotentable` (a 401 cached by its around filter would be replayed) and before `Throttleable` (forged traffic shouldn't burn rate budget). Webhook endpoints also need `skip_before_action :verify_authenticity_token`.
 - In tests: `skip_before_action :verify_webhook_signature!`, or sign payloads for real with `OpenSSL::HMAC`. After a pass, `webhook_verified?` is true.
@@ -2450,7 +2492,9 @@ end
 
 `http_cache_actions` declares the `Cache-Control`/`Vary` policy (emitted via `after_action` — it rides a 304 too); `stale_resource?` sets the ETag/Last-Modified validators and, on a safe request whose precondition matches, sends `304 Not Modified` and returns `false`.
 
-**Options** (`http_cache_actions *actions, …`, repeatable; no actions = catch-all; **last matching rule wins**): `visibility:` (`:private` default | `:public`), `max_age:` (Integer/Duration), `must_revalidate:`, `no_store:` (overrides everything → bare `no-store`), `stale_while_revalidate:`, `vary:` (String or Array, appended to any existing `Vary`).
+**Options** (`http_cache_actions *actions, …`, repeatable; no actions = catch-all; **last matching rule wins**): `visibility:` (`:private` default | `:public`), `max_age:` (Integer/Duration), `must_revalidate:`, `no_store:` (overrides everything → bare `no-store`, on every method and status), `stale_while_revalidate:`, `vary:` (String or Array, appended to any existing `Vary`, de-duplicated case-insensitively; `Vary: *` is left alone).
+
+**Positive freshness is GET/HEAD-only.** Every policy other than `no_store` (`public`/`private`, `max-age`, `must-revalidate`, `stale-while-revalidate`) is emitted only on a GET or HEAD whose status is **200, 203, 204, 206 or 304** — so a catch-all rule never tells a shared cache to store a POST's 201 or the 404 / 500 / redirect an action rendered itself (Cacheable leaves `Cache-Control` unset on them, so whatever the rest of the stack adds applies — in a stock Rails app, `Rack::ETag`'s `max-age=0, private, must-revalidate` on a body it digests, its `no-cache` otherwise). RFC 9111 lets caches store more statuses heuristically, but an explicit `max-age` on an error or redirect is almost never what the rule meant.
 
 **ETag context** (`etag_with`, repeatable — the analogue of Rails' class-level `etag { }`): when the representation depends on more than the record — the locale, the requested fields, the caller's role — declare it and the values are folded into the ETag so two representations of one resource never share a validator. Sources are presets (`:locale` → also `Vary: Accept-Language`, `:format` → `Vary: Accept`, `:query`), Symbols naming controller methods, or a block (`instance_exec`'d); `vary:` overrides the implied header(s), `vary: false` suppresses them; nil values are ignored. Per call: `stale_resource?(@article, extras: [params[:fields]])`. An explicit `etag:` stays verbatim only when there is no context to fold in.
 

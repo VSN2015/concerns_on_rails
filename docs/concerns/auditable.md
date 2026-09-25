@@ -61,11 +61,11 @@ Configures the tracked fields and the audit column. Every column (tracked fields
 One entry is recorded **per changed tracked field per save**; all entries of one save share the same timestamp. On create, entries are recorded with `"from" => nil`.
 
 ```json
-{ "field": "price", "from": 100, "to": 200, "at": "2026-06-10T12:34:56Z", "by": "admin@shop.com" }
+{ "field": "price", "from": 100, "to": 200, "at": "2026-06-10T12:34:56.123456Z", "by": "admin@shop.com" }
 ```
 
 - Keys are strings; `audit_trail` returns exactly what `JSON.parse` produces.
-- `"at"` is ISO8601 UTC, second precision.
+- `"at"` is ISO8601 UTC with **microsecond** precision, so `audited_changes_since` tells apart two edits in the same second. Entries written by 1.29.0 and earlier have second precision; they still parse, and since they only say "during that second" they match any cutoff within it.
 - `"by"` is **omitted entirely** when no actor resolves — none on the model, none gem-wide (or `actor: nil`/`actor: false`) — or the actor returns `nil`.
 - Values are JSON-coerced: `Time`/`DateTime`/`TimeWithZone` → ISO8601 UTC strings, `Date` → ISO8601, `BigDecimal` → plain numeric string (`"19.99"`, precision-safe), `Symbol` → `String`; everything else passes through `as_json`.
 - There is **no built-in length cap** on `from`/`to` — by default a change to a large text field stores both full values. Set `max_value_length:` to bound entry size explicitly (e.g. `max_value_length: 120` stores `"first 120 chars…"`); truncation runs after coercion and applies only to `String` values.
@@ -103,7 +103,7 @@ Every audited model that **omits** `actor:` stamps this value; a model-level `ac
 ```ruby
 product = Product.create!(name: "Widget", price: 100)
 product.audit_trail
-# => [{"field"=>"price", "from"=>nil, "to"=>100, "at"=>"2026-06-10T12:00:00Z"}]
+# => [{"field"=>"price", "from"=>nil, "to"=>100, "at"=>"2026-06-10T12:00:00.000000Z"}]
 
 product.update!(price: 200, status: "live")
 product.audit_trail.size        # => 3 (price create, price update, status update)

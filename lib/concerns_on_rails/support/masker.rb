@@ -7,6 +7,10 @@ module ConcernsOnRails
     # Every method is string-safe: a non-String argument is returned untouched,
     # exactly like the Normalizable / Sanitizable preset lambdas. Masking is for
     # presentation only — callers keep the original value in the database.
+    #
+    # Fail closed: a String that does not have the shape a preset expects
+    # (no "@" for #email, four or fewer ASCII digits for #phone) gets the
+    # full mask (#all) — never the raw value.
     module Masker
       module_function
 
@@ -30,20 +34,21 @@ module ConcernsOnRails
         return value unless value.is_a?(String)
 
         local, at, domain = value.partition("@")
-        return value if at.empty? # not an email-shaped string; leave it alone
+        return all(value, mask: mask) if at.empty? # not email-shaped: reveal nothing
 
         masked_local = local.length <= 1 ? mask : local[0] + (mask * (local.length - 1))
         "#{masked_local}@#{domain}"
       end
 
-      # Keep the last four digits of a phone number visible: "***-2671".
+      # Keep the last four digits of a phone number visible: "***-2671". With
+      # four or fewer digits that would be the whole number, so mask it all.
       def phone(value, mask: DEFAULT_MASK)
         return value unless value.is_a?(String)
 
         digits = value.gsub(/\D/, "")
-        return value if digits.empty?
+        return all(value, mask: mask) if digits.length <= 4
 
-        "#{mask * 3}-#{digits.length <= 4 ? digits : digits[-4..]}"
+        "#{mask * 3}-#{digits[-4..]}"
       end
 
       # Keep the last four digits of a card number: "**** **** **** 4242".

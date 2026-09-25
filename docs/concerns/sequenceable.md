@@ -99,6 +99,8 @@ Computes and assigns the next sequence value and, when `into:` is configured, th
 
 Numbers the record now: computes the next value for its scope (and period), writes the integer and the `into:` string, and — when the record is persisted — `save!`s. On a new record the attributes are set and left for your own save. Returns `true` when a number was assigned and `false` when the record already had one (nothing is rewritten), so a "finalize" action can be retried safely. Available in both modes; it is the only way to number a record under `assign: :manual`.
 
+The `save!` runs in its own savepoint, and when it fails — `ActiveRecord::RecordNotUnique` from a concurrent writer that took the same number, a failed validation — the integer and `into:` columns are put back before the error propagates. So `ConcernsOnRails::Support::UniqueRetry.with_retries { invoice.assign_sequence! }` retries with a freshly drawn number instead of finding the record "already numbered", and a failure inside your own transaction does not abort it on PostgreSQL.
+
 **`<field>_assigned?`**
 
 `true` when the integer column has a value.
@@ -219,6 +221,23 @@ draft.number                             # => "INV-00001"
 **`start_at:` applies per scope+period bucket.** When `scope:` and `reset:` are both configured, each combination of scope values *and* period starts fresh at `start_at` independently.
 
 **Sequence queries bypass `default_scope`.** The `MAX` and existence-check queries run through `unscoped`, so soft-deleted records (or any other default-scoped-out rows) are still counted when computing the next value. This prevents gaps from soft-deleted records causing the counter to reuse numbers.
+
+**With STI, the declaring class owns the counter.** The `MAX` is read over the class that called `sequenceable_by` (and its descendants):
+
+- Declared on the STI **base** — every subclass draws from one table-wide counter, so `Credit` and `Debit` rows sharing a unique `sequence` column never collide.
+- Declared on **each subclass** (`Invoice` with `prefix: "INV-"`, `CreditNote` with `prefix: "CN-"`) — each keeps its own gap-free sequence, INV-0001, INV-0002, CN-0001.
+- A subclass that merely inherits a parent's declaration shares the parent's counter.
+- A subclass that **re-declares** `sequenceable_by` numbers its own series (with its descendants). The parent's `MAX` still spans every row of the table, so the parent series may show a **gap** after those rows — never a duplicate, even when a subclass starts declaring its own sequence after a deploy.
+- Declared on an **abstract** class, each concrete table (and its STI subtree) keeps its own counter.
+- `scope: :type` on the base partitions one declaration per type.
+
+For **independent per-type series without gaps**, declare once on the base with `scope: :type`.
+
+**Index per type.** Per-subclass (or re-declared) series share one integer column, so their numbers overlap across types. Index `(type, <field>)` — or the scope columns plus the field — not the field alone.
+
+**Upgrading from 1.29.0 or earlier:** a per-type series that used to number per subclass while *inheriting* a base declaration now shares the table-wide counter. Its next number jumps once to the table-wide MAX + 1, leaving a one-time gap. Declare `scope: :type` to keep per-type numbering.
+
+`next_<field>` previews exactly what the receiving class's next `create!` gets in every one of these setups — under `scope: :type`, an omitted `type:` resolves to the receiver's own STI name (NULL for the base).
 
 **Column validation runs at class load time.** `sequenceable_by` calls `ensure_columns!` for `field`, `into:`, all `scope:` columns, and `created_at` (when `reset:` is not `:never`). A missing column raises `ArgumentError` with the message `"does not exist in the database"` before any records are created.
 

@@ -305,4 +305,141 @@ describe ConcernsOnRails::Hashable do
       expect { build.call(to_param: :yes) }.to raise_error(ArgumentError, /to_param: must be true or false/)
     end
   end
+
+  describe "1.29 audit regressions" do
+    def capture_sql
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") { |*args| statements << args.last[:sql].to_s }
+      yield
+      statements
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscriber)
+    end
+
+    context "STI subclasses sharing the column" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :sti_orders, force: true do |t|
+            t.string :type
+            t.string :token
+          end
+          add_index :sti_orders, :token, unique: true
+        end
+        Object.const_set(:StiOrder, Class.new(TestModel) do
+          self.table_name = "sti_orders"
+          include ConcernsOnRails::Hashable
+
+          hashable_by :token, unique: true
+        end)
+        Object.const_set(:StiRushOrder, Class.new(StiOrder))
+        Object.const_set(:StiBulkOrder, Class.new(StiOrder))
+      end
+
+      after do
+        %i[StiRushOrder StiBulkOrder StiOrder].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+      end
+
+      it "prechecks uniqueness across the whole table, not just the subclass" do
+        StiRushOrder.create!(token: "taken")
+        allow(StiBulkOrder).to receive(:generate_hashable_value).and_return("taken", "fresh")
+
+        expect(StiBulkOrder.create!.token).to eq("fresh")
+      end
+    end
+
+    context "regenerate_<field>! inside a caller's transaction" do
+      before do
+        ActiveRecord::Base.connection.add_index(:orders, :token, unique: true)
+      end
+
+      it "retries each candidate in its own savepoint (PostgreSQL aborts the transaction otherwise)" do
+        taken = Order.create!(token: "taken")
+        order = Order.create!
+        allow(Order).to receive(:generate_hashable_value).and_return(taken.token, "fresh")
+
+        statements = capture_sql do
+          Order.transaction do
+            Order.create!(name: "before", token: "b") # materialize the outer transaction
+            order.regenerate_token!
+            Order.create!(name: "after", token: "a")
+          end
+        end
+
+        expect(order.reload.token).to eq("fresh")
+        expect(Order.where(name: %w[before after]).count).to eq(2)
+        expect(statements.grep(/\AROLLBACK TO SAVEPOINT/i).size).to eq(1)
+      end
+    end
+
+    context "type: :custom alphabets" do
+      def build(alphabet)
+        Class.new(TestModel) do
+          self.table_name = "orders"
+          include ConcernsOnRails::Hashable
+
+          hashable_by :token, type: :custom, length: 8, alphabet: alphabet
+        end
+      end
+
+      it "de-duplicates a repeated character (removing the bias) and warns it will raise in 2.0" do
+        expect(ConcernsOnRails.deprecator).to receive(:warn).with(/duplicate character\(s\) "a", "b".*raise in 2\.0/m)
+        klass = build("abca1b")
+
+        expect(klass.hashable_alphabet).to eq("abc1")
+        expect(klass.create!.token).to match(/\A[abc1]{8}\z/)
+      end
+
+      it "does not warn for an alphabet without duplicates" do
+        expect(ConcernsOnRails.deprecator).not_to receive(:warn)
+        build("ABC123")
+      end
+
+      it "still rejects an alphabet that is all one character after de-duplication" do
+        allow(ConcernsOnRails.deprecator).to receive(:warn)
+        expect { build("ZZZ") }.to raise_error(ArgumentError, /at least 2 distinct characters/)
+      end
+
+      it "rejects an alphabet with fewer than two distinct characters" do
+        expect { build("Z") }.to raise_error(ArgumentError, /at least 2 distinct characters/)
+        expect { build("") }.to raise_error(ArgumentError, /non-empty alphabet/)
+      end
+
+      it "still accepts a proper alphabet" do
+        expect(build("ABC123").create!.token).to match(/\A[ABC123]{8}\z/)
+      end
+    end
+
+    context "declared on one STI subclass only (review of #111)" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :sti_parcels, force: true do |t|
+            t.string :type
+            t.string :token
+          end
+          add_index :sti_parcels, :token, unique: true
+        end
+        Object.const_set(:StiParcel, Class.new(TestModel) { self.table_name = "sti_parcels" })
+        Object.const_set(:StiTrackedParcel, Class.new(StiParcel) do
+          include ConcernsOnRails::Hashable
+
+          hashable_by :token, unique: true
+        end)
+      end
+
+      after do
+        %i[StiTrackedParcel StiParcel].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+      end
+
+      it "generates, prechecks table-wide and regenerates on the declaring subclass" do
+        StiParcel.create!(token: "taken")
+        allow(StiTrackedParcel).to receive(:generate_hashable_value).and_return("taken", "fresh", "rolled")
+
+        parcel = StiTrackedParcel.create!
+        expect(parcel.token).to eq("fresh")
+        expect(StiParcel.create!.token).to be_nil # the undeclared base generates nothing
+        parcel.regenerate_token!
+        expect(parcel.reload.token).to eq("rolled")
+      end
+    end
+  end
 end

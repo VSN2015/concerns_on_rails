@@ -67,6 +67,28 @@ describe ConcernsOnRails::Models::Maskable do
       expect(MaskableUser.new(phone: "+1 (415) 555-2671").masked_phone).to eq("***-2671")
     end
 
+    # Fail closed: input that does not have the expected shape used to come
+    # back UNMASKED (an email column holding a bare username, a phone column
+    # holding "ext. four" or "1234"). It now gets the full mask.
+    it "falls back to the full mask when a value is not email- or phone-shaped" do
+      class MaskableUser < TestModel
+        self.table_name = "maskable_users"
+        include ConcernsOnRails::Models::Maskable
+
+        maskable :email, with: :email
+        maskable :phone, with: :phone
+      end
+
+      expect(MaskableUser.new(email: "johndoe").masked_email).to eq("*******")
+      expect(MaskableUser.new(email: "").masked_email).to eq("")
+      expect(MaskableUser.new(phone: "1234").masked_phone).to eq("****")
+      expect(MaskableUser.new(phone: "x42").masked_phone).to eq("***")
+      expect(MaskableUser.new(phone: "call me").masked_phone).to eq("*******")
+      expect(MaskableUser.new(phone: "٤١٥٥٥٥٢٦٧١").masked_phone).to eq("*" * 10) # no ASCII digits
+      expect(MaskableUser.new(phone: "555-2671").masked_phone).to eq("***-2671") # 7 digits still keep 4
+      expect(MaskableUser.new(phone: "12345").masked_phone).to eq("***-2345")
+    end
+
     it ":last4 honors a custom mask character" do
       class MaskableUser < TestModel
         self.table_name = "maskable_users"

@@ -2,6 +2,7 @@
 
 require "spec_helper"
 require "openssl"
+require "support/integration_harness"
 
 describe ConcernsOnRails::Controllers::WebhookVerifiable do
   WebhookFakeRequest = Struct.new(:headers, :raw_post) unless defined?(WebhookFakeRequest)
@@ -91,6 +92,116 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       failing = instance(klass, headers: { "X-Sig" => hex_hmac("second-secret", WH_BODY) })
       failing.verify_webhook_signature!
       expect_failure(failing, :unauthorized, "webhook_signature_invalid")
+    end
+
+    # Lookup is by SPECIFICITY: an action-specific rule naming the action wins
+    # over any catch-all, whichever class declared either. Pre-fix it was
+    # first-match over inherited-rules-first, so a parent's catch-all shadowed
+    # every rule a subclass declared.
+    it "prefers a subclass's specific rule over an inherited catch-all" do
+      parent = verifiable_class { verify_webhook secret: "parent-secret", scheme: :hex, header: "X-Sig" }
+      child = Class.new(parent) { verify_webhook :receive, secret: "child-secret", scheme: :hex, header: "X-Sig" }
+
+      own = instance(child, headers: { "X-Sig" => hex_hmac("child-secret", WH_BODY) })
+      own.verify_webhook_signature!
+      expect(own.webhook_verified?).to be(true)
+
+      # The parent's catch-all still covers every action the child did not name.
+      other = instance(child, action: "other", headers: { "X-Sig" => hex_hmac("parent-secret", WH_BODY) })
+      other.verify_webhook_signature!
+      expect(other.webhook_verified?).to be(true)
+
+      # And the parent itself is untouched by the child's declaration.
+      expect(parent.webhook_rules.size).to eq(1)
+      at_parent = instance(parent, headers: { "X-Sig" => hex_hmac("child-secret", WH_BODY) })
+      at_parent.verify_webhook_signature!
+      expect_failure(at_parent, :unauthorized, "webhook_signature_invalid")
+    end
+
+    # The reverse direction: a subclass adding a catch-all for its NEW actions
+    # must not take over an action its parent named — nor drop that rule's
+    # own replay:/scheme/tolerance.
+    it "keeps an inherited specific rule (and its replay:) ahead of a subclass catch-all" do
+      replay_store = Class.new do
+        attr_reader :data
+
+        def initialize
+          @data = {}
+        end
+
+        def write(key, value, options = {})
+          return nil if options[:unless_exist] && @data.key?(key)
+
+          @data[key] = value
+          true
+        end
+
+        def read(key)
+          @data[key]
+        end
+      end.new
+      parent = verifiable_class do
+        verify_webhook :receive, secret: "parent-secret", scheme: :hex, header: "X-Sig", replay: replay_store
+      end
+      child = Class.new(parent) { verify_webhook secret: "generic", scheme: :hex, header: "X-Sig" }
+
+      inherited = instance(child, headers: { "X-Sig" => hex_hmac("parent-secret", WH_BODY) })
+      inherited.verify_webhook_signature!
+      expect(inherited.webhook_verified?).to be(true)
+      expect(replay_store.data.size).to eq(1)
+
+      generic_on_receive = instance(child, headers: { "X-Sig" => hex_hmac("generic", WH_BODY) })
+      generic_on_receive.verify_webhook_signature!
+      expect_failure(generic_on_receive, :unauthorized, "webhook_signature_invalid")
+
+      new_action = instance(child, action: "other", headers: { "X-Sig" => hex_hmac("generic", WH_BODY) })
+      new_action.verify_webhook_signature!
+      expect(new_action.webhook_verified?).to be(true)
+    end
+
+    # A shared concern module's `included { verify_webhook secret: ... }`
+    # lands in the host BEFORE the host's own specific rules; that must boot
+    # and the specific rules must still apply.
+    it "lets a specific rule declared after a same-class catch-all match" do
+      klass = verifiable_class do
+        verify_webhook secret: "generic", scheme: :hex, header: "X-Sig"
+        verify_webhook :receive, secret: "specific", scheme: :hex, header: "X-Sig"
+      end
+
+      specific = instance(klass, headers: { "X-Sig" => hex_hmac("specific", WH_BODY) })
+      specific.verify_webhook_signature!
+      expect(specific.webhook_verified?).to be(true)
+
+      other = instance(klass, action: "other", headers: { "X-Sig" => hex_hmac("generic", WH_BODY) })
+      other.verify_webhook_signature!
+      expect(other.webhook_verified?).to be(true)
+    end
+
+    it "resolves across several levels: most-derived specific, then most-derived catch-all" do
+      grandparent = verifiable_class do
+        verify_webhook :receive, secret: "gp-specific", scheme: :hex, header: "X-Sig"
+        verify_webhook secret: "gp-generic", scheme: :hex, header: "X-Sig"
+      end
+      parent = Class.new(grandparent) do
+        verify_webhook :receive, :ping, secret: "p-first", scheme: :hex, header: "X-Sig"
+        verify_webhook :receive, secret: "p-second", scheme: :hex, header: "X-Sig"
+      end
+      child = Class.new(parent) { verify_webhook secret: "c-generic", scheme: :hex, header: "X-Sig" }
+
+      expect(child.webhook_rules.map { |rule| rule[:secret] })
+        .to eq(%w[c-generic p-first p-second gp-specific gp-generic])
+
+      verified = lambda do |action, secret|
+        c = instance(child, action: action, headers: { "X-Sig" => hex_hmac(secret, WH_BODY) })
+        c.verify_webhook_signature!
+        c.webhook_verified?
+      end
+      expect(verified.call("receive", "p-first")).to be(true)   # parent's first specific rule
+      expect(verified.call("receive", "p-second")).to be(false) # declaration order within a class
+      expect(verified.call("receive", "c-generic")).to be(false)
+      expect(verified.call("ping", "p-first")).to be(true)
+      expect(verified.call("other", "c-generic")).to be(true)   # most-derived catch-all
+      expect(verified.call("other", "gp-generic")).to be(false)
     end
 
     it "treats a controller without a usable request as a missing signature (no crash)" do
@@ -609,7 +720,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       failed = instance(klass, headers: headers)
       failed.verify_webhook_signature!
       failed.response.status = 500
-      failed.commit_webhook_replay_claim
+      failed.send(:commit_webhook_replay_claim)
 
       retried = instance(klass, headers: headers)
       retried.verify_webhook_signature!
@@ -617,7 +728,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       expect(retried.webhook_verified?).to be(true)
 
       # And once a delivery really is handled, the duplicate is still rejected.
-      retried.commit_webhook_replay_claim
+      retried.send(:commit_webhook_replay_claim)
       duplicate = instance(klass, headers: headers)
       duplicate.verify_webhook_signature!
       expect_failure(duplicate, :conflict, "webhook_replayed")
@@ -652,7 +763,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       c = instance(short, headers: { "X-Sig" => hex_hmac(WH_SECRET, WH_BODY) })
       c.verify_webhook_signature!
       expect(fresh_store.writes.last[2][:expires_in]).to eq(60) # the claim
-      c.commit_webhook_replay_claim
+      c.send(:commit_webhook_replay_claim)
       expect(fresh_store.writes.last[2][:expires_in]).to eq(600) # the real ttl
     end
 
@@ -855,6 +966,134 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
 
       expect(c.verify_webhook_signature!).to be_nil
       expect(c.rendered).to be_nil
+    end
+  end
+
+  # Through the REAL callback chain: Rails skips after_action callbacks when a
+  # later before_action halts, or when the action raises. The replay claim was
+  # written in the before_action and only ever promoted/released in the
+  # after_action, so in both cases it sat there for REPLAY_CLAIM_TTL and the
+  # provider's retry of a delivery that was never processed got a 409.
+  describe "replay claim through real ActionController dispatch" do
+    class WebhookBoomError < StandardError
+    end
+
+    let(:store) do
+      Class.new do
+        attr_reader :data
+
+        def initialize
+          @data = {}
+        end
+
+        def write(key, value, options = {})
+          return nil if options[:unless_exist] && @data.key?(key)
+
+          @data[key] = value
+          true
+        end
+
+        def read(key)
+          @data[key]
+        end
+
+        def delete(key)
+          @data.delete(key)
+        end
+      end.new
+    end
+
+    let(:controller) do
+      replay_store = store
+      IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::WebhookVerifiable
+
+        verify_webhook :receive, secret: WH_SECRET, scheme: :hex, header: "X-Sig", replay: replay_store
+        # A LATER filter (declared after the include) that can halt — an app's
+        # maintenance switch, a feature flag, a tenant check.
+        before_action { head :service_unavailable if request.headers["X-Halt"] }
+
+        rescue_from(WebhookBoomError) { render json: { error: "handled" }, status: :unprocessable_entity }
+
+        def receive
+          raise WebhookBoomError if request.headers["X-Boom"]
+
+          render json: { ok: true }
+        end
+      end
+    end
+
+    def deliver(extra_headers = {})
+      headers = { "X-Sig" => hex_hmac(WH_SECRET, "id=1") }.merge(extra_headers)
+      IntegrationHarness.dispatch(controller, :receive, method: "POST", params: { id: "1" }, headers: headers)
+    end
+
+    it "releases the claim when a later before_action halts, so the provider's retry is processed" do
+      expect(deliver("X-Halt" => "1").status).to eq(503)
+      expect(store.data).to be_empty
+
+      expect(deliver.status).to eq(200)
+      expect(deliver.status).to eq(409) # processed now, so a real duplicate is still a replay
+    end
+
+    it "releases the claim when the action raises, even when rescue_from renders a non-5xx" do
+      expect(deliver("X-Boom" => "1").status).to eq(422)
+      expect(store.data).to be_empty
+
+      expect(deliver.status).to eq(200)
+    end
+
+    it "promotes the claim to replay_ttl after a completed action, exactly as before" do
+      expect(deliver.status).to eq(200)
+      expect(store.data.size).to eq(1)
+      expect(deliver.status).to eq(409)
+    end
+
+    it "keeps the replay callbacks out of action_methods" do
+      expect(controller.action_methods).to include("receive")
+      expect(controller.action_methods).not_to include("guard_webhook_replay_claim", "commit_webhook_replay_claim")
+    end
+
+    context "when the store's #delete raises" do
+      let(:store) do
+        Class.new do
+          attr_reader :data
+
+          def initialize
+            @data = {}
+          end
+
+          def write(key, value, options = {})
+            return nil if options[:unless_exist] && @data.key?(key)
+
+            @data[key] = value
+            true
+          end
+
+          def read(key)
+            @data[key]
+          end
+
+          def delete(_key)
+            raise IOError, "store went away"
+          end
+        end.new
+      end
+
+      it "does not turn a later filter's halt into a 500" do
+        expect(deliver("X-Halt" => "1").status).to eq(503)
+      end
+
+      it "never masks the action's own exception" do
+        expect(deliver("X-Boom" => "1").status).to eq(422) # still rescued as WebhookBoomError
+      end
+
+      it "logs the failed release" do
+        output = StringIO.new
+        controller.logger = Logger.new(output)
+        deliver("X-Halt" => "1")
+        expect(output.string).to match(/could not release.*IOError: store went away/)
+      end
     end
   end
 end

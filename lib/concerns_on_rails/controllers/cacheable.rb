@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/support/vary_header"
 require "digest/md5"
 require "time"
 
@@ -66,8 +67,17 @@ module ConcernsOnRails
     #     carries it.
     #
     # Notes:
-    #   * `no_store: true` overrides everything (emits the lone `no-store`).
-    #   * `Vary` is appended to any existing `Vary` header, de-duplicated.
+    #   * `no_store: true` overrides everything (emits the lone `no-store`),
+    #     and is emitted for every method and status.
+    #   * Every OTHER policy — `public`/`private`, `max-age`,
+    #     `stale-while-revalidate`, `must-revalidate` — is only emitted on a
+    #     GET/HEAD whose status is one of FRESHNESS_STATUSES. A catch-all rule
+    #     must not tell a shared cache to store a POST's 201, or the 404 / 500 /
+    #     redirect an action rendered itself; those keep Rails' default.
+    #   * `Vary` is appended to any existing `Vary` header via
+    #     Support::VaryHeader: de-duplicated case-insensitively, `Vary: *` left
+    #     alone, and Rails' own `Vary: Accept` preserved even though validators
+    #     are written before render.
     #   * No positional actions = catch-all; the LAST matching rule wins (the
     #     Deprecatable convention — caching policy is an override).
     #   * Works on bare objects (every `request`/`response` touch is guarded), so
@@ -81,6 +91,12 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Controllers::Cacheable".freeze
       VALID_VISIBILITY = %i[public private].freeze
       SAFE_METHODS = %w[GET HEAD].freeze
+      # Statuses that may carry the rule's positive freshness policy. RFC 9111
+      # lets caches store more (301, 404, 410, … are heuristically cacheable),
+      # but an EXPLICIT max-age on an error or a redirect is almost never what
+      # a catch-all rule meant, so this is the conservative success set plus
+      # the 304 that stale_resource? sends (the policy rides it on purpose).
+      FRESHNESS_STATUSES = [200, 203, 204, 206, 304].freeze
 
       # `etag_with` presets: the value folded into the ETag and the Vary header
       # it implies. Any other Symbol names a controller method.
@@ -215,9 +231,9 @@ module ConcernsOnRails
         return unless rule
         return unless respond_to?(:response) && response
 
-        value = http_cache_control_value(rule)
+        value = http_cache_control_for_response(rule)
         response.set_header("Cache-Control", value) if value
-        response.set_header("Vary", http_cache_merge_vary(rule[:vary])) if rule[:vary]
+        http_cache_merge_vary(rule[:vary]) if rule[:vary]
         # Here too, not only from set_cache_validators: an action that renders
         # without calling stale_resource? still owes the etag_with sources their
         # Vary (idempotent — merge_vary appends and uniqs).
@@ -328,7 +344,7 @@ module ConcernsOnRails
         return unless respond_to?(:response) && response
 
         headers = self.class.cacheable_etag_extras.flat_map { |entry| entry[:vary] }.uniq
-        response.set_header("Vary", http_cache_merge_vary(headers)) if headers.any?
+        http_cache_merge_vary(headers) if headers.any?
       end
 
       def http_cache_write_validators(etag, last_modified)
@@ -373,12 +389,30 @@ module ConcernsOnRails
         self.class.cacheable_etag_extras.any? { |entry| entry[:vary].empty? && entry[:source] != :query }
       end
 
+      # Previously a hand-rolled, case-SENSITIVE merge that also appended to
+      # `Vary: *` — and, run from set_cache_validators before render, it left
+      # the header non-blank so Rails skipped its own `Vary: Accept`.
       def http_cache_merge_vary(vary_list)
-        values = []
-        existing = response.headers["Vary"]
-        values.concat(existing.split(",").map(&:strip)) unless existing.to_s.empty?
-        values.concat(vary_list)
-        values.uniq.join(", ")
+        ConcernsOnRails::Support::VaryHeader.append(self, *vary_list)
+      end
+
+      # no-store always; any other policy only when http_cache_fresh_response?.
+      def http_cache_control_for_response(rule)
+        return http_cache_control_value(rule) if rule[:no_store] || http_cache_fresh_response?
+
+        nil
+      end
+
+      # May this response carry the rule's positive freshness policy? Only a
+      # safe request with one of FRESHNESS_STATUSES (see its comment).
+      def http_cache_fresh_response?
+        http_cache_safe_request? && FRESHNESS_STATUSES.include?(http_cache_response_status)
+      end
+
+      def http_cache_response_status
+        return 200 unless response.respond_to?(:status) && response.status
+
+        response.status.to_i
       end
 
       def http_cache_send_not_modified

@@ -53,6 +53,7 @@ These are blanked on every copy, no configuration needed — identity, not busin
 | Auditable trail column | A copy inherits no history (its own creation is then audited normally). |
 | SoftDeletable timestamp | A copy of trash is a live record. |
 | Lockable `attempts` (→ 0) / `locked_at` (→ nil) | A copy starts unlocked. |
+| Counter-cache columns (→ 0) | Columns maintained by a child — its CounterCacheable rules, or a native `belongs_to ..., counter_cache:` (polymorphic `as:` included) — found through this class's `has_many` / `has_one` reflections. Each child the copy carries re-increments them on save: a deep copy of a post with 2 comments counts 2 (not 4), a shallow copy counts 0. Plain (non-Duplicable) child copies are zeroed the same way, since their own children are never copied. A has_many with no inverse (a scoped one) bumps the copy's in-memory counter as children are attached; that bump is undone before the INSERT, so the count is right with partial inserts on or off, and `duplicate!` re-reads the counters after saving (after a plain `duplicate` + your own `save!` the in-memory value stays at 0 until `reload`; the row is correct). A reflection whose class can't be loaded is skipped; a counter kept by a child with no `has_many`/`has_one` on this class isn't visible — set it in `on_duplicate`. |
 
 Business state (Publishable, Stateable, Activatable, Expirable, …) is a judgment call and is **not** auto-reset — list those columns in `reset:`.
 

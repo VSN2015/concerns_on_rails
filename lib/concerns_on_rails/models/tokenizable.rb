@@ -113,9 +113,11 @@ module ConcernsOnRails
         def define_tokenizable_methods(field)
           # Same uniqueness path as create-time assignment (pre-1.22 this wrote
           # one blind candidate — a short :numeric invite code regenerated
-          # straight into RecordNotUnique with no retry).
+          # straight into RecordNotUnique with no retry). Each attempt runs in
+          # its own savepoint so a rejected UPDATE inside a caller's
+          # transaction doesn't abort it on PostgreSQL.
           define_method("regenerate_#{field}!") do
-            ConcernsOnRails::Support::UniqueRetry.with_retries(limit: MAX_GENERATION_ATTEMPTS) do
+            ConcernsOnRails::Support::UniqueRetry.with_retries(limit: MAX_GENERATION_ATTEMPTS, savepoint: self.class) do
               update!(tokenizable_generated_attributes(field))
             end
           end
@@ -199,10 +201,12 @@ module ConcernsOnRails
       # Generate → in-Ruby exists? precheck → retry, up to MAX_GENERATION_ATTEMPTS
       # times — useful for short codes; a unique DB index is still the real
       # guarantee. Shared by create-time assignment and regenerate_<field>!.
+      # Checked against the STI base class: a subclass's own relation carries
+      # its type condition and would miss a sibling subclass's token.
       def tokenizable_unique_value(field)
         MAX_GENERATION_ATTEMPTS.times do
           candidate = self.class.generate_tokenizable_value(field)
-          return candidate unless self.class.unscoped.exists?(field => candidate)
+          return candidate unless self.class.base_class.unscoped.exists?(field => candidate)
         end
 
         raise "#{LABEL}: could not generate a unique value for '#{field}' " \

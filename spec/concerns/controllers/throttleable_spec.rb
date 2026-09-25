@@ -107,6 +107,53 @@ describe ConcernsOnRails::Controllers::Throttleable do
       expect(c.response.headers["X-RateLimit-Limit"]).to be_nil
     end
 
+    # Pre-fix the default name was "rule#{index}" with no controller in it, so
+    # every controller's first unnamed rule shared ONE counter per client:
+    # browsing the articles index spent the login endpoint's budget.
+    it "gives unnamed rules on unrelated controllers separate counters" do
+      stub_const("ArticlesThrottleController", throttled_class(store))
+      stub_const("LoginThrottleController", throttled_class(store))
+      [ArticlesThrottleController, LoginThrottleController].each { |klass| klass.throttle_by limit: 1, period: 60 }
+      anonymous = throttled_class(store) { throttle_by limit: 1, period: 60 }
+
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        instance(ArticlesThrottleController, remote_ip: "4.4.4.4").enforce_throttles
+        login = instance(LoginThrottleController, remote_ip: "4.4.4.4")
+        login.enforce_throttles
+        other = instance(anonymous, remote_ip: "4.4.4.4")
+        other.enforce_throttles
+
+        expect(login.rendered).to be_nil
+        expect(other.rendered).to be_nil
+        expect(login.response.headers["X-RateLimit-Remaining"]).to eq("0")
+      end
+    end
+
+    it "shares an inherited unnamed rule's budget between the parent and its subclasses" do
+      parent = stub_const("ParentThrottleController", throttled_class(store))
+      parent.throttle_by limit: 1, period: 60
+      child = Class.new(parent)
+
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        instance(parent, remote_ip: "4.4.4.5").enforce_throttles
+        from_child = instance(child, remote_ip: "4.4.4.5")
+        from_child.enforce_throttles
+
+        expect(from_child.rendered[:status]).to eq(:too_many_requests)
+      end
+    end
+
+    it "names the default rule after the declaring controller, and keeps an explicit name: verbatim" do
+      stub_const("NamedThrottleController", throttled_class(store))
+      NamedThrottleController.throttle_by limit: 1, period: 60
+      NamedThrottleController.throttle_by limit: 5, period: 60, name: "login"
+      anonymous = throttled_class(store) { throttle_by limit: 1, period: 60 }
+
+      expect(NamedThrottleController.throttleable_rules.map { |rule| rule[:name] })
+        .to eq(%w[NamedThrottleController#rule0 login])
+      expect(anonymous.throttleable_rules.first[:name]).to eq("anonymous-#{anonymous.object_id}#rule0")
+    end
+
     it "raises when a rule fires with no store configured" do
       klass = Class.new(base_class) do
         include ConcernsOnRails::Controllers::Throttleable

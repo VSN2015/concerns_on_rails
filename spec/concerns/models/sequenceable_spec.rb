@@ -380,4 +380,305 @@ describe ConcernsOnRails::Sequenceable do
       expect(Invoice.pending_sequence).to be_empty
     end
   end
+
+  describe "STI subclasses sharing one sequence column (1.29 audit)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :sti_documents, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+          t.string  :number
+          t.timestamps
+        end
+        add_index :sti_documents, :sequence, unique: true
+      end
+
+      Object.const_set(:StiDocument, Class.new(TestModel) do
+        self.table_name = "sti_documents"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "DOC-"
+      end)
+      Object.const_set(:StiCredit, Class.new(StiDocument))
+      Object.const_set(:StiDebit, Class.new(StiDocument))
+    end
+
+    after do
+      %i[StiCredit StiDebit StiDocument StiTypedDocument StiTypedCredit StiTypedDebit].each do |const|
+        Object.send(:remove_const, const) if Object.const_defined?(const)
+      end
+    end
+
+    it "numbers across the whole table, not per subclass" do
+      credit = StiCredit.create!
+      debit = StiDebit.create!
+      base = StiDocument.create!
+
+      expect([credit.sequence, debit.sequence, base.sequence]).to eq([1, 2, 3])
+      expect(debit.number).to eq("DOC-2")
+      expect(StiCredit.next_sequence).to eq(4)
+    end
+
+    it "still offers per-type numbering through scope: :type" do
+      ActiveRecord::Base.connection.remove_index(:sti_documents, :sequence)
+      Object.const_set(:StiTypedDocument, Class.new(TestModel) do
+        self.table_name = "sti_documents"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, scope: :type
+      end)
+      Object.const_set(:StiTypedCredit, Class.new(StiTypedDocument))
+      Object.const_set(:StiTypedDebit, Class.new(StiTypedDocument))
+
+      expect([StiTypedCredit.create!, StiTypedDebit.create!, StiTypedCredit.create!].map(&:sequence)).to eq([1, 1, 2])
+    end
+  end
+
+  describe "assign_<field>! when the save fails (1.29 audit)" do
+    before do
+      ActiveRecord::Base.connection.add_index(:invoices, :sequence, unique: true)
+
+      class ManualInvoice < TestModel
+        self.table_name = "invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", assign: :manual
+      end
+    end
+
+    # The first draw hands out a number another writer already holds — the
+    # race the unique index exists for.
+    def collide_once!(klass, taken)
+      calls = 0
+      allow(klass).to receive(:sequence_base_value).and_wrap_original do |original, *args|
+        calls += 1
+        calls == 1 ? taken : original.call(*args)
+      end
+    end
+
+    it "puts the field back so UniqueRetry draws a fresh number instead of reporting 'already numbered'" do
+      holder = ManualInvoice.create!
+      holder.assign_sequence!
+      invoice = ManualInvoice.create!
+      collide_once!(ManualInvoice, holder.sequence)
+
+      ConcernsOnRails::Support::UniqueRetry.with_retries { invoice.assign_sequence! }
+
+      expect(invoice.reload.sequence).to eq(2)
+      expect(invoice.number).to eq("INV-2")
+    end
+
+    it "restores both the field and the into: column when save! raises" do
+      holder = ManualInvoice.create!
+      holder.assign_sequence!
+      invoice = ManualInvoice.create!
+      collide_once!(ManualInvoice, holder.sequence)
+
+      expect { invoice.assign_sequence! }.to raise_error(ActiveRecord::RecordNotUnique)
+      expect(invoice.sequence).to be_nil
+      expect(invoice.number).to be_nil
+      expect(invoice.sequence_assigned?).to be(false)
+    end
+
+    it "restores on a validation failure too, and keeps a caller's transaction usable" do
+      ManualInvoice.validate { errors.add(:base, "locked") if sequence.present? && account_id == 13 }
+      invoice = ManualInvoice.create!(account_id: 13)
+
+      ActiveRecord::Base.transaction do
+        expect { invoice.assign_sequence! }.to raise_error(ActiveRecord::RecordInvalid)
+        expect(invoice.sequence).to be_nil
+        expect(invoice.number).to be_nil
+        ManualInvoice.create! # the outer transaction is still usable
+      end
+      expect(ManualInvoice.count).to eq(2)
+    end
+  end
+
+  describe "which rows share a counter: the class that DECLARED the macro (review of #111)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :x_docs, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+          t.string  :number
+          t.timestamps
+        end
+        add_index :x_docs, %i[type sequence], unique: true
+      end
+
+      Object.const_set(:XDoc, Class.new(TestModel) { self.table_name = "x_docs" })
+      Object.const_set(:XInvoice, Class.new(XDoc) do
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", padding: 4
+      end)
+      Object.const_set(:XCredit, Class.new(XDoc) do
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "CN-", padding: 4
+      end)
+    end
+
+    after do
+      %i[XInvoice XCredit XDoc].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    it "keeps per-subclass numbering when each subclass declares its own sequence (gap-free per type)" do
+      numbers = [XInvoice.create!, XInvoice.create!, XCredit.create!, XInvoice.create!].map(&:number)
+      expect(numbers).to eq(%w[INV-0001 INV-0002 CN-0001 INV-0003])
+    end
+
+    it "previews exactly what the next per-subclass assignment produces" do
+      2.times { XInvoice.create! }
+      XCredit.create!
+
+      expect(XInvoice.next_sequence).to eq(3)
+      expect(XCredit.next_sequence).to eq(2)
+      expect(XInvoice.create!.sequence).to eq(3)
+      expect(XCredit.create!.sequence).to eq(2)
+    end
+
+    it "previews the base-declared, table-wide counter from the base and from any subclass" do
+      ActiveRecord::Base.connection.remove_index(:x_docs, %i[type sequence])
+      base = Class.new(TestModel) do
+        self.table_name = "x_docs"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence
+      end
+      Object.const_set(:XShared, base)
+      Object.const_set(:XSharedSub, Class.new(base))
+      XSharedSub.create!
+      XShared.create!
+
+      expect(XShared.next_sequence).to eq(3)
+      expect(XSharedSub.next_sequence).to eq(3)
+      expect(XSharedSub.create!.sequence).to eq(3)
+    ensure
+      %i[XSharedSub XShared].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    it "previews scope: :type per receiving class when no scope attrs are passed" do
+      ActiveRecord::Base.connection.remove_index(:x_docs, %i[type sequence])
+      base = Class.new(TestModel) do
+        self.table_name = "x_docs"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, scope: :type
+      end
+      Object.const_set(:XTyped, base)
+      Object.const_set(:XTypedInv, Class.new(base))
+      Object.const_set(:XTypedCn, Class.new(base))
+      2.times { XTypedInv.create! }
+      XTypedCn.create!
+
+      expect(XTypedInv.next_sequence).to eq(3)
+      expect(XTypedCn.next_sequence).to eq(2)
+      expect(XTyped.next_sequence(type: "XTypedInv")).to eq(3) # explicit scope attrs still win
+      expect(XTyped.next_sequence).to eq(1) # base rows carry type NULL
+      expect([XTypedInv.create!, XTypedCn.create!, XTyped.create!].map(&:sequence)).to eq([3, 2, 1])
+    ensure
+      %i[XTypedInv XTypedCn XTyped].each { |c| Object.send(:remove_const, c) if Object.const_defined?(c) }
+    end
+
+    it "keeps the declaring class as the owner for a subclass that inherits the config" do
+      Object.const_set(:XInvoiceProforma, Class.new(XInvoice))
+      XInvoice.create!
+      XCredit.create!
+      expect(XInvoiceProforma.create!.number).to eq("INV-0002") # shares XInvoice's counter
+      expect(XInvoiceProforma.next_sequence).to eq(3)
+    ensure
+      Object.send(:remove_const, :XInvoiceProforma) if Object.const_defined?(:XInvoiceProforma)
+    end
+  end
+
+  describe "numbering class edge cases (re-review of #111)" do
+    after do
+      %i[AbInvSub AbInv AbQuote AbDoc RdInv RdCn RdCnSub RdBase].each do |c|
+        Object.send(:remove_const, c) if Object.const_defined?(c)
+      end
+    end
+
+    it "numbers over the concrete table when the macro is declared on an abstract class" do
+      ActiveRecord::Schema.define do
+        create_table :ab_invs, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+        end
+        create_table :ab_quotes, force: true do |t|
+          t.integer :sequence
+        end
+      end
+      Object.const_set(:AbDoc, Class.new(TestModel) do
+        self.abstract_class = true
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence
+      end)
+      Object.const_set(:AbInv, Class.new(AbDoc) { self.table_name = "ab_invs" })
+      Object.const_set(:AbInvSub, Class.new(AbInv))
+      Object.const_set(:AbQuote, Class.new(AbDoc) { self.table_name = "ab_quotes" })
+
+      expect([AbInv.create!, AbInvSub.create!, AbInv.create!].map(&:sequence)).to eq([1, 2, 3])
+      expect(AbQuote.create!.sequence).to eq(1) # its own table, its own counter
+      expect(AbInvSub.next_sequence).to eq(4)
+      expect(AbInv.next_sequence).to eq(4)
+      expect(AbQuote.next_sequence).to eq(2)
+    end
+
+    it "lets a re-declaring subclass's rows leave a GAP in the parent series — never a duplicate" do
+      ActiveRecord::Schema.define do
+        create_table :rd_docs, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+          t.string  :number
+        end
+      end
+      Object.const_set(:RdBase, Class.new(TestModel) do
+        self.table_name = "rd_docs"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", padding: 4
+      end)
+      Object.const_set(:RdInv, Class.new(RdBase)) # inherits INV-
+      Object.const_set(:RdCn, Class.new(RdBase) { sequenceable_by :sequence, into: :number, prefix: "CN-", padding: 4 })
+      Object.const_set(:RdCnSub, Class.new(RdCn)) # inherits CN-
+
+      numbers = [RdInv.create!, RdCn.create!, RdCnSub.create!, RdCn.create!, RdInv.create!, RdBase.create!].map(&:number)
+      # The base series is MAX over every row of the table (as on master), so
+      # the CN rows push it past 3; per-type series without gaps: scope: :type.
+      expect(numbers).to eq(%w[INV-0001 CN-0001 CN-0002 CN-0003 INV-0004 INV-0005])
+      expect(RdInv.next_sequence).to eq(6)
+      expect(RdBase.next_sequence).to eq(6)
+      expect(RdCnSub.next_sequence).to eq(4)
+    end
+
+    it "never reissues a parent number when a subclass starts declaring its own sequence after a deploy" do
+      ActiveRecord::Schema.define do
+        create_table :rd_docs, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+          t.string  :number
+        end
+        add_index :rd_docs, %i[type sequence], unique: true
+      end
+      Object.const_set(:RdBase, Class.new(TestModel) do
+        self.table_name = "rd_docs"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+      end)
+      Object.const_set(:RdInv, Class.new(RdBase))
+      issued = [RdBase.create!, RdInv.create!, RdInv.create!].map(&:number)
+      expect(issued).to eq(%w[INV-1 INV-2 INV-3])
+
+      # The deploy: RdInv now declares its own series.
+      RdInv.sequenceable_by :sequence, into: :number, prefix: "INV-"
+
+      next_base = RdBase.create!.number
+      expect(issued).not_to include(next_base)
+      expect(next_base).to eq("INV-4")
+      expect(RdInv.create!.number).to eq("INV-4") # its own series continues from its own rows
+    end
+  end
 end

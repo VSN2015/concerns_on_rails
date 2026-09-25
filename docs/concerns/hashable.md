@@ -53,8 +53,8 @@ hashable_by :field, type: :hex, length: 16, alphabet: nil, unique: false, prefix
 | `field` (positional, required) | `Symbol` | — | The model attribute that receives the generated value. The column must already exist in the schema. |
 | `type:` | `Symbol` | `:hex` | Generator strategy. Valid values: `:hex`, `:uuid`, `:integer`, `:custom`. Any other value raises `ArgumentError`. |
 | `length:` | `Integer` | `16` | For `:hex`: byte count (output string is `length * 2` characters). For `:integer`: number of digits. For `:custom`: output length in characters. Ignored by `:uuid`. |
-| `alphabet:` | `String` | `nil` | Required when `type: :custom`. A non-empty string of characters to sample from uniformly via `SecureRandom`. Raises `ArgumentError` if omitted or empty when `type: :custom`. |
-| `unique:` | `Boolean` | `false` | Pre-check each candidate against the table (unscoped) and retry a bounded number of times on a collision, at create time and in `regenerate_<field>!`. Pair with a unique index — the pre-check narrows the race, the index closes it. |
+| `alphabet:` | `String` | `nil` | Required when `type: :custom`. A string of at least 2 **distinct** characters to sample from uniformly via `SecureRandom`. Raises `ArgumentError` if omitted or empty, or if fewer than 2 distinct characters remain. A repeated character (which would silently be drawn more often, biasing the output) is removed with a `ConcernsOnRails.deprecator` warning — it will raise in 2.0. |
+| `unique:` | `Boolean` | `false` | Pre-check each candidate against the table (unscoped, on the STI base class so sibling subclasses' values count) and retry a bounded number of times on a collision, at create time and in `regenerate_<field>!`. Pair with a unique index — the pre-check narrows the race, the index closes it. |
 | `prefix:` | `String` | `nil` | Prepended to every generated value (`prefix: "ord_"` → `"ord_k7m3pq9a"`), the Stripe/GitHub public-ID convention: the type of object is readable from the id and a leaked id can't be mistaken for another resource. String types only — `type: :integer` with a prefix raises `ArgumentError`. The uniqueness pre-check and the `regenerate_` method both work on the full prefixed value. |
 | `to_param:` | `Boolean` | `false` | When `true`, overrides `to_param` to return the hashed field, so `order_path(order)` and `redirect_to order` use it. Falls back to the primary key while the field is blank (an unsaved record still returns `nil`, like Rails) — while a backfill is in flight, look records up with `find_by(field: params[:id]) || find(params[:id])` so both shapes resolve; otherwise `find_by!(field: params[:id])`. `find` still means the primary key. Raises at class load on a model that also includes Sluggable, since friendly_id overrides `to_param` too and the winner would depend on include order. |
 
@@ -73,7 +73,7 @@ hashable_by :field, type: :hex, length: 16, alphabet: nil, unique: false, prefix
 
 | Signature | Description |
 |-----------|-------------|
-| `regenerate_<field>!` | Generates a new random value and immediately persists it with `update!`. The method name is derived from the configured field, e.g. `regenerate_token!` or `regenerate_external_id!`. |
+| `regenerate_<field>!` | Generates a new random value and immediately persists it with `update!`. A `RecordNotUnique` from a unique index is retried with a fresh value, each attempt in its own savepoint (so it works inside your transaction on PostgreSQL). The method name is derived from the configured field, e.g. `regenerate_token!` or `regenerate_external_id!`. |
 
 ### Class methods
 

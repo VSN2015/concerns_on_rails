@@ -43,7 +43,7 @@ describe ConcernsOnRails::Aliasable do
     end
     %i[Author Book SoloAuthor ShelfAuthor GhostBook VirtualBook HabtmAuthor Label
        PhantomBook TrackedBook DestroyAuthor FancyAuthor Note Review LazyAuthor
-       LazyBook].each do |const|
+       LazyBook NestedAuthor NestedSoloAuthor NestedBook].each do |const|
       Object.send(:remove_const, const) if Object.const_defined?(const)
     end
   end
@@ -611,6 +611,135 @@ describe ConcernsOnRails::Aliasable do
 
       author = subclass.create!(name: "Jane")
       expect(author.association(:works)).to equal(author.association(:books))
+    end
+  end
+
+  # accepts_nested_attributes_for :alias used to flip autosave on the renamed
+  # reflection COPY only. The copy installs no save callbacks, and the source's
+  # callbacks (which do run) still saw autosave: nil — so only brand-new
+  # children were persisted; updates and _destroy of EXISTING children were
+  # silently dropped.
+  describe "accepts_nested_attributes_for through an alias" do
+    before do
+      class NestedAuthor < TestModel
+        self.table_name = "authors"
+        include ConcernsOnRails::Aliasable
+
+        has_many :books, foreign_key: :author_id, inverse_of: false
+        alias_association :works, :books
+        accepts_nested_attributes_for :works, allow_destroy: true,
+                                              reject_if: ->(attrs) { attrs["title"] == "reject me" },
+                                              limit: 3
+      end
+
+      class NestedSoloAuthor < TestModel
+        self.table_name = "authors"
+        include ConcernsOnRails::Aliasable
+
+        has_one :book, foreign_key: :author_id, inverse_of: false
+        alias_association :masterpiece, :book
+        accepts_nested_attributes_for :masterpiece, allow_destroy: true
+      end
+
+      class NestedBook < TestModel
+        self.table_name = "books"
+        include ConcernsOnRails::Aliasable
+
+        belongs_to :author, optional: true
+        alias_association :writer, :author
+        accepts_nested_attributes_for :writer
+      end
+    end
+
+    it "creates new children on a new parent (has_many)" do
+      author = NestedAuthor.create!(name: "A", works_attributes: [{ title: "one" }, { title: "two" }])
+
+      expect(author.reload.books.map(&:title)).to contain_exactly("one", "two")
+    end
+
+    it "updates EXISTING children (has_many)" do
+      author = NestedAuthor.create!(name: "A")
+      book = Book.create!(title: "old", author_id: author.id)
+
+      author.update!(works_attributes: [{ id: book.id, title: "new" }])
+
+      expect(book.reload.title).to eq("new")
+    end
+
+    it "destroys EXISTING children marked _destroy (has_many, allow_destroy)" do
+      author = NestedAuthor.create!(name: "A")
+      book = Book.create!(title: "old", author_id: author.id)
+
+      author.update!(works_attributes: [{ id: book.id, _destroy: "1" }])
+
+      expect(Book.exists?(book.id)).to be(false)
+    end
+
+    it "honours reject_if and limit" do
+      author = NestedAuthor.create!(name: "A", works_attributes: [{ title: "reject me" }, { title: "kept" }])
+      expect(author.reload.books.map(&:title)).to eq(["kept"])
+
+      expect do
+        author.works_attributes = Array.new(4) { |i| { title: "t#{i}" } }
+      end.to raise_error(ActiveRecord::NestedAttributes::TooManyRecords)
+    end
+
+    it "saves each changed child exactly once (callbacks run once)" do
+      saves = []
+      Book.after_save { saves << title }
+      author = NestedAuthor.create!(name: "A")
+      book = Book.create!(title: "old", author_id: author.id)
+      saves.clear
+
+      author.update!(works_attributes: [{ id: book.id, title: "new" }, { title: "fresh" }])
+
+      expect(saves).to contain_exactly("new", "fresh")
+    end
+
+    it "validates nested children once, without duplicate errors" do
+      Book.validates :title, presence: true
+      author = NestedAuthor.create!(name: "A")
+      book = Book.create!(title: "old", author_id: author.id)
+
+      expect(author.update(works_attributes: [{ id: book.id, title: "" }])).to be(false)
+      expect(author.errors.count).to eq(1)
+      expect(book.reload.title).to eq("old")
+    end
+
+    it "updates and destroys an EXISTING has_one child" do
+      author = NestedSoloAuthor.create!(name: "A")
+      book = Book.create!(title: "old", author_id: author.id)
+
+      author.update!(masterpiece_attributes: { id: book.id, title: "new" })
+      expect(book.reload.title).to eq("new")
+
+      author.reload.update!(masterpiece_attributes: { id: book.id, _destroy: "1" })
+      expect(Book.exists?(book.id)).to be(false)
+    end
+
+    it "updates an EXISTING belongs_to parent" do
+      author = Author.create!(name: "old")
+      book = NestedBook.create!(title: "b", author_id: author.id)
+
+      book.update!(writer_attributes: { id: author.id, name: "new" })
+
+      expect(author.reload.name).to eq("new")
+    end
+
+    # Pins the documented behaviour: stock Rails nested attributes set autosave
+    # on the (shared, inherited) reflection too, so the parent autosaves.
+    it "sets autosave on the inherited source reflection when a subclass declares it" do
+      parent = Author
+      expect(parent.reflect_on_association(:books).options[:autosave]).to be_nil
+
+      Class.new(parent) { accepts_nested_attributes_for :works }
+
+      expect(parent.reflect_on_association(:books).options[:autosave]).to be(true)
+    end
+
+    it "does not define a writer for the source name" do
+      expect(NestedAuthor.method_defined?(:books_attributes=)).to be(false)
+      expect(NestedAuthor.method_defined?(:works_attributes=)).to be(true)
     end
   end
 
