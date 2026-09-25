@@ -7,7 +7,7 @@ RSpec.describe ConcernsOnRails::Support::Callable do
     end.new
   end
 
-  it "instance_execs a Proc on the controller, whatever its arity" do
+  it "instance_execs a zero-arity lambda or a block on the receiver" do
     expect(described_class.invoke(controller, -> { tenant })).to eq("acme")
     expect(described_class.invoke(controller, proc { tenant })).to eq("acme")
   end
@@ -16,6 +16,20 @@ RSpec.describe ConcernsOnRails::Support::Callable do
     callable = Class.new { def call(controller) = "#{controller.tenant}!" }.new
 
     expect(described_class.invoke(controller, callable)).to eq("acme!")
+  end
+
+  # Throttleable's if: dispatch: a lambda that takes an argument (or a
+  # symbol proc) is CALLED with the receiver — instance_exec'ing it passed
+  # no argument and raised ArgumentError.
+  it "calls a lambda that takes an argument, and a symbol proc, with the receiver" do
+    outside = "outside"
+    expect(described_class.invoke(controller, ->(c) { "#{c.tenant}/#{outside}" })).to eq("acme/outside")
+    expect(described_class.invoke(controller, :tenant.to_proc)).to eq("acme")
+    expect(described_class.invoke(controller, controller.method(:tenant).to_proc)).to eq("acme")
+  end
+
+  it "instance_execs a block-style proc and hands it the receiver as well" do
+    expect(described_class.invoke(controller, proc { |c| [tenant, c.tenant] })).to eq(%w[acme acme])
   end
 
   it "calls a callable whose #call takes no arguments bare (a Method included)" do

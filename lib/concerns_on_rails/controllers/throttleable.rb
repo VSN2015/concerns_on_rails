@@ -49,8 +49,9 @@ module ConcernsOnRails
 
       module ClassMethods
         # Declare a rate-limit rule. `limit` requests per `period` (a Duration or
-        # seconds), bucketed by `by:` (a callable, default per-IP; a Proc is
-        # instance_exec'd, any other callable is passed the controller). `only:`/
+        # seconds), bucketed by `by:` (a callable, default per-IP; dispatched by
+        # Support::Callable — a zero-arity lambda or a block is instance_exec'd,
+        # anything else is passed the controller). `only:`/
         # `except:` scope it to a subset of actions (mutually exclusive). `if:`/
         # `unless:` (a Symbol naming a controller method, or a callable — a
         # zero-arity Proc is instance_exec'd, anything else is handed the
@@ -250,9 +251,10 @@ module ConcernsOnRails
         end
       end
 
-      # A Proc `by:` is instance_exec'd; any other callable is handed the
-      # controller (Support::Callable) — it used to be instance_exec'd too,
-      # a TypeError on every request for the objects the macro accepts.
+      # Support::Callable: a zero-arity lambda or a block is instance_exec'd,
+      # anything else is handed the controller — `by:` used to be
+      # instance_exec'd unconditionally, a TypeError on every request for the
+      # callable objects the macro accepts (and an ArgumentError for `->(c)`).
       def throttle_discriminator(rule)
         value = ConcernsOnRails::Support::Callable.invoke(self, rule[:by])
         if value.blank?

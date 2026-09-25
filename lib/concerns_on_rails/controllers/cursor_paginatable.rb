@@ -25,7 +25,9 @@ module ConcernsOnRails
     # Reads params[:cursor] (the opaque token from X-Next-Cursor) and
     # params[:per_page]. The primary key is always appended as a tiebreaker.
     # Ordering columns are chosen in code (never from params), must live on the
-    # base model's table, be selected by the relation, and should be NOT NULL.
+    # base model's table, be selected by the relation, and be NOT NULL: a NULL
+    # anywhere in the relation raises ArgumentError on every page (see
+    # cursor_guard_nulls!) rather than letting the keyset silently drop rows.
     #
     # Optional capabilities (all opt-in, defaults unchanged):
     #   * bidirectional: true — mints X-Prev-Cursor / X-Has-Prev alongside the
@@ -299,8 +301,8 @@ module ConcernsOnRails
         effective = backward ? cursor_invert_pairs(pairs) : pairs
         scoped = relation.reorder(effective.to_h)
         scoped = scoped.where(cursor_predicate(relation.model, effective, cursor[:values])) if cursor
+        cursor_guard_nulls!(relation, pairs)
         rows = scoped.limit(limit + 1).to_a
-        cursor_guard_nulls!(relation, pairs, cursor, rows, limit)
 
         page = rows.first(limit)
         page.reverse! if backward
@@ -468,87 +470,38 @@ module ConcernsOnRails
         value = record.read_attribute(col)
         return value unless value.nil?
 
-        cursor_null_ordering!(col, "is NULL on the page-boundary row", record.read_attribute(record.class.primary_key))
+        cursor_null_ordering!(col, "is NULL on the page-boundary row (id: #{record.read_attribute(record.class.primary_key).inspect})")
       end
 
-      # The same contract, for the NULLs the boundary guard never sees: the
-      # rows AFTER the boundary. Where NULLs sort is adapter-specific (SQLite /
-      # MySQL first ascending, PostgreSQL last), and wherever they land after
-      # the boundary the next page's `col > v` / `(col, id) > (v, x)` is never
-      # TRUE for them — they were dropped without a word, the walk simply
-      # "ending" early. Two guards cover it:
-      #
-      #   * the limit+1 probe row (free — it is already loaded): walking the
-      #     ordering columns as the predicate does, a NULL met before any
-      #     column differs from the boundary's is a row the next page cannot
-      #     return;
-      #   * the last page of a cursor walk (nothing past it matched): if a
-      #     NULL-ordered row this page did not return sorts after the cursor's
-      #     boundary row, the walk skipped it. Two small queries, and only
-      #     when an ordering column is nullable in the schema — NOT NULL
-      #     columns (the documented setup) pay nothing.
-      #
-      # NULL rows sorting BEFORE the boundary were already returned and pass.
-      def cursor_guard_nulls!(relation, pairs, cursor, rows, limit)
-        effective = cursor&.dig(:backward) ? cursor_invert_pairs(pairs) : pairs
-        if rows.size > limit
-          cursor_guard_probe_null!(effective, rows[limit - 1], rows[limit])
-        elsif cursor
-          cursor_guard_skipped_nulls!(relation, pairs, effective, cursor, rows)
-        end
-      end
-
-      # The first ordering column where the probe differs from the boundary
-      # (or is NULL) decides whether the next page's predicate can return it.
-      def cursor_guard_probe_null!(effective, boundary, probe)
-        col = effective.map(&:first).find do |column|
-          value = probe.read_attribute(column)
-          value.nil? || value != boundary.read_attribute(column)
-        end
-        return if col.nil? || boundary.read_attribute(col).nil? # the boundary guard reports a NULL boundary
-        return unless probe.read_attribute(col).nil?
-
-        cursor_null_ordering!(col, "is NULL on the row after the page boundary", probe.read_attribute(probe.class.primary_key))
-      end
-
-      def cursor_guard_skipped_nulls!(relation, pairs, effective, cursor, rows)
-        nullable = cursor_nullable_columns(relation.model, effective)
-        return if nullable.empty?
-
-        pk = relation.model.primary_key.to_sym
-        skipped = cursor_last_unreturned_null_row(relation, effective, nullable, rows.map { |row| row.read_attribute(pk) })
-        return unless skipped
-
-        boundary_id = cursor[:values][pairs.map(&:first).index(pk)]
-        order = relation.where(pk => [boundary_id, skipped[pk]]).reorder(effective.to_h).pluck(pk)
-        return unless order == [boundary_id, skipped[pk]]
-
-        cursor_null_ordering!(nullable.find { |col| skipped[col].nil? }, "has NULL rows the cursor walk would skip", skipped[pk])
-      end
-
-      def cursor_nullable_columns(model, effective)
-        effective.map(&:first).select do |col|
-          column = model.columns_hash[col.to_s]
-          column.nil? || column.null
-        end
-      end
-
-      # {column => value} of the NULL-ordered row, not on this page, that
-      # sorts LAST in the direction of travel (the inverted order's first —
-      # reversing an ORDER BY flips NULL placement on every adapter), or nil.
-      # Plucks every ordering column so a DISTINCT relation stays valid SQL.
-      def cursor_last_unreturned_null_row(relation, effective, nullable, returned_ids)
+      # The same contract, for the NULLs the boundary guard never sees. A
+      # keyset predicate (`col > v`, `(col, id) > (v, x)`) is never TRUE for a
+      # NULL, so a NULL-ordered row anywhere after the boundary — the limit+1
+      # probe, a later row, a secondary column past an equal primary — was
+      # dropped without a word, and where the adapter sorts NULLs (SQLite /
+      # MySQL first ascending, PostgreSQL last) decided which rows. Heuristics
+      # on the fetched rows cannot see rows the predicate already excluded,
+      # and Ruby value comparison disagrees with case-insensitive collations,
+      # so the check is deterministic instead: before every page, each
+      # ordering column the SCHEMA allows NULL in is probed with one
+      # `EXISTS (... WHERE col IS NULL)` over the relation's own scoping
+      # (indexable; ORDER/LIMIT/OFFSET/SELECT dropped, so DISTINCT and joined
+      # relations stay valid SQL — the column is table-qualified). Any NULL
+      # raises, whichever page and whatever the adapter. NOT NULL columns
+      # (the documented setup, including the primary key) cost nothing.
+      def cursor_guard_nulls!(relation, pairs)
         model = relation.model
-        columns = effective.map(&:first)
-        any_null = nullable.map { |col| model.arel_table[col].eq(nil) }.reduce(:or)
-        row = relation.where(any_null).where.not(model.primary_key => returned_ids)
-                      .reorder(cursor_invert_pairs(effective).to_h).limit(1).pluck(*columns).first
-        row && columns.zip(row).to_h
+        pairs.map(&:first).each do |col|
+          column = model.columns_hash[col.to_s]
+          next unless column&.null
+          next unless relation.unscope(:order, :limit, :offset, :select).where(model.arel_table[col].eq(nil)).exists?
+
+          cursor_null_ordering!(col, "has NULL values in the paginated relation")
+        end
       end
 
-      def cursor_null_ordering!(col, problem, id)
+      def cursor_null_ordering!(col, problem)
         raise ArgumentError,
-              "#{CursorPaginatable.name}: ordering column '#{col}' #{problem} (id: #{id.inspect}) — " \
+              "#{CursorPaginatable.name}: ordering column '#{col}' #{problem} — " \
               "cursor pagination needs non-NULL ordering values; use NOT NULL columns or COALESCE"
       end
 

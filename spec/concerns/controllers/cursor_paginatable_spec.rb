@@ -650,45 +650,27 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
   end
 
   describe "NULL ordering values" do
-    it "raises loudly when the page-boundary row has a NULL ordering value" do
+    let(:null_error) { /ordering column 'score' has NULL values in the paginated relation/ }
+
+    it "raises loudly when every ordering value is NULL" do
       Item.delete_all
-      # Every row is NULL-scored on purpose. Where the NULL lands in the sort is
-      # adapter-specific — SQLite and MySQL order NULLs first ascending,
-      # PostgreSQL orders them last — so a mixed fixture only puts a NULL on the
-      # page boundary on two of the three. With no non-NULL score anywhere, the
-      # boundary row carries a NULL whichever way the adapter sorts, and the
-      # guard under test fires on every one of them.
       Item.create!(name: "null-score-a", score: nil)
       Item.create!(name: "null-score-b", score: nil)
 
       controller = make_controller(per_page: 1)
       expect do
         controller.cursor_paginated(Item.all, order: :score)
-      end.to raise_error(ArgumentError, /NULL on the page-boundary row/)
+      end.to raise_error(ArgumentError, null_error)
     end
 
     # Where NULLs sort is adapter-specific (SQLite/MySQL: first ascending,
-    # last descending; PostgreSQL the opposite), so each example asks the
-    # adapter which direction puts them LAST (where a keyset walk would lose
-    # them) and FIRST (where it already returned them).
+    # last descending; PostgreSQL the opposite).
     def nulls_last_direction
       Item.order(score: :desc, id: :desc).first.score.nil? ? :asc : :desc
     end
 
     def nulls_first_direction
       nulls_last_direction == :asc ? :desc : :asc
-    end
-
-    def walk(order, per_page:)
-      seen = []
-      cursor = nil
-      10.times do
-        controller = make_controller({ per_page: per_page, cursor: cursor }.compact)
-        seen.concat(controller.cursor_paginated(Item.all, order: order).map(&:id))
-        cursor = controller.cursor_pagination_meta[:next_cursor]
-        break unless cursor
-      end
-      seen
     end
 
     def seed_scores(*scores)
@@ -700,27 +682,72 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
     # so NULL rows sorting after the last non-NULL one were dropped without a
     # word when the NULL row was only the limit+1 probe: page 1 had_more, page
     # 2 came back empty, and the walk "ended".
-    it "fails loudly when the row after the page boundary (the probe) is NULL" do
+    it "fails loudly on the first page when NULL rows sort after the non-NULL ones" do
       seed_scores(1, 2, 3, nil, nil)
 
-      controller = make_controller(per_page: 3)
-      expect do
-        controller.cursor_paginated(Item.all, order: { score: nulls_last_direction })
-      end.to raise_error(ArgumentError, /ordering column 'score' is NULL on the row after the page boundary/)
+      expect { make_controller(per_page: 3).cursor_paginated(Item.all, order: { score: nulls_last_direction }) }
+        .to raise_error(ArgumentError, null_error)
     end
 
-    it "fails loudly on the last page when NULL rows lie beyond it (never ends the walk short)" do
-      seed_scores(4, 3, 2, 1, nil)
-      direction = nulls_last_direction
-
-      expect { walk({ score: direction }, per_page: 3) }
-        .to raise_error(ArgumentError, /ordering column 'score' has NULL rows the cursor walk would skip/)
-    end
-
-    it "walks NULL rows that sort before every boundary without complaint" do
+    # The contract is deterministic — any NULL in a nullable ordering column
+    # raises — so the same data answers the same way on every adapter, instead
+    # of working where NULLs happen to sort first and dropping rows elsewhere.
+    it "fails loudly whichever way the adapter sorts the NULLs" do
       seed_scores(nil, 1, 2, 3)
 
-      expect(walk({ score: nulls_first_direction }, per_page: 2).sort).to eq(Item.pluck(:id).sort)
+      expect { make_controller(per_page: 2).cursor_paginated(Item.all, order: { score: nulls_first_direction }) }
+        .to raise_error(ArgumentError, null_error)
+    end
+
+    it "fails loudly on a later page too (a NULL row inserted mid-walk)" do
+      seed_scores(1, 2, 3, 4)
+      first = make_controller(per_page: 2)
+      first.cursor_paginated(Item.all, order: :score)
+      Item.create!(name: "late", score: nil)
+
+      expect { make_controller(per_page: 2, cursor: first.cursor_pagination_meta[:next_cursor]).cursor_paginated(Item.all, order: :score) }
+        .to raise_error(ArgumentError, null_error)
+    end
+
+    it "ignores NULLs the relation's own scoping excludes" do
+      seed_scores(1, 2, nil)
+
+      records = make_controller(per_page: 5).cursor_paginated(Item.where.not(score: nil), order: :score)
+      expect(records.map(&:score)).to eq([1, 2])
+    end
+
+    # A NULL in a SECONDARY ordering column next to an equal primary value is
+    # excluded by the predicate just the same. Comparing fetched values in
+    # Ruby missed it under a case-insensitive collation ("A" = "a" in SQL, not
+    # in Ruby); the EXISTS probe asks the database instead.
+    it "fails loudly on a NULL secondary column, even under a case-insensitive collation" do
+      ActiveRecord::Schema.define do
+        create_table(:ci_items, force: true) do |t|
+          t.string :name, **(TestDatabase.adapter == "sqlite3" ? { collation: "NOCASE" } : {})
+          t.integer :score
+        end
+      end
+      stub_const("CiItem", Class.new(TestModel) { self.table_name = "ci_items" })
+      [["a", 5], ["A", nil], ["b", 1], ["c", 1]].each { |name, score| CiItem.create!(name: name, score: score) }
+
+      expect { make_controller(per_page: 1).cursor_paginated(CiItem.all, order: { name: :asc, score: :asc }) }
+        .to raise_error(ArgumentError, null_error)
+    end
+
+    # The probe must stay valid SQL on PostgreSQL/MySQL, which reject
+    # SELECT DISTINCT ... ORDER BY a column outside the select list.
+    it "probes DISTINCT and joined relations with valid, table-qualified SQL" do
+      seed_scores(1, 2, nil)
+      queries = []
+      callback = ->(*, payload) { queries << payload[:sql] unless payload[:name] == "SCHEMA" }
+
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+        expect { make_controller.cursor_paginated(Item.distinct.joins("INNER JOIN items AS other ON other.id = items.id"), order: :score) }
+          .to raise_error(ArgumentError, null_error)
+      end
+      probe = queries.find { |sql| sql.include?("IS NULL") }
+      expect(probe).not_to match(/ORDER BY/i)
+      expect(probe).to include("#{TestDatabase.qualified('items', 'score')} IS NULL")
     end
 
     it "costs nothing extra when the ordering columns are NOT NULL" do

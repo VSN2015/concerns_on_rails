@@ -244,15 +244,31 @@ module ConcernsOnRails
       # distinct values paginated as 6). Such a relation is counted as a
       # subquery instead — SELECT COUNT(*) FROM (SELECT DISTINCT ...) — which,
       # unlike COUNT(DISTINCT a, b), every adapter accepts for any number of
-      # columns. `unscoped` because the subquery already carries the
-      # relation's scoping (a default_scope re-applied outside it would
-      # reference a table the outer query does not have).
+      # columns. The outer query is raw SQL, not a model relation: even
+      # `Model.unscoped` re-applies an STI subclass's `type` condition, which
+      # the outer query would aim at a table its FROM does not have. to_sql
+      # inlines the relation's bind values, quoted by the adapter.
       def paginatable_distinct_select?(source)
         source.distinct_value && source.select_values.any? && source.group_values.empty?
       end
 
       def paginatable_distinct_select_total(source)
-        source.model.unscoped.from(source.except(:order, :limit, :offset), :paginatable_distinct).count(:all)
+        connection = source.connection
+        subquery = source.except(:order, :limit, :offset)
+        connection.select_value("SELECT COUNT(*) FROM (#{subquery.to_sql}) paginatable_distinct").to_i
+      rescue ActiveRecord::StatementInvalid => e
+        raise unless paginatable_mysql_duplicate_column?(connection, e)
+
+        # MySQL alone rejects a derived table whose SELECT list repeats an
+        # output name (`select("a.id, b.id")`, error 1060). MySQL does not
+        # abort the surrounding transaction on it, so fall back to reading
+        # the distinct rows themselves — one narrow column list, never the
+        # every-row count the subquery exists to avoid.
+        connection.select_rows(subquery.to_sql).size
+      end
+
+      def paginatable_mysql_duplicate_column?(connection, error)
+        connection.adapter_name.match?(/mysql|trilogy/i) && error.message.match?(/Duplicate column name/i)
       end
 
       # Both readers route through ScalarParam: `?page[]=1` / `?page[x]=1`

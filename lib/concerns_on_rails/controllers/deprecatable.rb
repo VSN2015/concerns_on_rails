@@ -184,8 +184,9 @@ module ConcernsOnRails
 
       # Public override point + instrumentation seam. Default: emit an
       # ActiveSupport::Notifications event and run the rule's `notify:` callable
-      # (a Proc is instance_exec'd, so it can read controller state; any other
-      # callable is passed the controller). A raising `notify` propagates by
+      # (Support::Callable: a zero-arity lambda or a block is instance_exec'd,
+      # so it can read controller state; anything else is passed the
+      # controller). A raising `notify` propagates by
       # design.
       def on_deprecated_access(rule)
         ActiveSupport::Notifications.instrument(

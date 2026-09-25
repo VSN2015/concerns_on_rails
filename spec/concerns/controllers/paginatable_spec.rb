@@ -668,6 +668,41 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(controller.pagination_meta[:total]).to eq(4)
     end
 
+    # `Model.unscoped` on an STI subclass still carries the `type` condition,
+    # so an outer count built from it aimed that condition at a table its
+    # FROM did not have — a StatementInvalid 500.
+    it "counts an STI subclass's DISTINCT select without re-scoping the outer query" do
+      ActiveRecord::Schema.define { add_column :pagination_memberships, :type, :string }
+      stub_const("PaginationAdmin", Class.new(PaginationMembership))
+      PaginationMembership.reset_column_information
+      [1, 1, 2, 3].each { |group_id| PaginationAdmin.create!(group_id: group_id) }
+
+      controller = controller_class.new(params: { per_page: 2 })
+      expect { controller.paginated(PaginationAdmin.select(:group_id).distinct).to_a }.not_to raise_error
+      expect(controller.pagination_meta[:total]).to eq(3)
+    end
+
+    it "keeps the relation's bound conditions in the counted subquery" do
+      controller = controller_class.new(params: { per_page: 2 })
+      controller.paginated(PaginationMembership.where(group_id: [1, 2]).select(:role_id).distinct).to_a
+
+      expect(controller.pagination_meta[:total]).to eq(2)
+    end
+
+    # Two output columns with the same name: MySQL rejects such a derived
+    # table (1060) and falls back to reading the distinct rows; the other
+    # adapters accept it. Either way the total is right.
+    it "counts a DISTINCT select with repeated output names" do
+      table = TestDatabase.quoted_table("pagination_memberships")
+      relation = PaginationMembership
+                 .joins("INNER JOIN #{table} other ON other.id = #{table}.id")
+                 .select("#{TestDatabase.qualified('pagination_memberships', 'group_id')}, other.group_id").distinct
+      controller = controller_class.new(params: { per_page: 2 })
+      controller.paginated(relation).to_a
+
+      expect(controller.pagination_meta[:total]).to eq(3)
+    end
+
     it "keeps counting every row of a plain DISTINCT relation" do
       controller = controller_class.new(params: { per_page: 2 })
       controller.paginated(PaginationMembership.distinct).to_a

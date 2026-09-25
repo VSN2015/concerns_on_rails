@@ -35,10 +35,10 @@ module ConcernsOnRails
     #            body; these have no standard header so `header:` is required;
     #            `digest:` (:sha256 default, :sha1/:sha512) applies to these only
     #
-    # secret: a non-blank String, a callable (resolved per request: a Proc is
-    # instance_exec'd — use `-> { ENV[...] }` for boot-order safety or read
-    # params for multi-tenant secrets — and any other callable is passed the
-    # controller), or an Array of those (rotation: any match passes). A secret that
+    # secret: a non-blank String, a callable (resolved per request via
+    # Support::Callable: a zero-arity lambda or a block is instance_exec'd —
+    # use `-> { ENV[...] }` for boot-order safety or read params for
+    # multi-tenant secrets — and anything else is passed the controller), or an Array of those (rotation: any match passes). A secret that
     # resolves blank at request time raises ArgumentError — a misconfigured
     # endpoint must alert the operator, not 401 into the provider's silent
     # retry loop.
@@ -550,10 +550,11 @@ module ConcernsOnRails
       end
 
       # Callables resolve per request (multi-tenant secrets can read params):
-      # a Proc is instance_exec'd, any other callable is handed the controller
-      # (Support::Callable — instance_exec on a non-Proc was a TypeError 500
-      # any sender could trigger). An Array means rotation. Resolving blank is a server
-      # misconfiguration — raise loudly rather than 401 every delivery.
+      # a zero-arity lambda or a block is instance_exec'd, anything else is
+      # handed the controller (Support::Callable — instance_exec on a non-Proc
+      # was a TypeError 500 any sender could trigger). An Array means
+      # rotation. Resolving blank is a server misconfiguration — raise loudly
+      # rather than 401 every delivery.
       def resolve_webhook_secrets!(rule)
         resolved = Array(rule[:secret]).flat_map do |candidate|
           Array(candidate.respond_to?(:call) ? ConcernsOnRails::Support::Callable.invoke(self, candidate) : candidate)

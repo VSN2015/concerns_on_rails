@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/callable"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/hooked_write"
 require "concerns_on_rails/support/unique_retry"
@@ -374,8 +375,11 @@ module ConcernsOnRails
           ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, value)
       end
 
+      # A callable object has no #arity of its own (only Procs and Methods
+      # do) — asking it directly was a NoMethodError at erasure time for a
+      # strategy the macro had accepted.
       def anonymizable_apply_strategy(strategy, value)
-        strategy.arity == 1 ? strategy.call(value) : strategy.call(value, self)
+        ConcernsOnRails::Support::Callable.arity(strategy) == 1 ? strategy.call(value) : strategy.call(value, self)
       end
 
       # The strategy's output for `field`, reading no more of the old value
