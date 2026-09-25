@@ -81,6 +81,53 @@ describe ConcernsOnRails::Support::AssociationScope do
     expect(bodies(:tagged_children)).to eq(%w[mine])
   end
 
+  # Rails memoizes the association's own scope half; a declared lambda that
+  # reaches the target model captures the default scope in force when it is
+  # first built, so a normal read beforehand leaked the default scope in.
+  describe "a declared scope that reaches the target model" do
+    before do
+      ScopeOwner.has_many :merged_children, -> { merge(ScopeChild.where.not(body: "zzz")) },
+                          class_name: "ScopeChild"
+    end
+
+    it "ignores a default-scoped memo left by an earlier normal read" do
+      child(scope_owner_id: owner.id, body: "hidden", visible: false)
+      owner.merged_children.to_a
+
+      expect(bodies(:merged_children)).to eq(%w[hidden])
+    end
+
+    it "leaves no unscoped memo behind for a later normal read" do
+      child(scope_owner_id: owner.id, body: "hidden", visible: false)
+
+      expect(bodies(:merged_children)).to eq(%w[hidden])
+      expect(owner.merged_children.reload.map(&:body)).to eq([])
+    end
+  end
+
+  it "drops only the TARGET's default scopes on a :through association" do
+    ActiveRecord::Schema.define do
+      create_table :scope_links, force: true do |t|
+        t.integer :scope_owner_id
+        t.integer :scope_child_id
+        t.boolean :active, default: true
+      end
+    end
+    stub_const("ScopeLink", Class.new(TestModel) do
+      self.table_name = "scope_links"
+      default_scope { where(active: true) }
+      belongs_to :scope_child
+    end)
+    ScopeOwner.has_many :scope_links
+    ScopeOwner.has_many :linked_children, through: :scope_links, source: :scope_child
+    kept = child(body: "kept")
+    unlinked = child(body: "unlinked")
+    ScopeLink.create!(scope_owner_id: owner.id, scope_child_id: kept.id, active: true)
+    ScopeLink.create!(scope_owner_id: owner.id, scope_child_id: unlinked.id, active: false)
+
+    expect(bodies(:linked_children)).to eq(%w[kept])
+  end
+
   it "keeps has_one's single row" do
     child(scope_owner_id: owner.id, body: "a", position: 1)
     child(scope_owner_id: owner.id, body: "b", position: 2)

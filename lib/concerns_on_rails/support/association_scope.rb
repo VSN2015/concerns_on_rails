@@ -24,9 +24,17 @@ module ConcernsOnRails
     module AssociationScope
       module_function
 
+      # Rails memoizes the association's own half of the scope
+      # (@association_scope), and a declared scope lambda that reaches the
+      # target model (`-> { merge(Child.where(...)) }`) picks up the default
+      # scope in effect when it is first built. So the memo is reset before
+      # building inside `unscoped` (an earlier normal read must not leak its
+      # default scope in) and after (ours must not leak into a later read).
       def unfiltered(record, name)
         association = record.association(name)
+        association.reset_scope
         relation = association.klass.unscoped { association.scope }
+        association.reset_scope
         order = association.scope.order_values
         order.empty? || order == relation.order_values ? relation : relation.reorder(*order)
       end

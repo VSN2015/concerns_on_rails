@@ -162,6 +162,58 @@ describe ConcernsOnRails::Support::HookedWrite do
     expect(item.reload.note).to be_nil
   end
 
+  # Forced changes live in the dirty tracker, not the attribute set, so
+  # rebuilding the tracker after the restore dropped them.
+  it "keeps a forced change (attribute_will_change!) across the abort" do
+    HookedItem.after_action = :rollback
+    item.note_will_change!
+
+    run(item) { item.update_column(:state, "new") }
+
+    expect(item.changed).to include("note")
+  end
+
+  describe "hooks that touch more than columns" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :hooked_posts, force: true do |t|
+          t.string :title
+          t.json :settings
+          t.integer :hooked_item_id
+        end
+      end
+      stub_const("HookedPost", Class.new(TestModel) do
+        self.table_name = "hooked_posts"
+        belongs_to :hooked_item, optional: true
+
+        attr_accessor :hook
+
+        def before_write
+          hook&.call(self)
+          raise ActiveRecord::Rollback
+        end
+      end)
+    end
+
+    it "undoes a vetoed hook's nested in-place mutation of a json value" do
+      post = HookedPost.create!(title: "t", settings: { "a" => { "b" => "orig" } })
+      post.hook = ->(record) { record.settings["a"]["b"] = "vetoed" }
+
+      expect(described_class.run(post, before: :before_write) { true }).to be(false)
+      expect(post.settings["a"]["b"]).to eq("orig")
+    end
+
+    it "puts the foreign key back when a vetoed hook reassigns a belongs_to" do
+      first = HookedItem.create!(state: "a")
+      post = HookedPost.create!(title: "t", hooked_item: first)
+      post.hook = ->(record) { record.hooked_item = HookedItem.create!(state: "b") }
+
+      described_class.run(post, before: :before_write) { true }
+
+      expect([post.hooked_item_id, post.hooked_item.id]).to eq([first.id, first.id])
+    end
+  end
+
   # Encryptable + Storable + Auditable on the model whose Publishable write is
   # vetoed: Auditable's before_save appends to the trail during the aborted
   # `update`. (Rails' own savepoint rollback reads the record's attributes —

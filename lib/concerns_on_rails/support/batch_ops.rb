@@ -100,14 +100,32 @@ module ConcernsOnRails
       # ids, not the two rows the fast path's update_all writes. So the order
       # is stripped, and a limit/offset is resolved up front — the primary
       # keys the relation selects (order, limit, default scopes and all) are
-      # plucked in one query, then iterated with every other condition kept.
-      # Plucked rather than a subquery: MySQL rejects LIMIT inside IN (...).
+      # plucked in one query, then iterated with every other condition kept,
+      # BATCH_SIZE keys (in key order) per query — handing the whole list to
+      # find_each re-sent every key in every batch. Plucked rather than an
+      # IN (subquery): MySQL rejects LIMIT inside IN (...).
       def each_record(relation, &)
         return relation.unscope(:order).find_each(&) unless relation.limit_value || relation.offset_value
 
         key = relation.klass.primary_key
-        ids = relation.pluck(key)
-        relation.unscope(:order, :limit, :offset).where(key => ids).find_each(&)
+        rows = relation.unscope(:order, :limit, :offset)
+        limited_keys(relation, key).sort.each_slice(BATCH_SIZE) do |slice|
+          rows.where(key => slice).reorder(Array(key).to_h { |column| [column, :asc] }).each(&)
+        end
+      end
+
+      # find_each's default batch size, so a limited relation pages the same.
+      BATCH_SIZE = 1000
+
+      # The primary keys a limited relation selects. A DISTINCT relation is
+      # plucked from itself as a subquery: `SELECT DISTINCT id ... ORDER BY
+      # other_column` is rejected by PostgreSQL (and MySQL under
+      # ONLY_FULL_GROUP_BY), while the relation's own `SELECT DISTINCT
+      # table.*` carries every column its ORDER BY can name.
+      def limited_keys(relation, key)
+        return relation.pluck(key) unless relation.distinct_value
+
+        relation.klass.unscoped.from(relation, relation.klass.quoted_table_name).pluck(key)
       end
 
       # The validate callbacks every ActiveRecord model carries out of the box

@@ -426,6 +426,21 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
       end
     end
 
+    it "uses a loaded association as-is when the child model has no default scope" do
+      plain = child_class { self.table_name = "dup_children" }
+      parent = parent_with(:has_many, plain)
+      original = parent.create!(title: "p")
+      DupChild.create!(dup_invoice_id: original.id, body: "a")
+      original.dup_children.load
+
+      queries = []
+      counter = ->(*, payload) { queries << payload[:sql] if payload[:sql].to_s.match?(/SELECT .*dup_children/) }
+      copy = ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { original.duplicate }
+
+      expect(queries).to be_empty
+      expect(copy.dup_children.map(&:body)).to eq(%w[a])
+    end
+
     # A child without Duplicable only had its timestamps (and counters)
     # blanked: its token was copied onto the new row — a shared credential,
     # or RecordNotUnique on the unique index — and likewise its sequence

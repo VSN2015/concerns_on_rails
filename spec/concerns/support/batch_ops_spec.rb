@@ -188,6 +188,67 @@ describe ConcernsOnRails::Support::BatchOps do
       expect(BatchItem.where(state: "done").count).to eq(2)
     end
 
+    # Handing the whole plucked key list to find_each re-sent all of it in
+    # every 1000-row batch — quadratic in the limit.
+    it "sends at most one batch of keys per query for a large limited relation" do
+      BatchItem.insert_all(Array.new(2500) { { state: "new" } })
+      in_lists = []
+      counter = lambda do |*, payload|
+        sql = payload[:sql].to_s
+        in_lists << sql.scan(/\d+/).size if sql.include?("batch_items") && sql.match?(/ IN \(/)
+      end
+
+      seen = 0
+      ActiveSupport::Notifications.subscribed(counter, "sql.active_record") do
+        described_class.each_record(BatchItem.order(id: :desc).limit(2500)) { seen += 1 }
+      end
+
+      expect(seen).to eq(2500)
+      expect(in_lists.size).to eq(3)
+      expect(in_lists.max).to be <= 1010
+    end
+
+    it "handles a joined, DISTINCT relation ordered by a column it does not pluck" do
+      ActiveRecord::Schema.define do
+        create_table :batch_owners, force: true do |t|
+          t.string :name
+        end
+        add_column :batch_items, :batch_owner_id, :integer
+      end
+      stub_const("BatchOwner", Class.new(TestModel) { self.table_name = "batch_owners" })
+      joined = Class.new(TestModel)
+      stub_const("JoinedBatchItem", joined) # joins(:assoc) needs a named class
+      joined.class_eval do
+        self.table_name = "batch_items"
+        belongs_to :batch_owner, class_name: "BatchOwner", optional: true
+      end
+      owner = BatchOwner.create!(name: "o")
+      items = %w[c a b].map { |state| joined.create!(state: state, batch_owner_id: owner.id) }
+
+      seen = []
+      relation = joined.joins(:batch_owner).distinct.order(:state).limit(2)
+      described_class.each_record(relation) { |record| seen << record.state }
+
+      expect(seen.sort).to eq(%w[a b])
+      expect(items.size).to eq(3)
+    end
+
+    it "handles a composite primary key", min_rails: "7.1" do
+      ActiveRecord::Schema.define do
+        create_table :batch_pairs, primary_key: %i[a b], force: true do |t|
+          t.integer :a
+          t.integer :b
+        end
+      end
+      pair = Class.new(TestModel) { self.table_name = "batch_pairs" }
+      [[1, 1], [1, 2], [2, 1]].each { |a, b| pair.create!(a: a, b: b) }
+
+      seen = []
+      described_class.each_record(pair.order(a: :desc, b: :desc).limit(2)) { |r| seen << [r.a, r.b] }
+
+      expect(seen).to eq([[1, 2], [2, 1]])
+    end
+
     describe "under error_on_ignored_order" do
       around do |example|
         config = ActiveRecord.respond_to?(:error_on_ignored_order=) ? ActiveRecord : ActiveRecord::Base

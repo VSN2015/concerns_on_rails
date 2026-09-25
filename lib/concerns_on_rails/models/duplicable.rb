@@ -223,10 +223,13 @@ module ConcernsOnRails
       #
       # An unsaved owner has no rows to query (its FK is nil, which would
       # match orphans), and an already-loaded association may hold unsaved
-      # edits or children: its in-memory records win over their rows.
+      # edits or children: its in-memory records win over their rows. When
+      # the child model declares no default scope at all, a loaded target is
+      # already every row, so it is used without the extra query.
       def duplicable_source_records(name)
         association = association(name)
         return Array.wrap(public_send(name)) if new_record?
+        return Array.wrap(association.target) if association.loaded? && association.klass.default_scopes.empty?
 
         rows = duplicable_unfiltered_rows(name)
         association.loaded? ? duplicable_merge_loaded(association, rows) : rows

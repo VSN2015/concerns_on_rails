@@ -100,9 +100,16 @@ module ConcernsOnRails
       # along with it. The last save's mutations are kept too: `update`
       # inside the aborted write would otherwise leave saved_changes
       # reporting a save that was rolled back.
+      #
+      # Forced changes (`title_will_change!`) live in the dirty tracker, not
+      # the attribute set — a Set of names on Rails 6.0, a name => original
+      # value Hash later — so they are copied from it and replayed onto the
+      # rebuilt tracker.
       def attribute_snapshot(record)
+        tracker = record.instance_variable_get(:@mutations_from_database)
         { attributes: record.instance_variable_get(:@attributes).deep_dup,
-          before_last_save: record.instance_variable_get(:@mutations_before_last_save) }
+          before_last_save: record.instance_variable_get(:@mutations_before_last_save),
+          forced_changes: tracker&.instance_variable_get(:@forced_changes).dup }
       end
 
       # Swap the copy back in. The dirty tracker is built over the attribute
@@ -120,6 +127,8 @@ module ConcernsOnRails
         record.instance_variable_set(:@attributes, snapshot[:attributes])
         record.instance_variable_set(:@mutations_from_database, nil)
         record.instance_variable_set(:@mutations_before_last_save, snapshot[:before_last_save])
+        forced = snapshot[:forced_changes]
+        record.send(:mutations_from_database).instance_variable_set(:@forced_changes, forced) if forced.present?
       end
       private_class_method :attribute_snapshot, :restore_attributes!, :identity_snapshot, :restore_identity!
     end

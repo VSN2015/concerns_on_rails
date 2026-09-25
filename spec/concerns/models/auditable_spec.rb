@@ -462,7 +462,37 @@ describe ConcernsOnRails::Auditable do
       expect(doc.audit_trail.map { |entry| entry["to"] }).to eq(%w[a])
 
       doc.update!(title: "b")
-      expect(klass.find(doc.id).audit_trail.map { |entry| entry["to"] }).to eq(%w[a b])
+      upgraded = klass.find(doc.id)
+      expect(upgraded.audit_trail.map { |entry| entry["to"] }).to eq(%w[a b])
+      expect(upgraded.audit_log).to be_a(Array) # rewritten as a real array
+    end
+  end
+
+  # A host-`serialize`d text column is handed the Array (its coder encodes
+  # it), and a plain JSON string written there earlier still reads.
+  describe "a serialized (YAML) trail column" do
+    let(:klass) do
+      Class.new(TestModel) do
+        self.table_name = "audit_products"
+        if ActiveRecord.version >= Gem::Version.new("7.1")
+          serialize :audit_log, coder: YAML
+        else
+          serialize :audit_log
+        end
+        include ConcernsOnRails::Auditable
+
+        auditable_by :name
+      end
+    end
+
+    it "round-trips the trail and keeps reading a legacy JSON string row" do
+      record = klass.create!(name: "a")
+      record.update!(name: "b")
+      expect(record.reload.audit_trail.map { |entry| entry["to"] }).to eq(%w[a b])
+
+      record.update_column(:audit_log, JSON.generate([{ "field" => "name", "to" => "legacy" }]))
+      record.reload.update!(name: "c")
+      expect(record.reload.audit_trail.map { |entry| entry["to"] }).to eq(%w[legacy c])
     end
   end
 
