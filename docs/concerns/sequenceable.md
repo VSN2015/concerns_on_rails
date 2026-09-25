@@ -67,8 +67,9 @@ end
 | `start_at:` | Integer | `1` | The first value assigned when the scope/period has no rows yet. |
 | `scope:` | Symbol / Array of Symbols / nil | `nil` | Column or array of columns that partition the counter. Each distinct combination of scope-column values maintains its own independent counter. |
 | `reset:` | Symbol | `:never` | Restarts the counter at `start_at` each calendar period. Valid values: `:never`, `:year`, `:month`, `:day`. Any value other than `:never` requires a `created_at` column. |
+| `time_zone:` | String / `ActiveSupport::TimeZone` / nil | `nil` (app zone) | The zone `reset:` periods are cut in — for the `MAX` range and the period token alike. `nil` resolves at use time to the app's configured zone (`config.time_zone`, i.e. `Time.zone_default`), falling back to UTC. Never the per-request `Time.zone`. An unknown zone name raises `ArgumentError` at class-load time. Has no effect with `reset: :never`. |
 | `template:` | Callable / nil | `nil` | A callable (e.g. a lambda) with signature `->(seq, record)` that returns the formatted string. When set, it completely overrides `prefix`, `padding`, `separator`, and the period token. Must respond to `#call`. |
-| `assign:` | Symbol | `:create` | When the number is assigned. `:create` registers the `before_create` callback (the default). `:manual` registers none — the column stays `NULL` until `assign_<field>!` is called, so a draft can exist without consuming a number and numbering follows finalization order. Any other value raises `ArgumentError`. |
+| `assign:` | Symbol | `:create` | When the number is assigned. `:create` numbers the field in the concern's `before_create` callback (the default). `:manual` skips it — the column stays `NULL` until `assign_<field>!` is called, so a draft can exist without consuming a number and numbering follows finalization order. Any other value raises `ArgumentError`. |
 
 ### Default format by `reset:` value
 
@@ -91,9 +92,11 @@ end
 
 Returns the formatted display string for the configured field. When an `into:` column is configured and its value is present (i.e. already persisted), the stored value is returned directly. Otherwise the value is computed on the fly from the raw integer using the configured prefix, padding, separator, period, and template. Returns `nil` when the raw integer column is blank.
 
-**`assign_sequenceable_value(field)`** *(called automatically via `before_create`)*
+**Numbering on create** *(automatic, via one `before_create`)*
 
-Computes and assigns the next sequence value and, when `into:` is configured, the formatted string. Skips assignment if the integer column already has a value (caller-supplied values are respected). If the computed candidate is already taken, the value is incremented until a free slot is found, up to `MAX_GENERATION_ATTEMPTS` (10) retries.
+The concern registers a single `before_create` the first time `sequenceable_by` is called and it is inherited by subclasses. At create it walks the receiving class's **current** configuration and numbers every field declared `assign: :create`, computing the next value and, when `into:` is configured, the formatted string. Assignment is skipped when the integer column already has a value (caller-supplied values are respected).
+
+Because the callback reads the configuration at run time, re-declaring a field changes its mode: `sequenceable_by :sequence, assign: :manual` on an STI subclass (or later on the same class) stops that class numbering at create, while the parent and any subclass that does not re-declare keep numbering. The last declaration wins.
 
 **`assign_<field>!`**
 
@@ -215,6 +218,16 @@ draft.number                             # => "INV-00001"
 **`into:` requires a string column.** Integer columns in most databases strip leading zeros, so `"00001"` would be stored as `1`. Always use a `string`/`varchar` column for `into:`.
 
 **`reset:` requires `created_at`.** Any value of `reset:` other than `:never` causes `sequenceable_by` to verify that the `created_at` column exists. If it does not, an `ArgumentError` is raised at class-load time. The period is derived from each row's own `created_at`, not from the current time at query time, so historical records land in the correct period bucket.
+
+**Periods are cut in a fixed zone, not the request's.** With `reset:`, the `MAX` range and the period token are computed from `created_at` in the field's `time_zone:` (default: `config.time_zone`, else UTC). The per-request `Time.zone` set by `Timezoneable` or `Time.use_zone` plays no part. If it did, a Tokyo request and a New York request would disagree on which day it is, read `MAX` over different ranges and issue the same number, and `formatted_<field>` without `into:` would render a different date depending on the reader's zone.
+
+```ruby
+sequenceable_by :sequence, into: :number, reset: :day, time_zone: "Asia/Tokyo"
+# 2026-09-24 16:00 UTC is 2026-09-25 in Tokyo, whoever makes the request:
+Invoice.create!.number   # => "20260925-0001"
+```
+
+Apps that never change `Time.zone` per request see no change, because the default is the zone they already run in. Apps that did change it per request may hold rows numbered under a request zone that now fall into a different fixed-zone period, so add a unique index on `into:` (and on the scope columns plus the field) before upgrading. A reissued number then fails loudly instead of being issued twice.
 
 **`template:` completely overrides built-in formatting.** When `template:` is set, `prefix`, `padding`, `separator`, and the period token are all ignored. The lambda receives `(seq, record)` where `seq` is the raw integer and `record` is the model instance.
 

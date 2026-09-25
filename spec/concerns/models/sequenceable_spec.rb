@@ -681,4 +681,151 @@ describe ConcernsOnRails::Sequenceable do
       expect(RdInv.create!.number).to eq("INV-4") # its own series continues from its own rows
     end
   end
+
+  describe "reset: periods are taken in a FIXED zone, not the request's Time.zone" do
+    # Every Rails app has time_zone_aware_attributes on (the AR railtie sets
+    # it); the bare harness does not, which is how the per-request zone leak
+    # slipped past this suite.
+    def zoned_invoice_class(**options)
+      Class.new(TestModel) do
+        self.table_name = "invoices"
+        self.time_zone_aware_attributes = true
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, reset: :day, padding: 4, **options
+      end
+    end
+
+    after { Time.zone = "UTC" }
+
+    it "renders formatted_<field> (no into:) the same whatever zone the reader is in" do
+      klass = zoned_invoice_class(prefix: "INV-")
+      invoice = klass.create!(created_at: Time.utc(2026, 9, 24, 23, 30))
+      expect(invoice.formatted_sequence).to eq("INV-20260924-0001")
+
+      Time.zone = "Tokyo" # 2026-09-25 08:30 there
+      expect(klass.find(invoice.id).formatted_sequence).to eq("INV-20260924-0001")
+    end
+
+    it "never issues the same number to two requests running in different zones" do
+      klass = zoned_invoice_class(into: :number)
+      Time.zone = "Tokyo"
+      a = klass.create!(created_at: Time.utc(2026, 9, 24, 16, 0)) # 09-25 01:00 in Tokyo
+      Time.zone = "Eastern Time (US & Canada)"
+      b = klass.create!(created_at: Time.utc(2026, 9, 25, 14, 0)) # 09-25 10:00 in New York
+
+      # Both periods are UTC days (no config.time_zone in the harness).
+      expect([a.number, b.number]).to eq(%w[20260924-0001 20260925-0001])
+      expect(klass.pluck(:number).uniq.size).to eq(2)
+    end
+
+    it "honors an explicit time_zone: for the period range AND the token" do
+      klass = zoned_invoice_class(into: :number, time_zone: "Tokyo")
+      Time.zone = "Eastern Time (US & Canada)"
+      a = klass.create!(created_at: Time.utc(2026, 9, 24, 16, 0)) # 09-25 01:00 Tokyo
+      Time.zone = "UTC"
+      b = klass.create!(created_at: Time.utc(2026, 9, 25, 14, 0)) # 09-25 23:00 Tokyo
+      c = klass.create!(created_at: Time.utc(2026, 9, 25, 15, 0)) # 09-26 00:00 Tokyo
+
+      expect([a, b, c].map(&:number)).to eq(%w[20260925-0001 20260925-0002 20260926-0001])
+      travel_to(Time.utc(2026, 9, 25, 14, 30)) { expect(klass.next_sequence).to eq(3) }
+    end
+
+    it "defaults to the app's configured zone (config.time_zone), resolved at use time" do
+      previous = Time.zone_default
+      Time.zone_default = ActiveSupport::TimeZone["Tokyo"]
+      klass = zoned_invoice_class(into: :number)
+      Time.zone = "UTC"
+      expect(klass.create!(created_at: Time.utc(2026, 9, 24, 16, 0)).number).to eq("20260925-0001")
+    ensure
+      Time.zone_default = previous
+    end
+
+    it "rejects an unknown time_zone: at macro time" do
+      expect { zoned_invoice_class(time_zone: "Mars/Olympus") }
+        .to raise_error(ArgumentError, %r{unknown time_zone 'Mars/Olympus'})
+      expect { zoned_invoice_class(time_zone: Object.new) }.to raise_error(ArgumentError, /unknown time_zone/)
+      expect(zoned_invoice_class(time_zone: ActiveSupport::TimeZone["Tokyo"]).create!.sequence).to eq(1)
+    end
+  end
+
+  describe "re-declaring a field with assign: :manual (audit 2026-09-23)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :manual_sti_invoices, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+          t.string  :number
+          t.timestamps
+        end
+      end
+    end
+
+    it "stops numbering at create when the same class re-declares assign: :manual" do
+      klass = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence
+        sequenceable_by :sequence, assign: :manual
+      end
+
+      invoice = klass.create!
+      expect(invoice.sequence).to be_nil
+      expect(invoice.assign_sequence!).to be(true)
+      expect(invoice.reload.sequence).to eq(1)
+    end
+
+    it "lets an STI subclass switch to :manual while the parent and a non-redeclaring sibling keep numbering" do
+      parent = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+      end
+      stub_const("ManualStiInvoice", parent)
+      stub_const("ManualStiDraft", Class.new(parent) { sequenceable_by :sequence, into: :number, assign: :manual })
+      stub_const("ManualStiCredit", Class.new(parent))
+
+      draft = ManualStiDraft.create!
+      expect(draft.sequence).to be_nil
+      expect(draft.number).to be_nil
+      expect(ManualStiInvoice.create!.number).to eq("INV-1")
+      expect(ManualStiCredit.create!.number).to eq("INV-2") # inherits :create
+      expect(ManualStiInvoice.sequenceable_config[:sequence][:assign]).to eq(:create)
+      # Finalizing the draft later continues its own series without ever
+      # reusing a number the parent series issued (its MAX sees its own rows).
+      expect(draft.assign_sequence!).to be(true)
+      expect(ManualStiInvoice.pluck(:number)).to match_array(%w[INV-1 INV-2 1])
+    end
+
+    it "flips back to :create when a manual declaration is re-declared with assign: :create" do
+      klass = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, assign: :manual
+        sequenceable_by :sequence
+      end
+      expect(klass.create!.sequence).to eq(1)
+    end
+
+    it "registers ONE before_create however many fields and re-declarations there are" do
+      klass = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence
+        sequenceable_by :sequence, assign: :manual
+        sequenceable_by :sequence
+      end
+      sub = Class.new(klass) { sequenceable_by :sequence, assign: :manual }
+
+      [klass, sub].each do |k|
+        filters = k._create_callbacks.select { |cb| cb.kind == :before }.map(&:filter)
+        expect(filters.count(:assign_sequenceable_values_on_create)).to eq(1)
+        expect(filters.grep(Proc)).to be_empty
+      end
+    end
+  end
 end

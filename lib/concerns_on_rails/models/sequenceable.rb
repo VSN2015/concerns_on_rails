@@ -38,6 +38,7 @@ module ConcernsOnRails
 
       included do
         class_attribute :sequenceable_config, instance_accessor: false, default: {}
+        class_attribute :sequenceable_callback_registered, instance_accessor: false, default: false
       end
 
       class_methods do
@@ -54,11 +55,15 @@ module ConcernsOnRails
         #   start_at:  first value per scope/period when no rows exist yet (default 1)
         #   scope:     column or array of columns the counter is scoped to (default nil)
         #   reset:     :never (default) | :year | :month | :day — restart per period (needs created_at)
+        #   time_zone: zone the reset: periods are cut in (name or ActiveSupport::TimeZone). Default:
+        #              the app's config.time_zone (Time.zone_default), else UTC — never the
+        #              per-request Time.zone, so every request agrees on which day/month/year it is
         #   template:  ->(seq, record) { ... } full custom formatter; overrides prefix/padding/period
         #   assign:    :create (default) numbers every record in before_create; :manual leaves the
         #              column NULL until `assign_<field>!` — invoices numbered when finalized
         def sequenceable_by(field = :sequence, into: nil, prefix: "", padding: 0,
-                            separator: "-", start_at: 1, scope: nil, reset: :never, template: nil, assign: :create)
+                            separator: "-", start_at: 1, scope: nil, reset: :never, template: nil, assign: :create,
+                            time_zone: nil)
           field      = field.to_sym
           into       = into&.to_sym
           reset      = reset.to_sym
@@ -75,17 +80,18 @@ module ConcernsOnRails
             field => { into: into, prefix: prefix.to_s, padding: padding.to_i,
                        separator: separator.to_s, start_at: start_at.to_i,
                        scope: scope_cols, reset: reset, template: template, assign: assign,
+                       time_zone: sequenceable_time_zone!(time_zone), # nil = app default, see #period_time
                        # The rows that share this counter: the declaring class and
                        # its descendants (see SequenceCalculator#sequence_relation).
                        owner: self }
           )
 
-          before_create -> { assign_sequenceable_value(field) } if assign == :create
+          register_sequenceable_callback
           define_sequenceable_methods(field)
         end
       end
 
-      class_methods do
+      class_methods do # rubocop:disable Metrics/BlockLength
         private
 
         def define_sequenceable_methods(field)
@@ -108,6 +114,20 @@ module ConcernsOnRails
           scope "pending_#{field}", -> { where(field => nil) }
         end
 
+        # ONE before_create for every field, registered by the first macro call
+        # (so it keeps that call's position among the host's callbacks) and
+        # inherited by subclasses. It reads the receiving class's config at run
+        # time, so a re-declaration — on the same class or an STI subclass —
+        # that switches a field to assign: :manual really stops numbering it.
+        # (A lambda per call could never be taken back: the :create one kept
+        # firing after a later :manual declaration.)
+        def register_sequenceable_callback
+          return if sequenceable_callback_registered
+
+          before_create :assign_sequenceable_values_on_create
+          self.sequenceable_callback_registered = true
+        end
+
         def validate_sequenceable_options!(reset, template, assign = :create)
           unless RESET_PERIODS.include?(reset)
             raise ArgumentError, "#{NAME}: unknown reset '#{reset}'. Valid values: #{RESET_PERIODS.join(', ')}"
@@ -120,6 +140,15 @@ module ConcernsOnRails
           raise ArgumentError, "#{NAME}: template must be callable (respond to #call)"
         end
       end
+
+      # The before_create: numbers every field whose CURRENT declaration on this
+      # class is assign: :create. :manual fields wait for assign_<field>!.
+      def assign_sequenceable_values_on_create
+        self.class.sequenceable_config.each do |field, cfg|
+          assign_sequenceable_value(field) if cfg[:assign] == :create
+        end
+      end
+      private :assign_sequenceable_values_on_create
 
       # Assigns the sequence (and, when configured, the formatted string) only when
       # the integer column is blank, so callers can pass an explicit value.
