@@ -76,7 +76,7 @@ This concern adds no ActiveRecord scopes.
 def apply_normalizations
 ```
 
-Iterates over all rules declared with `normalizable` and applies each normalizer to the corresponding attribute. Called automatically via `before_validation`; `nil` values are skipped without transformation. Calling this method manually is not normally necessary but is safe to do so.
+Iterates over all rules declared with `normalizable` and applies each normalizer to the corresponding attribute. Called automatically via `before_validation` (fields it misses — a save that skips validation — are covered by a `before_save` backstop); `nil` values are skipped without transformation. Calling this method manually is not normally necessary but is safe to do so.
 
 ### Class methods
 
@@ -161,7 +161,7 @@ account.email   # => "alice@example.com"
 
 ## Notes & gotchas
 
-- **Callback timing.** Normalization runs in `before_validation`, not `before_save`. Values are transformed before any ActiveRecord validators fire, so uniqueness validators, format validators, and length validators all operate on the normalized form.
+- **Callback timing.** Normalization runs in `before_validation`, so values are transformed before any ActiveRecord validators fire — uniqueness, format and length validators all operate on the normalized form. A `before_save` backstop also normalizes the saves that skip validation (`update_attribute`, `save(validate: false)`), and a value assigned after a validation ran; a field already normalized in this save's `before_validation` is not normalized again, so a non-idempotent Proc runs once per save. `update_column(s)`, `update_all` and raw SQL skip callbacks and are not normalized.
 - **`nil` is never coerced.** When a field's value is `nil`, `apply_normalizations` skips it entirely. No preset converts `nil` to `""` or any other value.
 - **Non-string values pass through preset normalizers unchanged.** Every built-in preset guards with `v.is_a?(String)`, so applying `:downcase` to an integer column returns the integer unmodified rather than raising a `NoMethodError`.
 - **Column existence is validated at class-load time.** If a field passed to `normalizable` does not exist in the database table, an `ArgumentError` is raised immediately when the class is evaluated (not at runtime), with the message `"does not exist in the database (table: <table_name>)"` followed by a ready-to-paste `bin/rails generate migration` command. This is enforced by `ConcernsOnRails::Support::ColumnGuard`.

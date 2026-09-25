@@ -178,6 +178,60 @@ describe ConcernsOnRails::Models::Normalizable do
       expect(user.valid?).to be true
       expect(user.email).to eq("alice@example.com")
     end
+
+    context "when validation is skipped" do
+      # Anonymous: the outer after(:each) removes a User constant itself.
+      let(:model) do
+        Class.new(TestModel) do
+          self.table_name = "users"
+          include ConcernsOnRails::Models::Normalizable
+
+          normalizable :email, with: :email
+          normalizable :code, with: ->(v) { "#{v}!" } # deliberately NOT idempotent
+        end
+      end
+
+      it "still normalizes on update_attribute" do
+        user = model.create!(email: "a@b.com")
+        user.update_attribute(:email, "  NEW@B.COM ")
+        expect(user.reload.email).to eq("new@b.com")
+      end
+
+      it "still normalizes on save(validate: false), for a new record too" do
+        user = model.new(email: "  NEW@B.COM ", code: "x")
+        user.save(validate: false)
+        expect(user.reload.email).to eq("new@b.com")
+        expect(user.code).to eq("x!")
+      end
+
+      it "normalizes a value changed after a (failed) validation" do
+        user = model.new(email: "a@b.com")
+        user.valid?
+        user.email = " LATE@B.COM "
+        user.save(validate: false)
+        expect(user.reload.email).to eq("late@b.com")
+      end
+
+      it "does not run a rule twice in one validated save" do
+        user = model.create!(code: "x")
+        expect(user.reload.code).to eq("x!")
+        user.update!(code: "y")
+        expect(user.reload.code).to eq("y!")
+      end
+
+      it "does not re-run a rule on a save(validate: false) right after a validation" do
+        user = model.new(code: "x")
+        user.valid?
+        user.save(validate: false)
+        expect(user.reload.code).to eq("x!")
+      end
+
+      it "leaves an unchanged field of a persisted record alone" do
+        user = model.create!(code: "x")
+        user.update_attribute(:email, "a@b.com")
+        expect(user.reload.code).to eq("x!")
+      end
+    end
   end
 
   describe "configuration errors" do

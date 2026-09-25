@@ -835,7 +835,7 @@ User.find_by(email: User.normalize(:email, params[:email]))
 | `:url`          | strip, default scheme to `https://` (`host:port` counts as schemeless), lowercase scheme + host, keep userinfo/path/query, drop a redundant default port. Only `http`/`https` are canonicalized — any other scheme (`mailto:`, `tel:`, `javascript:`, `data:`) and unparseable input come back stripped for your format validator to reject |
 
 **Notes**
-- Runs in `before_validation`, so DB constraints and AR validations see the normalized value.
+- Runs in `before_validation`, so DB constraints and AR validations see the normalized value — with a `before_save` backstop for saves that skip validation (`update_attribute`, `save(validate: false)`); `update_column(s)`/`update_all` bypass it.
 - `with:` takes a preset, a Proc, or an Array of them (applied in order); every entry is validated at class load.
 - `nil` values are skipped — no `nil → ""` coercion (use `:nullify_blank` for the opposite direction).
 - Preset normalizers pass non-string values through unchanged.
