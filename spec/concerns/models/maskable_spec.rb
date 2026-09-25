@@ -9,6 +9,8 @@ describe ConcernsOnRails::Models::Maskable do
         t.string :phone
         t.string :ssn
         t.integer :age
+        t.integer :pin
+        t.bigint :mobile
       end
 
       create_table :maskable_profiles, force: true do |t|
@@ -122,7 +124,10 @@ describe ConcernsOnRails::Models::Maskable do
       expect(MaskableUser.new(email: nil).masked_email).to be_nil
     end
 
-    it "passes non-string column values through untouched" do
+    # Every preset used to hand a non-String value back UNCHANGED, so an
+    # integer column declared `with: :last4` displayed the raw number —
+    # masking failed open. Non-nil values are stringified before masking.
+    it "masks non-string column values instead of passing them through" do
       class MaskableUser < TestModel
         self.table_name = "maskable_users"
         include ConcernsOnRails::Models::Maskable
@@ -130,7 +135,29 @@ describe ConcernsOnRails::Models::Maskable do
         maskable :age, with: :all
       end
 
-      expect(MaskableUser.new(age: 42).masked_age).to eq(42)
+      expect(MaskableUser.new(age: 42).masked_age).to eq("**")
+      expect(MaskableUser.new(age: nil).masked_age).to be_nil
+    end
+
+    it "never returns the raw value of an integer column (:last4, :phone, as_json)" do
+      class MaskableUser < TestModel
+        self.table_name = "maskable_users"
+        include ConcernsOnRails::Models::Maskable
+
+        maskable :pin, with: :last4
+        maskable :mobile, with: :phone
+      end
+
+      user = MaskableUser.new(pin: 123_456_789, mobile: 2_025_550_123)
+
+      expect(user.masked_pin).to eq("*****6789")
+      expect(user.masked_mobile).to eq("***-0123")
+      expect(user.as_json(masked: true)).to include("pin" => "*****6789", "mobile" => "***-0123")
+      expect(user.pin).to eq(123_456_789) # the attribute itself is untouched
+    end
+
+    it "stringifies a BigDecimal in plain notation, not scientific" do
+      expect(ConcernsOnRails::Support::Masker.last4(BigDecimal("12345.67"))).to eq("****5.67")
     end
   end
 

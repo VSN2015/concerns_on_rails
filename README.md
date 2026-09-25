@@ -1374,7 +1374,7 @@ end
 | `:all`         | mask every character (the default)          |
 | `Proc`         | used as-is (you own the non-String guard)   |
 
-`mask:` sets the mask character (default `*`). Nil and non-string values pass through untouched. The presets fail closed: a String without the expected shape — no `@` for `:email`, four or fewer digits for `:phone` / `:credit_card` — gets the full `:all` mask, never the raw value. To strip dangerous HTML instead, see [Sanitizable](#-sanitizable).
+`mask:` sets the mask character (default `*`). `nil` passes through; any other non-String value (an integer SSN or phone column) is stringified and then masked — never shown raw. The presets fail closed: a String without the expected shape — no `@` for `:email`, four or fewer digits for `:phone` / `:credit_card` — gets the full `:all` mask, never the raw value. To strip dangerous HTML instead, see [Sanitizable](#-sanitizable).
 
 **Serialization** — mask in the response, not just in the view
 
