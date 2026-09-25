@@ -1,29 +1,105 @@
 require "spec_helper"
+require "json"
 require "open3"
 require "rbconfig"
+require "tempfile"
 
 # Every concern file must work when required ON ITS OWN — without the gem's
 # `lib/concerns_on_rails.rb` loader — because the loader documents that a
 # direct `require "concerns_on_rails/models/lockable"` keeps working. The spec
-# process has already loaded the whole gem, so the check runs each file in a
-# fresh Ruby SUBPROCESS: only active_record + action_controller, the one
-# concern file, and a trivial declaration that reaches whatever gem-level
-# singleton (`ConcernsOnRails.encryption/config/deprecator/
-# filter_parameter_registry`) the concern touches.
+# process has already loaded the whole gem, so each file is checked in a
+# fresh process that has loaded ONLY what a host necessarily has: model files
+# get `active_record` (no action_controller, no extra core_ext), controller
+# files get `action_controller` (no active_record). Then the one concern file,
+# and a trivial declaration that reaches whatever gem-level singleton
+# (`ConcernsOnRails.encryption/config/deprecator/filter_parameter_registry`)
+# or ActiveSupport extension the concern touches.
+#
+# Cost: one boot per KIND, not per file — the runner boots once and forks a
+# child per file (spawning a fresh Ruby per file where fork is unsupported).
+# Tagged :subprocess so it can be skipped locally: `rspec --tag ~subprocess`.
 #
 # The regression this pins: ten files called those singletons, which were
 # defined only in the loader, so a direct require raised NoMethodError — or,
 # worse, Encryptable/Lockable swallowed it and silently skipped registering
 # the sensitive field with filter_parameters.
-RSpec.describe "requiring a single concern file directly" do
+RSpec.describe "requiring a single concern file directly", :subprocess do
   lib_dir = File.expand_path("../../lib", __dir__)
 
+  # Boots `ARGV[0]`, then runs every job of the JSON file `ARGV[1]` (name =>
+  # code) in its own forked child, 8 at a time, and prints
+  # "__RESULTS__" + JSON { name => [output, success] }.
+  runner = <<~'RUBY'
+        require "json"
+        require "rbconfig"
+        require "open3"
+        boot, jobs_path = ARGV
+        boot.split(",").each { |lib| require lib }
+        # What every host has already loaded before a model / controller file:
+        # the base classes (both autoloaded, and ~1s each to load per child).
+        ActiveRecord::Base if defined?(ActiveRecord)
+        ActiveRecord::Schema if defined?(ActiveRecord) # the prelude's, not a concern's
+        ActionController::Base if defined?(ActionController)
+        jobs = JSON.parse(File.read(jobs_path))
+        forkable = Process.respond_to?(:fork) && RUBY_ENGINE == "ruby" && !Gem.win_platform?
+
+        run_forked = lambda do |code|
+          reader, writer = IO.pipe
+          pid = fork do
+            reader.close
+            $stdout.reopen(writer)
+            $stderr.reopen(writer)
+            status = begin
+              TOPLEVEL_BINDING.eval(code)
+              print "LOADED-OK"
+              0
+            rescue Exception => e # rubocop:disable Lint/RescueException
+              $stderr.print "#{e.class}: #{e.message}
+    #{Array(e.backtrace).first(8).join("
+    ")}"
+              1
+            end
+            $stdout.flush
+            $stderr.flush
+            exit!(status)
+          end
+          writer.close
+          output = reader.read
+          reader.close
+          [output, Process.wait2(pid).last.success? && output.end_with?("LOADED-OK")]
+        end
+
+        run_spawned = lambda do |code|
+          preload = boot.split(",").map { |lib| "require #{lib.inspect}
+    " }.join
+          output, status = Open3.capture2e(RbConfig.ruby, *$LOAD_PATH.first(1).flat_map { |d| ["-I", d] },
+                                           "-e", "#{preload}#{code}
+    print 'LOADED-OK'")
+          [output, status.success? && output.end_with?("LOADED-OK")]
+        end
+
+        queue = Queue.new
+        jobs.each { |job| queue << job }
+        results = {}
+        lock = Mutex.new
+        Array.new(8) do
+          Thread.new do
+            loop do
+              name, code = queue.pop(true)
+              outcome = forkable ? run_forked.call(code) : run_spawned.call(code)
+              lock.synchronize { results[name] = outcome }
+            end
+          rescue ThreadError
+            nil # queue drained
+          end
+        end.each(&:join)
+        print "
+    __RESULTS__#{JSON.generate(results)}"
+  RUBY
+
   model_prelude = <<~RUBY
-    require "active_record"
-    require "action_controller"
-    require "active_support/core_ext/time"
-    Time.zone = "UTC"
     ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
+    Time.zone = "UTC" # host setup; loading ActiveRecord::Base brings the zone extension
     ActiveRecord::Schema.verbose = false
     ActiveRecord::Schema.define do
       create_table :widgets do |t|
@@ -85,7 +161,7 @@ RSpec.describe "requiring a single concern file directly" do
                       'ConcernsOnRails.configure_encryption { |c| c.key = "k" * 32 }' \
                       "\nWidget.create!(ssn: '1').reload.ssn == '1' || raise('roundtrip')" \
                       "\nConcernsOnRails.filter_parameter_registry.include?('ssn') || raise('not filtered')"],
-    "expirable" => ["Expirable", "expirable_by", "Widget.create!(expires_at: 1.day.ago); Widget.expired.count == 1 || raise"],
+    "expirable" => ["Expirable", "expirable_by", "Widget.create!(expires_at: Time.now - 86_400); Widget.expired.count == 1 || raise"],
     "hashable" => ["Hashable", "hashable_by :identifier", "Widget.create!.identifier.present? || raise"],
     "lockable" => ["Lockable", "lockable_by max_attempts: 1, unlock_token: :unlock_token",
                    "Widget.create!.register_failed_attempt!" \
@@ -113,18 +189,6 @@ RSpec.describe "requiring a single concern file directly" do
     "tokenizable" => ["Tokenizable", "tokenizable_by :token", "Widget.create!.token.present? || raise"]
   }
 
-  controller_prelude = <<~RUBY
-    require "active_record"
-    require "action_controller"
-    require "rack/mock"
-    def dispatch(klass, action, method: "GET", headers: {})
-      env = Rack::MockRequest.env_for("/", method: method)
-      headers.each { |k, v| env["HTTP_\#{k.tr('-', '_').upcase}"] = v }
-      status, = klass.action(action).call(env)
-      status
-    end
-  RUBY
-
   # file basename => [module constant, class body, exercise]. The class body
   # always defines `index`, rendering 200.
   controllers = {
@@ -136,6 +200,7 @@ RSpec.describe "requiring a single concern file directly" do
     "error_handleable" => ["ErrorHandleable", "", "dispatch(C, :index) == 200 || raise"],
     "filterable" => ["Filterable", "filter_by :name", "C.new"],
     "idempotentable" => ["Idempotentable", "idempotent_actions :index",
+                         "require 'active_support/cache'\n" \
                          "ConcernsOnRails.setup { |c| c.cache_store = ActiveSupport::Cache::MemoryStore.new }\n" \
                          "dispatch(C, :index, method: 'POST', headers: { 'Idempotency-Key' => 'k1' }) == 200 || raise"],
     "includable" => ["Includable", "includable :author", "C.new"],
@@ -146,16 +211,28 @@ RSpec.describe "requiring a single concern file directly" do
     "secure_headable" => ["SecureHeadable", "secure_headers", "dispatch(C, :index) == 200 || raise"],
     "sortable" => ["Sortable", "sortable_by :name", "C.new"],
     "throttleable" => ["Throttleable", "throttle_by limit: 5, period: 60, by: -> { 'client' }",
+                       "require 'active_support/cache'\n" \
                        "ConcernsOnRails.setup { |c| c.cache_store = ActiveSupport::Cache::MemoryStore.new }\n" \
                        "dispatch(C, :index) == 200 || raise"],
     "timezoneable" => ["Timezoneable", "timezoneable cookie: true", "dispatch(C, :index) == 200 || raise"],
     "webhook_verifiable" => ["WebhookVerifiable", "verify_webhook :index, secret: 's', header: 'X-Signature', replay: true",
+                             "require 'active_support/cache'\n" \
                              "ConcernsOnRails.setup { |c| c.cache_store = ActiveSupport::Cache::MemoryStore.new }\n" \
                              "dispatch(C, :index) == 401 || raise"]
   }
 
-  model_script = lambda do |file, const, body, exercise|
-    <<~RUBY
+  controller_prelude = <<~RUBY
+    require "rack/mock"
+    def dispatch(klass, action, method: "GET", headers: {})
+      env = Rack::MockRequest.env_for("/", method: method)
+      headers.each { |k, v| env["HTTP_\#{k.tr('-', '_').upcase}"] = v }
+      status, = klass.action(action).call(env)
+      status
+    end
+  RUBY
+
+  model_jobs = models.to_h do |file, (const, body, exercise)|
+    ["models/#{file}", <<~RUBY]
       #{model_prelude}
       require "concerns_on_rails/models/#{file}"
       class Widget < ActiveRecord::Base
@@ -163,12 +240,32 @@ RSpec.describe "requiring a single concern file directly" do
         #{body}
       end
       #{exercise}
-      print "LOADED-OK"
     RUBY
   end
 
-  controller_script = lambda do |file, const, body, exercise|
-    <<~RUBY
+  # Sluggable/Sortable raise MissingDependency when their gem is absent; a
+  # direct require used to hit NameError instead, because the constant lived
+  # only in the top-level loader. (The runner never loads either gem.)
+  model_jobs["missing_dependency"] = <<~RUBY
+    module Kernel
+      alias_method :__direct_require_spec_require, :require
+      def require(name)
+        raise LoadError, "cannot load such file -- \#{name}" if %w[friendly_id acts_as_list].include?(name)
+
+        __direct_require_spec_require(name)
+      end
+    end
+    missing = %w[sluggable sortable].map do |file|
+      require "concerns_on_rails/models/\#{file}"
+      raise "\#{file} loaded without its gem"
+    rescue ConcernsOnRails::MissingDependency
+      file
+    end
+    missing == %w[sluggable sortable] || raise(missing.inspect)
+  RUBY
+
+  controller_jobs = controllers.to_h do |file, (const, body, exercise)|
+    ["controllers/#{file}", <<~RUBY]
       #{controller_prelude}
       require "concerns_on_rails/controllers/#{file}"
       class C < ActionController::Base
@@ -177,40 +274,32 @@ RSpec.describe "requiring a single concern file directly" do
         def index = head(:ok)
       end
       #{exercise}
-      print "LOADED-OK"
     RUBY
   end
 
-  model_scripts = models.to_h { |file, spec| ["models/#{file}", model_script.call(file, *spec)] }
-  controller_scripts = controllers.to_h { |file, spec| ["controllers/#{file}", controller_script.call(file, *spec)] }
-  scripts = model_scripts.merge(controller_scripts)
+  run_runner = lambda do |boot, jobs|
+    Tempfile.create(["direct_require_jobs", ".json"]) do |file|
+      file.write(JSON.generate(jobs))
+      file.flush
+      output, = Open3.capture2e(RbConfig.ruby, "-I", lib_dir, "-e", runner, boot, file.path)
+      marker = output.rindex("__RESULTS__")
+      raise "direct-require runner (#{boot}) crashed:\n#{output}" unless marker
 
-  # One Ruby boot per file is ~2s, so the subprocesses run concurrently (once,
-  # on first use) and each example reads its own [output, status].
+      JSON.parse(output[(marker + "__RESULTS__".length)..])
+    end
+  end
+
+  # Both runners at once, on first use; each example reads its own entry.
   results = nil
   results_mutex = Mutex.new
-  result_for = lambda do |key|
+  result_for = lambda do |name|
     results_mutex.synchronize do
-      results ||= begin
-        queue = Queue.new
-        scripts.each { |entry| queue << entry }
-        collected = {}
-        collect_mutex = Mutex.new
-        Array.new(8) do
-          Thread.new do
-            loop do
-              name, script = queue.pop(true)
-              outcome = Open3.capture2e(RbConfig.ruby, "-I", lib_dir, "-e", script)
-              collect_mutex.synchronize { collected[name] = outcome }
-            end
-          rescue ThreadError
-            nil # queue drained
-          end
-        end.each(&:join)
-        collected
-      end
+      results ||= [
+        Thread.new { run_runner.call("active_record,active_record/connection_adapters/sqlite3_adapter", model_jobs) },
+        Thread.new { run_runner.call("action_controller", controller_jobs) }
+      ].map(&:value).reduce(:merge)
     end
-    results.fetch(key)
+    results.fetch(name)
   end
 
   it "covers every model and controller concern file" do
@@ -219,36 +308,15 @@ RSpec.describe "requiring a single concern file directly" do
     expect(controllers.keys.sort).to eq(on_disk.call("controllers"))
   end
 
-  # Sluggable/Sortable raise MissingDependency when their gem is absent; a
-  # direct require used to hit NameError instead, because the constant lived
-  # only in the top-level loader.
   it "raises MissingDependency (not NameError) for an absent friendly_id / acts_as_list" do
-    script = <<~RUBY
-      require "active_record"
-      module Kernel
-        alias_method :__direct_require_spec_require, :require
-        def require(name)
-          raise LoadError, "cannot load such file -- \#{name}" if %w[friendly_id acts_as_list].include?(name)
-
-          __direct_require_spec_require(name)
-        end
-      end
-      %w[sluggable sortable].each do |file|
-        require "concerns_on_rails/models/\#{file}"
-        raise "\#{file} loaded without its gem"
-      rescue ConcernsOnRails::MissingDependency
-        print "\#{file}-missing "
-      end
-    RUBY
-    output, = Open3.capture2e(RbConfig.ruby, "-I", lib_dir, "-e", script)
-    expect(output).to end_with("sluggable-missing sortable-missing "), output
+    output, success = result_for.call("missing_dependency")
+    expect(success).to be(true), output
   end
 
-  scripts.each_key do |name|
+  (model_jobs.keys - ["missing_dependency"] + controller_jobs.keys).each do |name|
     it "#{name}.rb loads and declares on its own" do
-      output, status = result_for.call(name)
-      expect(output).to end_with("LOADED-OK"), output
-      expect(status).to be_success
+      output, success = result_for.call(name)
+      expect(success).to be(true), output
     end
   end
 end
