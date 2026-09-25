@@ -192,6 +192,34 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - The envelope is versioned (`ver`/`alg`/`key_id`): `key_id` drives [key rotation](#key-rotation); `alg 0x11` (deterministic encryption) is still reserved, so it can be added later without a data migration.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need deterministic search, KMS-backed or per-record keys, or Rails-managed key infrastructure.
 
+## Upgrading: slugs built from an encrypted field
+
+Earlier releases let an encrypted field be a slug source (`sluggable_by :ssn`, a
+`candidates:` entry, Sluggable's implicit `:name`, or a bare `friendly_id :ssn`
+base). The slug column then stored that field's **plaintext**, and friendly_id
+`history` kept every earlier plaintext slug in `friendly_id_slugs`. Such a model
+now raises when it is declared or saved. To clean up existing rows:
+
+1. Point the slug at a non-sensitive field (`sluggable_by :public_id`, or
+   `friendly_id :public_id, use: :slugged`).
+2. Regenerate every slug from it, then delete the history rows that still hold
+   the old plaintext slugs:
+
+```ruby
+Customer.find_each do |customer|
+  customer.regenerate_slug!                      # Sluggable
+  # customer.update!(slug: nil)                  # bare friendly_id: nil forces a new slug
+end
+
+FriendlyId::Slug.where(sluggable_type: "Customer")
+                .where.not(slug: Customer.unscoped.select(:slug))
+                .delete_all
+```
+
+Old URLs built from the sensitive value stop resolving, which is the point. If
+the slug column is also audited (Auditable), its trail holds the plaintext
+slugs too — clear it with `clear_audit_trail!`.
+
 ## Changed in 1.22.0
 
 - `where_<field>(nil)` / `find_by_<field>(nil)` return `none`/nil instead of matching every row without a fingerprint (`bidx IS NULL`).

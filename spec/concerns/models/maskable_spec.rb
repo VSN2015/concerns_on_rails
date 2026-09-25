@@ -165,6 +165,12 @@ describe ConcernsOnRails::Models::Maskable do
     it "drops the '.0' of an integral BigDecimal / Float, so :last4 keeps the real last digits" do
       expect(ConcernsOnRails::Support::Masker.last4(BigDecimal("123456789"))).to eq("*****6789")
       expect(ConcernsOnRails::Support::Masker.last4(123_456_789.0)).to eq("*****6789")
+      expect(ConcernsOnRails::Support::Masker.last4(5_551_234_567.0)).to eq("******4567")
+    end
+
+    it "handles -0.0 (integral: \"0\") and NaN (not finite: \"NaN\") without raising" do
+      expect(ConcernsOnRails::Support::Masker.last4(-0.0)).to eq("*")
+      expect(ConcernsOnRails::Support::Masker.last4(Float::NAN)).to eq("***")
     end
   end
 

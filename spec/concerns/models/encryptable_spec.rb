@@ -444,6 +444,55 @@ describe ConcernsOnRails::Models::Encryptable do
         expect { late.create!(ssn: "123-45-6789") }.to raise_error(ArgumentError, /:ssn.*slug source/)
       end
 
+      it "also refuses save(validate: false), which skips friendly_id's before_validation" do
+        klass = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          encryptable :name
+        end
+        stub_const("EncSlugNoValidate", klass)
+        expect { klass.new(name: "Jane Smith").save(validate: false) }.to raise_error(ArgumentError)
+        expect(klass.connection.select_value("SELECT COUNT(*) FROM encryptable_records").to_i).to eq(0)
+      end
+
+      it "STI: a subclass encrypting its parent's implicit :name source is refused; the parent is not" do
+        parent = Class.new(TestModel) do
+          self.table_name = "encryptable_records"
+          include ConcernsOnRails::Models::Sluggable
+        end
+        stub_const("EncSlugParent", parent)
+        child = Class.new(parent) do
+          include ConcernsOnRails::Models::Encryptable
+
+          encryptable :name
+        end
+        stub_const("EncSlugChild", child)
+
+        expect(parent.create!(name: "Ok").slug).to eq("ok")
+        expect { child.create!(name: "Jane Smith") }.to raise_error(ArgumentError, /:name/)
+      end
+
+      it "no false positives: a safe slug source (explicit or the implicit :name) keeps slugging" do
+        explicit = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          sluggable_by :name
+          encryptable :ssn
+        end
+        stub_const("EncSlugSafe", explicit)
+        record = explicit.create!(name: "Hello World", ssn: "123-45-6789")
+        record.update!(name: "New Title", ssn: "999-99-9999")
+        record.regenerate_slug!
+        expect(raw_slug(explicit, record.id)).to eq("new-title")
+
+        implicit = model_class do
+          encryptable :ssn
+          include ConcernsOnRails::Models::Sluggable
+        end
+        stub_const("EncSlugSafeImplicit", implicit)
+        expect(raw_slug(implicit, implicit.create!(name: "Jane", ssn: "1").id)).to eq("jane")
+      end
+
       it "a refused sluggable_by leaves the previous slug configuration in place" do
         klass = model_class do
           include ConcernsOnRails::Models::Sluggable

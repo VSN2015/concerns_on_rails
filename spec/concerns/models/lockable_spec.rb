@@ -963,6 +963,14 @@ describe ConcernsOnRails::Lockable do
       expect(locker.unlock_by_token(mailed)).to eq(row)
     end
 
+    it "a stale loser inside the caller's own transaction still adopts the winner's token" do
+      stale = klass.find(user.id)
+      user.lock_access!
+
+      expect(klass.transaction { stale.lock_access! }).to be(true)
+      expect(stale.unlock_token).to eq(user.unlock_token)
+    end
+
     it "lock_access! on a stale instance adopts the existing lock instead of re-minting" do
       stale = klass.find(user.id)
       user.lock_access!
