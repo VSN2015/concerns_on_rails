@@ -472,6 +472,49 @@ describe ConcernsOnRails::Storable do
         .to raise_error(ArgumentError, /serialized with a non-JSON coder/)
     end
 
+    describe "a column that is also encryptable" do
+      # The column holds a ciphertext envelope, not JSON: the scope used to
+      # return nothing for a real value and — worse — `where_<key>(nil)`
+      # matched EVERY row (json_valid is false for ciphertext, so the key read
+      # as NULL everywhere); PostgreSQL/MySQL raised deep in the adapter.
+      before do
+        ConcernsOnRails.encryption.key = "storable-spec-encryption-key"
+        ConcernsOnRails.encryption.on_missing_key = :raise
+      end
+
+      after { ConcernsOnRails.encryption.key = nil }
+
+      {
+        "encryptable declared after storable_by" => proc do
+          storable_by :settings, theme: { default: "light" }
+          include ConcernsOnRails::Models::Encryptable
+
+          encryptable :settings
+        end,
+        "encryptable declared before storable_by" => proc do
+          include ConcernsOnRails::Models::Encryptable
+
+          encryptable :settings
+          storable_by :settings, theme: { default: "light" }
+        end
+      }.each do |order, declaration|
+        it "refuses to query it (#{order}) instead of failing open" do
+          encrypted_klass = model_class(&declaration)
+          record = encrypted_klass.create!(theme: "dark")
+          encrypted_klass.create!
+
+          # Reads and writes still work through the encrypted type.
+          expect(encrypted_klass.find(record.id).theme).to eq("dark")
+          expect(encrypted_klass.find(record.id).settings_encrypted?).to be(true)
+
+          expect { encrypted_klass.where_theme("dark").to_a }
+            .to raise_error(ArgumentError, /'settings' is encrypted/)
+          expect { encrypted_klass.where_theme(nil).to_a }
+            .to raise_error(ArgumentError, /'settings' is encrypted/)
+        end
+      end
+    end
+
     it "queries a column serialized with the JSON coder" do
       # Rails 7.1 hides the coder inside an ActiveRecord::Coders::ColumnSerializer,
       # so the canonical `serialize :settings, coder: JSON, type: Hash` looked
