@@ -44,7 +44,7 @@ end
 anonymizable(*fields, with:, stamp: :anonymized_at, clear_audit_trail: true, slug: :auto, prefix: nil, suffix: nil)
 ```
 
-The macro is repeatable — field rules merge across calls. `stamp:`, `clear_audit_trail:` and `slug:` apply only when explicitly passed (the last explicit value wins), so later calls can't silently reset earlier choices.
+The macro is repeatable — field rules merge across calls. `stamp:`, `clear_audit_trail:`, `slug:`, `prefix:` and `suffix:` apply only when explicitly passed (the last explicit value wins, per option), so later calls can't silently reset earlier choices.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
@@ -53,7 +53,7 @@ The macro is repeatable — field rules merge across calls. `stamp:`, `clear_aud
 | `stamp:` | Symbol or `false` | `:anonymized_at` | The datetime column stamped by `anonymize!`. `false` disables stamping (and the scopes). |
 | `clear_audit_trail:` | Boolean | `true` | When the model is also `Auditable` and any anonymized field is tracked, clear the audit column in the same UPDATE (the trail holds historical plaintext). |
 | `slug:` | `:auto`, `true` or `false` | `:auto` | Whether `anonymize!` replaces a friendly_id slug (see *Slugs* below). `:auto` rewrites only when the slug's source **columns** are anonymized; `true` always rewrites; `false` never does. Anything else — `nil` included — raises `ArgumentError` (omit the option for the default). |
-| `prefix:` / `suffix:` | Symbol/String | `nil` | Affix the scope names (e.g. `prefix: :privacy` → `privacy_anonymized`). Taken from the first defining call. |
+| `prefix:` / `suffix:` | Symbol/String/`true` | `nil` | Affix the scope names (e.g. `prefix: :privacy` → `privacy_anonymized`; `true` uses the stamp column name). A later call that passes a different affix defines the renamed scopes and removes the old names — only ones this class defined itself and that were not overridden since; a parent's scopes are never removed from a subclass. `prefix: nil` explicitly drops an earlier prefix. |
 
 ### Strategy presets
 
@@ -84,6 +84,7 @@ A slug generated from an anonymized field *is* that PII (`"jane-smith"`), and `u
 - **`slug: true`** always rewrites; **`slug: false`** never does. Both work for the gem's Sluggable and for any friendly_id `:slugged` model. An explicit `anonymizable :slug, with: ...` rule wins over the generated slug.
 - **Length.** The replacement is `anon-<32 hex>`, shortened to fit the slug **column's** `limit`. Sluggable's `max_length:` is ignored here: it is cosmetic, and friendly_id's conflict suffixes already go past it. The `anon-` prefix is kept only while 16 random characters (64 bits) still fit beside it; otherwise the whole slug is random hex. A column that cannot hold 16 characters raises `ArgumentError` when `anonymize!` would rewrite the slug, before anything is written, and the message names `slug: false`. There is no boot-time check, so declaration order never matters.
 - **Collisions.** When a unique index rejects the generated slug, the write is retried with a fresh slug (3 attempts in total). Each attempt runs in its own savepoint (`Support::UniqueRetry`'s `savepoint:`), so a collision never rolls back an `anonymize_all!` batch, on PostgreSQL included.
+- **An audited slug is erased with it.** When the slug is rewritten, the slug column counts as an erased field for `clear_audit_trail:` — its old value is the erased name — so a model with `auditable_by :slug` has its trail cleared in the same UPDATE.
 - **Errors while detecting the source fail closed.** Only an unreachable schema (`ActiveRecord::ActiveRecordError`) is tolerated. Any other error propagates, so erasure never reports success while quietly keeping a PII slug.
 
 ## Scopes
@@ -147,6 +148,7 @@ patient.anonymize!
 ## Notes & gotchas
 
 - **`:hash` is pseudonymization, not anonymization.** The digest is stable, so anyone holding the original value can re-identify the row. Use it when cross-dataset joins must survive; use `:random_hex`/`:nullify` for true erasure.
+- **Addressable fingerprints are cleared.** Addressable's `fingerprint:` column is an unkeyed SHA-256 of the address, restamped only in `before_save` (which `update_columns` skips). When any mapped address column is anonymized, `anonymize!` sets it to `nil` in the same UPDATE, so `with_address(old_fingerprint)` stops resolving the erased row; an explicit `anonymizable` rule for the fingerprint column wins. A later ordinary save restamps it from the anonymized values.
 - **The audit trail is cleared all-or-nothing.** Auditable stores every field's history in one column; when any anonymized field is tracked, the whole column is nil'ed (unless `clear_audit_trail: false`).
 - **Erasure is terminal for the instance.** `anonymize!` ends with `reload`, discarding unsaved changes and refreshing every attribute.
 - **Skipped callbacks cut both ways.** Cache-key touches, counter caches, and search-index sync hooks do not run — trigger those manually from `after_anonymize` if you need them.

@@ -1,4 +1,5 @@
 require "rails/railtie"
+require "concerns_on_rails/core"
 
 module ConcernsOnRails
   # Boot-time integration, loaded only when Rails is present (see the

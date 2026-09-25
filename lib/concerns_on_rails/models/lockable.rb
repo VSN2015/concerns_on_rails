@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
@@ -45,8 +46,9 @@ module ConcernsOnRails
     #     lose updates (in-Ruby increment! is read-modify-write before Rails
     #     5.2) and a NULL counter needs no column default. While the account is
     #     locked it stops counting and returns the current count unchanged.
-    #     Two requests crossing the threshold at the same instant may each fire
-    #     after_lock once (same property as Devise).
+    #     Two requests crossing the threshold at once lock the row exactly
+    #     once: lock_access! is a conditional UPDATE, so the loser adopts the
+    #     winner's lock (and unlock token) and fires no hooks.
     #   * lock_access!/unlock_access! persist via update_columns: validations
     #     and AR callbacks are bypassed on purpose, so an otherwise-invalid
     #     record can still be locked. That also skips updated_at and means a
@@ -229,11 +231,10 @@ module ConcernsOnRails
         # time by the proc ConcernsOnRails::Railtie appends to
         # config.filter_parameters at boot, so a model class that loads later
         # (lazy loading in development) is still covered. Mirrors
-        # Models::Encryptable.
+        # Models::Encryptable. Deliberately unrescued: a failure here means
+        # the token would be logged in clear, which must not pass silently.
         def lockable_register_filter_parameter(field)
           ConcernsOnRails.filter_parameter_registry.add(field)
-        rescue StandardError
-          nil
         end
 
         def validate_lockable!(attempts, locked_at, max_attempts:, unlock_in:, unlock_token: nil)
@@ -334,19 +335,37 @@ module ConcernsOnRails
         fresh
       end
 
-      # Lock now (update_columns — no validations/callbacks). Idempotent while
-      # locked; an expired lock is re-locked with a fresh timestamp. Returns
-      # true, or false when a hook aborted the write via ActiveRecord::Rollback.
+      # Lock now (no validations/callbacks). Idempotent while locked; an
+      # expired lock is re-locked with a fresh timestamp. Returns true, or
+      # false when a hook aborted the write via ActiveRecord::Rollback.
+      #
+      # The write is ONE conditional UPDATE — only while the row is not
+      # already locked in the DATABASE — claimed before any hook runs. A stale
+      # instance (a concurrent failed login that loaded the row before another
+      # request locked it) used to pass the in-memory idempotency guard, mint
+      # a fresh unlock token over the one after_lock had already mailed, and
+      # fire after_lock again. Now it loses the claim, adopts the lock that is
+      # there, fires no hooks, and returns true (the account IS locked) — or
+      # false when the row has gone. Like update_columns, a readonly! record
+      # raises ReadOnlyRecord and a destroyed one ActiveRecordError.
+      # before_lock therefore runs after the claim, inside the same savepoint:
+      # a hook that raises or vetoes with Rollback still undoes the lock.
       def lock_access!
         lockable_guard_persisted!("lock_access!")
         return true if access_locked?
 
+        lockable_guard_writable!
         field = self.class.lockable_locked_at_field
-        lockable_write_with_hooks({ field => self[field] }.merge(lockable_token_snapshot)) do
+        attributes = { field => Time.zone.now }.merge(self.class.lockable_token_attributes(SecureRandom.urlsafe_base64(32)))
+        claimed = false
+        completed = lockable_write_with_hooks({ field => self[field] }.merge(lockable_token_snapshot)) do
+          next unless (claimed = lockable_claim_lock!(attributes))
+
+          lockable_sync_columns(attributes)
           before_lock
-          update_columns({ field => Time.zone.now }.merge(self.class.lockable_token_attributes(SecureRandom.urlsafe_base64(32))))
           after_lock
         end
+        claimed || !completed ? completed : lockable_adopt_current_lock!
       end
 
       # Clear the lock and zero the counter in one write. Fires unlock hooks.
@@ -461,6 +480,51 @@ module ConcernsOnRails
       def lockable_clear_expired_lock!
         update_columns({ self.class.lockable_locked_at_field => nil,
                          self.class.lockable_attempts_field => 0 }.merge(self.class.lockable_token_attributes(nil)))
+      end
+
+      # The UPDATE behind lock_access!, applied only while the row is unlocked
+      # in the database: locked_at NULL, or (with unlock_in) lapsed — the same
+      # boundary as lock_expired?. unscoped, so a default_scope cannot hide the
+      # row. true when this call took the lock.
+      def lockable_claim_lock!(attributes)
+        klass = self.class
+        column = klass.arel_table[klass.lockable_locked_at_field]
+        unlocked = column.eq(nil)
+        unlocked = unlocked.or(column.lteq(Time.zone.now - klass.lockable_unlock_in)) if klass.lockable_unlock_in
+        klass.unscoped.where(klass.primary_key => id).where(unlocked).update_all(attributes) == 1
+      end
+
+      # Mirror a raw write into the in-memory attributes without leaving them
+      # dirty (what update_columns would have done).
+      def lockable_sync_columns(attributes)
+        attributes.each { |column, value| self[column] = value }
+        send(:clear_attribute_changes, attributes.keys.map(&:to_s))
+      end
+
+      # update_columns' preconditions, which the raw claim UPDATE would
+      # otherwise skip: a readonly! record must not be locked behind the
+      # caller's back, and a destroyed one has no row to lock.
+      def lockable_guard_writable!
+        raise ActiveRecord::ReadOnlyRecord, "#{self.class} is marked as readonly" if readonly?
+        raise ActiveRecord::ActiveRecordError, "cannot update a destroyed record" if destroyed?
+      end
+
+      # Lost the lock_access! claim: another request locked the row first.
+      # Read its lock (and token) back so this instance agrees with the
+      # database. A LOCKING read (FOR UPDATE; a no-op on SQLite): under
+      # MySQL's REPEATABLE READ a plain SELECT inside the caller's
+      # transaction can return the snapshot taken before the winner
+      # committed — the unlocked row the claim just failed against — while a
+      # locking read sees the latest committed version, like the UPDATE did.
+      # true — the account is locked; false when the row is gone.
+      def lockable_adopt_current_lock!
+        klass = self.class
+        columns = [klass.lockable_locked_at_field, klass.lockable_unlock_token_field].compact
+        current = klass.unscoped.where(klass.primary_key => id).select(klass.primary_key, *columns).lock.first
+        return false unless current
+
+        lockable_sync_columns(columns.to_h { |column| [column, current[column]] })
+        true
       end
 
       # The token column's current value, for rollback when a hook aborts.

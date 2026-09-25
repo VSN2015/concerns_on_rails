@@ -15,6 +15,11 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
         t.datetime :anonymized_at
         t.datetime :when_wiped
         t.string :slug
+        t.string :line1
+        t.string :city
+        t.string :postal_code
+        t.string :country
+        t.string :addr_fp
         t.timestamps null: true
       end
     end
@@ -192,6 +197,56 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
       klass = model_class { anonymizable :name, with: :redact, prefix: :privacy }
       expect(klass).to respond_to(:privacy_anonymized)
       expect(klass).to respond_to(:privacy_not_anonymized)
+    end
+
+    # The scopes used to be defined once, by the first call, so an affix
+    # passed on a later (repeatable) call was silently dropped — against the
+    # macro's "last explicit value wins".
+    it "honours prefix:/suffix: passed on a later call, retiring the earlier names" do
+      klass = model_class do
+        anonymizable :name, with: :redact
+        anonymizable :email, with: :email, prefix: :pii
+      end
+      wiped = klass.create!(name: "a").tap(&:anonymize!)
+      kept = klass.create!(name: "b")
+
+      expect(klass.pii_anonymized).to contain_exactly(wiped)
+      expect(klass.pii_not_anonymized).to contain_exactly(kept)
+      expect(klass).not_to respond_to(:anonymized)
+      expect(klass).not_to respond_to(:not_anonymized)
+    end
+
+    it "merges affixes per option across calls, and a call without one keeps the current names" do
+      klass = model_class do
+        anonymizable :name, with: :redact, prefix: :pii
+        anonymizable :email, with: :email, suffix: :rows
+        anonymizable :phone, with: :nullify
+      end
+
+      expect(klass).to respond_to(:pii_anonymized_rows)
+      expect(klass).to respond_to(:pii_not_anonymized_rows)
+      expect(klass).not_to respond_to(:pii_anonymized)
+
+      klass.anonymizable :bio, with: :nullify, prefix: nil # explicit nil drops the prefix
+      expect(klass).to respond_to(:anonymized_rows)
+      expect(klass).not_to respond_to(:pii_anonymized_rows)
+    end
+
+    it "never removes a same-named scope the model defined itself, nor its parent's scopes" do
+      parent = model_class do
+        anonymizable :name, with: :redact
+        scope :not_anonymized, -> { where(name: "custom") }
+      end
+      parent.anonymizable :email, with: :email, prefix: :pii
+      expect(parent).to respond_to(:not_anonymized) # the model's own override survives
+      expect(parent.not_anonymized.to_sql).to include("custom")
+      expect(parent).not_to respond_to(:anonymized)
+
+      base = model_class { anonymizable :name, with: :redact }
+      child = Class.new(base) { anonymizable :email, with: :email, prefix: :pii }
+      expect(child).to respond_to(:pii_anonymized)
+      expect(base).to respond_to(:anonymized) # the parent is never touched
+      expect(base).not_to respond_to(:pii_anonymized)
     end
   end
 
@@ -399,6 +454,44 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
 
       record.anonymize!
       expect(record.audit_trail).not_to be_empty
+    end
+  end
+
+  describe "Addressable interaction" do
+    # Addressable's fingerprint column is a deterministic SHA-256 of the
+    # normalized address. update_columns skips the before_save that restamps
+    # it, so the erased row kept an unkeyed hash of the OLD address and
+    # `with_address(old_fingerprint)` still found it.
+    it "clears the Addressable fingerprint when a fingerprinted column is erased" do
+      klass = model_class do
+        include ConcernsOnRails::Models::Addressable
+
+        addressable_by required: %i[line1 city postal_code], fingerprint: :addr_fp
+        anonymizable :line1, :city, :postal_code, with: :nullify
+      end
+      record = klass.create!(line1: "1 Main St", city: "Springfield", postal_code: "12345", country: "US")
+      old_fingerprint = record.address_fingerprint
+      expect(klass.with_address(old_fingerprint)).to contain_exactly(record)
+
+      statements = capture_sql { record.anonymize! }
+
+      expect(statements.grep(/\AUPDATE/i).size).to eq(1)
+      expect(klass.with_address(old_fingerprint)).to be_empty
+      expect(record.reload.addr_fp).to be_nil
+    end
+
+    it "leaves the fingerprint alone when no fingerprinted column is erased" do
+      klass = model_class do
+        include ConcernsOnRails::Models::Addressable
+
+        addressable_by required: %i[line1 city postal_code], fingerprint: :addr_fp
+        anonymizable :name, with: :redact
+      end
+      record = klass.create!(name: "Jane", line1: "1 Main St", city: "Springfield", postal_code: "12345", country: "US")
+      fingerprint = record.addr_fp
+
+      record.anonymize!
+      expect(record.addr_fp).to eq(fingerprint)
     end
   end
 
@@ -631,6 +724,46 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
       expect(jane.slug).not_to eq(john.slug)
       expect(klass.friendly.find(jane.slug)).to eq(jane)
       expect { klass.friendly.find("jane-smith") }.to raise_error(ActiveRecord::RecordNotFound)
+    end
+
+    # The rewritten slug ("jane-smith") is as identifying as the erased name,
+    # so when the slug column itself is audited the trail must go too.
+    it "clears the audit trail when the rewritten slug column is audited" do
+      klass = slugged_class do
+        include ConcernsOnRails::Models::Auditable
+
+        auditable_by :slug, :phone, into: :audit_log
+        anonymizable :name, with: :redact
+      end
+      record = klass.create!(name: "Jane Smith", phone: "1")
+      expect(record.reload.audit_log.to_s).to include("jane-smith")
+
+      record.anonymize!
+      expect(record.slug).not_to include("jane")
+      expect(record.audit_log.to_s).not_to include("jane-smith")
+      expect(record.audit_trail).to eq([])
+    end
+
+    it "keeps an audited slug's trail when the slug is not rewritten (slug: false / clear_audit_trail: false)" do
+      unrewritten = slugged_class("AnonSlugKept") do
+        include ConcernsOnRails::Models::Auditable
+
+        auditable_by :slug, into: :audit_log
+        anonymizable :name, with: :redact, slug: false
+      end
+      record = unrewritten.create!(name: "Jane Smith")
+      record.anonymize!
+      expect(record.audit_trail).not_to be_empty
+
+      opted_out = slugged_class("AnonSlugTrailKept") do
+        include ConcernsOnRails::Models::Auditable
+
+        auditable_by :slug, into: :audit_log
+        anonymizable :name, with: :redact, clear_audit_trail: false
+      end
+      record = opted_out.create!(name: "Jane Smith")
+      record.anonymize!
+      expect(record.audit_trail).not_to be_empty
     end
 
     it "rewrites the slug in the same single UPDATE" do

@@ -174,6 +174,7 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - **Normalizable** — normalization runs `before_validation` on the plaintext; encryption happens later, at the DB-serialization boundary. So the stored ciphertext is always of the *normalized* value, regardless of `include` order.
 - **Maskable** — `masked_<field>` masks the *decrypted* value; the column stays ciphertext. Order-independent.
 - **Auditable** — auditing an encrypted field would persist its plaintext into the audit column, so declaring a field with **both** `encryptable` and `auditable_by` **raises**. Audit a non-sensitive companion column instead.
+- **Sluggable** — a friendly_id slug is plaintext of its source (`"123-45-6789"`), so an encrypted field named as the `sluggable_by` field or in its `candidates:` (nested arrays included) — or as a bare `friendly_id :field, use: :slugged` base — **raises** at declaration. Shapes a declaration cannot see (Sluggable included without `sluggable_by`, which slugs the implicit `:name`; friendly_id declared after `encryptable`) are refused at save time, before the row is written, with the same `ArgumentError`. A method or Proc candidate that reads an encrypted field under another name cannot be detected — keep encrypted values out of those yourself.
 - **Searchable / Filterable** — encrypted columns are **not** searchable: non-deterministic ciphertext (random IV) means the same plaintext never produces the same bytes, so `where(:ssn)`, `LIKE`, and prefix matching cannot work. For exact-match lookups, add a [blind index](#querying-encrypted-fields-blind-index) and query the `<field>_bidx` column (via `find_by_<field>` / `where_<field>`).
 
 ## Security notes
@@ -191,9 +192,37 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - The envelope is versioned (`ver`/`alg`/`key_id`): `key_id` drives [key rotation](#key-rotation); `alg 0x11` (deterministic encryption) is still reserved, so it can be added later without a data migration.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need deterministic search, KMS-backed or per-record keys, or Rails-managed key infrastructure.
 
+## Upgrading: slugs built from an encrypted field
+
+Earlier releases let an encrypted field be a slug source (`sluggable_by :ssn`, a
+`candidates:` entry, Sluggable's implicit `:name`, or a bare `friendly_id :ssn`
+base). The slug column then stored that field's **plaintext**, and friendly_id
+`history` kept every earlier plaintext slug in `friendly_id_slugs`. Such a model
+now raises when it is declared or saved. To clean up existing rows:
+
+1. Point the slug at a non-sensitive field (`sluggable_by :public_id`, or
+   `friendly_id :public_id, use: :slugged`).
+2. Regenerate every slug from it, then delete the history rows that still hold
+   the old plaintext slugs:
+
+```ruby
+Customer.find_each do |customer|
+  customer.regenerate_slug!                      # Sluggable
+  # customer.update!(slug: nil)                  # bare friendly_id: nil forces a new slug
+end
+
+FriendlyId::Slug.where(sluggable_type: "Customer")
+                .where.not(slug: Customer.unscoped.select(:slug))
+                .delete_all
+```
+
+Old URLs built from the sensitive value stop resolving, which is the point. If
+the slug column is also audited (Auditable), its trail holds the plaintext
+slugs too — clear it with `clear_audit_trail!`.
+
 ## Changed in 1.22.0
 
 - `where_<field>(nil)` / `find_by_<field>(nil)` return `none`/nil instead of matching every row without a fingerprint (`bidx IS NULL`).
 - Encrypted field names register with Rails parameter filtering through a live registry consulted by a proc the gem's railtie appends at boot — redaction now works with boot-time filter snapshots (ActiveRecord `filter_attributes`, lograge-style initializers) and lazily-loaded model classes.
 - PBKDF2-derived keys are memoized (bounded, mutex-guarded); previously every encrypt/decrypt/blind-index call re-ran the 65,536-iteration KDF.
-- The encrypted×audited overlap raises at macro time from both declaration orders.
+- The encrypted×audited and encrypted×slug-source overlaps raise at macro time from both declaration orders.

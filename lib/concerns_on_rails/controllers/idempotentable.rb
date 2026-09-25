@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "concerns_on_rails/core"
 require "concerns_on_rails/support/error_envelope"
 require "digest"
 require "json"

@@ -37,7 +37,10 @@ Model concerns live in `lib/concerns_on_rails/models/<name>.rb`, controller conc
 `lib/concerns_on_rails/controllers/<name>.rb`, and shared internal helpers in
 `lib/concerns_on_rails/support/<name>.rb`. `lib/concerns_on_rails.rb` is the loader —
 fully autoload-based since the post-1.22 DX wave (each concern file requires the support
-helpers it uses, so direct requires still work). `friendly_id`/`acts_as_list` load lazily
+helpers it uses, plus `concerns_on_rails/core` — `MissingDependency` and the gem-level
+singletons `deprecator`/`config`/`setup`/`encryption`/`filter_parameter_registry` — when it
+touches one, so direct requires still work; `spec/concerns/direct_require_spec.rb` requires
+every model/controller file alone in a subprocess). `friendly_id`/`acts_as_list` load lazily
 with Sluggable/Sortable (absent gem → `ConcernsOnRails::MissingDependency`, a LoadError
 subclass). Top-level aliases for the pre-1.6 module paths (e.g. `ConcernsOnRails::Sluggable`)
 resolve lazily via `const_missing` in `lib/concerns_on_rails/legacy_aliases.rb`. Gem-wide
@@ -128,7 +131,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Lockable`** — failed-attempt tracking + account lockout ("Devise lockable-lite").
   `lockable_by attempts:, locked_at:, max_attempts:, unlock_in:, prefix:/suffix:`;
   `register_failed_attempt!` (atomic SQL increment), `access_locked?` (lazy expiry),
-  `lock_access!`/`unlock_access!` (update_columns + before/after hooks),
+  `lock_access!` (one conditional UPDATE claimed only while the row is unlocked — a stale
+  concurrent instance adopts the existing lock/token and fires no hooks; readonly/destroyed
+  preconditions replicated) / `unlock_access!` (update_columns) + before/after hooks,
   `reset_failed_attempts!`; expiry-aware `.locked`/`.unlocked` scopes. Batch
   `unlock_expired` (mirrors `unlock_access!`; no validators gate needed since
   `update_columns` already skips them; returns 0 without a query when `unlock_in` is nil).

@@ -29,7 +29,7 @@ The fully-qualified alias `ConcernsOnRails::Models::Maskable` also works and is 
 
 `Maskable` reads existing columns but never writes to them. No new columns are added. Each field passed to `maskable` must already exist in the model's database table, or an `ArgumentError` is raised at class-load time (see [Notes & gotchas](#notes--gotchas)).
 
-The concern works with any column type. Preset masking methods are string-safe: a non-`String` value (e.g. an integer, `nil`) is returned untouched. Only `String` values are processed by the built-in presets.
+The concern works with any column type. `nil` stays `nil`; every other non-`String` value (an integer SSN, a `bigint` phone number) is converted to a `String` before a built-in preset masks it — an integral `BigDecimal`/`Float` without its `.0` (so `:last4` keeps the real last digits), any other in plain notation — so a preset never displays the raw value.
 
 ## Configuration
 
@@ -159,7 +159,7 @@ render json: other_user.as_json(masked: true)         # everyone else sees the m
 - **`:with` must be a Symbol or Proc.** Any other type (e.g. a string, integer) raises `ArgumentError` (message: `":with must be a preset symbol or a Proc/lambda"`).
 - **At least one field is required.** Calling `maskable` with no positional arguments (e.g. `maskable with: :all`) raises `ArgumentError` (message: `"at least one field is required"`).
 - **`nil` values are passed through.** All preset strategies return `nil` when the column value is `nil`. When using a custom `Proc`, the caller is responsible for nil-guarding.
-- **Non-String values are passed through by presets.** An integer or other non-String column value is returned as-is by every built-in preset. Custom `Proc` strategies receive the raw value and must handle type-checking themselves.
+- **Non-String values are stringified by presets, never passed through.** `maskable :ssn, with: :last4` on an integer column returns `"*****6789"`, not `123456789` (earlier releases returned the raw value — masking failed open). The masked reader therefore returns a `String` for any non-nil value. Custom `Proc` strategies receive the raw value and must handle type-checking themselves.
 - **Email preset edge case.** If the column value is a string that does not contain `@`, the `:email` preset returns the value unchanged rather than masking it.
 - **Phone preset edge case.** If the column value contains no digit characters, the `:phone` preset returns the value unchanged.
 - **Credit card with four or fewer digits.** When a card value has four or fewer digit characters, `:credit_card` falls back to `:all` and masks every character rather than using the grouped format.
