@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    concerns_on_rails (1.29.0)
+    concerns_on_rails (1.30.0)
       actionpack (>= 6.0, < 9)
       activerecord (>= 6.0, < 9)
       activesupport (>= 6.0, < 9)

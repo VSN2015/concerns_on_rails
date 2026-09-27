@@ -16,7 +16,7 @@ One `include`, one declarative macro — done.
 
 ### [📖 **Documentation**](https://vsn2015.github.io/concerns_on_rails) &nbsp;·&nbsp; [💎 **RubyGems**](https://rubygems.org/gems/concerns_on_rails) &nbsp;·&nbsp; [📝 **Changelog**](CHANGELOG.md) &nbsp;·&nbsp; [🐛 **Issues**](https://github.com/VSN2015/concerns_on_rails/issues)
 
-🧩 **26 model concerns** &nbsp;·&nbsp; 🎮 **16 controller concerns** &nbsp;·&nbsp; 🪶 **lean deps** &nbsp;·&nbsp; ✅ **schema-validated** &nbsp;·&nbsp; 🧪 **1,160 specs**
+🧩 **26 model concerns** &nbsp;·&nbsp; 🎮 **16 controller concerns** &nbsp;·&nbsp; 🪶 **lean deps** &nbsp;·&nbsp; ✅ **schema-validated** &nbsp;·&nbsp; 🧪 **2,146 specs**
 
 </div>
 
@@ -2629,9 +2629,9 @@ Point your agent at `llms.txt` for an overview, or paste a single concern's `.md
 
 ```sh
 bundle install                                  # install dev dependencies
-bundle exec rspec                               # run the test suite (1,830 examples)
+bundle exec rspec                               # run the test suite (2,146 examples)
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.29.0.gem      # install locally
+gem install ./concerns_on_rails-1.30.0.gem      # install locally
 
 # Preview the docs site locally (GitHub Pages serves docs/ as-is):
 cd docs && python3 -m http.server 8000          # → http://localhost:8000
