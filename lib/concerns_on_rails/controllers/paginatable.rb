@@ -48,6 +48,12 @@ module ConcernsOnRails
       # The same guard for per_page (see Support::ScalarParam::MAX_PER_PAGE,
       # which both paginators share).
       MAX_PER_PAGE = ConcernsOnRails::Support::ScalarParam::MAX_PER_PAGE
+      # Re-aliasing a DISTINCT select list (see paginatable_realiased_select):
+      # an item's own trailing alias, the tokens a list splits into (quoted
+      # strings/identifiers kept whole), and how parentheses nest.
+      PAGINATABLE_TRAILING_ALIAS = /\s+AS\s+(?:`[^`]*`|"[^"]*"|\[[^\]]*\]|\w+)\s*\z/i
+      PAGINATABLE_SELECT_TOKEN = /'(?:[^']|'')*'|"[^"]*"|`[^`]*`|[(),?]|[^'"`(),?]+|./m
+      PAGINATABLE_PAREN_DEPTH = { "(" => 1, ")" => -1 }.freeze
 
       included do
         class_attribute :paginatable_per_page, default: DEFAULT_PER_PAGE
@@ -234,8 +240,125 @@ module ConcernsOnRails
       def paginatable_total(source)
         return source.size if source.is_a?(Array)
 
-        counted = source.except(:order, :limit, :offset, :select).count(:all)
+        relation = paginatable_count_relation(source)
+        return paginatable_distinct_select_total(relation) if paginatable_distinct_select?(relation)
+
+        paginatable_plain_count(relation)
+      end
+
+      # A model class answers limit/offset (so it paginates in SQL) but not
+      # the relation readers the count inspects (`distinct_value`,
+      # `select_values`, ...): `paginated(Article)` was a NoMethodError 500.
+      # Count through its default relation, `.all`, instead.
+      def paginatable_count_relation(source)
+        source.is_a?(Class) && source.respond_to?(:all) ? source.all : source
+      end
+
+      def paginatable_plain_count(relation)
+        counted = relation.except(:order, :limit, :offset, :select).count(:all)
         counted.is_a?(Hash) ? counted.length : counted
+      end
+
+      # `select(:group_id).distinct` is distinct over the SELECT list, so
+      # stripping that list COUNTed every underlying row (6 rows over 3
+      # distinct values paginated as 6). Such a relation is counted as a
+      # subquery instead — SELECT COUNT(*) FROM (SELECT DISTINCT ...) — which,
+      # unlike COUNT(DISTINCT a, b), every adapter accepts for any number of
+      # columns. The outer query is raw SQL, not a model relation: even
+      # `Model.unscoped` re-applies an STI subclass's `type` condition, which
+      # the outer query would aim at a table its FROM does not have. to_sql
+      # inlines the relation's bind values, quoted by the adapter. A
+      # duck-typed source without the relation readers takes the plain count.
+      def paginatable_distinct_select?(relation)
+        return false unless %i[distinct_value select_values group_values].all? { |reader| relation.respond_to?(reader) }
+
+        relation.distinct_value && relation.select_values.any? && relation.group_values.empty?
+      end
+
+      # The relation's own SQL, unchanged, on every adapter. Rails 6.x's
+      # NullRelation (`none`) compiles to "" — `FROM ()` is a syntax error —
+      # and holds no rows. Only MySQL's duplicate-output-name rejection (1060)
+      # is answered with a retry; every other error propagates (on PostgreSQL
+      # it has aborted the transaction anyway).
+      def paginatable_distinct_select_total(relation)
+        connection = relation.connection
+        subquery = relation.except(:order, :limit, :offset)
+        sql = subquery.to_sql
+        return 0 if sql.blank?
+
+        paginatable_count_subquery(connection, sql)
+      rescue ActiveRecord::StatementInvalid => e
+        raise unless paginatable_mysql_duplicate_column?(connection, e)
+
+        paginatable_mysql_realiased_total(relation, subquery, connection)
+      end
+
+      def paginatable_count_subquery(connection, sql)
+        connection.select_value("SELECT COUNT(*) FROM (#{sql}) paginatable_distinct").to_i
+      end
+
+      # MySQL only, after a 1060: retry with the select list re-aliased
+      # positionally (a failed statement does not abort a MySQL transaction,
+      # so the retry is safe). When the list cannot be re-aliased, or MySQL
+      # rejects that too, fall back to the plain count — an over-count, but
+      # one COUNT in SQL, never the distinct rows loaded into memory.
+      def paginatable_mysql_realiased_total(relation, subquery, connection)
+        realiased = paginatable_realiased_select(subquery, connection)
+        return paginatable_plain_count(relation) unless realiased
+
+        paginatable_count_subquery(connection, realiased.to_sql)
+      rescue ActiveRecord::StatementInvalid
+        paginatable_plain_count(relation)
+      end
+
+      # MySQL rejects a derived table whose SELECT list repeats an output name
+      # (`select("a.id, b.id")`, error 1060). Re-alias every select item
+      # positionally (`... AS c0, ... AS c1`) — the same expressions, so the
+      # same DISTINCT rows. Only ever tried as MySQL's retry: the split is a
+      # heuristic (an alias written without AS, `name n`, is not stripped, so
+      # that retry fails and the count falls back). nil when the list cannot
+      # be split safely: `*` / `table.*`, or an unquoted bind placeholder.
+      def paginatable_realiased_select(subquery, connection)
+        items = subquery.arel.projections.flat_map do |projection|
+          paginatable_split_select_list(connection.visitor.compile(projection))
+        end
+        return nil unless paginatable_realiasable?(items)
+
+        aliased = items.each_with_index.map do |item, index|
+          "#{item.sub(PAGINATABLE_TRAILING_ALIAS, '')} AS #{connection.quote_column_name("c#{index}")}"
+        end
+        subquery.except(:select).select(Arel.sql(aliased.join(", ")))
+      end
+
+      def paginatable_realiasable?(items)
+        items.any? && items.none? { |item| item.nil? || item.empty? || item.match?(/(\A|\.)\*\z/) }
+      end
+
+      # Split a SELECT list on its top-level commas — not inside parentheses
+      # or quoted strings/identifiers. An unquoted `?` (an uninlined bind)
+      # makes the list unsplittable ([nil]).
+      def paginatable_split_select_list(sql)
+        tokens = sql.scan(PAGINATABLE_SELECT_TOKEN)
+        return [nil] if tokens.include?("?")
+
+        depth = 0
+        tokens.each_with_object([+""]) do |token, items|
+          depth += PAGINATABLE_PAREN_DEPTH.fetch(token, 0)
+          token == "," && depth.zero? ? items << +"" : items.last << token
+        end.map(&:strip)
+      end
+
+      # ER_DUP_FIELDNAME (1060), by error code — mysql2 #error_number,
+      # Trilogy #error_code — since a server with localized lc_messages
+      # translates the text; else by the English message.
+      def paginatable_mysql_duplicate_column?(connection, error)
+        return false unless connection.adapter_name.match?(/mysql|trilogy/i)
+
+        cause = error.cause
+        reader = %i[error_number error_code].find { |name| cause.respond_to?(name) }
+        return cause.public_send(reader) == 1060 if reader
+
+        error.message.match?(/Duplicate column name/i)
       end
 
       # Both readers route through ScalarParam: `?page[]=1` / `?page[x]=1`

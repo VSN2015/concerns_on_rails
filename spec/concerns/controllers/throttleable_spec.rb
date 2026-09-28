@@ -99,6 +99,35 @@ describe ConcernsOnRails::Controllers::Throttleable do
       end
     end
 
+    # The macro accepts anything that responds to #call, but the discriminator
+    # was instance_exec'd — a TypeError on every request for a non-Proc.
+    it "accepts a callable object as the discriminator, handing it the controller" do
+      discriminator = Class.new { def call(controller) = controller.params[:user_id] }.new
+      klass = throttled_class(store) { throttle_by limit: 1, period: 60, by: discriminator }
+
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        alice1 = instance(klass, params: { user_id: "alice" })
+        alice2 = instance(klass, params: { user_id: "alice" })
+        bob1   = instance(klass, params: { user_id: "bob" })
+        [alice1, alice2, bob1].each(&:enforce_throttles)
+
+        expect(alice1.rendered).to be_nil
+        expect(alice1.response.headers["X-RateLimit-Remaining"]).to eq("0")
+        expect(alice2.rendered[:status]).to eq(:too_many_requests)
+        expect(bob1.rendered).to be_nil
+      end
+    end
+
+    it "calls a zero-argument callable (a Method) bare" do
+      tenant = Class.new { def self.current = "tenant-1" }
+      klass = throttled_class(store) { throttle_by limit: 5, period: 60, by: tenant.method(:current) }
+      c = instance(klass)
+
+      expect { c.enforce_throttles }.not_to raise_error
+      expect(c.response.headers["X-RateLimit-Remaining"]).to eq("4")
+      expect(store.instance_variable_get(:@counts).keys).to all(include(":tenant-1:"))
+    end
+
     it "does not count requests for out-of-scope actions (only:)" do
       c = controller(store: store, action: "index") { throttle_by limit: 1, period: 60, only: :create }
       c.enforce_throttles

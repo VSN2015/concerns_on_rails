@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/callable"
 require "bigdecimal"
 require "json"
 
@@ -27,8 +28,9 @@ module ConcernsOnRails
     #   product.audited_changes_since(1.day.ago)
     #   product.clear_audit_trail!                 # wipe the column (skips callbacks)
     #
-    # Actor resolution ("by"): a model's `actor:` (a callable instance_exec'd
-    # on the record, or a Symbol naming a record method) wins; otherwise the
+    # Actor resolution ("by"): a model's `actor:` (a callable — `-> { ... }` is
+    # instance_exec'd on the record, `->(record) { ... }` is called with it —
+    # or a Symbol naming a record method) wins; otherwise the
     # gem-wide fallback `ConcernsOnRails.setup { |c| c.audit_actor = -> {
     # Current.user&.id } }` applies to every audited model at once. Only a
     # model that passes no `actor:` at all takes that fallback — an explicit
@@ -242,15 +244,18 @@ module ConcernsOnRails
         auditable_json_value(auditable_actor_value(actor))
       end
 
-      # A Symbol names a method on the record; a Proc is instance_exec'd on it
-      # (globals and the record's own attributes in scope); any other callable
-      # is #call'd as-is — instance_exec needs a to_proc only Procs have.
+      # A Symbol names a method on the record; every callable goes through
+      # Support::Callable.invoke: a lambda with no required parameter (and a
+      # block) is instance_exec'd on the record (globals and its own
+      # attributes in scope), a `->(record) { ... }` lambda, a symbol proc or a
+      # callable object taking an argument is called WITH the record, and a
+      # zero-argument callable object is #call'd bare. Every Proc used to be
+      # instance_exec'd, so the `->(record)` lambda the macro accepted raised
+      # ArgumentError on every save.
       def auditable_actor_value(actor)
-        case actor
-        when Symbol then auditable_actor_send(actor)
-        when Proc then instance_exec(&actor)
-        else actor.call
-        end
+        return auditable_actor_send(actor) if actor.is_a?(Symbol)
+
+        ConcernsOnRails::Support::Callable.invoke(self, actor)
       end
 
       # Resolve-time guard: a Symbol naming no method would otherwise raise a
