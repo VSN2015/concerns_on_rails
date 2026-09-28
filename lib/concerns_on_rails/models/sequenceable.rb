@@ -42,10 +42,11 @@ module ConcernsOnRails
       DEFAULTS = { into: nil, prefix: "", padding: 0, separator: "-", start_at: 1, scope: [],
                    reset: :never, template: nil, assign: :create, time_zone: nil }.freeze
       # The options that shape the NUMBER — its format and the rows it counts
-      # over (see #sequenceable_owner). A re-declaration passing any of them
-      # restates the format from DEFAULTS; one passing only assign: and/or
-      # time_zone: keeps the current config. time_zone: must match an owner
-      # it shares a counter with (see #sequenceable_zone_matches!).
+      # over (see #sequenceable_owner). A re-declaration passing any of them,
+      # or no option at all, restates the format from DEFAULTS; one passing
+      # only assign: and/or time_zone: keeps the current config. time_zone:
+      # must match an owner it shares a counter with (see
+      # #sequenceable_zone_matches!).
       FORMAT_KEYS = %i[prefix template padding reset scope into separator start_at].freeze
       # Two zones cut the same periods when their UTC offsets agree over this
       # window (see #sequenceable_same_zone?).
@@ -87,12 +88,12 @@ module ConcernsOnRails
         #              column NULL until `assign_<field>!` — invoices numbered when finalized
         #
         # Re-declaring a field (later on the same class, or on an STI subclass):
-        # - passing ONLY assign: and/or time_zone: (or nothing) keeps every
+        # - passing assign: and/or time_zone: and NOTHING else keeps every
         #   other option of the field's current config, so a Draft's
         #   `sequenceable_by :sequence, assign: :manual` keeps the parent's
         #   into:/prefix:/reset:/template: — and its counter;
-        # - passing any other option restates the format: every option it
-        #   omits takes its default, as in a first declaration.
+        # - any other call, a bare one included, restates the format: every
+        #   option it omits takes its default, as in a first declaration.
         def sequenceable_by(field = :sequence, into: UNSET, prefix: UNSET, padding: UNSET,
                             separator: UNSET, start_at: UNSET, scope: UNSET, reset: UNSET,
                             template: UNSET, assign: UNSET, time_zone: UNSET)
@@ -140,20 +141,24 @@ module ConcernsOnRails
         # class whose rows share this counter (SequenceCalculator#sequence_relation).
         #
         # The base is the field's CURRENT config (inherited or from an earlier
-        # call) only when the call passes no FORMAT_KEYS option — just assign:
-        # and/or time_zone:, the Draft case. Any format option restates the
-        # format from DEFAULTS. Merging a partial format onto an inherited one
-        # would render numbers the declaration never spelled out: a CN- prefix
-        # under an inherited template: (which ignores prefix) renders the
-        # parent's "INV/1" from a counter of its own; `start_at: 2` or
-        # `scope: :account_id` alone would keep the parent's "INV-" and reissue
-        # its numbers; and a declaration written against the old
-        # "omitted = default" rule would silently pick up a parent's scope:
-        # (or reset:/padding:/template:) on upgrade, re-bucketing a global
-        # CN- series per account and reissuing CN-3.
+        # call) only when the call passes assign: and/or time_zone: and no
+        # FORMAT_KEYS option — the Draft case. Any other call, a bare one
+        # included, restates the format from DEFAULTS, as it always did: a
+        # subclass declared bare today owns a default-format series whose rows
+        # carry no into: value, and inheriting would re-render them in the
+        # parent's format (INV-1 shown twice). Merging a partial format onto
+        # an inherited one would render numbers the declaration never spelled
+        # out: a CN- prefix under an inherited template: (which ignores
+        # prefix) renders the parent's "INV/1" from a counter of its own;
+        # `start_at: 2` or `scope: :account_id` alone would keep the parent's
+        # "INV-" and reissue its numbers; and a declaration written against
+        # the old "omitted = default" rule would silently pick up a parent's
+        # scope: (or reset:/padding:/template:) on upgrade, re-bucketing a
+        # global CN- series per account and reissuing CN-3.
         def sequenceable_merged_config(field, given)
           current = sequenceable_config[field]
-          base = current && !given.keys.intersect?(FORMAT_KEYS) ? current.except(:owner) : DEFAULTS
+          inherit = current && !given.empty? && !given.keys.intersect?(FORMAT_KEYS)
+          base = inherit ? current.except(:owner) : DEFAULTS
           options = given.to_h { |key, value| [key, normalize_sequenceable_option(key, value)] }
           merged = base.merge(options)
           merged.merge(owner: sequenceable_owner(field, merged))

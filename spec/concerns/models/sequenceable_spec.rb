@@ -892,12 +892,24 @@ describe ConcernsOnRails::Sequenceable do
         include ConcernsOnRails::Sequenceable
 
         sequenceable_by :sequence, assign: :manual
-        sequenceable_by :sequence # passes nothing, so changes nothing
       end
       expect(klass.create!.sequence).to be_nil
 
       klass.sequenceable_by :sequence, assign: :create
       expect(klass.create!.sequence).to eq(1) # the manual row is still NULL
+    end
+
+    it "resets a :manual field to the defaults (:create) on a bare re-declaration, as before" do
+      klass = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", assign: :manual
+        sequenceable_by :sequence # no options: a full re-declaration
+      end
+
+      expect(klass.sequenceable_config[:sequence]).to include(into: nil, prefix: "", assign: :create)
+      expect(klass.create!.sequence).to eq(1)
     end
 
     it "registers ONE before_create per field however many re-declarations there are" do
@@ -1004,11 +1016,18 @@ describe ConcernsOnRails::Sequenceable do
       expect(FmtJp.sequenceable_config[:sequence][:owner]).to eq(FmtJp)
     end
 
-    it "keeps the config and the counter on a bare subclass re-declaration" do
+    it "treats a bare subclass re-declaration as a full one: defaults, its own series (no re-rendered rows)" do
       stub_const("FmtInv", base_class(prefix: "INV-"))
       stub_const("FmtSub", Class.new(FmtInv) { sequenceable_by :sequence })
-      FmtInv.create!
-      expect(FmtSub.create!.number).to end_with("-2")
+
+      # A bare subclass owns a default-format series whose rows carry no
+      # into: value; inheriting INV- on upgrade would re-render them as the
+      # parent's numbers.
+      expect(FmtSub.sequenceable_config[:sequence])
+        .to include(prefix: "", into: nil, reset: :never, owner: FmtSub)
+      expect(FmtInv.create!(created_at: Time.utc(2026, 9, 25, 1)).number).to eq("INV-20260925-1")
+      sub = FmtSub.create!
+      expect([sub.number, sub.formatted_sequence]).to eq([nil, "1"])
     end
 
     describe "the stored-token MAX" do
