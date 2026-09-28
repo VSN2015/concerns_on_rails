@@ -367,6 +367,66 @@ describe ConcernsOnRails::Models::CounterCacheable do
       end
     end
 
+    # The per-type tally resolves each stored type to its class WITHOUT
+    # building a record: `instantiate(type => ...)` ran after_find /
+    # after_initialize on a fabricated type-only row, and raised
+    # SubclassNotFound for a type that no longer resolves — where the
+    # unconditional tally had always been pure SQL.
+    context "when resolving each stored type during a recount" do
+      it "never runs after_initialize on a fabricated row (an unguarded hook raised MissingAttributeError)" do
+        stub_const("Reply", reply_class)
+        Reply.after_initialize { self.approved = false if approved.nil? }
+        stub_const("ThreadReply", Class.new(reply_class))
+        Reply.create!(post: post)
+        ThreadReply.create!(post: post)
+        Post.where(id: post.id).update_all(comments_count: 0)
+
+        expect { Reply.recount_counter_caches! }.not_to raise_error
+        expect(post.reload.comments_count).to eq(2)
+      end
+
+      it "fires no after_find for an unconditional counter (a grouped count, as before)" do
+        found = []
+        stub_const("Reply", reply_class)
+        Reply.after_find { found << id }
+        Reply.create!(post: post)
+
+        Reply.recount_counter_caches!
+        expect(found).to eq([])
+      end
+
+      it "counts a row whose stored type no longer resolves under the base class's rule" do
+        stub_const("Reply", reply_class)
+        Reply.create!(post: post)
+        Reply.connection.execute(
+          "INSERT INTO replies (#{TestDatabase.quoted_column(:type)}, #{TestDatabase.quoted_column(:post_id)}) " \
+          "VALUES ('RemovedLegacyReply', #{post.id})"
+        )
+
+        expect { Reply.recount_counter_caches! }.not_to raise_error
+        expect(post.reload.comments_count).to eq(2)
+      end
+
+      it "scans such rows as the base class when the base rule is conditional" do
+        stub_const("Reply", Class.new(TestModel) do
+          self.table_name = "replies"
+          include ConcernsOnRails::CounterCacheable
+
+          belongs_to :post, optional: true
+          counter_cacheable_by :post, count: :comments_count, if: -> { approved? }
+        end)
+        Reply.create!(post: post, approved: true)
+        Reply.connection.execute(
+          "INSERT INTO replies (#{TestDatabase.quoted_column(:type)}, #{TestDatabase.quoted_column(:post_id)}, " \
+          "#{TestDatabase.quoted_column(:approved)}) VALUES ('RemovedLegacyReply', #{post.id}, " \
+          "#{Reply.connection.quoted_true}), ('RemovedLegacyReply', #{post.id}, #{Reply.connection.quoted_false})"
+        )
+
+        expect { Reply.recount_counter_caches! }.not_to raise_error
+        expect(post.reload.comments_count).to eq(2)
+      end
+    end
+
     it "replaces the earlier rule, in place, when the same class re-declares it" do
       stub_const("Reply", reply_class) # the `type` column needs a named class
       reply_class.counter_cacheable_by :post, count: :approved_comments_count, if: -> { approved? }

@@ -306,19 +306,39 @@ module ConcernsOnRails
 
           key = rule.values_at(:association, :count_column)
           children.distinct.pluck(type_column).each_with_object(Hash.new(0)) do |type, tally|
-            effective = counter_cacheable_rule_for_type(type_column, type, key)
+            klass = counter_cacheable_sti_class(type)
+            effective = counter_cacheable_rule_on(klass || base_class, key)
             next unless effective
 
-            rows = children.where(type_column => type)
+            rows = counter_cacheable_type_rows(children.where(type_column => type), type_column, klass, effective)
             counter_cacheable_rule_tally(rows, foreign_key, effective).each { |id, n| tally[id] += n }
           end
         end
 
-        # The rule the class stored as `type` applies for this counter, or nil.
-        # `instantiate` resolves the type exactly as loading the row would
-        # (blank => the base class; an unknown type raises SubclassNotFound).
-        def counter_cacheable_rule_for_type(type_column, type, key)
-          klass = base_class.instantiate(type_column => type).class
+        # A stored type that no longer resolves (`klass` nil) can't be
+        # instantiated, so a conditional scan loads those rows WITHOUT the
+        # inheritance column: they then load as the base class, whose rule
+        # they fall back to. An unconditional rule never loads a row.
+        def counter_cacheable_type_rows(rows, type_column, klass, rule)
+          return rows if klass || rule[:condition].nil?
+
+          rows.select(*(base_class.column_names - [type_column]))
+        end
+
+        # The class a row stored as `type` loads as — blank => the base class,
+        # exactly as the loader decides — resolved WITHOUT building a record
+        # (`instantiate` would run after_find/after_initialize on a fabricated,
+        # type-only row). nil for a type that no longer resolves (a removed or
+        # renamed subclass): the caller falls back to the base class's rule
+        # rather than failing the whole repair, as the pure-SQL tally never did.
+        def counter_cacheable_sti_class(type)
+          type.blank? ? base_class : base_class.send(:find_sti_class, type)
+        rescue ActiveRecord::SubclassNotFound
+          nil
+        end
+
+        # The rule `klass` applies for this (association, column) counter, or nil.
+        def counter_cacheable_rule_on(klass, key)
           return nil unless klass.respond_to?(:counter_cacheable_rules)
 
           klass.counter_cacheable_rules.find { |candidate| candidate.values_at(:association, :count_column) == key }
