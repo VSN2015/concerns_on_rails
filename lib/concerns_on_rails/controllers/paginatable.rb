@@ -239,9 +239,23 @@ module ConcernsOnRails
       # (group => count); the meaningful total is the number of groups.
       def paginatable_total(source)
         return source.size if source.is_a?(Array)
-        return paginatable_distinct_select_total(source) if paginatable_distinct_select?(source)
 
-        counted = source.except(:order, :limit, :offset, :select).count(:all)
+        relation = paginatable_count_relation(source)
+        return paginatable_distinct_select_total(relation) if paginatable_distinct_select?(relation)
+
+        paginatable_plain_count(relation)
+      end
+
+      # A model class answers limit/offset (so it paginates in SQL) but not
+      # the relation readers the count inspects (`distinct_value`,
+      # `select_values`, ...): `paginated(Article)` was a NoMethodError 500.
+      # Count through its default relation, `.all`, instead.
+      def paginatable_count_relation(source)
+        source.is_a?(Class) && source.respond_to?(:all) ? source.all : source
+      end
+
+      def paginatable_plain_count(relation)
+        counted = relation.except(:order, :limit, :offset, :select).count(:all)
         counted.is_a?(Hash) ? counted.length : counted
       end
 
@@ -253,32 +267,57 @@ module ConcernsOnRails
       # columns. The outer query is raw SQL, not a model relation: even
       # `Model.unscoped` re-applies an STI subclass's `type` condition, which
       # the outer query would aim at a table its FROM does not have. to_sql
-      # inlines the relation's bind values, quoted by the adapter.
-      def paginatable_distinct_select?(source)
-        source.distinct_value && source.select_values.any? && source.group_values.empty?
+      # inlines the relation's bind values, quoted by the adapter. A
+      # duck-typed source without the relation readers takes the plain count.
+      def paginatable_distinct_select?(relation)
+        return false unless %i[distinct_value select_values group_values].all? { |reader| relation.respond_to?(reader) }
+
+        relation.distinct_value && relation.select_values.any? && relation.group_values.empty?
       end
 
-      def paginatable_distinct_select_total(source)
-        connection = source.connection
-        subquery = source.except(:order, :limit, :offset)
-        inner = paginatable_realiased_select(subquery, connection) || subquery
-        connection.select_value("SELECT COUNT(*) FROM (#{inner.to_sql}) paginatable_distinct").to_i
+      # The relation's own SQL, unchanged, on every adapter. Rails 6.x's
+      # NullRelation (`none`) compiles to "" — `FROM ()` is a syntax error —
+      # and holds no rows. Only MySQL's duplicate-output-name rejection (1060)
+      # is answered with a retry; every other error propagates (on PostgreSQL
+      # it has aborted the transaction anyway).
+      def paginatable_distinct_select_total(relation)
+        connection = relation.connection
+        subquery = relation.except(:order, :limit, :offset)
+        sql = subquery.to_sql
+        return 0 if sql.blank?
+
+        paginatable_count_subquery(connection, sql)
       rescue ActiveRecord::StatementInvalid => e
         raise unless paginatable_mysql_duplicate_column?(connection, e)
 
-        # Only a select list that could not be re-aliased (a `table.*`, or an
-        # item we cannot split safely) reaches here on MySQL. Fall back to the
-        # plain count — an over-count, but one COUNT in SQL, never the
-        # distinct rows loaded into memory.
-        source.except(:order, :limit, :offset, :select).count(:all)
+        paginatable_mysql_realiased_total(relation, subquery, connection)
+      end
+
+      def paginatable_count_subquery(connection, sql)
+        connection.select_value("SELECT COUNT(*) FROM (#{sql}) paginatable_distinct").to_i
+      end
+
+      # MySQL only, after a 1060: retry with the select list re-aliased
+      # positionally (a failed statement does not abort a MySQL transaction,
+      # so the retry is safe). When the list cannot be re-aliased, or MySQL
+      # rejects that too, fall back to the plain count — an over-count, but
+      # one COUNT in SQL, never the distinct rows loaded into memory.
+      def paginatable_mysql_realiased_total(relation, subquery, connection)
+        realiased = paginatable_realiased_select(subquery, connection)
+        return paginatable_plain_count(relation) unless realiased
+
+        paginatable_count_subquery(connection, realiased.to_sql)
+      rescue ActiveRecord::StatementInvalid
+        paginatable_plain_count(relation)
       end
 
       # MySQL rejects a derived table whose SELECT list repeats an output name
       # (`select("a.id, b.id")`, error 1060). Re-alias every select item
       # positionally (`... AS c0, ... AS c1`) — the same expressions, so the
-      # same DISTINCT rows — and the COUNT stays in SQL on every adapter. nil
-      # when the list cannot be split safely: `*` / `table.*`, or an unquoted
-      # bind placeholder.
+      # same DISTINCT rows. Only ever tried as MySQL's retry: the split is a
+      # heuristic (an alias written without AS, `name n`, is not stripped, so
+      # that retry fails and the count falls back). nil when the list cannot
+      # be split safely: `*` / `table.*`, or an unquoted bind placeholder.
       def paginatable_realiased_select(subquery, connection)
         items = subquery.arel.projections.flat_map do |projection|
           paginatable_split_select_list(connection.visitor.compile(projection))

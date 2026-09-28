@@ -118,6 +118,17 @@ describe ConcernsOnRails::Controllers::Paginatable do
     meta = controller.pagination_meta(Widget.all)
     expect(meta).to eq(total: 50, page: 2, per_page: 10, total_pages: 5)
   end
+
+  # A model class is a documented relation source: it answers limit/offset
+  # but not the relation readers the DISTINCT check inspects
+  # (distinct_value), so paginated(Widget) was a NoMethodError 500.
+  it "paginates and counts a bare model class" do
+    controller = controller_class.new(params: { page: 2, per_page: 10 })
+
+    expect(controller.paginated(Widget).map(&:name).first).to eq("Widget 10")
+    expect(controller.response.headers["X-Total-Count"]).to eq("50")
+    expect(controller_class.new.pagination_meta(Widget)).to include(total: 50, total_pages: 2)
+  end
   describe "in-memory collections (Array / Enumerable)" do
     let(:items) { (1..50).map { |i| "item #{i}" } }
 
@@ -690,8 +701,9 @@ describe ConcernsOnRails::Controllers::Paginatable do
     end
 
     # Two output columns with the same name: MySQL rejects such a derived
-    # table (1060) and falls back to reading the distinct rows; the other
-    # adapters accept it. Either way the total is right.
+    # table (1060) and retries with the list re-aliased positionally; the
+    # other adapters accept the relation's own SQL. Either way the total is
+    # right.
     it "counts a DISTINCT select with repeated output names" do
       table = TestDatabase.quoted_table("pagination_memberships")
       relation = PaginationMembership
@@ -703,9 +715,8 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(controller.pagination_meta[:total]).to eq(3)
     end
 
-    # MySQL rejects repeated output names in a derived table (1060); the
-    # select list is re-aliased positionally so COUNT(*) stays in SQL on
-    # every adapter — never the distinct rows loaded into memory.
+    # MySQL's 1060 retry: the select list is re-aliased positionally so
+    # COUNT(*) stays in SQL — never the distinct rows loaded into memory.
     it "re-aliases the select list positionally, keeping commas inside calls and quotes intact" do
       controller = controller_class.new
       relation = PaginationMembership
@@ -733,6 +744,94 @@ describe ConcernsOnRails::Controllers::Paginatable do
       controller.paginated(PaginationMembership.distinct).to_a
 
       expect(controller.pagination_meta[:total]).to eq(6)
+    end
+
+    def count_statements(&block)
+      statements = []
+      callback = ->(*, payload) { statements << payload[:sql] unless payload[:name] == "SCHEMA" }
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record", &block)
+      statements.grep(/paginatable_distinct/)
+    end
+
+    # The re-aliaser only strips an alias written with AS: `group_id g`
+    # became `group_id g AS c0` — a syntax error, a 500. The relation's own
+    # SQL now runs first on every adapter, so an alias in any valid form
+    # (and a bind inside a projection) reaches the database untouched.
+    it "counts the relation's own SQL first, so an alias written without AS works" do
+      controller = controller_class.new(params: { per_page: 2 })
+      relation = PaginationMembership.select("group_id g").distinct
+      statements = count_statements { controller.paginated(relation).to_a }
+
+      expect(controller.response.headers["X-Total-Count"]).to eq("3")
+      expect(statements.size).to eq(1)
+      expect(statements.first).not_to include(TestDatabase.quoted_column("c0"))
+    end
+
+    # Rails 6.x's NullRelation#to_sql is "" — `SELECT COUNT(*) FROM ()` was a
+    # syntax error there (Rails >= 7.0 compiles `none` to real SQL).
+    it "counts a none() DISTINCT select as 0" do
+      controller = controller_class.new
+
+      expect { controller.paginated(PaginationMembership.none.select(:group_id).distinct).to_a }.not_to raise_error
+      expect(controller.response.headers["X-Total-Count"]).to eq("0")
+      expect(controller.response.headers["X-Total-Pages"]).to eq("0")
+    end
+
+    # The MySQL-only retry, driven on any adapter: the duplicate-column
+    # check is forced on and the plain subquery is rejected the way MySQL
+    # rejects repeated output names (error 1060).
+    context "when MySQL rejects the plain subquery's repeated output names (1060)" do
+      let(:controller) { controller_class.new(params: { per_page: 2 }) }
+      let(:relation) { PaginationMembership.select(:group_id, :role_id).distinct }
+      let(:realiased_marker) { "AS #{TestDatabase.quoted_column('c0')}" }
+
+      def reject_count_subquery(controller, connection, also_realiased: false)
+        allow(controller).to receive(:paginatable_mysql_duplicate_column?).and_return(true)
+        allow(connection).to receive(:select_value).and_wrap_original do |original, sql, *args, **kwargs|
+          counting = sql.is_a?(String) && sql.start_with?("SELECT COUNT(*) FROM (")
+          if counting && (also_realiased || !sql.include?(realiased_marker))
+            raise ActiveRecord::StatementInvalid, "Mysql2::Error: Duplicate column name 'group_id'"
+          end
+
+          original.call(sql, *args, **kwargs)
+        end
+      end
+
+      it "retries once with the select list re-aliased positionally" do
+        reject_count_subquery(controller, relation.connection)
+        controller.paginated(relation).to_a
+
+        expect(controller.pagination_meta[:total]).to eq(4)
+        expect(relation.connection).to have_received(:select_value).with(a_string_starting_with("SELECT COUNT(*) FROM (")).twice
+      end
+
+      it "falls back to the plain over-count when the re-aliased retry is rejected too" do
+        reject_count_subquery(controller, relation.connection, also_realiased: true)
+        controller.paginated(relation).to_a
+
+        expect(controller.pagination_meta[:total]).to eq(6)
+      end
+
+      it "falls back to the plain over-count when the list cannot be re-aliased (table.*)" do
+        star = PaginationMembership.select("#{TestDatabase.quoted_table('pagination_memberships')}.*").distinct
+        reject_count_subquery(controller, star.connection)
+        controller.paginated(star).to_a
+
+        expect(controller.pagination_meta[:total]).to eq(6)
+        expect(star.connection).to have_received(:select_value).with(a_string_starting_with("SELECT COUNT(*) FROM (")).once
+      end
+    end
+
+    it "re-raises any other error from the count subquery" do
+      connection = PaginationMembership.connection
+      allow(connection).to receive(:select_value).and_wrap_original do |original, sql, *args, **kwargs|
+        raise ActiveRecord::StatementInvalid, "syntax error" if sql.is_a?(String) && sql.include?("paginatable_distinct")
+
+        original.call(sql, *args, **kwargs)
+      end
+
+      expect { controller_class.new.paginated(PaginationMembership.select(:group_id).distinct) }
+        .to raise_error(ActiveRecord::StatementInvalid, "syntax error")
     end
   end
 
