@@ -20,9 +20,17 @@ module ConcernsOnRails
         Array(klass.friendly_id_config.base).flatten
       end
 
-      # The source NAMES (Symbols) — Procs are opaque and left out.
+      # The source NAMES (Symbols) — Procs are opaque and left out — with
+      # attribute aliases resolved.
       def names(klass)
-        symbolize(sources(klass))
+        resolve_aliases(klass, symbolize(sources(klass)))
+      end
+
+      # `alias_attribute :tax_id, :ssn`: a slug built from the alias IS the
+      # aliased column's value, so the source names that column.
+      def resolve_aliases(klass, names)
+        aliases = klass.respond_to?(:attribute_aliases) ? klass.attribute_aliases : {}
+        names.map { |name| aliases.fetch(name.to_s, name).to_sym }
       end
 
       # Sluggable's source list for a given field + candidates, before either

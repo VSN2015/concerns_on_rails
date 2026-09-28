@@ -109,16 +109,16 @@ module ConcernsOnRails
           candidates = sluggable_validate_candidates!(candidates)
           max_length = sluggable_validate_max_length!(max_length)
           sluggable_guard_encryptable!(sluggable_source_fields(field, candidates))
-          self.sluggable_field = field
-          self.sluggable_candidates = candidates
-          self.sluggable_max_length = max_length
-          self.sluggable_declared = true
           # Validate the slug column too (a missing one used to fail at first save
           # with an opaque friendly_id error); an association scope: is exempt.
           scope_column = scope && reflect_on_association(scope.to_sym) ? nil : scope
           ensure_columns!("ConcernsOnRails::Models::Sluggable",
-                          [sluggable_field, friendly_id_config.slug_column, scope_column].compact,
+                          [field, friendly_id_config.slug_column, scope_column].compact,
                           types: { friendly_id_config.slug_column.to_sym => "string:uniq" })
+          self.sluggable_field = field
+          self.sluggable_candidates = candidates
+          self.sluggable_max_length = max_length
+          self.sluggable_declared = true
           return unless history || scope || reserved_words || finders
 
           reconfigure_friendly_id(history: history, scope: scope,
@@ -128,9 +128,10 @@ module ConcernsOnRails
         # The attribute names the slug is built from: the `candidates:` entries
         # that are Symbols/Strings (nested arrays flattened) when given — they
         # replace the sluggable field — else the sluggable field. Procs are
-        # opaque and left out.
+        # opaque and left out; attribute aliases resolve to their column.
         def sluggable_source_fields(field = sluggable_field, candidates = sluggable_candidates)
-          ConcernsOnRails::Support::SlugSources.symbolize(ConcernsOnRails::Support::SlugSources.declared(field, candidates))
+          sources = ConcernsOnRails::Support::SlugSources
+          sources.resolve_aliases(self, sources.symbolize(sources.declared(field, candidates)))
         end
 
         private

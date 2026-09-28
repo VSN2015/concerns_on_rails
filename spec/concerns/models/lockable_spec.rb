@@ -1126,6 +1126,81 @@ describe ConcernsOnRails::Lockable do
     end
   end
 
+  # Two requests load the row while its previous lock has lapsed. The first
+  # clears it, fails and locks (after_lock mails token T1). The second still
+  # sees the lapsed lock in memory: its quiet clear used to be an
+  # unconditional update_columns that wiped the fresh lock and T1, so it
+  # locked again (T2, a second after_lock) — or, below the threshold, left
+  # the account unlocked. The clear is now conditional like the lock claim.
+  describe "a stale instance over a lapsed lock (register_failed_attempt!)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :lapsed_lock_users, force: true do |t|
+          t.integer :failed_attempts, default: 0
+          t.datetime :locked_at
+          t.string :unlock_token
+        end
+      end
+    end
+
+    def lapsed_lock_class(max_attempts:)
+      Class.new(TestModel) do
+        self.table_name = "lapsed_lock_users"
+        include ConcernsOnRails::Lockable
+
+        lockable_by max_attempts: max_attempts, unlock_in: 1.hour, unlock_token: :unlock_token
+
+        attr_accessor :events
+
+        def after_lock = (self.events ||= []) << :after_lock
+      end
+    end
+
+    it "adopts the lock the other request took: no second token, no second after_lock" do
+      klass = lapsed_lock_class(max_attempts: 1)
+      id = klass.create!(failed_attempts: 1, locked_at: 2.hours.ago, unlock_token: "old").id
+      first = klass.find(id)
+      second = klass.find(id)
+
+      first.register_failed_attempt!
+      mailed = klass.find(id).unlock_token
+      expect(first.events).to eq([:after_lock])
+
+      expect(second.register_failed_attempt!).to eq(1)
+      expect(second.events).to be_nil
+      expect(second.access_locked?).to be(true)
+      expect(second.unlock_token).to eq(mailed)
+      expect(klass.find(id).unlock_token).to eq(mailed)
+      expect(klass.unlock_by_token(mailed)).not_to be_nil
+    end
+
+    it "never unlocks an account another request just locked (no lockout bypass)" do
+      klass = lapsed_lock_class(max_attempts: 2)
+      id = klass.create!(failed_attempts: 2, locked_at: 2.hours.ago).id
+      first = klass.find(id)
+      second = klass.find(id)
+
+      first.register_failed_attempt!
+      first.register_failed_attempt!
+      expect(klass.find(id).access_locked?).to be(true)
+
+      second.register_failed_attempt! # third failure in the window
+      expect(klass.find(id).access_locked?).to be(true)
+    end
+
+    it "still counts the failure when the other request only cleared the lapsed lock" do
+      klass = lapsed_lock_class(max_attempts: 3)
+      id = klass.create!(failed_attempts: 3, locked_at: 2.hours.ago).id
+      first = klass.find(id)
+      second = klass.find(id)
+
+      expect(first.register_failed_attempt!).to eq(1)
+      expect(second.register_failed_attempt!).to eq(2)
+      expect(klass.find(id).failed_attempts).to eq(2)
+      expect(klass.find(id).access_locked?).to be(false)
+    end
+  end
+
   describe "unreachable schema (1.29 audit)" do
     # db:create / a fresh db:migrate / assets:precompile: the table is not
     # there yet, and the model must still load.

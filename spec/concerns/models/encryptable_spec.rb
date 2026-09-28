@@ -397,6 +397,30 @@ describe ConcernsOnRails::Models::Encryptable do
         end.to raise_error(ArgumentError, /Sluggable/)
       end
 
+      # alias_attribute's reader returns the column's value, so a slug built
+      # from the alias stored the plaintext SSN.
+      it "raises when a slug candidate is an alias_attribute of an encrypted field, either order" do
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            alias_attribute :tax_id, :ssn
+            sluggable_by :name, candidates: [:tax_id]
+            encryptable :ssn
+          end
+        end.to raise_error(ArgumentError, /:ssn.*slug source/)
+
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            encryptable :ssn
+            alias_attribute :tax_id, :ssn
+            sluggable_by :name, candidates: [:tax_id]
+          end
+        end.to raise_error(ArgumentError, /Sluggable/)
+      end
+
       # The macro-time guards cannot see every shape; a save-time backstop
       # refuses to write a slug resolved from an encrypted field.
       def raw_slug(klass, id)

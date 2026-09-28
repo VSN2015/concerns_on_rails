@@ -206,13 +206,14 @@ now raises when it is declared or saved. To clean up existing rows:
    the old plaintext slugs:
 
 ```ruby
-Customer.find_each do |customer|
+Customer.unscoped.find_each do |customer|        # unscoped: soft-deleted / hidden rows too
   customer.regenerate_slug!                      # Sluggable
   # customer.update!(slug: nil)                  # bare friendly_id: nil forces a new slug
 end
 
+current_slugs = Customer.unscoped.where.not(slug: nil).select(:slug)
 FriendlyId::Slug.where(sluggable_type: "Customer")
-                .where.not(slug: Customer.unscoped.select(:slug))
+                .where.not(slug: current_slugs)  # NOT IN: a NULL in the list would match nothing
                 .delete_all
 ```
 

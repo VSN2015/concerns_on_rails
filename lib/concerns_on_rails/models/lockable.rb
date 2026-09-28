@@ -49,7 +49,10 @@ module ConcernsOnRails
     #     Two requests crossing the threshold at once lock the row exactly
     #     once: lock_access! is a conditional UPDATE, so the loser adopts the
     #     winner's lock (and unlock token) and fires no hooks.
-    #   * lock_access!/unlock_access! persist via update_columns: validations
+    #     A lapsed lock is cleared the same way, only while it is still
+    #     lapsed in the database, so a stale instance never wipes a fresh lock.
+    #   * lock_access! persists via that conditional UPDATE, unlock_access! via
+    #     update_columns — both write columns directly: validations
     #     and AR callbacks are bypassed on purpose, so an otherwise-invalid
     #     record can still be locked. That also skips updated_at and means a
     #     coexisting Auditable will not record the change. Hooks (before/
@@ -324,7 +327,12 @@ module ConcernsOnRails
         # A lapsed lock is cleared quietly — this is a *failed* login, so
         # firing unlock hooks ("account unlocked" notifications) would be
         # wrong. The failure below then counts as attempt 1 of the new window.
-        lockable_clear_expired_lock! if lock_expired?
+        # Losing the clear means a concurrent request changed the lock first:
+        # if it re-locked the account, this failure is not counted either.
+        if lock_expired? && !lockable_clear_expired_lock!
+          lockable_adopt_current_lock!
+          return lockable_current_attempts if access_locked?
+        end
 
         self.class.update_counters(id, self.class.lockable_attempts_field => 1)
         fresh = lockable_fresh_attempts_count
@@ -476,10 +484,24 @@ module ConcernsOnRails
         self[self.class.lockable_attempts_field] || 0
       end
 
-      # No hooks on purpose — see register_failed_attempt!.
+      # No hooks on purpose — see register_failed_attempt!. Conditional, like
+      # the lock_access! claim: the row is cleared only while its lock is
+      # still lapsed in the DATABASE. An unconditional write from a stale
+      # instance (it loaded the lapsed lock before a concurrent failure
+      # cleared it and locked the account again) wiped that fresh lock and
+      # the token after_lock had just mailed, then locked a second time —
+      # or, below the threshold, left the account unlocked. true when this
+      # call cleared the lock.
       def lockable_clear_expired_lock!
-        update_columns({ self.class.lockable_locked_at_field => nil,
-                         self.class.lockable_attempts_field => 0 }.merge(self.class.lockable_token_attributes(nil)))
+        lockable_guard_writable!
+        klass = self.class
+        attributes = { klass.lockable_locked_at_field => nil,
+                       klass.lockable_attempts_field => 0 }.merge(klass.lockable_token_attributes(nil))
+        lapsed = klass.arel_table[klass.lockable_locked_at_field].lteq(Time.zone.now - klass.lockable_unlock_in)
+        return false if klass.unscoped.where(klass.primary_key => id).where(lapsed).update_all(attributes).zero?
+
+        lockable_sync_columns(attributes)
+        true
       end
 
       # The UPDATE behind lock_access!, applied only while the row is unlocked

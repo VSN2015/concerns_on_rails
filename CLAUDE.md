@@ -116,7 +116,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `register_failed_attempt!` (atomic SQL increment), `access_locked?` (lazy expiry),
   `lock_access!` (one conditional UPDATE claimed only while the row is unlocked — a stale
   concurrent instance adopts the existing lock/token and fires no hooks; readonly/destroyed
-  preconditions replicated) / `unlock_access!` (update_columns) + before/after hooks,
+  preconditions replicated; `register_failed_attempt!`'s quiet lapsed-lock clear is conditional
+  the same way) / `unlock_access!` (update_columns) + before/after hooks,
   `reset_failed_attempts!`; expiry-aware `.locked`/`.unlocked` scopes. Batch
   `unlock_expired` (mirrors `unlock_access!`; no validators gate needed since
   `update_columns` already skips them; returns 0 without a query when `unlock_in` is nil).
