@@ -427,12 +427,15 @@ without one clobbering the other. With no affix passed, scope names, the optiona
 scope, and the emitted SQL are all unchanged.
 
 Publishable, SoftDeletable and Schedulable define their default-named scopes as soon as they
-are included, and their macro's affix renames them, so the affixing call may come before or
-after the other concern's declaration: `soft_deletable_by prefix: :trash` written after
-`stateable_by :status, states: %i[pending active]` leaves `.active` to Stateable and moves
-SoftDeletable's to `.trash_active`. With Stateable, a shared name that is never renamed is
-caught when the scope is called (`ArgumentError`), so declare the affix in the same class
-body. Only scopes are renamed: a state named after one of the concern's predicates
+are included, and their macro's affix renames them. So when the concern is **included before**
+the other concern's declaration, its affixing macro call may come before or after it:
+`include SoftDeletable; include Stateable; stateable_by :status, states: %i[pending active];
+soft_deletable_by prefix: :trash` leaves `.active` to Stateable and moves SoftDeletable's to
+`.trash_active`. Including the concern *after* `stateable_by` raises (its include-time scope
+would replace Stateable's), and so does a state that takes an include-time scope a *parent*
+class defined, which the subclass can never rename. With Stateable, a shared name that is
+never renamed is caught when the scope is called (`ArgumentError`), so declare the affix in
+the same class body. Only scopes are renamed: a state named after one of the concern's predicates
 (`published`/`draft`, `scheduled`, `expired`, …) still needs `prefix:`/`suffix:` on
 `stateable_by`.
 
@@ -1157,9 +1160,9 @@ stateable_by :state, states: %i[open closed], prefix: true
 
 **Notes**
 - String-column backed (not integer-backed like Rails enum) — values are stored as-is.
-- A generated method or scope that would override one the class already has — from ActiveRecord (an event `lock` → `lock!`, a state `valid` → `valid?`) or another concern (`active` next to `Activatable`, `restore` next to `SoftDeletable`) — raises `ArgumentError` at class load; use `prefix:` or `suffix:`. The reverse order (the other concern after `stateable_by`) raises too, for the affixing concerns (Activatable, Expirable, Lockable, Anonymizable, Publishable, SoftDeletable, Schedulable) and Storable. Re-declaring Stateable itself (same class or subclass) is fine. One exemption: SoftDeletable, Publishable and Schedulable define their default-named scopes when included, so a state may take one of those names (SoftDeletable's `.active`, say) when that concern's own macro renames its scopes with `prefix:`/`suffix:` — before or after `stateable_by`. Until it does, calling the shared scope raises `ArgumentError`.
+- A generated method or scope that would override one the class already has — from ActiveRecord (an event `lock` → `lock!`, a state `valid` → `valid?`) or another concern (`active` next to `Activatable`, `restore` next to `SoftDeletable`) — raises `ArgumentError` at class load; use `prefix:` or `suffix:`. The reverse order (the other concern after `stateable_by`) raises too, for the affixing concerns (Activatable, Expirable, Lockable, Anonymizable, Publishable, SoftDeletable, Schedulable) and Storable. Re-declaring Stateable itself (same class or subclass) is fine. One exemption: SoftDeletable, Publishable and Schedulable define their default-named scopes when included, so a state may take one of those names (SoftDeletable's `.active`, say) when that concern is included (in the same class) **before** `stateable_by` and its own macro renames its scopes with `prefix:`/`suffix:`, before or after `stateable_by`. Until it does, calling the shared scope raises `ArgumentError`.
 - Re-declaring without `default:` keeps the earlier default while it is still one of the declared states; otherwise (or with an explicit `default: nil`) new records fall back to the column's database default.
-- Re-declaring replaces the generated methods too: the states, events and scopes the new declaration no longer lists are removed (hidden in an STI subclass, which keeps its parent's untouched), so a subclass with `states: %i[open closed]` no longer answers its parent's `archive!` or `.draft`.
+- Re-declaring replaces the generated methods too: the states, events and scopes the new declaration no longer lists are removed (hidden in an STI subclass, which keeps its parent's untouched), so a subclass with `states: %i[open closed]` no longer answers its parent's `archive!` or `.draft`. A method of such a name that the class defined itself is left alone.
 - No persistence of transition history; combine with `Publishable` / `Schedulable` for time-based state tracking.
 
 ---

@@ -91,12 +91,13 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   Rails-owned `created_at`/`updated_at` refused at macro time; NOT affixed). A generated
   method/scope overriding an AR or sibling-concern method raises at macro time (the reverse
   order via `Affix.refuse_stateable_names!`), EXCEPT a SoftDeletable/Publishable/Schedulable
-  include-time default scope, which that concern's later affixing macro renames — until it
-  does, the shared scope raises when called. Re-declaring retires the previous declaration's
-  stale names (removed on the class; in a subclass hidden behind private stubs in a
-  `RetiredMethods` module — never `undef_method`, which would block later includes; a
-  dropped state hands an include-time scope back) and captures the field's cast type per
-  declaring class. Guarded `<event>!` + `may_<event>?`, `before/after_transition` plus
+  include-time default scope on the class's OWN singleton (concern included first), which
+  that concern's later affixing macro renames — until it does, the shared scope raises when
+  called. Re-declaring retires the previous declaration's stale names — only the exact
+  UnboundMethods it recorded, never a user's own override (removed on the class; in a
+  subclass hidden behind private stubs in a `RetiredMethods` module — never `undef_method`,
+  which would block later includes; a dropped state hands an include-time scope back) — and
+  captures the field's cast type per declaring class. Guarded `<event>!` + `may_<event>?`, `before/after_transition` plus
   per-event `before_/after_<event>` hooks (invoked with `send`, so private overrides work).
   Batch `transition_all(event)` — deliberately NO fast path, since the per-record path runs
   validations via `update!` and `update_all` would skip them.
