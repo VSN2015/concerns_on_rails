@@ -132,6 +132,9 @@ module ConcernsOnRails
         class_attribute :anonymizable_scope_affixes, instance_accessor: false, default: {}.freeze
         class_attribute :anonymizable_captured_scopes, instance_accessor: false, default: {}.freeze
         class_attribute :anonymizable_slug, instance_accessor: false, default: :auto
+        ConcernsOnRails::Support::Affix.refuse_stateable_names!(
+          self, Anonymizable.public_instance_methods(false), kind: :instance, label: LABEL
+        )
       end
 
       module ClassMethods
@@ -296,6 +299,7 @@ module ConcernsOnRails
           return if anonymizable_scopes_defined && previous.keys.sort == names.sort
 
           self.anonymizable_scopes_defined = true
+          ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, names, kind: :scope, label: LABEL)
           scope names.first, -> { where.not(anonymizable_stamp => nil) }
           scope names.last, -> { where(anonymizable_stamp => nil) }
           self.anonymizable_captured_scopes = ConcernsOnRails::Support::Affix.capture(self, names).freeze

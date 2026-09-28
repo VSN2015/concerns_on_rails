@@ -54,6 +54,7 @@ module ConcernsOnRails
         end
         predicates = predicates.except(*answered)
         check_predicate_collisions!(klass, predicates.keys, label)
+        refuse_stateable_names!(klass, predicates.keys, kind: :instance, label: label)
 
         registry = predicate_registry(klass)
         inherited = retire_predicates!(klass, registry[label], label)
@@ -137,6 +138,66 @@ module ConcernsOnRails
         klass.table_exists?
       rescue ActiveRecord::ActiveRecordError
         false
+      end
+
+      # Stateable's collision guard only sees what exists when stateable_by
+      # runs, so the REVERSE order — stateable_by, then another concern — is
+      # checked here: every affixing concern calls this with the scopes it is
+      # about to define (`scope` would silently replace Stateable's `.active`)
+      # and, on include, with its public instance methods (Stateable's
+      # class-level `publish!` would silently shadow Publishable's, which its
+      # own batch verbs call). Names an earlier stateable_by generated —
+      # `stateable_owned_methods` — raise; anything else is left alone.
+      def refuse_stateable_names!(klass, names, kind:, label:)
+        return unless klass.respond_to?(:stateable_owned_methods)
+
+        taken = names.map(&:to_sym) & klass.stateable_owned_methods.fetch(kind)
+        return if taken.empty?
+
+        what = kind == :scope ? "scope" : "method"
+        raise ArgumentError,
+              "#{label}: #{what} '#{taken.first}' collides with the one ConcernsOnRails::Models::Stateable " \
+              "generated for a state or event; pass prefix: or suffix: to stateable_by (or to this concern's " \
+              "macro) to rename one of them"
+      end
+
+      # The concerns whose default-named scopes exist from INCLUDE time,
+      # before their own macro can rename them with prefix:/suffix::
+      # label => [captured-scopes reader, current scope-names reader].
+      INCLUDE_TIME_SCOPES = {
+        "ConcernsOnRails::Models::SoftDeletable" => %i[soft_delete_captured_scopes soft_delete_scope_names].freeze,
+        "ConcernsOnRails::Models::Publishable" => %i[publishable_captured_scopes publishable_scope_names].freeze,
+        "ConcernsOnRails::Models::Schedulable" => %i[schedulable_captured_scopes schedulable_scope_names].freeze
+      }.freeze
+
+      # The label of the concern whose untouched include-time default scope
+      # `name` still is on `klass` — the very method `capture` recorded, not
+      # yet renamed by that concern's macro — or nil. Stateable lets a state
+      # take such a name, because the concern's own later affixing macro is
+      # what moves its scope off it (see include_time_scope). Only a scope on
+      # klass's OWN singleton qualifies: one inherited from a parent can
+      # never be renamed here (retire! refuses to affix on a subclass).
+      def include_time_scope_owner(klass, name)
+        singleton = klass.singleton_class
+        return nil unless singleton.method_defined?(name)
+
+        current = singleton.instance_method(name)
+        return nil unless current.owner == singleton
+
+        INCLUDE_TIME_SCOPES.each_key.find { |label| include_time_scope(klass, label, name) == current }
+      end
+
+      # The include-time scope the concern `label` captured for `name` while
+      # that concern still generates the default name — its current names map
+      # still yields `name`, i.e. its macro has not affixed its scopes — else
+      # nil. Stateable asks this on every call of a scope it shares the name
+      # with, so the collision is refused until the concern renames its own.
+      def include_time_scope(klass, label, name)
+        captured_reader, names_reader = INCLUDE_TIME_SCOPES.fetch(label)
+        return nil unless klass.respond_to?(captured_reader)
+        return nil unless klass.public_send(names_reader).value?(name)
+
+        klass.public_send(captured_reader)[name]
       end
 
       # Snapshot the scopes a concern just defined on `klass`: a

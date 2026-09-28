@@ -428,9 +428,21 @@ publishable_by :published_at, prefix: true       # => Article.published_at_publi
 
 `prefix:`/`suffix:` rename every scope `publishable_by` generates, so a model can include
 Publishable alongside another concern that would otherwise generate a same-named scope
-(SoftDeletable and Activatable also define `.active`, for instance) without one clobbering
-the other. With no affix passed, scope names, the optional default scope, and the emitted
-SQL are all unchanged.
+without one clobbering the other. With no affix passed, scope names, the optional default
+scope, and the emitted SQL are all unchanged.
+
+Publishable, SoftDeletable and Schedulable define their default-named scopes as soon as they
+are included, and their macro's affix renames them. So when the concern is **included before**
+the other concern's declaration, its affixing macro call may come before or after it:
+`include SoftDeletable; include Stateable; stateable_by :status, states: %i[pending active];
+soft_deletable_by prefix: :trash` leaves `.active` to Stateable and moves SoftDeletable's to
+`.trash_active`. Including the concern *after* `stateable_by` raises (its include-time scope
+would replace Stateable's), and so does a state that takes an include-time scope a *parent*
+class defined, which the subclass can never rename. With Stateable, a shared name that is
+never renamed is caught when the scope is called (`ArgumentError`), so declare the affix in
+the same class body. Only scopes are renamed: a state named after one of the concern's predicates
+(`published`/`draft`, `scheduled`, `expired`, …) still needs `prefix:`/`suffix:` on
+`stateable_by`.
 
 `prefix:`/`suffix:` mean three different things across the gem, depending on the concern:
 - **Scope-name affix** (renames generated scopes) — Activatable, Expirable, Lockable,
@@ -456,7 +468,7 @@ in memory.
 
 **Notes**
 - "Published" means `published_at` is set **and** in the past — so future-dated posts stay unpublished until their time arrives.
-- No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`).
+- No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`). An explicit `default_scope: false` on a later call or an STI subclass turns it off again; omitting the option keeps the current (inherited) setting.
 - A boolean publishable column works too (`publishable_by :is_published`). Its `.published` scope is `(is_published = TRUE)`, wrapped in parentheses (an Arel Grouping) so that Rails does not copy the condition onto new records built through the scope. So with `default_scope: true` a new record still starts unpublished, and so does `Post.published.new`. The predicate stays in the index-friendly `= TRUE` form, so a partial index `WHERE published = true` still matches. On Rails 6.0, which cannot `unscope` a Grouping, the scope uses `is_published <> FALSE` instead; it selects the same rows.
 
 ---
@@ -810,7 +822,7 @@ expirable_by :valid_until
 
 ## ✨ Normalizable
 
-Auto-normalize attribute values in `before_validation` — strip whitespace, downcase emails, dedupe spaces, chain transforms, run any custom lambda.
+Auto-normalize attribute values in `before_validation` (plus a `before_save` backstop for saves that skip validation) — strip whitespace, downcase emails, dedupe spaces, chain transforms, run any custom lambda.
 
 ```ruby
 class User < ApplicationRecord
@@ -847,7 +859,7 @@ User.find_by(email: User.normalize(:email, params[:email]))
 | `:url`          | strip, default scheme to `https://` (`host:port` counts as schemeless), lowercase scheme + host, keep userinfo/path/query, drop a redundant default port. Only `http`/`https` are canonicalized — any other scheme (`mailto:`, `tel:`, `javascript:`, `data:`) and unparseable input come back stripped for your format validator to reject |
 
 **Notes**
-- Runs in `before_validation`, so DB constraints and AR validations see the normalized value.
+- Runs in `before_validation`, so DB constraints and AR validations see the normalized value — with a `before_save` backstop for saves that skip validation (`update_attribute`, `save(validate: false)`); `update_column(s)`/`update_all` bypass it. The backstop is prepended to the save callbacks, so a sibling's `before_save` (Encryptable's blind index, Auditable's entry, Addressable's fingerprint) sees the normalized value whichever concern was included first.
 - `with:` takes a preset, a Proc, or an Array of them (applied in order); every entry is validated at class load.
 - `nil` values are skipped — no `nil → ""` coercion (use `:nullify_blank` for the opposite direction).
 - Preset normalizers pass non-string values through unchanged.
@@ -1165,7 +1177,9 @@ stateable_by :state, states: %i[open closed], prefix: true
 
 **Notes**
 - String-column backed (not integer-backed like Rails enum) — values are stored as-is.
-- States like `active` / `expired` overlap with `Activatable`/`Expirable` scopes — use `prefix:` or `suffix:` to disambiguate.
+- A generated method or scope that would override one the class already has — from ActiveRecord (an event `lock` → `lock!`, a state `valid` → `valid?`) or another concern (`active` next to `Activatable`, `restore` next to `SoftDeletable`) — raises `ArgumentError` at class load; use `prefix:` or `suffix:`. The reverse order (the other concern after `stateable_by`) raises too, for the affixing concerns (Activatable, Expirable, Lockable, Anonymizable, Publishable, SoftDeletable, Schedulable) and Storable. Re-declaring Stateable itself (same class or subclass) is fine. One exemption: SoftDeletable, Publishable and Schedulable define their default-named scopes when included, so a state may take one of those names (SoftDeletable's `.active`, say) when that concern is included (in the same class) **before** `stateable_by` and its own macro renames its scopes with `prefix:`/`suffix:`, before or after `stateable_by`. Until it does, calling the shared scope raises `ArgumentError`.
+- Re-declaring without `default:` keeps the earlier default while it is still one of the declared states; otherwise (or with an explicit `default: nil`) new records fall back to the column's database default.
+- Re-declaring replaces the generated methods too: the states, events and scopes the new declaration no longer lists are removed (hidden in an STI subclass, which keeps its parent's untouched), so a subclass with `states: %i[open closed]` no longer answers its parent's `archive!` or `.draft`. A method of such a name that the class defined itself is left alone.
 - No persistence of transition history; combine with `Publishable` / `Schedulable` for time-based state tracking.
 
 ---
@@ -1632,12 +1646,12 @@ Comment.recount_counter_caches!(:post, parents: imported_posts)   # repair just 
 
 Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose. A destroy decrements only when its DELETE actually removed the row (as Rails' native counter cache does) — destroying a stale second instance, or a never-saved record, writes nothing — and it reads the parent and the `if:` verdict from the **persisted** values, so an unsaved reparent or condition flip can't redirect it. A `belongs_to ..., primary_key: :code` is honoured: parents are addressed by that key (live adjustments and `recount_counter_caches!` alike), never by `id`. A child destroyed by its parent's own `has_many ..., dependent: :destroy` does not decrement that parent (as with Rails' native counter cache) — the row is going away, and bumping it first would trip the parent's `lock_version`. A `has_one` replacement, where the parent survives, still decrements. With `lock_version` on the parent, two pre-existing cases can still raise `StaleObjectError`: destroying a parent whose counted child hangs off a `has_one ..., dependent: :destroy`, and a `has_many :through ..., dependent: :destroy` (Rails deletes the join rows without `destroyed_by_association`).
 
-**Options** (`counter_cacheable_by association, …`, repeatable): `count:` (the parent column; default `"<table_name>_count"`), `if:` (a callable evaluated against the record — counts only when truthy; the previous state is reconstructed for updates), `touch:` (`false`; also bump the parent's `updated_at`).
+**Options** (`counter_cacheable_by association, …`, repeatable — re-declaring the same association + `count:` replaces that rule, e.g. an STI subclass narrowing it with `if:`): `count:` (the parent column; default `"<table_name>_count"`), `if:` (a callable evaluated against the record — counts only when truthy; the previous state is reconstructed for updates), `touch:` (`false`; also bump the parent's `updated_at`).
 
 **Notes**
 - The `belongs_to` must be declared **before** the macro (the reflection is validated at declaration). Polymorphic associations are not supported.
 - Don't also set native `counter_cache: true` on the same column — both would fire and double-count.
-- Counters track the **persisted** record; writes that skip callbacks (`update_column(s)`, `update_all`, `delete`) are not tracked — run `recount_counter_caches!` to reconcile. Bare, it rewrites every parent (portable across adapters, but O(n) for conditional counters) — a maintenance operation, run it offline. With `parents:` it zeroes and re-tallies only those parents (O(their children)) in one transaction that locks those rows before tallying, so repairing one imported post is safe on the request path.
+- Counters track the **persisted** record; writes that skip callbacks (`update_column(s)`, `update_all`, `delete`) are not tracked — run `recount_counter_caches!` to reconcile. Bare, it rewrites every parent (portable across adapters, but O(n) for conditional counters) — a maintenance operation, run it offline. On an STI table every class's rows are tallied under that class's own rule for the column, so a repair from any class of the tree matches the live counts (types are resolved without instantiating a row; a stored type that no longer resolves counts under the base class's rule). With `parents:` it zeroes and re-tallies only those parents (O(their children)) in one transaction that locks those rows before tallying, so repairing one imported post is safe on the request path.
 - Reach for [`counter_culture`](https://github.com/magnusvk/counter_culture) when you need multi-level rollups, delta columns, or after-commit execution.
 
 ---

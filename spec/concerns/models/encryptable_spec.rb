@@ -317,6 +317,25 @@ describe ConcernsOnRails::Models::Encryptable do
       expect(record.ssn).to eq("1 2 3")
     end
 
+    # Normalizable's before_save backstop (saves that skip validation) is
+    # prepended: registered after Encryptable's blind-index refresh, it ran
+    # after it, so the row stored the normalized value but fingerprinted the
+    # raw one and find_by_email missed it forever.
+    it "fingerprints the value Normalizable's before_save backstop stores (update_attribute)" do
+      klass = model_class do
+        include ConcernsOnRails::Models::Normalizable
+
+        encryptable :email, blind_index: true
+        normalizable :email, with: :email
+      end
+      user = klass.create!(email: "a@b.com")
+      user.update_attribute(:email, "  Foo@Example.COM ")
+
+      stored = user.reload.email
+      expect(stored).to eq("foo@example.com")
+      expect(klass.find_by_email(stored)).to eq(user)
+    end
+
     it "masks the decrypted value (Maskable)" do
       klass = model_class do
         include ConcernsOnRails::Models::Maskable
