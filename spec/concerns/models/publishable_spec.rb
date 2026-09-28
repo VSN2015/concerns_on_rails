@@ -250,14 +250,25 @@ describe ConcernsOnRails::Publishable do
         expect(plain.default_scopes).to be_empty
       end
 
-      it "registers it for a subclass that turns it on, leaving the parent unscoped" do
+      it "registers it for a subclass that turns it on, leaving the parent and a sibling unscoped" do
         stub_const("RedeclaredPost", plain)
         stub_const("RedeclaredFeaturedPost", Class.new(plain) { publishable_by :published_at, default_scope: true })
+        stub_const("RedeclaredBlogPost", Class.new(plain))
 
         RedeclaredFeaturedPost.create!(published_at: nil)
+        RedeclaredBlogPost.create!(published_at: nil)
         expect(RedeclaredFeaturedPost.count).to eq(0)
-        expect(RedeclaredPost.count).to eq(1)
+        expect(RedeclaredFeaturedPost.unscoped.count).to eq(1)
+        expect(RedeclaredBlogPost.count).to eq(1)
+        expect(RedeclaredPost.count).to eq(2)
         expect(RedeclaredPost.default_scopes).to be_empty
+      end
+
+      it "exposes drafts again after true then false on the same class" do
+        plain.publishable_by :published_at, default_scope: true
+        plain.publishable_by :published_at, default_scope: false
+        plain.create!(published_at: nil)
+        expect(plain.count).to eq(1)
       end
     end
   end

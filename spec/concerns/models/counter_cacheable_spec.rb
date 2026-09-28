@@ -407,6 +407,28 @@ describe ConcernsOnRails::Models::CounterCacheable do
         expect(post.reload.comments_count).to eq(2)
       end
 
+      it "resolves short, namespaced types (store_full_sti_class = false)" do
+        stub_const("Forum", Module.new)
+        stub_const("Forum::Reply", Class.new(TestModel) do
+          self.table_name = "replies"
+          self.store_full_sti_class = false
+          include ConcernsOnRails::CounterCacheable
+
+          belongs_to :post, optional: true, class_name: "Post"
+          counter_cacheable_by :post, count: :comments_count
+        end)
+        stub_const("Forum::ModeratedReply", Class.new(Forum::Reply) do
+          counter_cacheable_by :post, count: :comments_count, if: -> { approved? }
+        end)
+        Forum::Reply.create!(post: post)
+        Forum::ModeratedReply.create!(post: post, approved: false)
+        expect(Forum::Reply.unscoped.distinct.pluck(:type)).to contain_exactly(nil, "ModeratedReply")
+        Post.where(id: post.id).update_all(comments_count: 0)
+
+        Forum::Reply.recount_counter_caches!
+        expect(post.reload.comments_count).to eq(1)
+      end
+
       it "scans such rows as the base class when the base rule is conditional" do
         stub_const("Reply", Class.new(TestModel) do
           self.table_name = "replies"
