@@ -1,8 +1,10 @@
 require "active_support/concern"
+require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/callable"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/slug_sources"
 require "concerns_on_rails/support/unique_retry"
 require "digest"
 require "securerandom"
@@ -68,6 +70,10 @@ module ConcernsOnRails
     #     anonymized COLUMN is replaced in the same UPDATE by a random,
     #     length-fitting slug and its history rows are deleted. :auto cannot
     #     see through a method or Proc slug source — declare `slug: true`.
+    #     A rewritten slug counts as erased for the Auditable interaction.
+    #   * Addressable interaction: erasing any mapped address column clears
+    #     the `fingerprint:` column in the same UPDATE (it is an unkeyed hash
+    #     of the old address).
     #   * Erasure is terminal: unsaved changes on the instance are discarded by
     #     the post-write reload.
     module Anonymizable
@@ -120,6 +126,10 @@ module ConcernsOnRails
         class_attribute :anonymizable_stamp, instance_accessor: false, default: DEFAULT_STAMP
         class_attribute :anonymizable_clear_audit, instance_accessor: false, default: true
         class_attribute :anonymizable_scopes_defined, instance_accessor: false, default: false
+        # { prefix:, suffix: } as last explicitly passed, and the scope methods
+        # the current names were defined with (for guarded retirement).
+        class_attribute :anonymizable_scope_affixes, instance_accessor: false, default: {}.freeze
+        class_attribute :anonymizable_captured_scopes, instance_accessor: false, default: {}.freeze
         class_attribute :anonymizable_slug, instance_accessor: false, default: :auto
       end
 
@@ -129,7 +139,7 @@ module ConcernsOnRails
         # Declare fields and their erasure strategy. Repeatable — field rules
         # merge across calls; stamp:/clear_audit_trail:/prefix:/suffix: apply
         # only when explicitly passed (last explicit value wins).
-        def anonymizable(*fields, with:, stamp: UNSET, clear_audit_trail: UNSET, slug: UNSET, prefix: nil, suffix: nil)
+        def anonymizable(*fields, with:, stamp: UNSET, clear_audit_trail: UNSET, slug: UNSET, prefix: UNSET, suffix: UNSET)
           raise ArgumentError, "#{LABEL}: at least one field is required" if fields.empty?
 
           strategy = anonymizable_resolve_strategy(with)
@@ -160,9 +170,11 @@ module ConcernsOnRails
         # friendly_id model: its base, when that is a column.
         def anonymizable_slug_source_columns
           columns = column_names
-          anonymizable_slug_sources.filter_map do |source|
-            source.to_sym if (source.is_a?(Symbol) || source.is_a?(String)) && columns.include?(source.to_s)
-          end
+          sources = ConcernsOnRails::Support::SlugSources
+          # An alias_attribute source reads its column, so erasing the column
+          # has to rewrite a slug built from the alias too.
+          named = sources.resolve_aliases(self, sources.symbolize(anonymizable_slug_sources))
+          named.select { |source| columns.include?(source.to_s) }
         rescue ActiveRecord::ActiveRecordError
           # Schema unreachable only (the ColumnGuard convention) — any other
           # error propagates: swallowing it would silently keep a PII slug.
@@ -221,9 +233,7 @@ module ConcernsOnRails
         # Every declared slug source, columns or not (see
         # anonymizable_slug_source_columns).
         def anonymizable_slug_sources
-          return Array(friendly_id_config.base).flatten unless respond_to?(:sluggable_field)
-
-          sluggable_candidates ? Array(sluggable_candidates).flatten : [sluggable_field]
+          ConcernsOnRails::Support::SlugSources.sources(self)
         end
 
         def anonymizable_random_hex(length)
@@ -267,17 +277,34 @@ module ConcernsOnRails
         end
 
         # Scopes read the class attribute lazily, so later stamp changes take
-        # effect; defined once (affixes come from the first defining call).
+        # effect. prefix:/suffix: follow "last explicit value wins" per option:
+        # a later call that changes the affixed names defines the new scopes
+        # and retires the old ones — only the ones this class itself defined
+        # and nobody has since overridden (Support::Affix.retire!); a parent's
+        # scopes are never removed from under it.
         def anonymizable_define_scopes(prefix, suffix)
-          return if anonymizable_scopes_defined || anonymizable_stamp.nil?
+          affixes = anonymizable_scope_affixes
+          affixes = affixes.merge(prefix: prefix) unless prefix.equal?(UNSET)
+          affixes = affixes.merge(suffix: suffix) unless suffix.equal?(UNSET)
+          self.anonymizable_scope_affixes = affixes.freeze
+          return if anonymizable_stamp.nil?
+
+          names = anonymizable_scope_names(affixes)
+          previous = anonymizable_captured_scopes
+          return if anonymizable_scopes_defined && previous.keys.sort == names.sort
 
           self.anonymizable_scopes_defined = true
-          prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: anonymizable_stamp)
-          suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: anonymizable_stamp)
-          scope ConcernsOnRails::Support::Affix.name(:anonymized, prefix: prefix, suffix: suffix),
-                -> { where.not(anonymizable_stamp => nil) }
-          scope ConcernsOnRails::Support::Affix.name(:not_anonymized, prefix: prefix, suffix: suffix),
-                -> { where(anonymizable_stamp => nil) }
+          scope names.first, -> { where.not(anonymizable_stamp => nil) }
+          scope names.last, -> { where(anonymizable_stamp => nil) }
+          self.anonymizable_captured_scopes = ConcernsOnRails::Support::Affix.capture(self, names).freeze
+          ConcernsOnRails::Support::Affix.retire!(self, previous.except(*names), label: LABEL, inherited: :keep)
+        end
+
+        # [anonymized-scope name, not_anonymized-scope name] for these affixes.
+        def anonymizable_scope_names(affixes)
+          prefix = ConcernsOnRails::Support::Affix.normalize(affixes[:prefix], default: anonymizable_stamp)
+          suffix = ConcernsOnRails::Support::Affix.normalize(affixes[:suffix], default: anonymizable_stamp)
+          %i[anonymized not_anonymized].map { |base| ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix) }
         end
       end
 
@@ -355,10 +382,30 @@ module ConcernsOnRails
           payload[field] = cast
           anonymizable_add_blind_index(payload, field, cast)
         end
+        anonymizable_clear_address_fingerprint(payload)
         stamp = self.class.anonymizable_stamp
         payload[stamp] = Time.zone.now if stamp
         payload[self.class.auditable_into] = nil if anonymizable_clear_audit_column?
         payload
+      end
+
+      # Addressable's `fingerprint:` column is an unkeyed SHA-256 of the
+      # normalized address, restamped only in before_save — which
+      # update_columns skips. Left alone it would keep a digest of the ERASED
+      # address, and `with_address(old_fingerprint)` would still resolve the
+      # row. Cleared (nil — an erased address matches nothing) in the same
+      # UPDATE whenever any mapped address column is anonymized; an explicit
+      # `anonymizable :<fingerprint column>` rule wins. A later ordinary save
+      # restamps it from the anonymized values, as for any address.
+      def anonymizable_clear_address_fingerprint(payload)
+        klass = self.class
+        return unless klass.respond_to?(:addressable_fingerprint_column)
+
+        column = klass.addressable_fingerprint_column
+        return if column.nil? || payload.key?(column)
+        return unless klass.addressable_fields.values.map(&:to_sym).intersect?(klass.anonymizable_rules.keys)
+
+        payload[column] = nil
       end
 
       # update_columns skips before_save, so Encryptable's blind-index refresh
@@ -461,13 +508,19 @@ module ConcernsOnRails
       end
 
       # The audit trail holds historical plaintext of tracked fields; when any
-      # of them is being erased, the trail must go too (see module docs).
+      # of them is being erased, the trail must go too (see module docs). A
+      # slug this erasure rewrites counts as erased: its old value
+      # ("jane-smith") is the erased name, so an audited slug column holds
+      # the same PII.
       def anonymizable_clear_audit_column?
-        return false unless self.class.anonymizable_clear_audit
-        return false unless self.class.respond_to?(:auditable_fields)
+        klass = self.class
+        return false unless klass.anonymizable_clear_audit
+        return false unless klass.respond_to?(:auditable_fields)
 
-        tracked = Array(self.class.auditable_fields).map(&:to_sym)
-        self.class.anonymizable_rules.keys.intersect?(tracked)
+        tracked = Array(klass.auditable_fields).map(&:to_sym)
+        erased = klass.anonymizable_rules.keys
+        erased += [klass.friendly_id_config.slug_column.to_sym] if klass.anonymizable_rewrites_slug?
+        erased.intersect?(tracked)
       end
     end
   end

@@ -335,6 +335,48 @@ describe ConcernsOnRails::Lockable do
   end
 
   describe "#lock_access!" do
+    it "on a stale instance adopts the lock already in the row: no second write, no hooks" do
+      user = LockUser.create!(email: "a@b.c")
+      stale = LockUser.find(user.id)
+      user.lock_access!
+      locked_at = LockUser.find(user.id).locked_at
+
+      expect(stale.lock_access!).to be(true)
+      expect(stale.events).to be_nil
+      expect(stale.locked_at).to eq(locked_at)
+      expect(stale.access_locked?).to be(true)
+      expect(stale.changed?).to be(false)
+      expect(LockUser.find(user.id).locked_at).to eq(locked_at)
+    end
+
+    # The claim is a raw conditional UPDATE, so update_columns' own
+    # preconditions are replicated rather than silently lost.
+    it "raises ReadOnlyRecord on a readonly! record and writes nothing" do
+      user = LockUser.create!(email: "a@b.c")
+      readonly = LockUser.find(user.id)
+      readonly.readonly!
+
+      expect { readonly.lock_access! }.to raise_error(ActiveRecord::ReadOnlyRecord)
+      expect(LockUser.find(user.id).locked_at).to be_nil
+      expect(readonly.events).to be_nil
+    end
+
+    it "raises on a destroyed record instead of reporting a lock" do
+      user = LockUser.create!(email: "a@b.c")
+      user.destroy
+
+      expect { user.lock_access! }.to raise_error(ActiveRecord::ActiveRecordError, /destroyed/)
+    end
+
+    it "returns false (no hooks) when the row was deleted behind the instance's back" do
+      user = LockUser.create!(email: "a@b.c")
+      LockUser.where(id: user.id).delete_all
+
+      expect(user.lock_access!).to be(false)
+      expect(user.events).to be_nil
+      expect(user.locked_at).to be_nil
+    end
+
     it "locks a record that fails validations (update_columns bypass)" do
       klass = Class.new(TestModel) do
         self.table_name = "lock_users"
@@ -881,6 +923,93 @@ describe ConcernsOnRails::Lockable do
       expect(user.reload.unlock_token).to be_nil
     end
 
+    # Two requests loaded the row before either failed. The first crosses the
+    # threshold and locks (the token is mailed from after_lock); the second,
+    # still holding the unlocked row, crosses it too. Its lock_access! used to
+    # write a fresh token over the mailed one — killing the link — and fire
+    # after_lock again. The lock is now one conditional UPDATE, so the loser
+    # only adopts the lock that is already there.
+    it "a stale instance crossing the threshold concurrently keeps the mailed token and fires no hooks" do
+      locker = Class.new(TestModel) do
+        self.table_name = "token_lock_users"
+        include ConcernsOnRails::Lockable
+
+        lockable_by max_attempts: 2, unlock_in: 1.hour, unlock_token: :unlock_token
+
+        attr_accessor :events
+
+        def before_lock = (self.events ||= []) << :before_lock
+        def after_lock = (self.events ||= []) << :after_lock
+      end
+      id = locker.create!(email: "race@x.com", failed_attempts: 1).id
+      first = locker.find(id)
+      second = locker.find(id)
+
+      first.register_failed_attempt!
+      mailed = locker.find(id).unlock_token
+      locked_at = locker.find(id).locked_at
+      expect(mailed).to be_present
+      expect(first.events).to eq(%i[before_lock after_lock])
+
+      expect(second.register_failed_attempt!).to eq(3)
+      expect(second.events).to be_nil
+      expect(second.access_locked?).to be(true)
+      expect(second.unlock_token).to eq(mailed) # adopted the winner's lock, in memory too
+      expect(second.changed?).to be(false)
+
+      row = locker.find(id)
+      expect(row.unlock_token).to eq(mailed)
+      expect(row.locked_at).to eq(locked_at)
+      expect(locker.unlock_by_token(mailed)).to eq(row)
+    end
+
+    it "a stale loser inside the caller's own transaction still adopts the winner's token" do
+      stale = klass.find(user.id)
+      user.lock_access!
+
+      expect(klass.transaction { stale.lock_access! }).to be(true)
+      expect(stale.unlock_token).to eq(user.unlock_token)
+    end
+
+    it "lock_access! on a stale instance adopts the existing lock instead of re-minting" do
+      stale = klass.find(user.id)
+      user.lock_access!
+      token = user.unlock_token
+
+      expect(stale.lock_access!).to be(true)
+      expect(stale.unlock_token).to eq(token)
+      expect(klass.find(user.id).unlock_token).to eq(token)
+    end
+
+    it "a before_lock Rollback veto undoes the claim and restores memory exactly" do
+      vetoing = Class.new(TestModel) do
+        self.table_name = "token_lock_users"
+        include ConcernsOnRails::Lockable
+
+        lockable_by max_attempts: 2, unlock_token: :unlock_token
+
+        def before_lock = raise(ActiveRecord::Rollback)
+      end
+      record = vetoing.create!(email: "veto-lock@x.com")
+
+      expect(record.lock_access!).to be(false)
+      expect(record.locked_at).to be_nil
+      expect(record.unlock_token).to be_nil
+      expect(record.changed?).to be(false)
+      expect(vetoing.find(record.id).locked_at).to be_nil
+      expect(vetoing.find(record.id).unlock_token).to be_nil
+    end
+
+    it "lock_access! still re-locks (fresh token) over a lapsed lock a stale instance saw as live" do
+      user.lock_access!
+      old_token = user.unlock_token
+      travel_to(2.hours.from_now) do
+        expect(user.lock_access!).to be(true)
+        expect(user.unlock_token).not_to eq(old_token)
+        expect(klass.find(user.id).locked_at).to be_within(1.second).of(Time.zone.now)
+      end
+    end
+
     it "puts the token back when a hook vetoes the unlock, so the link is not burned" do
       vetoing = Class.new(TestModel) do
         self.table_name = "token_lock_users"
@@ -994,6 +1123,81 @@ describe ConcernsOnRails::Lockable do
         ArgumentError,
         /AddLockableColumnsToNakedLockUsers failed_attempts:integer locked_at:datetime unlock_token:string:uniq/
       )
+    end
+  end
+
+  # Two requests load the row while its previous lock has lapsed. The first
+  # clears it, fails and locks (after_lock mails token T1). The second still
+  # sees the lapsed lock in memory: its quiet clear used to be an
+  # unconditional update_columns that wiped the fresh lock and T1, so it
+  # locked again (T2, a second after_lock) — or, below the threshold, left
+  # the account unlocked. The clear is now conditional like the lock claim.
+  describe "a stale instance over a lapsed lock (register_failed_attempt!)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :lapsed_lock_users, force: true do |t|
+          t.integer :failed_attempts, default: 0
+          t.datetime :locked_at
+          t.string :unlock_token
+        end
+      end
+    end
+
+    def lapsed_lock_class(max_attempts:)
+      Class.new(TestModel) do
+        self.table_name = "lapsed_lock_users"
+        include ConcernsOnRails::Lockable
+
+        lockable_by max_attempts: max_attempts, unlock_in: 1.hour, unlock_token: :unlock_token
+
+        attr_accessor :events
+
+        def after_lock = (self.events ||= []) << :after_lock
+      end
+    end
+
+    it "adopts the lock the other request took: no second token, no second after_lock" do
+      klass = lapsed_lock_class(max_attempts: 1)
+      id = klass.create!(failed_attempts: 1, locked_at: 2.hours.ago, unlock_token: "old").id
+      first = klass.find(id)
+      second = klass.find(id)
+
+      first.register_failed_attempt!
+      mailed = klass.find(id).unlock_token
+      expect(first.events).to eq([:after_lock])
+
+      expect(second.register_failed_attempt!).to eq(1)
+      expect(second.events).to be_nil
+      expect(second.access_locked?).to be(true)
+      expect(second.unlock_token).to eq(mailed)
+      expect(klass.find(id).unlock_token).to eq(mailed)
+      expect(klass.unlock_by_token(mailed)).not_to be_nil
+    end
+
+    it "never unlocks an account another request just locked (no lockout bypass)" do
+      klass = lapsed_lock_class(max_attempts: 2)
+      id = klass.create!(failed_attempts: 2, locked_at: 2.hours.ago).id
+      first = klass.find(id)
+      second = klass.find(id)
+
+      first.register_failed_attempt!
+      first.register_failed_attempt!
+      expect(klass.find(id).access_locked?).to be(true)
+
+      second.register_failed_attempt! # third failure in the window
+      expect(klass.find(id).access_locked?).to be(true)
+    end
+
+    it "still counts the failure when the other request only cleared the lapsed lock" do
+      klass = lapsed_lock_class(max_attempts: 3)
+      id = klass.create!(failed_attempts: 3, locked_at: 2.hours.ago).id
+      first = klass.find(id)
+      second = klass.find(id)
+
+      expect(first.register_failed_attempt!).to eq(1)
+      expect(second.register_failed_attempt!).to eq(2)
+      expect(klass.find(id).failed_attempts).to eq(2)
+      expect(klass.find(id).access_locked?).to be(false)
     end
   end
 
