@@ -1,5 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/callable"
+require "concerns_on_rails/support/batch_ops"
 
 module ConcernsOnRails
   module Models
@@ -58,7 +60,9 @@ module ConcernsOnRails
     #     associations.
     #   * `recount_counter_caches!` rewrites every parent's counter and, for a
     #     conditional counter, scans the children in Ruby (portable across
-    #     adapters, but O(n)) — a maintenance operation, run it offline.
+    #     adapters, but O(n)) — a maintenance operation, run it offline. On an
+    #     STI table it tallies every class's rows under that class's own rule,
+    #     so it repairs the shared column from whichever class it is called on.
     #   * Reach for the `counter_culture` gem when you need multi-level rollups,
     #     delta columns, or after-commit execution.
     module CounterCacheable
@@ -84,6 +88,10 @@ module ConcernsOnRails
 
         # Declare one counter. Repeatable — each call maintains another column
         # (rules accumulate, reassigned never mutated, so subclasses inherit).
+        # A rule is keyed by (association, count column): re-declaring the same
+        # counter REPLACES that rule, in place, for this class — so an STI
+        # subclass can narrow an inherited counter with `if:` — where appending
+        # a second rule made both fire and double-count every row.
         # `count:` defaults to "<table_name>_count" (e.g. comments → comments_count).
         def counter_cacheable_by(association, count: nil, touch: false, **options)
           association = association.to_sym
@@ -97,10 +105,10 @@ module ConcernsOnRails
           count_column = (count || "#{table_name}_count").to_sym
           counter_cacheable_ensure_parent_column!(reflection, count_column)
 
-          self.counter_cacheable_rules = counter_cacheable_rules + [{
+          counter_cacheable_store_rule(
             association: association, count_column: count_column,
             condition: condition, touch: touch ? true : false
-          }]
+          )
         end
 
         # Recompute every (or one) counter from scratch — drift repair / backfill.
@@ -120,6 +128,13 @@ module ConcernsOnRails
         end
 
         private
+
+        def counter_cacheable_store_rule(rule)
+          key = rule.values_at(:association, :count_column)
+          rules = counter_cacheable_rules
+          index = rules.index { |existing| existing.values_at(:association, :count_column) == key }
+          self.counter_cacheable_rules = index ? rules.dup.tap { |copy| copy[index] = rule } : rules + [rule]
+        end
 
         # An association nobody declared a counter for would otherwise filter the
         # rules down to nothing and report a silent success — or, with `parents:`,
@@ -217,12 +232,6 @@ module ConcernsOnRails
 
         def validate_counter_cacheable_touch!(touch)
           raise ArgumentError, "#{LABEL}: :touch must be true or false" unless [true, false].include?(touch)
-          return unless touch && ActiveRecord::VERSION::MAJOR < 6
-
-          # `update_counters(..., touch: true)` exists on Rails 6.0+; on 5.x the
-          # option would be read as a counter column literally named `touch` and
-          # produce a SQL error at runtime — fail loudly at macro time instead.
-          raise ArgumentError, "#{LABEL}: `touch: true` requires Rails >= 6.0"
         end
 
         # Validate the column on the PARENT table when its class is already
@@ -245,7 +254,6 @@ module ConcernsOnRails
           parent_class = reflection.klass
           key = counter_cacheable_parent_key(reflection)
           column = rule[:count_column]
-          condition = rule[:condition]
 
           # One transaction so a crash mid-repair can't leave every counter at
           # the zeroed intermediate state. A scoped repair locks its (bounded)
@@ -260,9 +268,9 @@ module ConcernsOnRails
               targets.lock.pluck(parent_class.primary_key)
             end
 
-            children = unscoped.where.not(fk => nil)
+            children = base_class.unscoped.where.not(fk => nil)
             children = children.where(fk => parent_ids) if parent_ids
-            counts = condition ? counter_cacheable_recount_tally(children, fk, condition) : children.group(fk).count
+            counts = counter_cacheable_tally(children, fk, rule)
 
             targets.update_all(column => 0)
             counter_cacheable_apply_tally(parent_class, key, column, counts)
@@ -285,10 +293,68 @@ module ConcernsOnRails
           end
         end
 
+        # { parent key => count } for one (association, column) counter. The
+        # column is shared by every class of an STI tree, and each class may
+        # carry its own rule for it (a subclass narrowing it with `if:`), so
+        # the rows are tallied per stored type under THAT class's effective
+        # rule and summed: a recount agrees with the live counts whichever
+        # class of the tree it is called on — the parent no longer counts
+        # subclass rows under its own rule, and a subclass no longer zeroes
+        # the column and re-tallies its own rows only. A table without an
+        # inheritance column is the one-class case.
+        def counter_cacheable_tally(children, foreign_key, rule)
+          type_column = inheritance_column.to_s
+          return counter_cacheable_rule_tally(children, foreign_key, rule) unless base_class.column_names.include?(type_column)
+
+          key = rule.values_at(:association, :count_column)
+          children.distinct.pluck(type_column).each_with_object(Hash.new(0)) do |type, tally|
+            klass = counter_cacheable_sti_class(type)
+            effective = counter_cacheable_rule_on(klass || base_class, key)
+            next unless effective
+
+            rows = counter_cacheable_type_rows(children.where(type_column => type), type_column, klass, effective)
+            counter_cacheable_rule_tally(rows, foreign_key, effective).each { |id, n| tally[id] += n }
+          end
+        end
+
+        # A stored type that no longer resolves (`klass` nil) can't be
+        # instantiated, so a conditional scan loads those rows WITHOUT the
+        # inheritance column: they then load as the base class, whose rule
+        # they fall back to. An unconditional rule never loads a row.
+        def counter_cacheable_type_rows(rows, type_column, klass, rule)
+          return rows if klass || rule[:condition].nil?
+
+          rows.select(*(base_class.column_names - [type_column]))
+        end
+
+        # The class a row stored as `type` loads as — blank => the base class,
+        # exactly as the loader decides — resolved WITHOUT building a record
+        # (`instantiate` would run after_find/after_initialize on a fabricated,
+        # type-only row). nil for a type that no longer resolves (a removed or
+        # renamed subclass): the caller falls back to the base class's rule
+        # rather than failing the whole repair, as the pure-SQL tally never did.
+        def counter_cacheable_sti_class(type)
+          type.blank? ? base_class : base_class.send(:find_sti_class, type)
+        rescue ActiveRecord::SubclassNotFound
+          nil
+        end
+
+        # The rule `klass` applies for this (association, column) counter, or nil.
+        def counter_cacheable_rule_on(klass, key)
+          return nil unless klass.respond_to?(:counter_cacheable_rules)
+
+          klass.counter_cacheable_rules.find { |candidate| candidate.values_at(:association, :count_column) == key }
+        end
+
+        def counter_cacheable_rule_tally(children, foreign_key, rule)
+          condition = rule[:condition]
+          condition ? counter_cacheable_recount_tally(children, foreign_key, condition) : children.group(foreign_key).count
+        end
+
         def counter_cacheable_recount_tally(children, foreign_key, condition)
           tally = Hash.new(0)
-          children.find_each do |record|
-            tally[record[foreign_key]] += 1 if record.instance_exec(&condition)
+          ConcernsOnRails::Support::BatchOps.each_record(children) do |record|
+            tally[record[foreign_key]] += 1 if ConcernsOnRails::Support::Callable.invoke(record, condition)
           end
           tally
         end
@@ -419,7 +485,7 @@ module ConcernsOnRails
         condition = rule[:condition]
         return true unless condition
 
-        instance_exec(&condition) ? true : false
+        ConcernsOnRails::Support::Callable.invoke(self, condition) ? true : false
       end
 
       # Evaluate the condition against the record as it was BEFORE this save by
@@ -428,7 +494,7 @@ module ConcernsOnRails
         condition = rule[:condition]
         return true unless condition
 
-        counter_cacheable_with_attributes(counter_cacheable_changes) { instance_exec(&condition) ? true : false }
+        counter_cacheable_with_attributes(counter_cacheable_changes) { ConcernsOnRails::Support::Callable.invoke(self, condition) ? true : false }
       end
 
       # Temporarily put each changed attribute back to the FIRST value of its

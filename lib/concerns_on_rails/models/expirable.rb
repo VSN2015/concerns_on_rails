@@ -16,6 +16,9 @@ module ConcernsOnRails
         class_attribute :expirable_scope_names, instance_accessor: false,
                                                 default: { active: :active, expired: :expired,
                                                            expiring_within: :expiring_within }.freeze
+        ConcernsOnRails::Support::Affix.refuse_stateable_names!(
+          self, Expirable.public_instance_methods(false), kind: :instance, label: "ConcernsOnRails::Models::Expirable"
+        )
       end
 
       class_methods do # rubocop:disable Metrics/BlockLength
@@ -88,6 +91,7 @@ module ConcernsOnRails
           self.expirable_scope_names = %i[active expired expiring_within].to_h do |base|
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
+          ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, expirable_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::Expirable")
 
           scope expirable_scope_names[:active], lambda {
             column = arel_table[expirable_field]
@@ -149,7 +153,7 @@ module ConcernsOnRails
         time = self.class.expirable_cast_time(time)
         hooks = time.to_time > Time.zone.now ? {} : { before: :before_expire, after: :after_expire }
         field = self.class.expirable_field
-        ConcernsOnRails::Support::HookedWrite.run(self, restore: [field], **hooks) do
+        ConcernsOnRails::Support::HookedWrite.run(self, **hooks) do
           update(field => time)
         end
       end

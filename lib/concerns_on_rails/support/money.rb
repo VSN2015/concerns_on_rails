@@ -87,6 +87,11 @@ module ConcernsOnRails
       OVERSIZED_EXPONENT = /\d[eE][+-]?\d{3}/
       # "1.234" / "-1.234.567": "."-grouped thousands.
       DOTTED_THOUSANDS = /\A[+-]?\d{1,3}(?:\.\d{3})+\z/
+      # The only shape handed to BigDecimal(): sign, digits with an optional
+      # "." fraction, optional exponent. BigDecimal() itself also accepts
+      # Ruby-literal underscores, so "5_5" read as 55 while the equally
+      # mis-grouped "1,5" was garbage.
+      CANONICAL_AMOUNT = /\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z/
 
       # Parse a writer's input into a finite BigDecimal amount (major units),
       # or nil. A String has its unit removed (only at the start or the end),
@@ -113,11 +118,14 @@ module ConcernsOnRails
         return nil unless body && plausible_input?(body)
 
         body = body.delete(".") if dotted_thousands?(body, options)
-        canonical = BigDecimal(body, exception: false)
+        canonical = strict_decimal(body)
         return canonical if canonical
 
-        localized = localized_to_canonical(body, options)
-        localized && BigDecimal(localized, exception: false)
+        strict_decimal(localized_to_canonical(body, options))
+      end
+
+      def strict_decimal(string)
+        string&.match?(CANONICAL_AMOUNT) ? BigDecimal(string) : nil
       end
 
       # Non-empty, bounded in length, and no three-digit written exponent —

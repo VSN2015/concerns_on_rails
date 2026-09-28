@@ -29,7 +29,7 @@ The fully-qualified alias `ConcernsOnRails::Models::Maskable` also works and is 
 
 `Maskable` reads existing columns but never writes to them. No new columns are added. Each field passed to `maskable` must already exist in the model's database table, or an `ArgumentError` is raised at class-load time (see [Notes & gotchas](#notes--gotchas)).
 
-The concern works with any column type. Preset masking methods are string-safe: a non-`String` value (e.g. an integer, `nil`) is returned untouched. Only `String` values are processed by the built-in presets.
+The concern works with any column type. `nil` stays `nil`; every other non-`String` value (an integer SSN, a `bigint` phone number) is converted to a `String` before a built-in preset masks it — an integral `BigDecimal`/`Float` without its `.0` (so `:last4` keeps the real last digits), any other in plain notation — so a preset never displays the raw value.
 
 ## Configuration
 
@@ -159,9 +159,9 @@ render json: other_user.as_json(masked: true)         # everyone else sees the m
 - **`:with` must be a Symbol or Proc.** Any other type (e.g. a string, integer) raises `ArgumentError` (message: `":with must be a preset symbol or a Proc/lambda"`).
 - **At least one field is required.** Calling `maskable` with no positional arguments (e.g. `maskable with: :all`) raises `ArgumentError` (message: `"at least one field is required"`).
 - **`nil` values are passed through.** All preset strategies return `nil` when the column value is `nil`. When using a custom `Proc`, the caller is responsible for nil-guarding.
-- **Non-String values are passed through by presets.** An integer or other non-String column value is returned as-is by every built-in preset. Custom `Proc` strategies receive the raw value and must handle type-checking themselves.
-- **Email preset edge case.** If the column value is a string that does not contain `@`, the `:email` preset returns the value unchanged rather than masking it.
-- **Phone preset edge case.** If the column value contains no digit characters, the `:phone` preset returns the value unchanged.
+- **Non-String values are stringified by presets, never passed through.** `maskable :ssn, with: :last4` on an integer column returns `"*****6789"`, not `123456789` (earlier releases returned the raw value — masking failed open). The masked reader therefore returns a `String` for any non-nil value. Custom `Proc` strategies receive the raw value and must handle type-checking themselves.
+- **Email preset edge case.** A value that does not contain `@` is not email-shaped, so the `:email` preset masks every character (`"janedoe"` → `"*******"`) rather than revealing it.
+- **Phone preset edge case.** With four or fewer digit characters (none included) the last four would be the whole number, so the `:phone` preset masks every character (`"n/a"` → `"***"`).
 - **Credit card with four or fewer digits.** When a card value has four or fewer digit characters, `:credit_card` falls back to `:all` and masks every character rather than using the grouped format.
 - **`maskable_rules` is a `class_attribute`.** Because `maskable_rules` is defined with `class_attribute`, subclasses inherit a reference to the parent's hash. Calling `maskable` in a subclass merges into a new hash (`self.maskable_rules = maskable_rules.merge(...)`) rather than mutating the parent, so subclass declarations do not bleed up.
 - **`masked:` rides `serializable_hash`.** The concern overrides `serializable_hash(options)` and calls `super` first, so `only:`/`except:`/`methods:`/`include:` behave exactly as in Rails; only the values of declared fields still present in the hash are replaced, and they are masked from the SERIALIZED value, so an overridden reader or a `Sanitizable(on: :read)` field is masked after its own filtering. Nested `include:` records inherit the request: `masked: true` is merged into every include entry that does not set it explicitly, so a Maskable child is masked too. Pass `include: { profile: { masked: false } }` to opt a child out. Children mask all of their own declared fields even when the parent named a subset, because a field list names the parent's columns.

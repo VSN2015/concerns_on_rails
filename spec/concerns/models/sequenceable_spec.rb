@@ -672,13 +672,573 @@ describe ConcernsOnRails::Sequenceable do
       issued = [RdBase.create!, RdInv.create!, RdInv.create!].map(&:number)
       expect(issued).to eq(%w[INV-1 INV-2 INV-3])
 
-      # The deploy: RdInv now declares its own series.
+      # The deploy: RdInv re-declares the SAME format. Identical numbering
+      # options keep the inherited counter (review of the fixed-zone PR): a
+      # subclass-only MAX would hand out INV-4 twice.
       RdInv.sequenceable_by :sequence, into: :number, prefix: "INV-"
 
       next_base = RdBase.create!.number
       expect(issued).not_to include(next_base)
       expect(next_base).to eq("INV-4")
-      expect(RdInv.create!.number).to eq("INV-4") # its own series continues from its own rows
+      expect(RdInv.create!.number).to eq("INV-5")
+
+      # A different format does start its own series. A format option
+      # restates the whole format, so into: is spelled out again.
+      RdInv.sequenceable_by :sequence, into: :number, prefix: "RI-"
+      expect(RdInv.create!.number).to eq("RI-6") # MAX over RdInv's own rows (2, 3, 5)
+    end
+  end
+
+  describe "reset: periods are taken in a FIXED zone, not the request's Time.zone" do
+    # Every Rails app has time_zone_aware_attributes on (the AR railtie sets
+    # it); the bare harness does not, which is how the per-request zone leak
+    # slipped past this suite.
+    def zoned_invoice_class(reset: :day, **options)
+      Class.new(TestModel) do
+        self.table_name = "invoices"
+        self.time_zone_aware_attributes = true
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, reset:, padding: 4, **options
+      end
+    end
+
+    after { Time.zone = "UTC" }
+
+    it "renders formatted_<field> (no into:) the same whatever zone the reader is in" do
+      klass = zoned_invoice_class(prefix: "INV-")
+      invoice = klass.create!(created_at: Time.utc(2026, 9, 24, 23, 30))
+      expect(invoice.formatted_sequence).to eq("INV-20260924-0001")
+
+      Time.zone = "Tokyo" # 2026-09-25 08:30 there
+      expect(klass.find(invoice.id).formatted_sequence).to eq("INV-20260924-0001")
+    end
+
+    it "never issues the same number to two requests running in different zones" do
+      klass = zoned_invoice_class(into: :number)
+      Time.zone = "Tokyo"
+      a = klass.create!(created_at: Time.utc(2026, 9, 24, 16, 0)) # 09-25 01:00 in Tokyo
+      Time.zone = "Eastern Time (US & Canada)"
+      b = klass.create!(created_at: Time.utc(2026, 9, 25, 14, 0)) # 09-25 10:00 in New York
+
+      # Both periods are UTC days (no config.time_zone in the harness).
+      expect([a.number, b.number]).to eq(%w[20260924-0001 20260925-0001])
+      expect(klass.pluck(:number).uniq.size).to eq(2)
+    end
+
+    it "honors an explicit time_zone: for the period range AND the token" do
+      klass = zoned_invoice_class(into: :number, time_zone: "Tokyo")
+      Time.zone = "Eastern Time (US & Canada)"
+      a = klass.create!(created_at: Time.utc(2026, 9, 24, 16, 0)) # 09-25 01:00 Tokyo
+      Time.zone = "UTC"
+      b = klass.create!(created_at: Time.utc(2026, 9, 25, 14, 0)) # 09-25 23:00 Tokyo
+      c = klass.create!(created_at: Time.utc(2026, 9, 25, 15, 0)) # 09-26 00:00 Tokyo
+
+      expect([a, b, c].map(&:number)).to eq(%w[20260925-0001 20260925-0002 20260926-0001])
+      travel_to(Time.utc(2026, 9, 25, 14, 30)) { expect(klass.next_sequence).to eq(3) }
+    end
+
+    it "defaults to the app's configured zone (config.time_zone), resolved at use time" do
+      previous = Time.zone_default
+      Time.zone_default = ActiveSupport::TimeZone["Tokyo"]
+      klass = zoned_invoice_class(into: :number)
+      Time.zone = "UTC"
+      expect(klass.create!(created_at: Time.utc(2026, 9, 24, 16, 0)).number).to eq("20260925-0001")
+    ensure
+      Time.zone_default = previous
+    end
+
+    it "continues after a number stored under a request zone before the upgrade (no reissue)" do
+      klass = zoned_invoice_class(into: :number, prefix: "INV_")
+      # Numbered pre-fix by a Tokyo request: token 20260925, but created on
+      # the UTC day 2026-09-24, outside the fixed-zone range for 09-25.
+      klass.unscoped.insert_all([{ sequence: 1, number: "INV_20260925-0001",
+                                   created_at: Time.utc(2026, 9, 24, 16), updated_at: Time.utc(2026, 9, 24, 16) }])
+      # A LIKE-special prefix is escaped: "INV_" must not match "INVX".
+      klass.unscoped.insert_all([{ sequence: 7, number: "INVX20260925-0007",
+                                   created_at: Time.utc(2026, 9, 24, 16), updated_at: Time.utc(2026, 9, 24, 16) }])
+
+      expect(klass.create!(created_at: Time.utc(2026, 9, 25, 1)).number).to eq("INV_20260925-0002")
+      travel_to(Time.utc(2026, 9, 25, 2)) { expect(klass.next_sequence).to eq(3) }
+    end
+
+    it "exposes the fixed-zone period instant to template: via sequenceable_period_time" do
+      klass = zoned_invoice_class(into: :number, reset: :year,
+                                  template: ->(seq, r) { "#{r.sequenceable_period_time(:sequence).year}-#{seq}" })
+      Time.zone = "Tokyo"
+      a = klass.create!(created_at: Time.utc(2026, 12, 31, 16)) # 2027 in Tokyo, 2026 in UTC
+      b = klass.create!(created_at: Time.utc(2027, 1, 1, 1))
+      expect([a.number, b.number]).to eq(%w[2026-1 2027-1])
+      expect(a.sequenceable_period_time(:sequence).time_zone.name).to eq("UTC")
+    end
+
+    it "rejects an unknown time_zone: at macro time" do
+      expect { zoned_invoice_class(time_zone: "Mars/Olympus") }
+        .to raise_error(ArgumentError, %r{unknown time_zone 'Mars/Olympus'})
+      expect { zoned_invoice_class(time_zone: Object.new) }.to raise_error(ArgumentError, /unknown time_zone/)
+      expect(zoned_invoice_class(time_zone: ActiveSupport::TimeZone["Tokyo"]).create!.sequence).to eq(1)
+    end
+  end
+
+  describe "re-declaring a field with assign: :manual (audit 2026-09-23)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :manual_sti_invoices, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+          t.string  :number
+          t.timestamps
+        end
+      end
+    end
+
+    it "stops numbering at create when the same class re-declares assign: :manual" do
+      klass = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence
+        sequenceable_by :sequence, assign: :manual
+      end
+
+      invoice = klass.create!
+      expect(invoice.sequence).to be_nil
+      expect(invoice.assign_sequence!).to be(true)
+      expect(invoice.reload.sequence).to eq(1)
+    end
+
+    it "lets an STI subclass switch to :manual while the parent and a non-redeclaring sibling keep numbering" do
+      parent = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+      end
+      stub_const("ManualStiInvoice", parent)
+      stub_const("ManualStiDraft", Class.new(parent) { sequenceable_by :sequence, assign: :manual })
+      stub_const("ManualStiCredit", Class.new(parent))
+
+      draft = ManualStiDraft.create!
+      expect(draft.sequence).to be_nil
+      expect(draft.number).to be_nil
+      expect(ManualStiInvoice.create!.number).to eq("INV-1")
+      expect(ManualStiCredit.create!.number).to eq("INV-2") # inherits :create
+      expect(ManualStiInvoice.sequenceable_config[:sequence][:assign]).to eq(:create)
+      # Only assign: changed, so the draft keeps the inherited into:/prefix:
+      # AND the parent's counter: finalizing continues the INV- series.
+      expect(ManualStiDraft.sequenceable_config[:sequence]).to include(into: :number, prefix: "INV-", owner: parent)
+      expect(draft.assign_sequence!).to be(true)
+      expect(draft.reload.number).to eq("INV-3")
+      expect(ManualStiInvoice.create!.number).to eq("INV-4")
+    end
+
+    it "never reissues a parent number when the subclass repeats the parent's format with assign: :manual" do
+      parent = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+      end
+      stub_const("ManualStiInvoice", parent)
+      stub_const("ManualStiDraft", Class.new(parent) do
+        sequenceable_by :sequence, into: :number, prefix: "INV-", assign: :manual, time_zone: "Tokyo"
+      end)
+
+      ManualStiInvoice.create!
+      ManualStiInvoice.create!
+      draft = ManualStiDraft.create!
+      draft.assign_sequence!
+
+      expect(ManualStiInvoice.unscoped.pluck(:number)).to match_array(%w[INV-1 INV-2 INV-3])
+    end
+
+    it "takes ownership when a re-declaration changes the numbering format" do
+      parent = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+      end
+      stub_const("ManualStiInvoice", parent)
+      stub_const("ManualStiDraft", Class.new(parent) do
+        sequenceable_by :sequence, into: :number, prefix: "DR-", assign: :manual
+      end)
+
+      ManualStiInvoice.create!
+      draft = ManualStiDraft.create!
+      draft.assign_sequence!
+      expect(ManualStiDraft.sequenceable_config[:sequence]).to include(into: :number, owner: ManualStiDraft)
+      expect(draft.number).to eq("DR-1")
+    end
+
+    it "restates the whole format from the defaults when a re-declaration passes a format option" do
+      parent = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", padding: 3, reset: :year
+      end
+      stub_const("ManualStiInvoice", parent)
+      stub_const("ManualStiDraft", Class.new(parent) { sequenceable_by :sequence, prefix: "DR-", assign: :manual })
+
+      expect(ManualStiDraft.sequenceable_config[:sequence])
+        .to include(into: nil, prefix: "DR-", padding: 0, reset: :never, assign: :manual, owner: ManualStiDraft)
+      expect(ManualStiInvoice.sequenceable_config[:sequence]).to include(into: :number, padding: 3, reset: :year)
+    end
+
+    it "flips back to :create when a manual declaration is re-declared with assign: :create" do
+      klass = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, assign: :manual
+      end
+      expect(klass.create!.sequence).to be_nil
+
+      klass.sequenceable_by :sequence, assign: :create
+      expect(klass.create!.sequence).to eq(1) # the manual row is still NULL
+    end
+
+    it "resets a :manual field to the defaults (:create) on a bare re-declaration, as before" do
+      klass = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", assign: :manual
+        sequenceable_by :sequence # no options: a full re-declaration
+      end
+
+      expect(klass.sequenceable_config[:sequence]).to include(into: nil, prefix: "", assign: :create)
+      expect(klass.create!.sequence).to eq(1)
+    end
+
+    it "registers ONE before_create per field however many re-declarations there are" do
+      klass = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence
+        sequenceable_by :sequence, assign: :manual
+        sequenceable_by :sequence, assign: :create
+      end
+      sub = Class.new(klass) do
+        sequenceable_by :sequence, assign: :manual
+        sequenceable_by :sequence, assign: :create
+      end
+
+      [klass, sub].each do |k|
+        filters = k._create_callbacks.select { |cb| cb.kind == :before }.map(&:filter)
+        expect(filters.count(:assign_sequenceable_sequence_on_create)).to eq(1)
+        expect(filters.grep(Proc)).to be_empty
+      end
+    end
+
+    it "registers no callback for a field until it is first declared assign: :create" do
+      klass = Class.new(TestModel) do
+        self.table_name = "manual_sti_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, assign: :manual
+      end
+      filters = ->(k) { k._create_callbacks.select { |cb| cb.kind == :before }.map(&:filter) }
+      expect(filters.call(klass)).not_to include(:assign_sequenceable_sequence_on_create)
+
+      klass.sequenceable_by :sequence, assign: :create
+      expect(filters.call(klass).count(:assign_sequenceable_sequence_on_create)).to eq(1)
+    end
+  end
+
+  describe "one visible format = one counter and one zone (re-review of the fixed-zone PR)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :fmt_invoices, force: true do |t|
+          t.string  :type
+          t.string  :number
+          t.integer :sequence
+          t.integer :account_id
+          t.timestamps
+        end
+      end
+    end
+
+    after { Time.zone = "UTC" }
+
+    def seed(klass, at: Time.utc(2026, 9, 24, 16), **attrs)
+      klass.unscoped.insert_all([{ created_at: at, updated_at: at }.merge(attrs)])
+    end
+
+    def base_class(into: :number, **options)
+      Class.new(TestModel) do
+        self.table_name = "fmt_invoices"
+        self.time_zone_aware_attributes = true
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into:, reset: :day, **options
+      end
+    end
+
+    it "rejoins the parent's counter when a subclass changes its prefix away and back" do
+      stub_const("FmtInv", base_class(prefix: "INV-"))
+      stub_const("FmtSub", Class.new(FmtInv) do
+        sequenceable_by :sequence, into: :number, reset: :day, prefix: "CN-"
+        sequenceable_by :sequence, into: :number, reset: :day, prefix: "INV-" # the parent's format again
+      end)
+
+      expect(FmtSub.sequenceable_config[:sequence][:owner]).to eq(FmtInv)
+      first = FmtInv.create!
+      expect(FmtSub.create!.number).not_to eq(first.number)
+    end
+
+    it "walks past an intermediate owner to the ancestor with the same format" do
+      stub_const("FmtInv", base_class(prefix: "INV-"))
+      stub_const("FmtCn", Class.new(FmtInv) { sequenceable_by :sequence, into: :number, reset: :day, prefix: "CN-" })
+      stub_const("FmtCnInv", Class.new(FmtCn) { sequenceable_by :sequence, into: :number, reset: :day, prefix: "INV-" })
+
+      expect(FmtCn.sequenceable_config[:sequence][:owner]).to eq(FmtCn)
+      expect(FmtCnInv.sequenceable_config[:sequence][:owner]).to eq(FmtInv)
+      numbers = [FmtInv.create!, FmtCnInv.create!, FmtCn.create!].map(&:number)
+      expect(numbers.uniq.size).to eq(3)
+    end
+
+    it "refuses a re-declaration that keeps the format but changes the zone" do
+      stub_const("FmtInv", base_class(into: nil))
+      message = %r{same format as FmtInv \(one shared counter\).*"Asia/Tokyo" vs \(omitted: the app default\)\. One visible format}
+      expect { stub_const("FmtTokyo", Class.new(FmtInv) { sequenceable_by :sequence, time_zone: "Tokyo" }) }
+        .to raise_error(ArgumentError, message)
+    end
+
+    it "accepts a different zone with a different format" do
+      stub_const("FmtInv", base_class(prefix: "INV-"))
+      stub_const("FmtJp", Class.new(FmtInv) do
+        sequenceable_by :sequence, into: :number, reset: :day, prefix: "JP-", time_zone: "Tokyo"
+      end)
+
+      expect(FmtJp.sequenceable_config[:sequence][:owner]).to eq(FmtJp)
+    end
+
+    it "treats a bare subclass re-declaration as a full one: defaults, its own series (no re-rendered rows)" do
+      stub_const("FmtInv", base_class(prefix: "INV-"))
+      stub_const("FmtSub", Class.new(FmtInv) { sequenceable_by :sequence })
+
+      # A bare subclass owns a default-format series whose rows carry no
+      # into: value; inheriting INV- on upgrade would re-render them as the
+      # parent's numbers.
+      expect(FmtSub.sequenceable_config[:sequence])
+        .to include(prefix: "", into: nil, reset: :never, owner: FmtSub)
+      expect(FmtInv.create!(created_at: Time.utc(2026, 9, 25, 1)).number).to eq("INV-20260925-1")
+      sub = FmtSub.create!
+      expect([sub.number, sub.formatted_sequence]).to eq([nil, "1"])
+    end
+
+    describe "the stored-token MAX" do
+      it "escapes % _ and \\ in the prefix" do
+        klass = base_class(prefix: "A_%\\")
+        seed(klass, sequence: 7, number: "AB%\\20260925-7") # matches if _ were a wildcard
+        seed(klass, sequence: 9, number: "A_x\\20260925-9") # matches if % were a wildcard
+        expect(klass.create!(created_at: Time.utc(2026, 9, 25, 1)).sequence).to eq(1)
+        seed(klass, sequence: 4, number: "A_%\\20260925-4") # a literal match counts
+        expect(klass.create!(created_at: Time.utc(2026, 9, 25, 2)).sequence).to eq(5)
+      end
+
+      it "does not pick up a longer prefix's series (INV- vs INV-EU-)" do
+        klass = base_class(prefix: "INV-")
+        seed(klass, sequence: 9, number: "INV-EU-20260925-9")
+        expect(klass.create!(created_at: Time.utc(2026, 9, 25, 1)).sequence).to eq(1)
+      end
+
+      it "stays inside scope:" do
+        klass = base_class(scope: :account_id)
+        seed(klass, sequence: 9, number: "20260925-9", account_id: 2)
+        expect(klass.create!(account_id: 1, created_at: Time.utc(2026, 9, 25, 1)).sequence).to eq(1)
+        seed(klass, sequence: 3, number: "20260925-3", account_id: 1)
+        expect(klass.create!(account_id: 1, created_at: Time.utc(2026, 9, 25, 2)).sequence).to eq(4)
+      end
+
+      it "takes MAX over the integer column, so a non-numeric stored suffix is harmless" do
+        klass = base_class
+        seed(klass, sequence: 2, number: "20260925-ABC")
+        expect(klass.create!(created_at: Time.utc(2026, 9, 25, 1)).sequence).to eq(3)
+      end
+    end
+  end
+
+  # Review of the fixed-zone PR, round 2: re-declarations inherit only when
+  # they pass no format option; zone checks resolve like periods do.
+  describe "re-declaration inheritance and zone checks" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :redecl_docs, force: true do |t|
+          t.string  :type
+          t.integer :sequence
+          t.string  :number
+          t.integer :account_id
+          t.integer :ref_seq
+          t.timestamps
+        end
+      end
+    end
+
+    after { Time.zone = "UTC" }
+
+    def redecl_base(**options)
+      Class.new(TestModel) do
+        self.table_name = "redecl_docs"
+        self.time_zone_aware_attributes = true
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, **options
+      end
+    end
+
+    def seed_row(klass, **attrs)
+      at = Time.utc(2026, 9, 1)
+      klass.unscoped.insert_all([{ created_at: at, updated_at: at }.merge(attrs)])
+    end
+
+    it "does not carry an inherited template: into a prefix: re-declaration (no reissued INV/1)" do
+      stub_const("RedeclInv", redecl_base(template: ->(seq, _r) { "INV/#{seq}" }))
+      stub_const("RedeclCn", Class.new(RedeclInv) { sequenceable_by :sequence, into: :number, prefix: "CN-" })
+
+      issued = [RedeclInv.create!, RedeclInv.create!].map(&:number)
+      expect(RedeclCn.sequenceable_config[:sequence]).to include(template: nil, owner: RedeclCn)
+      expect(RedeclCn.create!.number).to eq("CN-1")
+      expect(issued).to eq(%w[INV/1 INV/2])
+    end
+
+    it "does not carry the parent's prefix:/into: into a start_at:- or scope:-only re-declaration" do
+      stub_const("RedeclInv", redecl_base(prefix: "INV-"))
+      stub_const("RedeclStart", Class.new(RedeclInv) { sequenceable_by :sequence, start_at: 2 })
+      stub_const("RedeclScoped", Class.new(RedeclInv) { sequenceable_by :sequence, scope: :account_id })
+
+      issued = Array.new(3) { RedeclInv.create!(account_id: 1).number }
+      expect(RedeclStart.sequenceable_config[:sequence]).to include(prefix: "", into: nil, start_at: 2)
+      start = RedeclStart.create!(account_id: 1)
+      scoped = RedeclScoped.create!(account_id: 1)
+      expect([start.formatted_sequence, scoped.formatted_sequence]).to eq(%w[2 1])
+      expect(issued).not_to include(start.formatted_sequence, scoped.formatted_sequence)
+    end
+
+    it "does not re-scope an existing global subclass series with the parent's scope: on upgrade" do
+      stub_const("RedeclInv", redecl_base(prefix: "INV-", scope: :account_id))
+      stub_const("RedeclCn", Class.new(RedeclInv) { sequenceable_by :sequence, into: :number, prefix: "CN-" })
+      # Rows of the global CN- series, numbered before the upgrade.
+      seed_row(RedeclInv, type: "RedeclCn", sequence: 1, number: "CN-1", account_id: 1)
+      seed_row(RedeclInv, type: "RedeclCn", sequence: 2, number: "CN-2", account_id: 2)
+      seed_row(RedeclInv, type: "RedeclCn", sequence: 3, number: "CN-3", account_id: 1)
+
+      expect(RedeclCn.sequenceable_config[:sequence][:scope]).to eq([])
+      expect(RedeclCn.create!(account_id: 2).number).to eq("CN-4")
+    end
+
+    it "lets a Draft re-declare ONLY assign: under a template: parent, keeping the template and the counter" do
+      stub_const("RedeclInv", redecl_base(template: ->(seq, _r) { "INV/#{seq}" }))
+      stub_const("RedeclDraft", Class.new(RedeclInv) { sequenceable_by :sequence, assign: :manual })
+
+      RedeclInv.create!
+      RedeclInv.create!
+      draft = RedeclDraft.create!
+      expect(draft.number).to be_nil
+      draft.assign_sequence!
+      expect(RedeclInv.unscoped.pluck(:number)).to match_array(%w[INV/1 INV/2 INV/3])
+      expect(RedeclDraft.sequenceable_config[:sequence][:template]).to equal(RedeclInv.sequenceable_config[:sequence][:template])
+    end
+
+    it "treats a template: repeated as a NEW lambda as a separate series (Procs compare by identity)" do
+      stub_const("RedeclInv", redecl_base(template: ->(seq, _r) { "INV/#{seq}" }))
+      stub_const("RedeclDraft", Class.new(RedeclInv) do
+        sequenceable_by :sequence, into: :number, template: ->(seq, _r) { "INV/#{seq}" }, assign: :manual
+      end)
+
+      # Documented: a draft/manual subclass re-declares with ONLY assign:.
+      expect(RedeclDraft.sequenceable_config[:sequence][:owner]).to eq(RedeclDraft)
+    end
+
+    it "refuses an explicit zone on a counter whose owner omits it, even one equal to the default at load" do
+      previous = Time.zone_default
+      Time.zone_default = nil # config.time_zone not applied yet
+      stub_const("RedeclInv", redecl_base(reset: :day))
+
+      # Accepted, it would split one counter once config.time_zone (say,
+      # Tokyo) is applied: the owner cuts Tokyo days, the subclass UTC days.
+      expect { stub_const("RedeclUtc", Class.new(RedeclInv) { sequenceable_by :sequence, time_zone: "Etc/UTC" }) }
+        .to raise_error(ArgumentError, %r{"Etc/UTC" vs \(omitted: the app default\)})
+    ensure
+      Time.zone_default = previous
+    end
+
+    it "shares the counter when both zones are explicit and the same zone, aliases included" do
+      stub_const("RedeclInv", redecl_base(prefix: "INV-", reset: :day, time_zone: "Kolkata"))
+      stub_const("RedeclSub", Class.new(RedeclInv) { sequenceable_by :sequence, time_zone: "Asia/Calcutta" })
+
+      expect(RedeclSub.sequenceable_config[:sequence][:owner]).to eq(RedeclInv)
+      numbers = [RedeclInv.create!, RedeclSub.create!].map(&:number)
+      expect(numbers.uniq.size).to eq(2)
+      expect { Class.new(RedeclInv) { sequenceable_by :sequence, time_zone: "UTC" } }
+        .to raise_error(ArgumentError, %r{"Etc/UTC" vs "Asia/Kolkata"})
+    end
+
+    it "accepts a Symbol time_zone:" do
+      klass = redecl_base(reset: :day, time_zone: :Tokyo)
+      expect(klass.sequenceable_config[:sequence][:time_zone]).to eq(ActiveSupport::TimeZone["Tokyo"])
+      expect(klass.create!(created_at: Time.utc(2026, 9, 24, 16)).number).to eq("20260925-1")
+      expect { redecl_base(reset: :day, time_zone: :UTC) }.not_to raise_error
+    end
+
+    it "lets a concrete table under an abstract declarer pick its own zone, but not an STI child on one table" do
+      ActiveRecord::Schema.define do
+        create_table :redecl_jp_docs, force: true do |t|
+          t.integer :sequence
+          t.timestamps
+        end
+      end
+      stub_const("RedeclAbstract", Class.new(TestModel) do
+        self.abstract_class = true
+        include ConcernsOnRails::Sequenceable
+      end)
+      RedeclAbstract.table_name = "redecl_docs" # columns for the macro-time guard
+      RedeclAbstract.sequenceable_by :sequence, reset: :day
+      RedeclAbstract.table_name = nil
+
+      # Its own table, its own counter: no zone to agree with.
+      stub_const("RedeclJp", Class.new(RedeclAbstract) do
+        self.table_name = "redecl_jp_docs"
+        sequenceable_by :sequence, time_zone: "Tokyo"
+      end)
+      expect(RedeclJp.create!(created_at: Time.utc(2026, 9, 24, 16)).formatted_sequence).to eq("20260925-1")
+
+      # One table, one MAX: an STI child must keep its base's zone.
+      stub_const("RedeclDocs", Class.new(RedeclAbstract) { self.table_name = "redecl_docs" })
+      expect { stub_const("RedeclDocsJp", Class.new(RedeclDocs) { sequenceable_by :sequence, time_zone: "Tokyo" }) }
+        .to raise_error(ArgumentError, /same format as RedeclDocs/)
+    end
+
+    it "numbers a field a subclass declares after its own before_create AFTER that callback" do
+      stub_const("RedeclInv", redecl_base(prefix: "INV-"))
+      stub_const("RedeclSub", Class.new(RedeclInv) do
+        before_create { self.account_id ||= 7 }
+        sequenceable_by :ref_seq, scope: :account_id
+      end)
+
+      2.times { RedeclSub.create!(account_id: 7) }
+      expect(RedeclSub.create!.ref_seq).to eq(3) # numbered in account 7, not the NULL bucket
+      expect(RedeclInv.create!.ref_seq).to be_nil # the parent never declared ref_seq
+    end
+
+    it "registers a :manual-then-:create subclass field's callback at the :create declaration" do
+      stub_const("RedeclInv", Class.new(TestModel) do
+        self.table_name = "redecl_docs"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :ref_seq, scope: :account_id, assign: :manual
+      end)
+      stub_const("RedeclSub", Class.new(RedeclInv) do
+        before_create { self.account_id ||= 5 }
+        sequenceable_by :ref_seq, scope: :account_id
+      end)
+
+      RedeclSub.create!(account_id: 5)
+      expect(RedeclSub.create!.ref_seq).to eq(2)
+      expect(RedeclInv.create!(account_id: 5).ref_seq).to be_nil
     end
   end
 end
