@@ -16,6 +16,10 @@ describe ConcernsOnRails::Support::AssociationScope do
         t.datetime :published_at
         t.datetime :deleted_at
         t.integer :position
+        t.integer :scope_author_id
+      end
+      create_table :scope_authors, force: true do |t|
+        t.datetime :deleted_at
       end
     end
 
@@ -80,6 +84,24 @@ describe ConcernsOnRails::Support::AssociationScope do
     child(scope_owner_id: owner.id, body: "theirs", tenant: "t2")
 
     expect(bodies(:scope_children)).to eq(%w[mine])
+  end
+
+  # unscope(where: :deleted_at) matches a column by NAME on any table, so an
+  # application default scope hiding rows through a JOIN on a same-named
+  # column (comments of soft-deleted authors) was peeled along with the
+  # gem's own predicate.
+  it "keeps an application default scope's predicate on a joined table's same-named column" do
+    stub_const("ScopeAuthor", Class.new(TestModel) { self.table_name = "scope_authors" })
+    ScopeChild.class_eval do
+      belongs_to :scope_author, optional: true
+      default_scope { joins(:scope_author).where(scope_authors: { deleted_at: nil }) }
+    end
+    live = ScopeAuthor.create!
+    gone = ScopeAuthor.create!(deleted_at: 1.day.ago)
+    child(scope_owner_id: owner.id, scope_author_id: live.id, body: "draft", published_at: nil)
+    child(scope_owner_id: owner.id, scope_author_id: gone.id, body: "by a deleted author")
+
+    expect(bodies(:scope_children)).to eq(%w[draft])
   end
 
   it "keeps the association's own scope" do

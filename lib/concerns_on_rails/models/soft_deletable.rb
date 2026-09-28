@@ -350,12 +350,13 @@ module ConcernsOnRails
 
       # Yields the records of every cascade association matching `deleted:`
       # (false → not deleted, a timestamp → deleted at exactly that time).
-      # Support::AssociationScope peels the gem's own hiding predicates off
-      # the target's default scopes — its SoftDeletable one, so deleted rows
-      # are reachable, and Publishable's `default_scope: true`, whose drafts
-      # the cascade used to leave live under a deleted parent. Every other
-      # default scope (a tenant, a discriminator on a shared table) still
-      # applies, as it does for Rails' `dependent:`. The association's own
+      # Support::AssociationScope removes the gem's own hiding predicates on
+      # the child's own table — its SoftDeletable one, so deleted rows are
+      # reachable, and Publishable's `default_scope: true`, whose drafts the
+      # cascade used to leave live under a deleted parent. Every other
+      # default-scope predicate (a tenant, a discriminator on a shared table,
+      # a joined table's same-named column) still applies, as it does for
+      # Rails' `dependent:`. The association's own
       # conditions apply too; a has_one acts on the child its reader returns
       # (a hidden one only when the reader returns none).
       def soft_delete_each_dependent(deleted:, &block)
@@ -363,7 +364,12 @@ module ConcernsOnRails
           reflection = self.class.reflect_on_association(name)
           self.class.send(:soft_delete_check_cascade_target!, name, reflection)
           field = reflection.klass.soft_delete_field
-          relation = ConcernsOnRails::Support::AssociationScope.unfiltered(self, name).unscope(where: field)
+          # Also drops the association's own condition on the column (restore
+          # must reach deleted rows) — on the child's table only: a default
+          # scope's `joins(:author).where(authors: { deleted_at: nil })` stays.
+          relation = ConcernsOnRails::Support::AssociationScope.without(
+            ConcernsOnRails::Support::AssociationScope.unfiltered(self, name), field
+          )
           relation = deleted ? relation.where(field => deleted) : relation.where(field => nil)
           ConcernsOnRails::Support::BatchOps.each_record(relation, &block)
         end

@@ -1074,6 +1074,7 @@ describe ConcernsOnRails::SoftDeletable do
             t.integer :casc_post_id
             t.string :body
             t.integer :tenant_id
+            t.integer :casc_author_id
             t.datetime :published_at
             t.datetime :deleted_at, precision: 6
           end
@@ -1134,6 +1135,41 @@ describe ConcernsOnRails::SoftDeletable do
         post.soft_delete!
 
         expect(deleted_at(CascDraft, draft)).to eq(deleted_at(CascPost, post))
+      end
+
+      # The cascade's own `unscope(where: :deleted_at)` matched the column by
+      # NAME on any table, so a default scope hiding comments of deleted
+      # authors through a JOIN was stripped and those comments cascaded too.
+      it "leaves children an app default scope hides through a joined table's same-named column" do
+        ActiveRecord::Schema.define do
+          create_table :casc_authors, force: true do |t|
+            t.datetime :deleted_at, precision: 6
+          end
+        end
+        stub_const("CascAuthor", Class.new(ActiveRecord::Base) { self.table_name = "casc_authors" })
+        stub_const("CascAuthored", Class.new(ActiveRecord::Base) do
+          self.table_name = "casc_drafts"
+          include ConcernsOnRails::SoftDeletable
+
+          soft_deletable_by :deleted_at
+          belongs_to :casc_author, class_name: "CascAuthor", optional: true
+          default_scope { joins(:casc_author).where(casc_authors: { deleted_at: nil }) }
+        end)
+        CascPost.has_many :authored, class_name: "CascAuthored", foreign_key: :casc_post_id
+        CascPost.soft_deletable_by :deleted_at, cascade: :authored
+        live = CascAuthor.create!
+        gone = CascAuthor.create!(deleted_at: 1.day.ago)
+        visible = CascAuthored.unscoped.create!(casc_post_id: post.id, casc_author_id: live.id)
+        hidden = CascAuthored.unscoped.create!(casc_post_id: post.id, casc_author_id: gone.id)
+
+        post.soft_delete!
+        expect(deleted_at(CascAuthored, visible)).to eq(deleted_at(CascPost, post))
+        expect(deleted_at(CascAuthored, hidden)).to be_nil
+
+        post.restore!
+        expect(deleted_at(CascAuthored, visible)).to be_nil
+      ensure
+        ActiveRecord::Base.connection.drop_table(:casc_authors, if_exists: true)
       end
 
       # Only the gem's own hiding predicates are peeled — an application's

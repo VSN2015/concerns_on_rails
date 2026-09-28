@@ -324,6 +324,7 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
           t.text :audit_log
           t.string :kind
           t.integer :tenant_id
+          t.integer :dup_author_id
           t.timestamps null: true
         end
         add_index :dup_children, :token, unique: true
@@ -512,6 +513,36 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
         DupChild.unscoped.create!(dup_invoice_id: original.id, body: "other tenant's", tenant_id: 2)
 
         expect(copied_bodies(original.duplicate!)).to eq(%w[mine])
+      end
+
+      # Peeling SoftDeletable's column by NAME also stripped a joined
+      # table's same-named column: the copy carried comments of deleted
+      # authors that the reader (and master) left out.
+      it "keeps an app default scope hiding rows through a joined table's same-named column" do
+        ActiveRecord::Schema.define do
+          create_table :dup_authors, force: true do |t|
+            t.datetime :deleted_at
+          end
+        end
+        stub_const("DupAuthor", Class.new(TestModel) { self.table_name = "dup_authors" })
+        authored = child_class do
+          include ConcernsOnRails::Models::SoftDeletable
+
+          soft_deletable_by :deleted_at
+          belongs_to :dup_author, class_name: "DupAuthor", optional: true
+          default_scope { joins(:dup_author).where(dup_authors: { deleted_at: nil }) }
+        end
+        parent = parent_with(:has_many, authored)
+        original = parent.create!(title: "p")
+        live = DupAuthor.create!
+        gone = DupAuthor.create!(deleted_at: 1.day.ago)
+        DupChild.unscoped.create!(dup_invoice_id: original.id, dup_author_id: live.id, body: "visible")
+        DupChild.unscoped.create!(dup_invoice_id: original.id, dup_author_id: gone.id, body: "by a deleted author")
+        expect(parent.find(original.id).dup_children.map(&:body)).to eq(%w[visible])
+
+        expect(copied_bodies(original.duplicate!)).to eq(%w[visible])
+      ensure
+        ActiveRecord::Base.connection.drop_table(:dup_authors, if_exists: true)
       end
 
       it "copies each discriminator-scoped sibling association's rows once" do

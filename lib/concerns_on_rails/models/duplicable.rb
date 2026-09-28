@@ -51,11 +51,12 @@ module ConcernsOnRails
     # call, so it is NOT auto-reset — list those columns in `reset:`.
     #
     # Associations (`associations:` allow-list, declared before the macro):
-    #   * Children are read with only the gem's own hiding default scopes
-    #     peeled off (Support::AssociationScope), so a draft hidden by
-    #     `publishable_by ..., default_scope: true` is copied too, while an
-    #     application's own default scopes (a tenant, a discriminator on a
-    #     shared table) still apply. A SoftDeletable child's soft-deleted rows
+    #   * Children are read with only the gem's own hiding predicates (on the
+    #     child's own table) removed (Support::AssociationScope), so a draft
+    #     hidden by `publishable_by ..., default_scope: true` is copied too,
+    #     while an application's own default scopes (a tenant, a
+    #     discriminator on a shared table, a joined table's same-named
+    #     column) still apply. A SoftDeletable child's soft-deleted rows
     #     never are — whatever its `default_scope:` setting (trash is not part
     #     of the record, and a copied child is born live). A has_one copies
     #     the child its reader returns (a hidden one only when the reader

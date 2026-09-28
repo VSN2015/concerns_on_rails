@@ -9,24 +9,29 @@ module ConcernsOnRails
     # into the association's own conditions, so a child model declaring
     # `publishable_by ..., default_scope: true` hid its drafts: a cascade
     # soft-deleted only the published children, a deep copy silently dropped
-    # the drafts. Only those predicates are removed — SoftDeletable's column
-    # while its default scope is on, Publishable's while `default_scope: true`
-    # is — with `unscope(where: column)`, the way SoftDeletable's own
-    # `with_deleted` / `soft_delete_without_default_scope` peel theirs. Every
-    # OTHER default scope still applies, exactly as it does for Rails' own
-    # `dependent:`: an application's tenant scope or a discriminator scope on
-    # a shared table (`default_scope { where(kind: "image") }`) is honoured,
-    # so a copy or cascade never reaches another tenant's rows or a sibling
-    # association's. (Dropping every default scope — building inside
-    # `klass.unscoped { }` — did both.)
+    # the drafts. Only the gem's own hiding predicates are removed: those on
+    # the CHILD'S OWN TABLE's SoftDeletable column while its default scope is
+    # on, and its Publishable column while `default_scope: true` is. Every
+    # other predicate still applies, exactly as it does for Rails' own
+    # `dependent:` — an application's tenant scope, a discriminator scope on
+    # a shared table (`default_scope { where(kind: "image") }`), and a
+    # same-named column of a JOINED table (`default_scope {
+    # joins(:author).where(authors: { deleted_at: nil }) }`) — so a copy or
+    # cascade never reaches another tenant's rows, a sibling association's,
+    # or the comments of a deleted author. (Dropping every default scope —
+    # building inside `klass.unscoped { }` — reached the first two;
+    # `unscope(where: column)`, which matches a column by NAME on any table,
+    # the third. Rails 6.0 cannot unscope by Arel attribute, so the where
+    # clause is filtered here, with the attribute lookup unscope uses.)
     #
-    # `unscope(where:)` also strips the association's OWN predicates on those
-    # columns (`has_many :live, -> { where(deleted_at: nil) }`), so they are
-    # put back: they come from the association scope built inside
-    # `klass.unscoped { }`, where no default scope is merged in. Everything
-    # else — the foreign key, the polymorphic type, the STI type condition,
-    # the declared `-> { ... }` scope, has_one's LIMIT 1, the default scopes'
-    # ORDER — is the association's own relation, untouched.
+    # The association's OWN predicates on those columns (`has_many :live,
+    # -> { where(deleted_at: nil) }`) are indistinguishable from the default
+    # scope's in the merged relation, so they are put back: they come from
+    # the association scope built inside `klass.unscoped { }`, where no
+    # default scope is merged in. Everything else — the foreign key, the
+    # polymorphic type, the STI type condition, the declared `-> { ... }`
+    # scope, has_one's LIMIT 1, the default scopes' ORDER — is the
+    # association's own relation, untouched.
     #
     # A LIMITed association (has_one, or a has_many declaring a limit) ranks
     # the rows its reader shows first: peeling a hiding predicate would
@@ -43,11 +48,25 @@ module ConcernsOnRails
         columns = hiding_columns(association.klass)
         return relation if columns.empty?
 
-        own = on_columns(own_where_clause(association), columns)
-        hidden = on_columns(relation.where_clause, columns) - own
-        peeled = relation.unscope(where: columns)
-        peeled.where_clause += own unless own.empty?
-        rank_visible_first(peeled, hidden)
+        table = association.klass.arel_table
+        own = predicates(own_where_clause(association)).select { |node| hiding?(node, table, columns) }
+        hiding = predicates(relation.where_clause).select { |node| hiding?(node, table, columns) }
+        peeled = without(relation, columns)
+        peeled.where_clause += ActiveRecord::Relation::WhereClause.new(own) unless own.empty?
+        rank_visible_first(peeled, hiding - own)
+      end
+
+      # `relation` minus its predicates on `columns` of its OWN table — the
+      # table-qualified form of `unscope(where: columns)`, which also strips a
+      # joined table's same-named column (see hiding?).
+      def without(relation, columns)
+        table = relation.klass.arel_table
+        columns = Array(columns).map(&:to_s)
+        peeled = relation.spawn
+        peeled.where_clause = ActiveRecord::Relation::WhereClause.new(
+          predicates(relation.where_clause).reject { |node| hiding?(node, table, columns) }
+        )
+        peeled
       end
 
       # The columns whose default-scope predicate is the gem's own: the
@@ -60,10 +79,18 @@ module ConcernsOnRails
         columns.map(&:to_s).uniq
       end
 
-      # The predicates of `where_clause` on `columns` (by name, as
-      # `unscope(where:)` matches them).
-      def on_columns(where_clause, columns)
-        where_clause - where_clause.except(*columns)
+      # WhereClause keeps its predicate list protected (Rails 6.0 through 8.1).
+      def predicates(where_clause)
+        where_clause.send(:predicates)
+      end
+
+      # A predicate on one of `columns` of the child's own `table` — found the
+      # way `unscope(where:)` finds a predicate's column (Arel.fetch_attribute:
+      # comparisons, IN, IS NULL, and on Rails 6.1+ Groupings and OR/AND of
+      # them), but matched on the attribute's TABLE as well as its name, so a
+      # joined table's same-named column (or an aliased self-join) is kept.
+      def hiding?(node, table, columns)
+        Arel.fetch_attribute(node) { |attribute| attribute.relation == table && columns.include?(attribute.name.to_s) }
       end
 
       # The association's own conditions, no default scope merged in. Rails
@@ -83,7 +110,8 @@ module ConcernsOnRails
       def rank_visible_first(relation, hidden)
         return relation if hidden.empty? || relation.limit_value.nil? || relation.distinct_value
 
-        shown_first = Arel::Nodes::Case.new.when(hidden.ast).then(0).else(1)
+        shown = ActiveRecord::Relation::WhereClause.new(hidden).ast
+        shown_first = Arel::Nodes::Case.new.when(shown).then(0).else(1)
         ranked = relation.spawn
         ranked.order_values = [shown_first, *relation.order_values]
         ranked
