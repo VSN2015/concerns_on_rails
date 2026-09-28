@@ -410,6 +410,7 @@ describe ConcernsOnRails::Auditable do
       ActiveRecord::Schema.define do
         create_table :audit_docs, force: true do |t|
           t.string :title
+          t.string :note
           # MySQL rejects a literal DEFAULT on a JSON column.
           if TestDatabase.mysql?
             t.json :audit_log
@@ -452,6 +453,20 @@ describe ConcernsOnRails::Auditable do
       doc = klass.create!(title: "a")
 
       expect(stored_trail(doc)).to match([hash_including("field" => "title", "to" => "a")])
+    end
+
+    # On a json column the decoded entries were the attribute value's own
+    # Hashes (a text column's come from JSON.parse, detached), so editing a
+    # returned entry was an in-place change the next save persisted.
+    it "does not let an edit of a returned entry rewrite the stored history" do
+      doc = klass.find(klass.create!(title: "a").id)
+
+      doc.audit_trail.first["to"] = "forged"
+      doc.last_change_for(:title)["from"] = "forged"
+      doc.update!(note: "untracked save")
+
+      stored = klass.find(doc.id).audit_trail.first
+      expect(stored.values_at("from", "to")).to eq([nil, "a"])
     end
 
     it "still reads (and extends) a trail stored double-encoded by an earlier version" do
