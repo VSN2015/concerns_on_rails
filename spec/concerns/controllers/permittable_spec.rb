@@ -71,9 +71,11 @@ describe ConcernsOnRails::Controllers::Permittable do
       end
     end
 
+    # The gemspec allows any permittable ~> 0.1, so the wording checks below
+    # accept both the pre-0.9 message and 0.9's reworded one.
     it "rejects :in that does not respond to include?" do
       expect { permittable_class { permit_params(:create) { required :a, :integer, in: 5 } } }
-        .to raise_error(ArgumentError, /:in for field :a must respond to include\?/)
+        .to raise_error(ArgumentError, /:in for field :a must (respond to|be a Range, .* answering) include\?/)
     end
 
     it "rejects a non-callable :validate" do
@@ -112,7 +114,7 @@ describe ConcernsOnRails::Controllers::Permittable do
       expect { permittable_class { permit_params(:create) { array :a, default: "x" } } }
         .to raise_error(ArgumentError, /:default for array :a must be an Array/)
       expect { permittable_class { permit_params(:create) { array :a, of: :integer, default: ["x"] } } }
-        .to raise_error(ArgumentError, /contains an element violating of: :integer/)
+        .to raise_error(ArgumentError, /contains an element violating of: :integer|:default for array :a violates its own contract/)
     end
 
     it "rejects a default that violates the field's own contract" do
