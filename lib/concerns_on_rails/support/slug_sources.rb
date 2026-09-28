@@ -27,10 +27,19 @@ module ConcernsOnRails
       end
 
       # `alias_attribute :tax_id, :ssn`: a slug built from the alias IS the
-      # aliased column's value, so the source names that column.
+      # aliased column's value, so the source names that column — followed
+      # through an alias of an alias (bounded, so a cycle cannot hang).
       def resolve_aliases(klass, names)
         aliases = klass.respond_to?(:attribute_aliases) ? klass.attribute_aliases : {}
-        names.map { |name| aliases.fetch(name.to_s, name).to_sym }
+        names.map do |name|
+          name = name.to_s
+          aliases.size.times do
+            break unless aliases.key?(name)
+
+            name = aliases[name]
+          end
+          name.to_sym
+        end
       end
 
       # Sluggable's source list for a given field + candidates, before either

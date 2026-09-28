@@ -169,9 +169,11 @@ module ConcernsOnRails
         # friendly_id model: its base, when that is a column.
         def anonymizable_slug_source_columns
           columns = column_names
-          anonymizable_slug_sources.filter_map do |source|
-            source.to_sym if (source.is_a?(Symbol) || source.is_a?(String)) && columns.include?(source.to_s)
-          end
+          sources = ConcernsOnRails::Support::SlugSources
+          # An alias_attribute source reads its column, so erasing the column
+          # has to rewrite a slug built from the alias too.
+          named = sources.resolve_aliases(self, sources.symbolize(anonymizable_slug_sources))
+          named.select { |source| columns.include?(source.to_s) }
         rescue ActiveRecord::ActiveRecordError
           # Schema unreachable only (the ColumnGuard convention) — any other
           # error propagates: swallowing it would silently keep a PII slug.

@@ -1,7 +1,4 @@
 require "rails/railtie"
-# core.rb requires this file at its end, so skip the require while core is
-# the one loading us (a circular require only warns, but it does warn).
-require "concerns_on_rails/core" unless defined?(ConcernsOnRails) && ConcernsOnRails.respond_to?(:filter_parameter_registry)
 
 module ConcernsOnRails
   # Boot-time integration, loaded only when Rails is present — by
@@ -9,6 +6,10 @@ module ConcernsOnRails
   # (`gem "concerns_on_rails", require: false`) gets it too, not just one that
   # goes through lib/concerns_on_rails.rb.
   class Railtie < Rails::Railtie
+    # core requires this file unless this class already exists — and it does
+    # from here on — so neither load order is a circular require.
+    require "concerns_on_rails/core" unless ConcernsOnRails.respond_to?(:filter_parameter_registry)
+
     # Append the filter-parameter proc before ActiveRecord copies
     # `config.filter_parameters` into `filter_attributes` (a `+=` snapshot), so
     # encrypted fields are redacted from both request logs and #inspect. When
@@ -26,10 +27,12 @@ module ConcernsOnRails
       filter
     end
 
-    # Loaded after boot — a concern file required from an autoloaded model —
-    # the initializer above never runs, so install directly. The request
-    # filter reads config.filter_parameters itself (the same Array, replaced
-    # in place when precompiled), but ActiveRecord copied it into
+    # Loaded once initialize! is under way — a concern file required from an
+    # eager-loaded model or a config/initializers file — or after it (an
+    # autoloaded model), the initializer above never runs: the app collected
+    # its initializers already. So install again once boot has finished. The
+    # request filter reads config.filter_parameters itself (the same Array,
+    # replaced in place when precompiled), but ActiveRecord copied it into
     # filter_attributes at boot, so that copy is extended too.
     def self.install_after_boot(app)
       filter = install_filter_parameters(app.config)
@@ -40,4 +43,6 @@ module ConcernsOnRails
   end
 end
 
-ConcernsOnRails::Railtie.install_after_boot(Rails.application) if Rails.respond_to?(:application) && Rails.application&.initialized?
+# Runs at the end of initialize! — or at once when boot is already over. A
+# no-op repeat when the initializer ran too (both installs are idempotent).
+ActiveSupport.on_load(:after_initialize) { ConcernsOnRails::Railtie.install_after_boot(self) }

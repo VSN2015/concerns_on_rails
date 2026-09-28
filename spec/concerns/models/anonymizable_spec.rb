@@ -726,6 +726,24 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
       expect { klass.friendly.find("jane-smith") }.to raise_error(ActiveRecord::RecordNotFound)
     end
 
+    # An alias_attribute candidate reads the erased column, so its slug is
+    # just as identifying; :auto used to see only literal column names.
+    it "rewrites a slug built from an alias_attribute of the anonymized column" do
+      klass = model_class do
+        include ConcernsOnRails::Models::Sluggable
+
+        alias_attribute :full_name, :name
+      end
+      stub_const("AnonAliasSluggedUser", klass)
+      klass.sluggable_by :name, candidates: [:full_name]
+      klass.anonymizable :name, with: :redact
+      jane = klass.create!(name: "Jane Smith")
+      expect(jane.slug).to eq("jane-smith")
+
+      jane.anonymize!
+      expect(jane.reload.slug).to match(/\Aanon-\h{32}\z/)
+    end
+
     # The rewritten slug ("jane-smith") is as identifying as the erased name,
     # so when the slug column itself is audited the trail must go too.
     it "clears the audit trail when the rewritten slug column is audited" do

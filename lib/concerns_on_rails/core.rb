@@ -89,4 +89,5 @@ end
 # The Railtie that wires the registry into filter_parameters, Rails apps only.
 # Required here, not just by lib/concerns_on_rails.rb: a concern file required
 # on its own registered its sensitive fields into a registry nothing consulted.
-require "concerns_on_rails/railtie" if defined?(Rails::Railtie)
+# (Skipped while railtie.rb is the file loading core.)
+require "concerns_on_rails/railtie" if defined?(Rails::Railtie) && !defined?(ConcernsOnRails::Railtie)

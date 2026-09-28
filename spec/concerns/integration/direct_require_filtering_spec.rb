@@ -1,6 +1,8 @@
 require "spec_helper"
 require "open3"
 require "rbconfig"
+require "tmpdir"
+require "fileutils"
 
 # A concern file required ON ITS OWN (`gem "concerns_on_rails", require:
 # false`) registered its sensitive fields into the filter registry, but only
@@ -79,6 +81,82 @@ RSpec.describe "filter_parameters when a concern file is required directly", :su
       _, ssn, inspected = run.call(:encryptable, require_at)
       expect(ssn).to eq("[FILTERED]")
       expect(inspected).not_to include("123-45-6789")
+    end
+  end
+
+  # DURING initialize!: after Rails collected the initializers, before
+  # `initialized?` — neither the initializer nor an "already booted" check
+  # sees it. Production's eager_load does this for every model file.
+  run_script = lambda do |source|
+    out, = Open3.capture2e(RbConfig.ruby, "-I", lib_dir, "-e", source)
+    marker = out.rindex("__OUT__")
+    raise out unless marker
+
+    out[(marker + 7)..]
+  end
+
+  it "filters when an eager-loaded model file requires the concern (production boot)" do
+    Dir.mktmpdir do |root|
+      FileUtils.mkdir_p(File.join(root, "app/models"))
+      File.write(File.join(root, "app/models/user.rb"), <<~RUBY)
+        require "concerns_on_rails/models/lockable"
+        class User < ActiveRecord::Base
+          include ConcernsOnRails::Models::Lockable
+          lockable_by unlock_token: :unlock_token
+        end
+      RUBY
+      filtered = run_script.call(<<~RUBY)
+        ENV["DATABASE_URL"] = "sqlite3::memory:"
+        require "rails"
+        require "active_record/railtie"
+        require "action_controller/railtie"
+        class App < Rails::Application
+          config.root = #{root.inspect}
+          config.eager_load = true
+          config.logger = Logger.new(nil)
+          config.secret_key_base = "x" * 64
+        end
+        App.initialize!
+        filter = ActiveSupport::ParameterFilter.new(Rails.application.env_config["action_dispatch.parameter_filter"])
+        print "__OUT__" + filter.filter("unlock_token" => "SECRET-TOKEN")["unlock_token"]
+      RUBY
+      expect(filtered).to eq("[FILTERED]")
+    end
+  end
+
+  it "keeps #inspect filtered when a config/initializers file requires the concern" do
+    inspected = run_script.call(<<~RUBY)
+      ENV["DATABASE_URL"] = "sqlite3::memory:"
+      require "rails"
+      require "active_record/railtie"
+      require "action_controller/railtie"
+      class App < Rails::Application
+        config.eager_load = false
+        config.logger = Logger.new(nil)
+        config.secret_key_base = "x" * 64
+        initializer("host.concerns", after: :load_config_initializers) do
+          require "concerns_on_rails/models/encryptable"
+          ConcernsOnRails.configure_encryption { |c| c.key = "k" * 32 }
+        end
+      end
+      App.initialize!
+      ActiveRecord::Schema.verbose = false
+      ActiveRecord::Schema.define { create_table(:people) { |t| t.text :ssn } }
+      class Person < ActiveRecord::Base
+        include ConcernsOnRails::Models::Encryptable
+        encryptable :ssn
+      end
+      print "__OUT__" + Person.new(ssn: "123-45-6789").inspect
+    RUBY
+    expect(inspected).not_to include("123-45-6789")
+  end
+
+  # core requires the railtie and the railtie requires core; either one
+  # loaded first must not be a circular require.
+  it "requires the railtie and core in either order without a circular-require warning" do
+    %w[concerns_on_rails/railtie concerns_on_rails/core concerns_on_rails/models/lockable].each do |entry|
+      out, = Open3.capture2e(RbConfig.ruby, "-w", "-I", lib_dir, "-e", %(require "rails"; require "#{entry}"))
+      expect(out).not_to include("circular require"), "#{entry}: #{out}"
     end
   end
 end

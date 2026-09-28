@@ -419,6 +419,18 @@ describe ConcernsOnRails::Models::Encryptable do
             sluggable_by :name, candidates: [:tax_id]
           end
         end.to raise_error(ArgumentError, /Sluggable/)
+
+        # An alias of an alias still reads the column on Rails <= 7.0.
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            encryptable :ssn
+            alias_attribute :tax_id, :ssn
+            alias_attribute :tid, :tax_id
+            sluggable_by :name, candidates: [:tid]
+          end
+        end.to raise_error(ArgumentError, /Sluggable/)
       end
 
       # The macro-time guards cannot see every shape; a save-time backstop
