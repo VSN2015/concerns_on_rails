@@ -78,6 +78,9 @@ module ConcernsOnRails
         class_attribute :lockable_unlock_token_field, instance_accessor: false, default: nil
         class_attribute :lockable_scope_names, instance_accessor: false,
                                                default: { locked: :locked, unlocked: :unlocked }.freeze
+        ConcernsOnRails::Support::Affix.refuse_stateable_names!(
+          self, Lockable.public_instance_methods(false), kind: :instance, label: LABEL
+        )
       end
 
       module ClassMethods
@@ -271,6 +274,7 @@ module ConcernsOnRails
             locked: ConcernsOnRails::Support::Affix.name(:locked, prefix: prefix, suffix: suffix),
             unlocked: ConcernsOnRails::Support::Affix.name(:unlocked, prefix: prefix, suffix: suffix)
           }.freeze
+          ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, lockable_scope_names.values, kind: :scope, label: LABEL)
 
           scope lockable_scope_names[:locked], lambda {
             field = lockable_locked_at_field

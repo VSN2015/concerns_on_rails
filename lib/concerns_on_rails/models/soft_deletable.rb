@@ -27,6 +27,9 @@ module ConcernsOnRails
         # with this record (their models must include SoftDeletable too).
         class_attribute :soft_delete_cascade, instance_accessor: false, default: [].freeze
 
+        ConcernsOnRails::Support::Affix.refuse_stateable_names!(
+          self, SoftDeletable.public_instance_methods(false), kind: :instance, label: "ConcernsOnRails::Models::SoftDeletable"
+        )
         define_soft_delete_scopes(nil, nil)
         self.soft_delete_captured_scopes =
           ConcernsOnRails::Support::Affix.capture(self, SCOPE_BASES).freeze
@@ -164,6 +167,7 @@ module ConcernsOnRails
           end.freeze
 
           soft_deleted_name = soft_delete_scope_names.fetch(:soft_deleted)
+          ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, soft_delete_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::SoftDeletable")
 
           scope soft_delete_scope_names[:active],
                 -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }

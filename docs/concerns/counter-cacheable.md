@@ -41,7 +41,7 @@ end
 
 ### `counter_cacheable_by(association, count: nil, if: nil, touch: false)`
 
-Repeatable — each call maintains another counter. Rules accumulate (reassigned, never mutated, so subclasses inherit). All errors raise `ArgumentError` at declaration time.
+Repeatable — each call maintains another counter. Rules accumulate (reassigned, never mutated, so subclasses inherit) and are keyed by association + `count:` column: re-declaring the same counter replaces the earlier rule for that class instead of adding a second one, so an STI subclass can narrow an inherited counter with `if:` without double-counting (the parent keeps its own rule). All errors raise `ArgumentError` at declaration time.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -52,7 +52,7 @@ Repeatable — each call maintains another counter. Rules accumulate (reassigned
 
 ### `recount_counter_caches!(association = nil, parents: <every parent>)`
 
-Class method. Recomputes every counter (or only those for one association) from scratch and returns `{ count_column => parents_with_a_nonzero_count }`. Portable across adapters: unconditional counters use `group(fk).count`, conditional counters tally in Ruby.
+Class method. Recomputes every counter (or only those for one association) from scratch and returns `{ count_column => parents_with_a_nonzero_count }`. Portable across adapters: unconditional counters use `group(fk).count`, conditional counters tally in Ruby. On an STI table the counter column is shared by the whole tree, so rows are tallied per stored `type` under that class's own rule for the column (a subclass that narrowed it with `if:` counts only its matching rows) and summed — the result matches the live counts whichever class of the tree the repair is called on.
 
 `parents:` limits the repair to specific parents — ids, records, or a relation of the parent class (`Post.where(...)`) — which are zeroed and re-tallied while every other row is left untouched. A listed parent with no matching children ends at `0`; an empty list/relation is a no-op returning `0` per column. Because the ids belong to one parent table, `parents:` needs the `association` argument when the child declares counters for more than one association (`ArgumentError` otherwise), and records or a relation of a different class are rejected with `ArgumentError` rather than zeroing whichever rows happen to share those ids. So is an `association` no counter was declared for, and an explicit `parents: nil` — omit the option to repair every parent, rather than have a typo or an empty `find_by` silently widen a scoped repair into a full-table rewrite.
 
@@ -117,6 +117,9 @@ Comment.recount_counter_caches!(:post, parents: Post.where(author: me))
 - **`if:` should read the record's own columns.** The previous-state reconstruction restores the changed attributes, not the associations.
 - **Bare `recount_counter_caches!` rewrites every parent** (zeroes the column, then applies the tally) and scans children in Ruby for conditional counters — portable, but O(n). Treat it as a maintenance task, not a request-path call. **`parents:` scopes both the zeroing and the tally** to the listed ids and locks those rows first, so it is proportional to their children and fine to run inline after a bulk write.
 - **`belongs_to ..., primary_key:` is honoured.** Parents are addressed by the association key (`primary_key: :code` → `WHERE code = ?`), never by `id` — by the live adjustments and by `recount_counter_caches!` alike. `parents:` still takes records, relations or primary-key ids. `has_many :through` rollups are out of scope — reach for [`counter_culture`](https://github.com/magnusvk/counter_culture) when you need multi-level rollups, delta columns, or after-commit execution.
+
+- **STI tables.** A subclass may re-declare an inherited counter (same association + `count:`) to narrow it with `if:` — the rule is replaced for that subclass only. `recount_counter_caches!` resolves each stored `type` to its class exactly as the loader would, but without instantiating a row (so an unconditional counter stays one grouped `COUNT` per type, with no `after_find`/`after_initialize` side effects), and tallies that type's rows under its class's rule. A type that no longer resolves (a removed or renamed subclass) is counted under the base class's rule rather than failing the repair; for a conditional rule those rows are scanned as the base class, loaded without the inheritance column.
+- **`touch: true` works on every supported Rails.** The minimum is Rails 6.0, whose `update_counters` takes `touch:`, so the 1.22.0 macro-time guard for Rails < 6.0 is unreachable and has been removed.
 
 ## Changed in 1.22.0
 

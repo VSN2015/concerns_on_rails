@@ -61,7 +61,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `use_acts_as_list: false`.
 - **`Publishable`** — timestamp (default `published_at`) **or** boolean column; scopes
   `.published/.unpublished/.scheduled/.draft` (affixable via `prefix:`/`suffix:`) branch on
-  the column type. `default_scope: true` hides unpublished. Lifecycle hooks:
+  the column type. `default_scope: true` hides unpublished (ONE flag-driven default_scope,
+  registered only once a class first asks; an omitted `default_scope:` keeps the inherited
+  flag, an explicit `false` turns it off). Lifecycle hooks:
   `before/after_publish`, `before/after_unpublish`. Batch `publish_all`/`unpublish_all`
   (atomic; single-UPDATE fast path when the hooks/bang methods are unoverridden AND the
   model has no validators — `update` in the per-record path runs them, `update_all` doesn't).
@@ -99,15 +101,25 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `activate_all`/`deactivate_all` (same validators-gated fast path as Publishable/Expirable).
 - **`Stateable`** — lightweight string-backed state machine: states, `default:`,
   `transitions:`, `prefix:`/`suffix:`, `lock:`, `timestamps:` (`<state>_at` stamped on entry;
-  Rails-owned `created_at`/`updated_at` refused at macro time; NOT affixed, so a state named
-  `published`/`deleted` collides with Publishable/SoftDeletable); guarded `<event>!` +
-  `may_<event>?`, `before/after_transition` plus per-event `before_/after_<event>` hooks
-  (invoked with `send`, so private overrides work). Batch `transition_all(event)` —
-  deliberately NO fast path, since the per-record path runs validations via `update!` and
-  `update_all` would skip them.
+  Rails-owned `created_at`/`updated_at` refused at macro time; NOT affixed). A generated
+  method/scope overriding an AR or sibling-concern method raises at macro time (the reverse
+  order via `Affix.refuse_stateable_names!`), EXCEPT a SoftDeletable/Publishable/Schedulable
+  include-time default scope on the class's OWN singleton (concern included first), which
+  that concern's later affixing macro renames — until it does, the shared scope raises when
+  called. Re-declaring retires the previous declaration's stale names — only the exact
+  UnboundMethods it recorded, never a user's own override (removed on the class; in a
+  subclass hidden behind private stubs in a `RetiredMethods` module — never `undef_method`,
+  which would block later includes; a dropped state hands an include-time scope back) — and
+  captures the field's cast type per declaring class. Guarded `<event>!` + `may_<event>?`, `before/after_transition` plus
+  per-event `before_/after_<event>` hooks (invoked with `send`, so private overrides work).
+  Batch `transition_all(event)` — deliberately NO fast path, since the per-record path runs
+  validations via `update!` and `update_all` would skip them.
 - **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all`,
   `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only).
-- **`Normalizable`** — `before_validation` normalization. Presets (`:email`, `:phone`,
+- **`Normalizable`** — `before_validation` normalization + a PREPENDED `before_save` backstop
+  for saves that skip validation (so an earlier sibling `before_save` — Encryptable's blind
+  index, Auditable, Addressable — sees the stored value; a field the validation pass already
+  normalized is skipped, so a Proc runs once per save). Presets (`:email`, `:phone`,
   `:squish`, …) or a Proc. (On Rails 7.1+, native `normalizes` is an alternative.)
 - **`Taggable`** — delimiter-joined tags in one string column (no join table). `tagged_with`,
   `all_tags`, boundary-safe and LIKE-escaped (tag and delimiter).
@@ -183,7 +195,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`CounterCacheable`** — conditional denormalized counters ("counter_culture-lite"),
   declared on the CHILD. `counter_cacheable_by association, count:, if:, touch:`
   (repeatable; belongs_to must be declared first; polymorphic rejected;
-  `touch:` raises on Rails < 6). Atomic `update_counters` adjustments inside
+  re-declaring the same association + `count:` REPLACES that rule, so an STI subclass can
+  narrow it with `if:`; on an STI table the recount tallies each stored `type` under its
+  class's rule — resolved via `find_sti_class`, never by instantiating, and an unresolvable
+  type falls back to the base class's rule). Atomic `update_counters` adjustments inside
   the save transaction covering the reparent × condition-flip matrix;
   `recount_counter_caches!` drift repair (transactional, one UPDATE per
   distinct tally value). Destroy decrements only when the DELETE removed a row, reads the
