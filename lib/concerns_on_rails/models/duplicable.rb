@@ -180,7 +180,7 @@ module ConcernsOnRails
         (duplicable_auto_reset_columns + self.class.duplicable_config[:reset]).each do |column|
           copy[column] = nil if copy.class.column_names.include?(column.to_s)
         end
-        copy[self.class.lockable_attempts_field] = 0 if duplicable_concern?(Lockable)
+        copy[self.class.lockable_attempts_field] = 0 if duplicable_concern?(:Lockable)
         Duplicable.zero_counter_cache_columns(copy)
       end
 
@@ -194,9 +194,9 @@ module ConcernsOnRails
       def duplicable_auto_reset_columns
         columns = TIMESTAMP_COLUMNS.dup
         columns.concat(duplicable_generator_columns)
-        columns << self.class.auditable_into if duplicable_concern?(Auditable)
-        columns << self.class.soft_delete_field if duplicable_concern?(SoftDeletable)
-        columns.concat(duplicable_lockable_columns) if duplicable_concern?(Lockable)
+        columns << self.class.auditable_into if duplicable_concern?(:Auditable)
+        columns << self.class.soft_delete_field if duplicable_concern?(:SoftDeletable)
+        columns.concat(duplicable_lockable_columns) if duplicable_concern?(:Lockable)
         columns
       end
 
@@ -204,10 +204,10 @@ module ConcernsOnRails
       # numbers) — each concern regenerates them on the copy's save.
       def duplicable_generator_columns
         columns = []
-        columns << self.class.friendly_id_config.slug_column if duplicable_concern?(Sluggable)
-        columns.concat(duplicable_token_columns) if duplicable_concern?(Tokenizable)
-        columns << self.class.hashable_field if duplicable_concern?(Hashable) && self.class.hashable_field
-        columns.concat(duplicable_sequence_columns) if duplicable_concern?(Sequenceable)
+        columns << self.class.friendly_id_config.slug_column if duplicable_concern?(:Sluggable)
+        columns.concat(duplicable_token_columns) if duplicable_concern?(:Tokenizable)
+        columns << self.class.hashable_field if duplicable_concern?(:Hashable) && self.class.hashable_field
+        columns.concat(duplicable_sequence_columns) if duplicable_concern?(:Sequenceable)
         columns
       end
 
@@ -237,8 +237,16 @@ module ConcernsOnRails
         end
       end
 
-      def duplicable_concern?(concern)
-        self.class.include?(concern)
+      # By NAME, never a bare constant: `Sluggable` here would autoload the
+      # concern (and friendly_id, raising MissingDependency where it is not
+      # installed) just to learn the model does not use it — and it raised
+      # NameError outright when duplicable.rb was required without the gem's
+      # loader. A concern still pending autoload cannot be included yet.
+      def duplicable_concern?(name)
+        models = ConcernsOnRails::Models
+        return false if models.autoload?(name) || !models.const_defined?(name, false)
+
+        self.class.include?(models.const_get(name, false))
       end
 
       def duplicable_copy_associations(copy, associations)

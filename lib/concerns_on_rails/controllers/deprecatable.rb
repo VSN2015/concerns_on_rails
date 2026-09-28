@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
 require "active_support/notifications"
+require "active_support/time_with_zone" # parse_deprecation_time matches it; not preloaded on Rails 6.0
 require "date"
 require "time"
 
