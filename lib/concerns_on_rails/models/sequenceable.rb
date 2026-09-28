@@ -254,10 +254,11 @@ module ConcernsOnRails
 
         # ONE symbol before_create per FIELD, registered by the field's first
         # assign: :create declaration in the class chain — the position its
-        # per-call lambda used to take, so a field a subclass declares after
-        # its own before_create is numbered after that callback — and
-        # inherited by subclasses. Re-declarations never add another. It reads
-        # the receiving class's config at run time, so a later assign: :manual
+        # per-call lambda used to take, so a field whose FIRST :create
+        # declaration follows a subclass's own before_create is numbered
+        # after that callback (an inherited :create field keeps the parent's
+        # position) — and inherited by subclasses. Re-declarations never add
+        # another. It reads the receiving class's config at run time, so a later assign: :manual
         # re-declaration (same class or STI subclass) really stops numbering;
         # a lambda per call could never be taken back.
         def register_sequenceable_callback(field)
