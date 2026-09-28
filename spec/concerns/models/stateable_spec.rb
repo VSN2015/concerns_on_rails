@@ -113,6 +113,133 @@ describe ConcernsOnRails::Stateable do
       parent.stateable_by :phase, states: %i[open closed]
       expect(parent.new.phase).to eq("open") # the DB default, not the stale "draft"
     end
+
+    # The captured type used to be stored once in the inherited class
+    # attribute, so the subclass got the parent's plain String put back.
+    it "keeps an STI subclass's own attribute type, declared before its stateable_by" do
+      downcasing = Class.new(ActiveModel::Type::String) { def cast(value) = super&.downcase }.new
+      stub_const("RedefaultedTicket", parent)
+      stub_const("RedefaultedCase", Class.new(parent) do
+        attribute :status, downcasing
+        stateable_by :status, states: %i[draft open]
+      end)
+
+      expect(RedefaultedCase.new(status: "OPEN").status).to eq("open")
+      expect(RedefaultedCase.new.status).to eq("draft") # the inherited default is kept
+      expect(RedefaultedTicket.new(status: "OPEN").status).to eq("OPEN") # the parent's own type
+    end
+  end
+
+  # A re-declaration replaces the previous one's generated names: those it no
+  # longer generates are retired (removed where this class defined them,
+  # hidden with undef_method where a parent did) and leave the owned list.
+  describe "re-declaring retires the previous declaration's methods" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :retired_tickets, force: true do |t|
+          t.string :type
+          t.string :status
+          t.boolean :flagged
+          t.boolean :active
+        end
+      end
+    end
+
+    let(:parent) do
+      Class.new(TestModel) do
+        self.table_name = "retired_tickets"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft published archived], default: :draft,
+                              transitions: { archive: { to: :archived } }
+      end
+    end
+
+    it "hides the parent's stale event, setter and scope in a subclass (the parent keeps them)" do
+      stub_const("RetiredTicket", parent)
+      stub_const("RetiredIncident", Class.new(parent) { stateable_by :status, states: %i[open closed], default: :open })
+
+      incident = RetiredIncident.create!
+      expect { incident.archive! }.to raise_error(NoMethodError)
+      expect(incident.reload.status).to eq("open") # the stale event wrote a state it never declared
+      expect(incident).not_to respond_to(:archive!)
+      expect(incident).not_to respond_to(:draft!)
+      expect(incident).not_to respond_to(:may_archive?)
+      expect(RetiredIncident).not_to respond_to(:draft)
+      expect(RetiredIncident.stateable_owned_methods[:scope]).to eq(%i[open closed])
+
+      ticket = RetiredTicket.create!
+      ticket.archive!
+      expect(ticket.reload.status).to eq("archived")
+      expect(RetiredTicket.draft.to_sql).to include(TestDatabase.quoted_column(:status))
+    end
+
+    it "removes them on a same-class re-declaration, and lets the class declare them again" do
+      parent.stateable_by :status, states: %i[open closed], default: :open
+      expect(parent.new).not_to respond_to(:archive!)
+      expect(parent).not_to respond_to(:archived)
+
+      parent.stateable_by :status, states: %i[open archived], transitions: { archive: { to: :archived } }
+      record = parent.create!(status: "open")
+      record.archive!
+      expect(record.reload.status).to eq("archived")
+    end
+
+    it "lets a column's query method show through again once a state stops shadowing it" do
+      parent.stateable_by :status, states: %i[open flagged]
+      expect(parent.new(status: "flagged", flagged: false).flagged?).to be(true) # the state predicate
+
+      parent.stateable_by :status, states: %i[open closed]
+      expect(parent.new(status: "flagged", flagged: false).flagged?).to be(false) # the column again
+    end
+
+    it "no longer refuses a sibling for a name only a previous declaration generated" do
+      parent.stateable_by :status, states: %i[pending active]
+      parent.stateable_by :status, states: %i[pending live]
+
+      expect { parent.include(ConcernsOnRails::Activatable) }.not_to raise_error
+    end
+
+    # Hidden in a module of the subclass's own, never with undef_method on
+    # it, which would also block a module the subclass includes later and a
+    # column's lazily generated query method.
+    context "when the stale names are inherited" do
+      it "does not block a sibling concern the subclass includes afterwards" do
+        parent.stateable_by :status, states: %i[pending active]
+        stub_const("RetiredTicket", parent)
+        stub_const("RetiredMember", Class.new(parent) do
+          stateable_by :status, states: %i[pending live]
+          include ConcernsOnRails::Activatable
+
+          activatable_by :active
+        end)
+
+        expect(RetiredMember.new(active: true).active?).to be(true) # Activatable's, not hidden
+        expect(RetiredMember.active.to_sql).to include(TestDatabase.quoted_column(:active))
+        expect(RetiredTicket.new(status: "active").active?).to be(true) # the parent's state predicate
+      end
+
+      it "hands a column's query method back instead of the parent's state predicate" do
+        parent.stateable_by :status, states: %i[open flagged]
+        stub_const("RetiredTicket", parent)
+        stub_const("RetiredIncident", Class.new(parent) { stateable_by :status, states: %i[open closed] })
+
+        expect(RetiredIncident.new(status: "flagged", flagged: false).flagged?).to be(false)
+        expect(RetiredTicket.new(status: "flagged", flagged: false).flagged?).to be(true)
+      end
+
+      it "lets the subclass declare a hidden name again" do
+        stub_const("RetiredTicket", parent)
+        stub_const("RetiredIncident", Class.new(parent) { stateable_by :status, states: %i[open closed] })
+        expect { RetiredIncident.stateable_by :status, states: %i[open archived], transitions: { archive: { to: :archived } } }
+          .not_to raise_error
+
+        incident = RetiredIncident.create!(status: "open")
+        incident.archive!
+        expect(incident.reload.status).to eq("archived")
+        expect(RetiredIncident.archived.to_sql).to include(TestDatabase.quoted_column(:status))
+      end
+    end
   end
 
   describe "predicates" do
@@ -371,6 +498,62 @@ describe ConcernsOnRails::Stateable do
             stateable_by :status, states: %i[live archived]
           end
         end.to raise_error(ArgumentError, /generated scope 'archived'/)
+      end
+
+      # SoftDeletable (like Publishable and Schedulable) defines its
+      # default-named scopes at INCLUDE time and renames them only in its own
+      # macro, which may come after stateable_by: the guard lets a state take
+      # such a name, and the shared scope refuses to run until the rename.
+      context "when a state shares a name with an include-time default scope" do
+        before do
+          ActiveRecord::Schema.define do
+            create_table(:trashed_members, force: true) do |t|
+              t.string :status
+              t.datetime :deleted_at
+            end
+          end
+        end
+
+        def member_model(&block)
+          Class.new(TestModel) do
+            self.table_name = "trashed_members"
+            include ConcernsOnRails::SoftDeletable
+            include ConcernsOnRails::Stateable
+
+            stateable_by :status, states: %i[pending active]
+            class_eval(&block) if block
+          end
+        end
+
+        it "accepts it when that concern's macro renames its scopes afterwards (as on 1.30)" do
+          klass = nil
+          expect { klass = member_model { soft_deletable_by prefix: :trash } }.not_to raise_error
+          expect(klass.active.to_sql).to include(TestDatabase.quoted_column(:status))
+          expect(klass.trash_active.to_sql).to include(TestDatabase.quoted_column(:deleted_at))
+          expect(klass.active.where_values_hash).to include("status" => "active")
+        end
+
+        it "raises when the shared scope is called and the rename never came" do
+          klass = member_model
+          expect { klass.active }
+            .to raise_error(ArgumentError, /scope 'active' is both a state scope and .*SoftDeletable.*prefix:/)
+          expect { member_model { soft_deletable_by :deleted_at }.active }.to raise_error(ArgumentError) # no affix
+        end
+
+        it "hands the name back to that concern when a re-declaration drops the state" do
+          klass = member_model
+          klass.stateable_by :status, states: %i[pending live]
+          expect(klass.active.to_sql).to include(TestDatabase.quoted_column(:deleted_at))
+        end
+
+        it "still refuses a scope the other concern's macro defined itself (not an include-time default)" do
+          expect do
+            member_model do
+              soft_deletable_by prefix: :trash
+              stateable_by :status, states: %i[pending trash_active]
+            end
+          end.to raise_error(ArgumentError, /generated scope 'trash_active'/)
+        end
       end
 
       context "when the other concern comes AFTER stateable_by" do

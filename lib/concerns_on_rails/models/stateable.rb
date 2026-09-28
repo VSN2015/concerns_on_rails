@@ -53,10 +53,15 @@ module ConcernsOnRails
     #   * A state or event whose generated method/scope would override one the
     #     class already has — an AR method (`valid?`, `lock!`) or another
     #     concern's (`.active`, `restore!`) — raises ArgumentError at macro
-    #     time; use prefix:/suffix: to disambiguate.
-    #   * Re-declaring (same class or an STI subclass) replaces the config. An
-    #     omitted default: keeps the earlier one while it is still a declared
-    #     state (else, or with `default: nil`, the column's DB default applies).
+    #     time; use prefix:/suffix: to disambiguate. Exception: a scope that is
+    #     still SoftDeletable's/Publishable's/Schedulable's include-time
+    #     default, which that concern's own affixing macro renames (before or
+    #     after this one) — until it does, calling the shared scope raises.
+    #   * Re-declaring (same class or an STI subclass) replaces the config and
+    #     the generated methods: names the new declaration no longer lists are
+    #     removed (hidden in a subclass). An omitted default: keeps the earlier
+    #     one while it is still a declared state (else, or with `default: nil`,
+    #     the column's DB default applies).
     #   * Guarded transitions check the in-memory state: two processes firing the
     #     same <event>! concurrently can both pass the guard (check-then-write).
     #     `lock: true` closes that race — each <event>! takes a row lock
@@ -71,6 +76,10 @@ module ConcernsOnRails
       # Raised when a guarded transition is attempted from a disallowed state.
       class InvalidTransition < StandardError; end
 
+      # The module a re-declaring subclass hides its parent's stale generated
+      # methods in (see ClassMethods#stateable_hide_inherited!).
+      class RetiredMethods < Module; end
+
       # Valid stateable_by keyword options (everything besides field/states:).
       OPTIONS = %i[default transitions prefix suffix lock timestamps].freeze
 
@@ -79,6 +88,18 @@ module ConcernsOnRails
       # exists — so every write into that state would quietly rewrite the row's
       # creation time (or fight the automatic touch).
       RESERVED_STAMP_COLUMNS = %w[created_at created_on updated_at updated_on].freeze
+
+      # Called by a state scope that shares its name with another concern's
+      # include-time default scope (see ClassMethods#stateable_scope_body):
+      # raises while that concern's macro has not yet renamed its own.
+      def self.refuse_unrenamed_scope!(klass, name, owner)
+        return unless ConcernsOnRails::Support::Affix.include_time_scope(klass, owner, name)
+
+        raise ArgumentError,
+              "#{LABEL}: scope '#{name}' is both a state scope and #{owner}'s default-named scope; " \
+              "rename that concern's scopes with prefix:/suffix: on its macro (it may come after " \
+              "stateable_by), or pass prefix:/suffix: to stateable_by"
+      end
 
       included do
         class_attribute :stateable_field, instance_accessor: false
@@ -90,16 +111,22 @@ module ConcernsOnRails
         class_attribute :stateable_lock, instance_accessor: false, default: false
         # States whose `<state>_at` column is stamped on every explicit write.
         class_attribute :stateable_timestamps, instance_accessor: false, default: []
-        # Every method name an earlier stateable_by generated (on this class
-        # or an ancestor): { instance: [...], scope: [...] }. The collision
-        # guard lets a re-declaration overwrite exactly these.
+        # Every method name the current stateable_by generated (on this class
+        # or, inherited, an ancestor): { instance: [...], scope: [...] }. The
+        # collision guard lets a re-declaration overwrite exactly these, and
+        # retires the ones it no longer generates.
         class_attribute :stateable_owned_methods, instance_accessor: false,
                                                   default: { instance: [].freeze, scope: [].freeze }.freeze
+        # scope name => label of the concern (SoftDeletable, Publishable,
+        # Schedulable) whose include-time default scope of that name a state
+        # took over, pending that concern's affixing macro (see
+        # stateable_guard_collisions!).
+        class_attribute :stateable_deferred_scopes, instance_accessor: false, default: {}.freeze
         # Whether stateable_by installed an attribute default for the field,
         # so a re-declaration without default: knows to take it back out.
         class_attribute :stateable_default_applied, instance_accessor: false, default: false
-        # field name => the attribute type captured before Stateable first
-        # redeclared the field (see stateable_cast_type).
+        # field name => [declaring class, the attribute type captured before
+        # Stateable first redeclared the field there] (see stateable_cast_type).
         class_attribute :stateable_cast_types, instance_accessor: false, default: {}.freeze
       end
 
@@ -127,7 +154,7 @@ module ConcernsOnRails
         def stateable_by(field, states:, **options)
           stateable_configure!(field, states, options)
           stateable_validate!
-          stateable_guard_collisions!
+          stateable_adopt_names!(*stateable_guard_collisions!)
           stateable_define_states
           stateable_define_transitions
           stateable_apply_default
@@ -272,6 +299,17 @@ module ConcernsOnRails
         # is defined, so a refused declaration leaves the class untouched.
         # (Lazily generated column accessors are not considered: whether they
         # exist yet depends on load order.)
+        #
+        # One scope exemption: SoftDeletable, Publishable and Schedulable
+        # define their default-named scopes at INCLUDE time, and their own
+        # macro's prefix:/suffix: is what renames them — possibly on a later
+        # line (`stateable_by ... states: %i[pending active]` then
+        # `soft_deletable_by prefix: :trash`). A state may take such a name
+        # while it is still that concern's untouched include-time scope; the
+        # shared scope then raises when CALLED until the concern's macro has
+        # moved its own off the name (stateable_scope_body), so a rename that
+        # never comes is still caught. Returns [instance names, scope names,
+        # deferred scopes] for stateable_adopt_names!.
         def stateable_guard_collisions!
           instance_names, scope_names = stateable_generated_method_names
           owned = stateable_owned_methods
@@ -280,15 +318,92 @@ module ConcernsOnRails
             next if owned[:instance].include?(name)
             raise stateable_collision_error(name) if stateable_instance_method_taken?(name)
           end
-          scope_names.each do |name|
-            next if owned[:scope].include?(name)
-            raise stateable_collision_error(name, scope: true) if singleton_class.method_defined?(name)
-          end
+          [instance_names, scope_names, stateable_guard_scopes!(scope_names, owned[:scope])]
+        end
 
-          self.stateable_owned_methods = {
-            instance: (owned[:instance] | instance_names).freeze,
-            scope: (owned[:scope] | scope_names).freeze
-          }.freeze
+        # The scope half of the guard. Returns the deferred scopes — name =>
+        # the concern whose include-time default it takes over — carrying an
+        # owned name's earlier entry forward.
+        def stateable_guard_scopes!(scope_names, owned)
+          deferred = stateable_deferred_scopes.slice(*scope_names)
+          (scope_names - owned).each do |name|
+            next unless singleton_class.method_defined?(name)
+
+            owner = ConcernsOnRails::Support::Affix.include_time_scope_owner(self, name)
+            raise stateable_collision_error(name, scope: true) unless owner
+
+            deferred[name] = owner
+          end
+          deferred
+        end
+
+        # Record this declaration's names as the ones Stateable owns, retiring
+        # those the previous declaration generated and this one does not: a
+        # subclass re-declared with `states: %i[open closed]` must stop
+        # answering its parent's `archive!` and `.draft` (a stale setter wrote
+        # a state it never declared), and a stale owned name would make the
+        # reverse-order check refuse a legitimate sibling.
+        def stateable_adopt_names!(instance_names, scope_names, deferred)
+          owned = stateable_owned_methods
+          (owned[:instance] - instance_names).each { |name| stateable_retire_method!(self, name) }
+          (owned[:scope] - scope_names).each { |name| stateable_retire_scope!(name) }
+
+          self.stateable_owned_methods = { instance: instance_names.freeze, scope: scope_names.freeze }.freeze
+          self.stateable_deferred_scopes = deferred.freeze
+        end
+
+        # A retired scope that had taken over another concern's still-unrenamed
+        # include-time scope hands the name back to that concern's method.
+        def stateable_retire_scope!(name)
+          owner = stateable_deferred_scopes[name]
+          captured = owner && ConcernsOnRails::Support::Affix.include_time_scope(self, owner, name)
+          return singleton_class.send(:define_method, name, captured) if captured
+
+          stateable_retire_method!(singleton_class, name)
+        end
+
+        # Retire `name` from `mod` (the class, or its singleton for a scope):
+        # remove it where this class defined it, and if a stale copy is still
+        # reachable from an ancestor CLASS (a parent's declaration), hide it.
+        # A module's method — a column's generated attribute method a state
+        # predicate had shadowed — just shows through again.
+        def stateable_retire_method!(mod, name)
+          mod.send(:remove_method, name) if mod.method_defined?(name, false) || mod.private_method_defined?(name, false)
+          return unless mod.method_defined?(name) || mod.private_method_defined?(name)
+          return unless mod.instance_method(name).owner.is_a?(Class)
+
+          stateable_hide_inherited!(mod, name)
+        end
+
+        # Hidden in a RetiredMethods module of this class's own rather than
+        # with undef_method on the class: an undef also blocks every module
+        # the class includes LATER (a sibling concern's `active?`) and a
+        # column's lazily generated query method. The stub is private — so
+        # `respond_to?` is false and an explicit call raises NoMethodError —
+        # except for a column's `<column>?`, which is handed back to the
+        # column instead of the parent's state predicate.
+        def stateable_hide_inherited!(mod, name)
+          hider = stateable_retired_module(mod)
+          column = mod.singleton_class? ? nil : stateable_query_column(name)
+          return hider.send(:define_method, name) { query_attribute(column) } if column
+
+          hider.send(:define_method, name) do |*|
+            raise NoMethodError.new("undefined method '#{name}' for #{is_a?(Module) ? self : self.class}", name)
+          end
+          hider.send(:private, name)
+        end
+
+        def stateable_retired_module(mod)
+          ivar = mod.singleton_class? ? :@stateable_retired_scopes : :@stateable_retired_methods
+          instance_variable_get(ivar) || instance_variable_set(ivar, RetiredMethods.new.tap { |hider| mod.include(hider) })
+        end
+
+        # The attribute `name` is the `?` query method of, or nil.
+        def stateable_query_column(name)
+          column = name.to_s.delete_suffix("?")
+          return nil if column == name.to_s || !schema_reachable?
+
+          column if attribute_names.include?(column) || attribute_alias?(column)
         end
 
         # [instance method names, scope names] this declaration will define.
@@ -304,11 +419,13 @@ module ConcernsOnRails
         # subclass inherits its parent's generated-attribute module, which
         # only holds `flagged?` once the parent has been instantiated — so
         # checking just this class's own module made the guard depend on
-        # load order.
+        # load order. So are the stubs a re-declaration hid a parent's stale
+        # names behind (RetiredMethods): declaring the name again takes it back.
         def stateable_instance_method_taken?(name)
           return false unless method_defined?(name) || private_method_defined?(name)
 
-          !instance_method(name).owner.is_a?(ActiveRecord::AttributeMethods::GeneratedAttributeMethods)
+          owner = instance_method(name).owner
+          !owner.is_a?(ActiveRecord::AttributeMethods::GeneratedAttributeMethods) && !owner.is_a?(RetiredMethods)
         end
 
         def stateable_collision_error(name, scope: false)
@@ -324,9 +441,25 @@ module ConcernsOnRails
           stateable_states.each do |state|
             value = state.to_s
             name = stateable_method_name(state)
-            scope name, -> { where(field => value) }
+            scope name, stateable_scope_body(name.to_sym, field, value)
             define_method("#{name}?") { self[field].to_s == value }
             define_method("#{name}!") { update!(stateable_write_attributes(value)) }
+          end
+        end
+
+        # A scope that took over another concern's include-time default name
+        # refuses to run while that concern still claims the name — its macro
+        # never renamed its own scopes — so the collision the guard let
+        # through is caught at first use instead of silently answering with
+        # Stateable's filter where the concern (or its own internals, e.g.
+        # Publishable's default scope calling `.published`) expected its own.
+        def stateable_scope_body(name, field, value)
+          owner = stateable_deferred_scopes[name]
+          return -> { where(field => value) } unless owner
+
+          lambda do
+            ConcernsOnRails::Models::Stateable.refuse_unrenamed_scope!(klass, name, owner)
+            where(field => value)
           end
         end
 
@@ -358,17 +491,21 @@ module ConcernsOnRails
 
         # The field's type as it stood BEFORE Stateable first redeclared it —
         # the schema's (a PG enum or citext column keeps its OID type) or the
-        # host's own `attribute` — captured once per field and inherited, so
-        # neither the default nor its reset forces a plain :string onto the
-        # column. Without a reachable schema, :string (the old behavior).
+        # host's own `attribute` — so neither the default nor its reset forces
+        # a plain :string onto the column. Captured once per field PER
+        # DECLARING CLASS: the class attribute is inherited, and an STI
+        # subclass that declares its own `attribute :status, CustomType`
+        # before its stateable_by must not get the parent's type put back (a
+        # subclass that declares none reads the parent's, the same type).
+        # Without a reachable schema: the inherited capture, else :string.
         def stateable_cast_type
           field = stateable_field.to_s
-          captured = stateable_cast_types[field]
-          return captured if captured
-          return :string unless schema_reachable?
+          owner, captured = stateable_cast_types[field]
+          return captured if captured && owner.equal?(self)
+          return captured || :string unless schema_reachable?
 
           type = type_for_attribute(field)
-          self.stateable_cast_types = stateable_cast_types.merge(field => type).freeze
+          self.stateable_cast_types = stateable_cast_types.merge(field => [self, type].freeze).freeze
           type
         end
 

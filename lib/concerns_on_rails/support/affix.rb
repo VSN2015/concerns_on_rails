@@ -161,6 +161,41 @@ module ConcernsOnRails
               "macro) to rename one of them"
       end
 
+      # The concerns whose default-named scopes exist from INCLUDE time,
+      # before their own macro can rename them with prefix:/suffix::
+      # label => [captured-scopes reader, current scope-names reader].
+      INCLUDE_TIME_SCOPES = {
+        "ConcernsOnRails::Models::SoftDeletable" => %i[soft_delete_captured_scopes soft_delete_scope_names].freeze,
+        "ConcernsOnRails::Models::Publishable" => %i[publishable_captured_scopes publishable_scope_names].freeze,
+        "ConcernsOnRails::Models::Schedulable" => %i[schedulable_captured_scopes schedulable_scope_names].freeze
+      }.freeze
+
+      # The label of the concern whose untouched include-time default scope
+      # `name` still is on `klass` — the very method `capture` recorded, not
+      # yet renamed by that concern's macro — or nil. Stateable lets a state
+      # take such a name, because the concern's own later affixing macro is
+      # what moves its scope off it (see include_time_scope).
+      def include_time_scope_owner(klass, name)
+        singleton = klass.singleton_class
+        return nil unless singleton.method_defined?(name)
+
+        current = singleton.instance_method(name)
+        INCLUDE_TIME_SCOPES.each_key.find { |label| include_time_scope(klass, label, name) == current }
+      end
+
+      # The include-time scope the concern `label` captured for `name` while
+      # that concern still generates the default name — its current names map
+      # still yields `name`, i.e. its macro has not affixed its scopes — else
+      # nil. Stateable asks this on every call of a scope it shares the name
+      # with, so the collision is refused until the concern renames its own.
+      def include_time_scope(klass, label, name)
+        captured_reader, names_reader = INCLUDE_TIME_SCOPES.fetch(label)
+        return nil unless klass.respond_to?(captured_reader)
+        return nil unless klass.public_send(names_reader).value?(name)
+
+        klass.public_send(captured_reader)[name]
+      end
+
       # Snapshot the scopes a concern just defined on `klass`: a
       # name => UnboundMethod map, captured immediately after definition.
       # Names that aren't defined are skipped (a concern may generate a scope
