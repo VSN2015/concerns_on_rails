@@ -350,13 +350,14 @@ module ConcernsOnRails
 
       # Yields the records of every cascade association matching `deleted:`
       # (false → not deleted, a timestamp → deleted at exactly that time).
-      # The target's default scopes are left out entirely (Support::
-      # AssociationScope) — not only its own SoftDeletable one, so deleted
-      # rows are reachable, but every other one too: a child hidden by, say,
-      # Publishable's `default_scope: true` still belongs to the parent, and
-      # the cascade used to leave its drafts live under a deleted parent. The
-      # association's own conditions still apply; has_one is handled through
-      # the same relation.
+      # Support::AssociationScope peels the gem's own hiding predicates off
+      # the target's default scopes — its SoftDeletable one, so deleted rows
+      # are reachable, and Publishable's `default_scope: true`, whose drafts
+      # the cascade used to leave live under a deleted parent. Every other
+      # default scope (a tenant, a discriminator on a shared table) still
+      # applies, as it does for Rails' `dependent:`. The association's own
+      # conditions apply too; a has_one acts on the child its reader returns
+      # (a hidden one only when the reader returns none).
       def soft_delete_each_dependent(deleted:, &block)
         self.class.soft_delete_cascade.each do |name|
           reflection = self.class.reflect_on_association(name)

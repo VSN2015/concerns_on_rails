@@ -1072,6 +1072,8 @@ describe ConcernsOnRails::SoftDeletable do
         ActiveRecord::Schema.define do
           create_table :casc_drafts, force: true do |t|
             t.integer :casc_post_id
+            t.string :body
+            t.integer :tenant_id
             t.datetime :published_at
             t.datetime :deleted_at, precision: 6
           end
@@ -1104,6 +1106,57 @@ describe ConcernsOnRails::SoftDeletable do
         post.restore!
         expect(deleted_at(CascDraft, draft)).to be_nil
         expect(deleted_at(CascDraft, live)).to be_nil
+      end
+
+      # Peeling the child's hiding predicates let has_one's LIMIT 1 pick the
+      # hidden draft (the lower id): the cascade deleted it and left the
+      # visible child — the one `post.featured_draft` returns — live.
+      it "soft-deletes and restores the has_one child its reader returns" do
+        CascPost.has_one :featured_draft, class_name: "CascDraft"
+        CascPost.soft_deletable_by :deleted_at, cascade: :featured_draft
+        old_draft = CascDraft.create!(casc_post: post, body: "old draft", published_at: nil)
+        shown = CascDraft.create!(casc_post: post, body: "shown", published_at: 1.day.ago)
+        expect(post.featured_draft).to eq(shown)
+
+        post.soft_delete!
+        expect(deleted_at(CascDraft, shown)).to eq(deleted_at(CascPost, post))
+        expect(deleted_at(CascDraft, old_draft)).to be_nil
+
+        post.restore!
+        expect(deleted_at(CascDraft, shown)).to be_nil
+      end
+
+      it "still reaches a has_one draft when the reader returns none" do
+        CascPost.has_one :featured_draft, class_name: "CascDraft"
+        CascPost.soft_deletable_by :deleted_at, cascade: :featured_draft
+        draft = CascDraft.create!(casc_post: post, published_at: nil)
+
+        post.soft_delete!
+
+        expect(deleted_at(CascDraft, draft)).to eq(deleted_at(CascPost, post))
+      end
+
+      # Only the gem's own hiding predicates are peeled — an application's
+      # tenant default scope still applies, as it does for Rails' own
+      # `dependent:`, so a shared parent never cascades into another
+      # tenant's rows.
+      it "leaves another tenant's children alone" do
+        stub_const("CascTenantDraft", Class.new(ActiveRecord::Base) do
+          self.table_name = "casc_drafts"
+          include ConcernsOnRails::SoftDeletable
+
+          soft_deletable_by :deleted_at
+          default_scope { where(tenant_id: 1) }
+        end)
+        CascPost.has_many :tenant_drafts, class_name: "CascTenantDraft", foreign_key: :casc_post_id
+        CascPost.soft_deletable_by :deleted_at, cascade: :tenant_drafts
+        mine = CascTenantDraft.create!(casc_post_id: post.id, tenant_id: 1)
+        theirs = CascTenantDraft.unscoped.create!(casc_post_id: post.id, tenant_id: 2)
+
+        post.soft_delete!
+
+        expect(deleted_at(CascTenantDraft, mine)).to eq(deleted_at(CascPost, post))
+        expect(deleted_at(CascTenantDraft, theirs)).to be_nil
       end
     end
 

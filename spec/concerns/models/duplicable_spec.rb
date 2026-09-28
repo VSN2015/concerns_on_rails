@@ -322,6 +322,8 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
           t.integer :sequence
           t.string :number
           t.text :audit_log
+          t.string :kind
+          t.integer :tenant_id
           t.timestamps null: true
         end
         add_index :dup_children, :token, unique: true
@@ -392,21 +394,45 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
         expect(copied_bodies(original.duplicate!)).to eq(%w[edited draft])
       end
 
-      it "re-links has_and_belongs_to_many records the associated model hides" do
+      def link_tags(invoice, *tags)
+        values = tags.map { |tag| "(#{invoice.id}, #{tag.id})" }.join(", ")
+        ActiveRecord::Base.connection.execute(
+          "INSERT INTO dup_invoices_dup_tags (dup_invoice_id, dup_tag_id) VALUES #{values}"
+        )
+      end
+
+      def linked_tag_ids(invoice)
+        ActiveRecord::Base.connection.select_values(
+          "SELECT dup_tag_id FROM dup_invoices_dup_tags WHERE dup_invoice_id = #{invoice.id}"
+        ).map(&:to_i)
+      end
+
+      it "re-links has_and_belongs_to_many drafts the associated model hides" do
+        ActiveRecord::Schema.define { add_column :dup_tags, :published_at, :datetime }
+        DupTag.reset_column_information
+        DupTag.class_eval do
+          include ConcernsOnRails::Models::Publishable
+
+          publishable_by :published_at, default_scope: true
+        end
+        original = DupInvoice.create!(title: "Q1")
+        shown = DupTag.create!(name: "shown", published_at: 1.day.ago)
+        draft = DupTag.unscoped.create!(name: "draft")
+        link_tags(original, shown, draft)
+
+        expect(linked_tag_ids(original.duplicate!)).to contain_exactly(shown.id, draft.id)
+      end
+
+      # Only the gem's own hiding predicates are peeled: an application
+      # default scope on the associated model still applies, as it does for
+      # the association reader.
+      it "honours the associated model's own default scope on has_and_belongs_to_many" do
         DupTag.class_eval { default_scope { where.not(name: "hidden") } }
         original = DupInvoice.create!(title: "Q1")
         shown = DupTag.create!(name: "shown")
-        hidden = DupTag.unscoped.create!(name: "hidden")
-        ActiveRecord::Base.connection.execute(
-          "INSERT INTO dup_invoices_dup_tags (dup_invoice_id, dup_tag_id) VALUES " \
-          "(#{original.id}, #{shown.id}), (#{original.id}, #{hidden.id})"
-        )
+        link_tags(original, shown, DupTag.unscoped.create!(name: "hidden"))
 
-        copy = original.duplicate!
-        linked = ActiveRecord::Base.connection.select_values(
-          "SELECT dup_tag_id FROM dup_invoices_dup_tags WHERE dup_invoice_id = #{copy.id}"
-        )
-        expect(linked.map(&:to_i)).to contain_exactly(shown.id, hidden.id)
+        expect(linked_tag_ids(original.duplicate!)).to contain_exactly(shown.id)
       end
 
       # A trashed child is not part of the record: the SoftDeletable default
@@ -423,6 +449,91 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
         DupChild.create!(dup_invoice_id: original.id, body: "trashed").soft_delete!
 
         expect(copied_bodies(original.duplicate!)).to eq(%w[kept])
+      end
+
+      # With no default scope to hide them, the trashed rows were read — and
+      # the plain-child reset blanked their stamp, so the copy carried the
+      # original's deleted children as LIVE rows.
+      it "leaves out a SoftDeletable child's trash when its default scope is off" do
+        soft = child_class do
+          include ConcernsOnRails::Models::SoftDeletable
+
+          soft_deletable_by :deleted_at, default_scope: false
+        end
+        parent = parent_with(:has_many, soft)
+        original = parent.create!(title: "course")
+        DupChild.create!(dup_invoice_id: original.id, body: "kept")
+        DupChild.create!(dup_invoice_id: original.id, body: "trashed").soft_delete!
+
+        copy = original.duplicate!
+
+        expect(copied_bodies(copy)).to eq(%w[kept])
+        expect(DupChild.where(dup_invoice_id: copy.id, deleted_at: nil).pluck(:body)).to eq(%w[kept])
+      end
+
+      it "leaves out trash in an already-loaded association too" do
+        soft = child_class do
+          include ConcernsOnRails::Models::SoftDeletable
+
+          soft_deletable_by :deleted_at, default_scope: false
+        end
+        parent = parent_with(:has_many, soft)
+        original = parent.create!(title: "course")
+        DupChild.create!(dup_invoice_id: original.id, body: "kept")
+        DupChild.create!(dup_invoice_id: original.id, body: "trashed").soft_delete!
+        original.dup_children.load
+
+        expect(copied_bodies(original.duplicate!)).to eq(%w[kept])
+      end
+
+      # LIMIT 1 over the peeled rows picked the hidden draft (the lower id)
+      # instead of the child `original.dup_children` shows.
+      it "copies the has_one child its reader returns, not a hidden draft" do
+        parent = parent_with(:has_one, publishable_child)
+        original = parent.create!(title: "course")
+        DupChild.create!(dup_invoice_id: original.id, body: "old draft", published_at: nil)
+        DupChild.create!(dup_invoice_id: original.id, body: "shown", published_at: 1.day.ago)
+        expect(parent.find(original.id).dup_children.body).to eq("shown") # not loading original's
+
+        expect(copied_bodies(original.duplicate!)).to eq(%w[shown])
+      end
+    end
+
+    # Dropping every default scope of the child reached rows the parent's
+    # reader never shows: another tenant's children through a shared parent,
+    # and — for two associations on one table told apart by a discriminator
+    # default scope — each other's rows, copied twice.
+    describe "application default scopes on the child" do
+      it "does not copy another tenant's children through a shared parent" do
+        tenant_child = child_class { default_scope { where(tenant_id: 1) } }
+        parent = parent_with(:has_many, tenant_child)
+        original = parent.create!(title: "shared template")
+        DupChild.create!(dup_invoice_id: original.id, body: "mine", tenant_id: 1)
+        DupChild.unscoped.create!(dup_invoice_id: original.id, body: "other tenant's", tenant_id: 2)
+
+        expect(copied_bodies(original.duplicate!)).to eq(%w[mine])
+      end
+
+      it "copies each discriminator-scoped sibling association's rows once" do
+        stub_const("DupImage", child_class { default_scope { where(kind: "image") } })
+        stub_const("DupDocument", child_class { default_scope { where(kind: "document") } })
+        parent = Class.new(TestModel) { self.table_name = "dup_invoices" }
+        stub_const("DupFolder", parent)
+        parent.class_eval do
+          include ConcernsOnRails::Models::Duplicable
+
+          has_many :images, class_name: "DupImage", foreign_key: :dup_invoice_id
+          has_many :documents, class_name: "DupDocument", foreign_key: :dup_invoice_id
+          duplicable_by associations: %i[images documents]
+        end
+        original = parent.create!(title: "folder")
+        original.images.create!(body: "a.png")
+        original.documents.create!(body: "b.pdf")
+
+        copy = original.duplicate!
+
+        expect(DupImage.unscoped.where(dup_invoice_id: copy.id).order(:id).pluck(:kind, :body))
+          .to eq([%w[image a.png], %w[document b.pdf]])
       end
     end
 

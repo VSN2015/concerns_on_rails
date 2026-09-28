@@ -51,11 +51,15 @@ module ConcernsOnRails
     # call, so it is NOT auto-reset — list those columns in `reset:`.
     #
     # Associations (`associations:` allow-list, declared before the macro):
-    #   * Children are read WITHOUT the child model's default scopes, so a
-    #     draft hidden by `publishable_by ..., default_scope: true` is copied
-    #     too. The one exception is a SoftDeletable child whose default scope
-    #     is on: its soft-deleted rows stay out of the copy (trash is not part
-    #     of the record). An already-loaded association keeps its in-memory
+    #   * Children are read with only the gem's own hiding default scopes
+    #     peeled off (Support::AssociationScope), so a draft hidden by
+    #     `publishable_by ..., default_scope: true` is copied too, while an
+    #     application's own default scopes (a tenant, a discriminator on a
+    #     shared table) still apply. A SoftDeletable child's soft-deleted rows
+    #     never are — whatever its `default_scope:` setting (trash is not part
+    #     of the record, and a copied child is born live). A has_one copies
+    #     the child its reader returns (a hidden one only when the reader
+    #     returns none). An already-loaded association keeps its in-memory
     #     edits and unsaved children.
     #   * has_many / has_one — children are deep-copied. A child whose class
     #     also includes Duplicable is copied via ITS OWN `duplicate` (own
@@ -217,41 +221,58 @@ module ConcernsOnRails
       # child model's default scopes, so a draft hidden by Publishable's
       # `default_scope: true` was silently left out of the copy; the rows
       # come from Support::AssociationScope instead (the association's own
-      # conditions, no default scopes). A SoftDeletable child's default scope
-      # is re-applied — a trashed child is not part of the record, and
-      # skipping it is what the copy always did.
+      # conditions and the application's default scopes, minus the gem's
+      # hiding predicates).
+      #
+      # A SoftDeletable child's trash is always left out of a has_many /
+      # has_one copy — also under its `default_scope: false`, where the
+      # plain-child reset would otherwise blank the stamp and hand the copy
+      # the original's deleted children back as LIVE rows. A HABTM copy only
+      # re-links the same records, so it keeps what the reader shows (trash
+      # included exactly when the target's default scope is off).
       #
       # An unsaved owner has no rows to query (its FK is nil, which would
       # match orphans), and an already-loaded association may hold unsaved
       # edits or children: its in-memory records win over their rows. When
-      # the child model declares no default scope at all, a loaded target is
-      # already every row, so it is used without the extra query.
+      # the child model hides nothing, a loaded target is already every row,
+      # so it is used without the extra query.
       def duplicable_source_records(name)
         association = association(name)
-        return Array.wrap(public_send(name)) if new_record?
-        return Array.wrap(association.target) if association.loaded? && association.klass.default_scopes.empty?
+        trash = duplicable_trash_column(association)
+        return duplicable_live(Array.wrap(public_send(name)), trash) if new_record?
+        return Array.wrap(association.target) if association.loaded? && !duplicable_hides_rows?(association, trash)
 
-        rows = duplicable_unfiltered_rows(name)
-        association.loaded? ? duplicable_merge_loaded(association, rows) : rows
+        rows = ConcernsOnRails::Support::AssociationScope.unfiltered(self, name)
+        rows = rows.where(trash => nil) if trash
+        association.loaded? ? duplicable_merge_loaded(association, rows.to_a, trash) : rows.to_a
       end
 
-      # A loaded has_one's target wins outright; a loaded collection's
+      # The soft-delete column whose trashed rows stay out of this copy, or nil.
+      def duplicable_trash_column(association)
+        klass = association.klass
+        return nil unless klass.respond_to?(:soft_delete_field)
+        return nil if association.reflection.macro == :has_and_belongs_to_many && !klass.soft_delete_default_scope
+
+        klass.soft_delete_field
+      end
+
+      def duplicable_hides_rows?(association, trash)
+        trash || ConcernsOnRails::Support::AssociationScope.hiding_columns(association.klass).any?
+      end
+
+      # A loaded has_one's (live) target wins outright; a loaded collection's
       # records replace their rows by id, and its unsaved ones are appended.
-      def duplicable_merge_loaded(association, rows)
+      def duplicable_merge_loaded(association, rows, trash)
         loaded = Array.wrap(association.target)
-        return loaded.first(1).presence || rows.first(1) unless association.reflection.collection?
+        return duplicable_live(loaded, trash).first(1).presence || rows.first(1) unless association.reflection.collection?
 
         by_id = loaded.reject(&:new_record?).index_by(&:id)
-        rows.map { |row| by_id.fetch(row.id, row) } + loaded.select(&:new_record?)
+        duplicable_live(rows.map { |row| by_id.fetch(row.id, row) } + loaded.select(&:new_record?), trash)
       end
 
-      def duplicable_unfiltered_rows(name)
-        rows = ConcernsOnRails::Support::AssociationScope.unfiltered(self, name)
-        klass = rows.klass
-        if klass.respond_to?(:soft_delete_default_scope) && klass.soft_delete_default_scope
-          rows = rows.public_send(klass.soft_delete_scope_names.fetch(:without_deleted))
-        end
-        rows.to_a
+      # In-memory records minus the trashed ones (`trash` is the column, or nil).
+      def duplicable_live(records, trash)
+        trash ? records.reject { |record| record[trash].present? } : records
       end
 
       # A child that is itself Duplicable copies by its OWN rules; anything
