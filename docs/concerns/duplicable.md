@@ -36,7 +36,7 @@ duplicable_by(associations: [], reset: [], suffix: {})
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `associations:` | Array of Symbols | `[]` | Allow-list of associations to copy. Must be declared **before** the macro; validated at macro time. `has_many`/`has_one` children are deep-copied; `has_and_belongs_to_many` links the copy to the *same* records; `belongs_to` and `has_many :through` are rejected with an explanation. |
+| `associations:` | Array of Symbols | `[]` | Allow-list of associations to copy. Must be declared **before** the macro; validated at macro time. `has_many`/`has_one` children are deep-copied; `has_and_belongs_to_many` links the copy to the *same* records. Children are read with **only the gem's own hiding predicates** removed — those on the child's own table's SoftDeletable column and, under Publishable's `default_scope: true`, its Publishable column — so a draft hidden by `publishable_by ..., default_scope: true` is copied too, while every other default-scope predicate still applies: a tenant scope, a discriminator on a shared table, a joined table's same-named column (`joins(:author).where(authors: { deleted_at: nil })`). A SoftDeletable child's soft-deleted rows are never copied, whatever its `default_scope:` setting (trash is not part of the record, and the copy would get it back live). A `has_one` copies the child its reader returns (a hidden one only when the reader returns none); HABTM re-links drafts too, and soft-deleted records only while the target's SoftDeletable default scope is off. An already-loaded association keeps its in-memory edits and unsaved children; `belongs_to` and `has_many :through` are rejected with an explanation. |
 | `reset:` | Array of Symbols | `[]` | Columns blanked on the copy (business state: `published_at`, `approved_at`, …). Validated against the schema. |
 | `suffix:` | Hash `{ field => text }` | `{}` | Appended to the copy's value when present (`title: " (copy)"`). Validated against the schema. |
 
@@ -88,7 +88,7 @@ copy = invoice.duplicate!
 copy.line_items.first.fulfillment_batch_id  # => nil (LineItem's own reset rule)
 ```
 
-A child whose class includes Duplicable is copied via **its own** `duplicate` — its resets, its suffixes, its nested associations — so recursive graphs stay declarative.
+A child whose class includes Duplicable is copied via **its own** `duplicate` — its resets, its suffixes, its nested associations — so recursive graphs stay declarative. A plain child (no Duplicable) still gets every automatic identity reset for **its own** class — timestamps, counters, and its Sluggable / Tokenizable / Hashable / Sequenceable / Auditable / SoftDeletable / Lockable columns — so a copied share link gets a fresh token instead of the original's secret (or a `RecordNotUnique` on its unique index).
 
 **Templates with a hook:**
 

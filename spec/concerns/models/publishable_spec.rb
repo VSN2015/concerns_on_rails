@@ -453,6 +453,48 @@ describe ConcernsOnRails::Publishable do
       expect(HookedArticle.published_ids).to match_array([a.id, b.id])
     end
 
+    # A has_many JOIN yields the parent once per joined child, so the
+    # per-record path published it through each stale copy: after_publish ran
+    # three times and the count said 3 — the fast path's update_all touches
+    # the row once.
+    describe "over a has_many join" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :batch_comments, force: true do |t|
+            t.integer :joined_article_id
+          end
+        end
+        stub_const("BatchComment", Class.new(TestModel) { self.table_name = "batch_comments" })
+        joined = Class.new(TestModel)
+        stub_const("JoinedArticle", joined) # joins(:assoc) needs a named class
+        joined.class_eval do
+          self.table_name = "batch_articles"
+          include ConcernsOnRails::Publishable
+
+          publishable_by
+          has_many :batch_comments, class_name: "BatchComment"
+
+          cattr_accessor :hook_calls, default: 0
+
+          def after_publish
+            self.class.hook_calls += 1
+          end
+        end
+        article = joined.create!(published_at: nil)
+        3.times { BatchComment.create!(joined_article_id: article.id) }
+      end
+
+      it "publishes a limited relation's record once" do
+        expect(JoinedArticle.joins(:batch_comments).limit(1).publish_all).to eq(1)
+        expect(JoinedArticle.hook_calls).to eq(1)
+      end
+
+      it "publishes an unlimited relation's record once" do
+        expect(JoinedArticle.joins(:batch_comments).publish_all).to eq(1)
+        expect(JoinedArticle.hook_calls).to eq(1)
+      end
+    end
+
     it "rolls the whole batch back when a record fails" do
       stub_const("FailingArticle", Class.new(TestModel) do
         self.table_name = "batch_articles"

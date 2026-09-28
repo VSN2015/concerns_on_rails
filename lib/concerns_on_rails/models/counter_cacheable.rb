@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/callable"
+require "concerns_on_rails/support/batch_ops"
 
 module ConcernsOnRails
   module Models
@@ -288,7 +289,7 @@ module ConcernsOnRails
 
         def counter_cacheable_recount_tally(children, foreign_key, condition)
           tally = Hash.new(0)
-          children.find_each do |record|
+          ConcernsOnRails::Support::BatchOps.each_record(children) do |record|
             tally[record[foreign_key]] += 1 if ConcernsOnRails::Support::Callable.invoke(record, condition)
           end
           tally

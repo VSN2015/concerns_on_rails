@@ -403,7 +403,12 @@ a custom `validate :method`, nor an association's autosave validation (a bare `h
 registers one, so most models with associations take the streaming path) — both collapse to a
 single `UPDATE`, which bumps `updated_at`
 exactly as the per-record path does; otherwise they stream per record through
-`publish!`/`unpublish!` so validations still run.
+`publish!`/`unpublish!` so validations still run. Both paths touch the same rows, each once: an
+ordered, limited relation (`Post.order(created_at: :desc).limit(10).publish_all`) publishes
+exactly those ten on the streaming path too (it resolves the limit to primary keys first), a
+`has_many` join (`Post.joins(:comments).publish_all`) publishes — and runs `after_publish` for —
+each post once however many comments it joins, and a model's default-scope `ORDER BY` (Sortable)
+no longer trips `error_on_ignored_order` — true of every `*_all` verb.
 
 `publish_all` targets every not-currently-published row — **including scheduled ones**, whose
 future `published_at` it overwrites — so chain `.draft` (`Post.draft.publish_all`) to exclude
@@ -547,7 +552,14 @@ that fails — whether it raises or just fails validation — aborts the cascade
 `ActiveRecord::RecordNotSaved` and rolls the parent back with it, so you never end up with a deleted
 parent and a live child. Declare the cascaded associations **above** `soft_deletable_by`; the macro
 resolves them at class load. Restore matches on the parent's timestamp, so independently
-deleted dependents keep their own. `cascade:` accepts `has_many` / `has_one` (no `belongs_to`, HABTM or
+deleted dependents keep their own. Dependents are loaded with only the gem's own hiding
+predicates removed — those on the child's **own table's** SoftDeletable column, and on its
+Publishable column under `default_scope: true` — so a child that hides its drafts has those drafts
+soft-deleted and restored too. Everything else still applies, exactly as for Rails' `dependent:`:
+the association's own conditions and every other default-scope predicate, including a tenant, a
+discriminator on a shared table, and a joined table's same-named column
+(`joins(:author).where(authors: { deleted_at: nil })` keeps a deleted author's comments out). A `has_one` cascades to the child its reader returns
+(a hidden one only when the reader returns none). `cascade:` accepts `has_many` / `has_one` (no `belongs_to`, HABTM or
 `:through`) whose models include SoftDeletable; with a cascade configured `soft_delete_all` / `restore_all`
 take the per-record path (a bulk `UPDATE` cannot follow associations).
 
@@ -1463,6 +1475,7 @@ One entry is recorded **per changed field per save** (creates record `"from" => 
 **Notes**
 - Writes that skip callbacks (`update_column(s)`, `touch`, `increment!`) are **not** audited; `save(validate: false)` is.
 - Values are JSON-coerced (times → ISO8601 UTC strings, `BigDecimal` → precision-safe numeric string); a corrupt column decodes as `[]` and is replaced on the next tracked save.
+- A native `json`/`jsonb` column works too — the trail is stored as a JSON array, and the entries `audit_trail` returns are detached from the column value, so editing one never rewrites the stored history. Declare it without a default (`t.json :audit_log`) — MySQL rejects a literal `DEFAULT` on a JSON column; the column stays `NULL` until a tracked field first changes, which reads as `[]`.
 - `"at"` is ISO8601 UTC with **microseconds**, so `audited_changes_since` tells apart two edits in the same second. Second-precision entries written by 1.29.0 and earlier still parse; they only say "during that second", so they match any cutoff within it.
 - Per-record and bounded by design — reach for [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) / [`audited`](https://github.com/collectiveidea/audited) when you need reify/undo or audit queries across models.
 
@@ -1742,7 +1755,7 @@ copy = invoice.duplicate!(only: [])                     # shallow copy — attri
 
 **Counter-cache columns start at 0**: a column on the copy's class maintained by a child — CounterCacheable rules or a native `belongs_to ..., counter_cache:` (polymorphic `as:` included), found through the class's `has_many`/`has_one` reflections — is zeroed, and each child the copy actually carries re-increments it on save. A deep copy of a post with two comments therefore counts 2 (not 4), a shallow copy 0. Plain (non-Duplicable) child copies get the same treatment for their own counters, since their children are never copied. A has_many with no inverse (a scoped one) makes Rails bump the copy's in-memory counter as children are attached; that bump is undone before the INSERT, so the result is right with partial inserts on or off, and `duplicate!` re-reads the counters after saving. (After a plain `duplicate` + your own `save!`, the in-memory counter stays at 0 until `reload`; the row is correct.) A counter kept by a child with no `has_many`/`has_one` on the parent is invisible to this — set it in `on_duplicate`.
 
-**Associations** (`associations:` allow-list, declared before the macro, validated at macro time): `has_many`/`has_one` children are deep-copied — a child that also includes Duplicable copies via **its own** rules, so nested graphs stay declarative; `has_and_belongs_to_many` re-links the *same* records; `belongs_to` and `has_many :through` are rejected with an explanation.
+**Associations** (`associations:` allow-list, declared before the macro, validated at macro time): `has_many`/`has_one` children are deep-copied — a child that also includes Duplicable copies via **its own** rules, so nested graphs stay declarative, and a plain child still gets its own class's identity resets (token, slug, number, trail…), so it never shares a credential or trips a unique index. Children are read with only the gem's own hiding predicates removed — those on the child's **own table's** SoftDeletable column and, under `default_scope: true`, its Publishable column — so drafts hidden by `publishable_by ..., default_scope: true` are copied too, while every other default-scope predicate still applies: a tenant, a discriminator on a shared table, a joined table's same-named column (`joins(:author).where(authors: { deleted_at: nil })`). A SoftDeletable child's soft-deleted rows are never copied, whatever its `default_scope:` setting (the copy would otherwise get them back as live rows), and a `has_one` copies the child its reader returns (a hidden one only when the reader returns none). `has_and_belongs_to_many` re-links the *same* records, drafts included (soft-deleted ones only while the target's SoftDeletable default scope is off); `belongs_to` and `has_many :through` are rejected with an explanation.
 
 **Notes**
 - The macro is optional — bare `include` gives `duplicate`/`duplicate!` with the auto resets.

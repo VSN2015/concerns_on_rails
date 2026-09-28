@@ -327,7 +327,8 @@ resolver with its absolute ceiling), `NumericOperand` (Filterable's exact numeri
 reader), `UniqueRetry` (bounded `RecordNotUnique` retry; `savepoint:` makes each attempt
 its own savepoint so a retry works inside a caller's transaction on PostgreSQL),
 `HookedWrite` (the one before-hook → write → after-hook path: own `requires_new`
-savepoint, true only once the after-hook returns, and on abort the `restore:` attributes
+savepoint, true only once the after-hook returns, and on abort the WHOLE AttributeSet (a
+deep_dup, already-read mutable values deep-copied), the last save's mutations, forced changes
 and the record's identity are put back — unread attributes restored raw, never
 deserialized, so encrypted fields are never decrypted), `ErrorEnvelope` (the shared `render_error`-or-inline error
 renderer used by seven controller concerns), `FilterParameterRegistry` (live
@@ -347,7 +348,18 @@ and a subclass never rips a scope out from under its parent), `BatchOps` (the ho
 fast-path predicate — every named instance method still owned by the concern, i.e.
 unoverridden — plus the transactional `find_each` batch runner shared by every `*_all` verb:
 Integer count, DB-side filtering for idempotency, rollback via `ActiveRecord::RecordNotSaved`
-on a failed record), `VaryHeader` (the shared `Vary` appender behind Localizable's
+on a failed record — and `each_record`, the ONLY way to `find_each` a relation: it strips the
+ORDER (error_on_ignored_order), resolves a LIMIT/OFFSET to plucked PKs first (bare `find_each`
+keeps the limit but pages by PK), and yields each record once even over a has_many join (a
+joined limited slice is re-plucked, then loaded unjoined — one instance per record)),
+`AssociationScope` (`unfiltered(record, name)`, for the cascade and deep copies: the
+association's own scope minus ONLY the gem's hiding predicates on the child's OWN table —
+SoftDeletable's column while its default scope is on, Publishable's under `default_scope: true` —
+matched by Arel attribute, not `unscope(where:)`'s any-table column name, with the association's
+own predicates on them put back; app default scopes (tenant, discriminator, joined-table
+same-named columns) still apply, and a limited association (has_one) ranks its reader's rows
+first; `without(relation, columns)` is the same table-qualified peel), `VaryHeader` (the shared `Vary`
+appender behind Localizable's
 `Accept-Language` and Timezoneable's `Time-Zone`: appends, de-duplicates case-insensitively,
 leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —
 seeds `Accept` itself whenever Rails' own `_set_vary_header` would have, since that only
