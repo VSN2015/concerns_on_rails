@@ -552,11 +552,13 @@ that fails — whether it raises or just fails validation — aborts the cascade
 `ActiveRecord::RecordNotSaved` and rolls the parent back with it, so you never end up with a deleted
 parent and a live child. Declare the cascaded associations **above** `soft_deletable_by`; the macro
 resolves them at class load. Restore matches on the parent's timestamp, so independently
-deleted dependents keep their own. Dependents are loaded with only the gem's own hiding default
-scopes peeled off — the child's SoftDeletable one and Publishable's `default_scope: true` — so a
-child that hides its drafts has those drafts soft-deleted and restored too; the association's own
-conditions and every other default scope (a tenant, a discriminator on a shared table) still
-apply, exactly as for Rails' `dependent:`. A `has_one` cascades to the child its reader returns
+deleted dependents keep their own. Dependents are loaded with only the gem's own hiding
+predicates removed — those on the child's **own table's** SoftDeletable column, and on its
+Publishable column under `default_scope: true` — so a child that hides its drafts has those drafts
+soft-deleted and restored too. Everything else still applies, exactly as for Rails' `dependent:`:
+the association's own conditions and every other default-scope predicate, including a tenant, a
+discriminator on a shared table, and a joined table's same-named column
+(`joins(:author).where(authors: { deleted_at: nil })` keeps a deleted author's comments out). A `has_one` cascades to the child its reader returns
 (a hidden one only when the reader returns none). `cascade:` accepts `has_many` / `has_one` (no `belongs_to`, HABTM or
 `:through`) whose models include SoftDeletable; with a cascade configured `soft_delete_all` / `restore_all`
 take the per-record path (a bulk `UPDATE` cannot follow associations).
@@ -1746,7 +1748,7 @@ copy = invoice.duplicate!(only: [])                     # shallow copy — attri
 
 **Counter-cache columns start at 0**: a column on the copy's class maintained by a child — CounterCacheable rules or a native `belongs_to ..., counter_cache:` (polymorphic `as:` included), found through the class's `has_many`/`has_one` reflections — is zeroed, and each child the copy actually carries re-increments it on save. A deep copy of a post with two comments therefore counts 2 (not 4), a shallow copy 0. Plain (non-Duplicable) child copies get the same treatment for their own counters, since their children are never copied. A has_many with no inverse (a scoped one) makes Rails bump the copy's in-memory counter as children are attached; that bump is undone before the INSERT, so the result is right with partial inserts on or off, and `duplicate!` re-reads the counters after saving. (After a plain `duplicate` + your own `save!`, the in-memory counter stays at 0 until `reload`; the row is correct.) A counter kept by a child with no `has_many`/`has_one` on the parent is invisible to this — set it in `on_duplicate`.
 
-**Associations** (`associations:` allow-list, declared before the macro, validated at macro time): `has_many`/`has_one` children are deep-copied — a child that also includes Duplicable copies via **its own** rules, so nested graphs stay declarative, and a plain child still gets its own class's identity resets (token, slug, number, trail…), so it never shares a credential or trips a unique index. Children are read with only the gem's own hiding default scopes peeled off, so drafts hidden by `publishable_by ..., default_scope: true` are copied too, while the child's other default scopes (a tenant, a discriminator on a shared table) still apply. A SoftDeletable child's soft-deleted rows are never copied, whatever its `default_scope:` setting (the copy would otherwise get them back as live rows), and a `has_one` copies the child its reader returns (a hidden one only when the reader returns none). `has_and_belongs_to_many` re-links the *same* records, drafts included (soft-deleted ones only while the target's SoftDeletable default scope is off); `belongs_to` and `has_many :through` are rejected with an explanation.
+**Associations** (`associations:` allow-list, declared before the macro, validated at macro time): `has_many`/`has_one` children are deep-copied — a child that also includes Duplicable copies via **its own** rules, so nested graphs stay declarative, and a plain child still gets its own class's identity resets (token, slug, number, trail…), so it never shares a credential or trips a unique index. Children are read with only the gem's own hiding predicates removed — those on the child's **own table's** SoftDeletable column and, under `default_scope: true`, its Publishable column — so drafts hidden by `publishable_by ..., default_scope: true` are copied too, while every other default-scope predicate still applies: a tenant, a discriminator on a shared table, a joined table's same-named column (`joins(:author).where(authors: { deleted_at: nil })`). A SoftDeletable child's soft-deleted rows are never copied, whatever its `default_scope:` setting (the copy would otherwise get them back as live rows), and a `has_one` copies the child its reader returns (a hidden one only when the reader returns none). `has_and_belongs_to_many` re-links the *same* records, drafts included (soft-deleted ones only while the target's SoftDeletable default scope is off); `belongs_to` and `has_many :through` are rejected with an explanation.
 
 **Notes**
 - The macro is optional — bare `include` gives `duplicate`/`duplicate!` with the auto resets.
