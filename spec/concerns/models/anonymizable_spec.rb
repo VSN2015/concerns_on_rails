@@ -325,6 +325,17 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
       expect(klass.anonymized.count).to eq(3)
       expect(already.reload.name).to eq("[REDACTED]")
     end
+
+    # find_each kept the LIMIT but dropped the ORDER, so "erase the newest
+    # one" erased the OLDEST instead.
+    it "erases exactly the rows an ordered, limited relation selects" do
+      klass = model_class { anonymizable :name, with: :redact }
+      oldest, newest = %w[a b].map { |name| klass.create!(name: name) }
+
+      expect(klass.order(id: :desc).limit(1).anonymize_all!).to eq(1)
+      expect(newest.reload).to be_anonymized
+      expect(oldest.reload).not_to be_anonymized
+    end
   end
 
   describe "macro validation" do

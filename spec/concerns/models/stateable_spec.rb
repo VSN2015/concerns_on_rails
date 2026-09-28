@@ -506,6 +506,51 @@ describe ConcernsOnRails::Stateable do
       expect(t.reload.status).to eq("draft")
     end
   end
+  # A vetoed transition restored only the state column: the entry
+  # Auditable's before_save had appended to the trail stayed in memory, and
+  # the next unrelated save wrote a "draft -> published" change that never
+  # happened.
+  describe "a vetoed transition on an Auditable model" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :audited_tickets, force: true do |t|
+          t.string :title
+          t.string :status
+          t.text :audit_log
+        end
+      end
+    end
+
+    let(:klass) do
+      Class.new(TestModel) do
+        self.table_name = "audited_tickets"
+        include ConcernsOnRails::Stateable
+        include ConcernsOnRails::Auditable
+
+        stateable_by :status, states: %i[draft published], default: :draft,
+                              transitions: { publish: { from: :draft, to: :published } }
+        auditable_by :status
+
+        attr_accessor :veto
+
+        def after_transition(*)
+          raise ActiveRecord::Rollback if veto
+        end
+      end
+    end
+
+    it "leaves no phantom entry for a later save to persist" do
+      ticket = klass.find(klass.create!(title: "a").id)
+      ticket.veto = true
+      expect(ticket.publish!).to be(false)
+      ticket.update!(title: "b") # an untracked field
+
+      published = klass.find(ticket.id).audit_trail.select { |entry| entry["to"] == "published" }
+      expect(published).to be_empty
+      expect(ticket.audit_trail.map { |entry| entry["to"] }).to eq(%w[draft])
+    end
+  end
+
   describe "timestamps: (<state>_at stamping)" do
     before do
       ActiveRecord::Schema.define do

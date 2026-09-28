@@ -149,7 +149,7 @@ module ConcernsOnRails
         time = self.class.expirable_cast_time(time)
         hooks = time.to_time > Time.zone.now ? {} : { before: :before_expire, after: :after_expire }
         field = self.class.expirable_field
-        ConcernsOnRails::Support::HookedWrite.run(self, restore: [field], **hooks) do
+        ConcernsOnRails::Support::HookedWrite.run(self, **hooks) do
           update(field => time)
         end
       end

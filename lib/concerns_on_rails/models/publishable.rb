@@ -16,6 +16,10 @@ module ConcernsOnRails
         class_attribute :publishable_scope_names, instance_accessor: false,
                                                   default: SCOPE_BASES.to_h { |b| [b, b] }.freeze
         class_attribute :publishable_captured_scopes, instance_accessor: false, default: {}.freeze
+        # Whether `publishable_by ..., default_scope: true` installed the
+        # hiding default scope — Support::AssociationScope peels exactly that
+        # predicate (and no application default scope) for cascades / copies.
+        class_attribute :publishable_default_scope, instance_accessor: false, default: false
 
         define_publishable_scopes(nil, nil)
         self.publishable_captured_scopes =
@@ -185,6 +189,7 @@ module ConcernsOnRails
         # Routed through a helper so the `default_scope:` keyword doesn't shadow
         # the `default_scope` macro inside `publishable_by`.
         def enable_published_default_scope
+          self.publishable_default_scope = true
           published_scope = publishable_scope_names.fetch(:published)
           default_scope { public_send(published_scope) }
         end
@@ -292,7 +297,7 @@ module ConcernsOnRails
       def publishable_write_with_hooks(value, kind)
         field = self.class.publishable_field
         before, after = kind == :publish ? %i[before_publish after_publish] : %i[before_unpublish after_unpublish]
-        ConcernsOnRails::Support::HookedWrite.run(self, before: before, after: after, restore: [field]) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: before, after: after) do
           update(field => value)
         end
       end

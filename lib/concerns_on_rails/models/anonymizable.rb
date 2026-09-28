@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
 require "concerns_on_rails/support/unique_retry"
 require "digest"
@@ -184,18 +185,19 @@ module ConcernsOnRails
         # Anonymize every matching record that isn't already stamped, in one
         # transaction. Returns the Integer count of records anonymized (the
         # 1.22 batch contract). Without a stamp column every record matches.
-        # Streams in PK batches (find_each) rather than loading the relation,
-        # filters stamped rows DB-side, and skips the per-record reload —
-        # the batch discards its instances, so reloading each one would cost
-        # a wasted SELECT per row. Deliberately NOT Support::BatchOps: an
-        # erasure batch maximises progress. Each record runs in its own
+        # Streams in PK batches (BatchOps.each_record, so an ordered/limited
+        # relation erases exactly the rows it selects) rather than loading
+        # the relation, filters stamped rows DB-side, and skips the per-record
+        # reload — the batch discards its instances, so reloading each one
+        # would cost a wasted SELECT per row. Deliberately NOT BatchOps.run:
+        # an erasure batch maximises progress. Each record runs in its own
         # savepoint, so one whose hook vetoes (a legal hold) is skipped
         # without undoing the others, and only records actually erased count.
         def anonymize_all!
           relation = anonymizable_stamp ? all.where(anonymizable_stamp => nil) : all
           transaction do
             count = 0
-            relation.find_each do |record|
+            ConcernsOnRails::Support::BatchOps.each_record(relation) do |record|
               next if record.anonymized?
 
               count += 1 if record.send(:anonymize_record!)
@@ -318,8 +320,7 @@ module ConcernsOnRails
         # update_columns already synced are put back.
         payload = anonymizable_payload
         slug = anonymizable_slug_payload!(payload)
-        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_anonymize, after: :after_anonymize,
-                                                        restore: payload.keys) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_anonymize, after: :after_anonymize) do
           anonymizable_write!(payload, slug[:generated])
           anonymizable_delete_slug_history! if slug[:history]
           true
