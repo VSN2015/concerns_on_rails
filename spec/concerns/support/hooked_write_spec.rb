@@ -78,6 +78,45 @@ describe ConcernsOnRails::Support::HookedWrite do
 
       expect(HookedItem.pluck(:state, :note)).to eq([%w[old edited]])
     end
+
+    # When the caller's transaction then rolls back, the record it created
+    # must be new again (its row is gone), so a later save INSERTs it.
+    it "is a new record again once the caller's transaction rolls back" do
+      if ActiveRecord.gem_version < Gem::Version.new("6.1")
+        # Known and pre-existing on Rails 6.0 only, deliberately not fixed:
+        # 6.0's savepoint rollback consumes the record's remembered
+        # transaction state (and HookedWrite then puts the persisted identity
+        # back), so the outer rollback has no state left to reset from and
+        # new_record? stays false — the next save UPDATEs a row that is gone.
+        pending "Rails 6.0: an outer rollback after a vetoed write leaves new_record? false"
+      end
+      HookedItem.after_action = :rollback
+      fresh = nil
+      ActiveRecord::Base.transaction do
+        fresh = HookedItem.create!(state: "old")
+        expect(run(fresh) { fresh.update(state: "new") }).to be(false)
+        raise ActiveRecord::Rollback
+      end
+
+      expect(HookedItem.count).to eq(0)
+      expect(fresh.new_record?).to be(true)
+      fresh.save!
+      expect(HookedItem.count).to eq(1)
+    end
+
+    it "keeps a persisted record's rolled-back edit dirty after the caller's rollback" do
+      record = HookedItem.create!(state: "old")
+      HookedItem.after_action = :rollback
+      ActiveRecord::Base.transaction do
+        record.update!(note: "inside")
+        expect(run(record) { record.update(state: "new") }).to be(false)
+        raise ActiveRecord::Rollback
+      end
+
+      expect(HookedItem.find(record.id).note).to be_nil
+      record.save!
+      expect(HookedItem.find(record.id).attributes.slice("state", "note")).to eq("state" => "old", "note" => "inside")
+    end
   end
 
   it "runs before, write, after (private hooks included) and returns true" do
@@ -201,6 +240,33 @@ describe ConcernsOnRails::Support::HookedWrite do
 
       expect(described_class.run(post, before: :before_write) { true }).to be(false)
       expect(post.settings["a"]["b"]).to eq("orig")
+    end
+
+    # deep_dup copies an already-read value only one level deep: a json Hash
+    # read BEFORE the write shared its nested Hashes with the snapshot, so the
+    # vetoed mutation survived the restore and the next save persisted it.
+    it "undoes a nested mutation of a json value read before the write" do
+      post = HookedPost.find(HookedPost.create!(title: "t", settings: { "a" => { "b" => "orig" } }).id)
+      expect(post.settings["a"]["b"]).to eq("orig")
+      post.hook = ->(record) { record.settings["a"]["b"] = "vetoed" }
+
+      expect(described_class.run(post, before: :before_write) { true }).to be(false)
+
+      expect(post.settings["a"]["b"]).to eq("orig")
+      expect(post.changed?).to be(false)
+      post.update!(title: "unrelated")
+      expect(HookedPost.find(post.id).settings["a"]["b"]).to eq("orig")
+    end
+
+    it "keeps an unsaved nested edit made before the write" do
+      post = HookedPost.find(HookedPost.create!(title: "t", settings: { "a" => { "b" => "orig" } }).id)
+      post.settings["a"]["b"] = "edited"
+      post.hook = ->(record) { record.settings["a"]["b"] = "vetoed" }
+
+      described_class.run(post, before: :before_write) { true }
+
+      expect(post.settings["a"]["b"]).to eq("edited")
+      expect(post.changed).to eq(%w[settings])
     end
 
     it "puts the foreign key back when a vetoed hook reassigns a belongs_to" do

@@ -101,15 +101,42 @@ module ConcernsOnRails
       # inside the aborted write would otherwise leave saved_changes
       # reporting a save that was rolled back.
       #
+      # deep_dup copies an already-read value only ONE level deep (`dup`), so
+      # a json Hash read before the write shared its nested Hashes with the
+      # snapshot, and a vetoed hook's `settings["a"]["b"] = ...` survived the
+      # restore (then persisted on the next save as an in-place change).
+      # Values of a mutable type that were ALREADY read are deep-copied into
+      # the snapshot; an unread one is never touched, so nothing is
+      # deserialized (or decrypted) to take it.
+      #
       # Forced changes (`title_will_change!`) live in the dirty tracker, not
       # the attribute set — a Set of names on Rails 6.0, a name => original
       # value Hash later — so they are copied from it and replayed onto the
       # rebuilt tracker.
       def attribute_snapshot(record)
         tracker = record.instance_variable_get(:@mutations_from_database)
-        { attributes: record.instance_variable_get(:@attributes).deep_dup,
+        { attributes: detach_read_values(record.instance_variable_get(:@attributes).deep_dup),
           before_last_save: record.instance_variable_get(:@mutations_before_last_save),
           forced_changes: tracker&.instance_variable_get(:@forced_changes).dup }
+      end
+
+      # Rails 7.1+ SHARES (does not dup) the Attribute of a type reporting
+      # `mutable? == false`, so only a mutable type's copy may be written to.
+      # Rails 6.0 has no `mutable?`; its in-place-tracked types (json,
+      # serialized, arrays) include Type::Helpers::Mutable.
+      def detach_read_values(attributes)
+        attributes.each_value do |attribute|
+          next unless attribute.has_been_read? && mutable_type?(attribute.type)
+
+          attribute.instance_variable_set(:@value, attribute.value.deep_dup)
+        end
+        attributes
+      end
+
+      def mutable_type?(type)
+        return type.mutable? if type.respond_to?(:mutable?)
+
+        type.is_a?(ActiveModel::Type::Helpers::Mutable)
       end
 
       # Swap the copy back in. The dirty tracker is built over the attribute
@@ -130,7 +157,8 @@ module ConcernsOnRails
         forced = snapshot[:forced_changes]
         record.send(:mutations_from_database).instance_variable_set(:@forced_changes, forced) if forced.present?
       end
-      private_class_method :attribute_snapshot, :restore_attributes!, :identity_snapshot, :restore_identity!
+      private_class_method :attribute_snapshot, :detach_read_values, :mutable_type?, :restore_attributes!,
+                           :identity_snapshot, :restore_identity!
     end
   end
 end
