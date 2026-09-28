@@ -14,7 +14,7 @@ module ConcernsOnRails
       # ISO_COUNTRY_CODES and the name/alpha-3 lookups below are all derived
       # from this, so the three never drift apart.
       # Each value is a [name, alpha-3] pair (a tuple), not a list of words.
-      # rubocop:disable Style/WordArray
+      # rubocop:disable-next Style/WordArray
       COUNTRY_DATA = {
         "AD" => ["Andorra", "AND"],
         "AE" => ["United Arab Emirates", "ARE"],
@@ -266,7 +266,6 @@ module ConcernsOnRails
         "ZM" => ["Zambia", "ZMB"],
         "ZW" => ["Zimbabwe", "ZWE"]
       }.freeze
-      # rubocop:enable Style/WordArray
 
       # ISO 3166-1 alpha-2 country codes (derived from COUNTRY_DATA).
       ISO_COUNTRY_CODES = Set.new(COUNTRY_DATA.keys).freeze

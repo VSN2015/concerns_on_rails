@@ -1,5 +1,123 @@
 <!-- CHANGELOG.md -->
 
+## 1.30.0 (2026-09-27)
+
+The fixes from the 2026-09-23 whole-gem audit of 1.29.0: 37 bugs (8 HIGH) across six PRs
+(#109–#114). It is a minor release, not a patch, because a few fixes add an option or a method,
+and several change observable behaviour. Read **Changed** before upgrading. No new
+concerns and no migrations. Every fix ships with a regression spec that fails on 1.29.0.
+2146 examples, 0 failures (2121 on Rails 6.0), green on PostgreSQL and MySQL.
+
+### Changed
+- **Throttleable: counters that use the default name reset once on upgrade.** The default
+  rule name changes from `"rule<n>"` to `"<DeclaringController>#rule<n>"`, so the cache key
+  changes, and so does the `rule` field of `rate_limited.concerns_on_rails`. Rules with an
+  explicit `name:` are not affected. (#109)
+- **WebhookVerifiable: rule lookup is by specificity.** A rule that names the action beats any
+  catch-all, whichever class declared either. The most-derived class wins, then declaration
+  order. Such actions no longer inherit a parent catch-all's `replay:`/`tolerance:`/scheme, so
+  declare those on the subclass rule if you still want them. A catch-all declared before
+  specific rules no longer shadows them. `commit_webhook_replay_claim` is now private. (#109)
+- **Cacheable**: POST/PUT/PATCH/DELETE responses, and statuses other than
+  200/203/204/206/304, no longer receive the rule's positive `Cache-Control`. `no_store` is
+  unchanged. `Vary` merging is now case-insensitive, leaves `Vary: *` alone, and keeps Rails'
+  own `Vary: Accept`. (#109)
+- **Idempotentable: an unreachable store returns 503 `idempotency_store_unavailable`**
+  (with `Retry-After`) instead of a permanent 409 `idempotency_conflict`. The action still
+  does not run. Unreachable means both claims failed and both reads returned nil. (#109)
+- **Filterable: numeric operands are exact, never truncated.** On an integer column,
+  `?stock=5.5` now matches nothing (it used to match 5), and `?stock=1e1` matches 10 (it used
+  to match 1). `?stock_lt=<huge>` returns every non-NULL row. One garbage member fails a whole
+  `in`/`not_in` list closed, and garbage fails `not` closed too. A JSON `true` or boolean
+  against a numeric column fails closed. `type: :integer` on a float/decimal column no longer
+  truncates. A numeric `type:` on a `with:` lambda pre-casts strictly, and fails closed
+  without calling the lambda. Operands over 100 characters are refused. (#113)
+- **Sequenceable (STI)**: declared on an STI **base** class, all subclasses now share one
+  table-wide counter. They used to each start at 1 and collide on a shared unique index.
+  **Upgrade note:** a subclass that *inherited* a base declaration and numbered per type now
+  jumps once to the table-wide MAX + 1. Declare `scope: :type` to keep per-type numbering, and
+  index `(type, <column>)`. `next_<field>` under `scope: :type` previews the receiving class's
+  sequence. (#111)
+- **Hooked verbs** (Publishable, SoftDeletable, Expirable, Activatable, Anonymizable,
+  Stateable): a hook's `ActiveRecord::Rollback` now vetoes the write for real. The verb
+  returns `false`, and the `*_all` verbs raise `RecordNotSaved`. The exception is
+  `anonymize_all!`, which skips the vetoed record and doesn't count it. After any aborted
+  write, the written attributes return to their pre-call in-memory values. (#114)
+- **Publishable**: with a boolean column, `Post.published.new` no longer pre-sets the flag.
+  The scope is now `("published" = TRUE)`, or `<> FALSE` on Rails 6.0. (#114)
+- **Expirable**: `expire!`/`expire_all` with nil or a blank time now mean "now" (they used to
+  mean "never expires"). An unparseable time raises `ArgumentError`. (#114)
+- **Expirable / Activatable / Schedulable**: `prefix:`/`suffix:` now also define affixed
+  predicates (`term_active?`, `window_expired?`, …). The macro raises if one would shadow a
+  different column's query method. (#114)
+- **Auditable**: new entries store `"at"` with microseconds. Second-precision entries still
+  parse. (#111)
+- **Hashable**: a `:custom` alphabet with duplicate characters is de-duplicated, with a
+  deprecation warning (it will raise in 2.0). Fewer than 2 distinct characters raises. (#111)
+
+### Added
+- **Idempotentable**: `on_store_unavailable:` (`:reject` default, or `:proceed` to run the
+  action without deduplication). (#109)
+- **Anonymizable**: `slug:` (`:auto` default, `true`, `false`). It rewrites a friendly_id slug
+  built from an anonymized column to a random slug, and deletes its history rows. (#110)
+- **Taggable**: `Model.normalize_tags!` rewrites rows written around the callbacks (e.g.
+  `"ruby, rails"`) to the form `tagged_with` matches. It returns a count. (#112)
+- **Support::UniqueRetry**: `savepoint:` runs each attempt in its own savepoint, so a retry
+  works inside a caller's transaction on PostgreSQL. (#110, #111)
+
+### Fixed
+- **Encryptable**: `Model.needs_reencryption` / `reencrypt_all!` now cover the whole table.
+  Rows hidden by a `default_scope` used to be skipped, and became undecryptable once the old
+  key was dropped. On a relation, both cover exactly that relation. On Rails 6.0–7.0,
+  `<field>_ciphertext` returns the stored ciphertext after a save, and `reencrypt!` works
+  right after a save. (#110)
+- **Anonymizable**: erasure is never blocked by ciphertext that won't decrypt, and one bad
+  row no longer rolls back `anonymize_all!`. A slug built from erased PII is replaced in the
+  same UPDATE. (#110)
+- **Storable**: `where_<key>` on an `encryptable` column raises instead of silently matching
+  nothing (or every row). (#110)
+- **CounterCacheable**: a destroy decrements only when its DELETE removed a row, and reads
+  persisted values. `belongs_to primary_key:` is honoured. A child destroyed by its parent's
+  `dependent: :destroy` no longer decrements that parent, which also fixes
+  `StaleObjectError`. (#111)
+- **Duplicable**: counter-cache columns are zeroed on the copy, so a deep copy counts its
+  children once. `duplicate!` re-reads the counters. (#111)
+- **Sequenceable**: `assign_<field>!` restores the number when the save fails, so a retry
+  draws a fresh one. (#111)
+- **Hashable / Tokenizable**: uniqueness prechecks see sibling STI rows, and
+  `regenerate_<field>!` retries work inside a caller's transaction. (#111)
+- **Lockable / Addressable**: models load again when the schema is unreachable. (#111)
+- **Aliasable**: `accepts_nested_attributes_for :alias` now updates and destroys existing
+  children. It used to save only new ones. (#112)
+- **Sanitizable**: `with: :strip, on: :write` stores plain text (`"Tom & Jerry"`, not
+  `"Tom &amp; Jerry"`). It stays idempotent and linear-time, and `sanitize_all!` repairs
+  double-escaped rows. (#112)
+- **Addressable**: `if:`/`unless:` from later calls and subclasses are honoured. (#112)
+- **Monetizable**: the writer reads the concern's own formatted output (`"$1,234.50"`).
+  Garbage, NaN, Infinity and oversized input cast to nil instead of raising. (#112)
+- **Normalizable**: whitespace presets treat Unicode whitespace as whitespace. (#112)
+- **Maskable**: `:email`/`:phone` fail closed. A malformed value gets the full mask instead of
+  being returned raw. (#112)
+- **Taggable**: `taggable_by` raises on an empty `delimiter:`. (#112)
+- **CursorPaginatable**: `max_per_page: 0` no longer lets a huge `per_page` overflow `LIMIT`
+  (a 500). Both paginators share `Support::ScalarParam.per_page`, with a 1,000,000 ceiling. A
+  cursor whose values can't be bound is a 400 `invalid_cursor`. (#113)
+- **Filterable**: `1e99999999` on an unconstrained numeric column no longer costs ~1.3 s and
+  476 MB per request. `contains`/`starts_with` on non-string columns match nothing, instead of
+  a PostgreSQL 500. (#113)
+- **Localizable / Timezoneable**: `rescue_from` handlers render under the resolved
+  locale/zone. `Accept-Language` ties keep header order, and `q` is case-insensitive. (#113)
+- **Stateable**: the in-memory state and `<state>_at` are restored after a vetoed transition
+  or `RecordInvalid`. (#114)
+- **Rails 6.0**: a hooked write aborted inside a caller's transaction no longer makes a
+  record created earlier in it INSERT twice. (#114)
+
+### Internal
+- New `Support::HookedWrite` (the one before-hook → write → after-hook path) and
+  `Support::NumericOperand` (Filterable's exact numeric reader). (#113, #114)
+- Development dependencies: rubocop 1.91, simplecov 1.2, permittable 0.7 in the lockfile. (#106)
+- CLAUDE.md describes the new behaviour. (#115)
+
 ## 1.29.0 (2026-09-21)
 
 CI now runs **every Rails line the gemspec admits** — 6.0, 6.1, 7.0, 7.1, 7.2, 8.0 and 8.1 —
