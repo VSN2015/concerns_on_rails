@@ -125,7 +125,7 @@ module ConcernsOnRails
       end
 
       def lookup_sequenceable_time_zone(value)
-        ActiveSupport::TimeZone[value]
+        ActiveSupport::TimeZone[value.is_a?(Symbol) ? value.to_s : value] # time_zone: :UTC
       rescue ArgumentError
         nil # TimeZone[] raises on a non-String/Numeric argument
       end
