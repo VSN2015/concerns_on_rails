@@ -772,6 +772,41 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
         .to raise_error(described_class::InvalidCursor, /Invalid pagination cursor/)
     end
 
+    # read_attribute answers nil just as quietly for a column the relation
+    # did not select as for a SQL NULL. Minted as a NULL boundary, the next
+    # page matched only `score IS NULL` rows and every non-NULL row after
+    # the boundary silently vanished. The public reader used to raise here.
+    it "raises MissingAttributeError, never a NULL boundary, for an unselected nullable ordering column" do
+      expect { make_controller(per_page: 2).cursor_paginated(NullableItem.select(:id), order: :score) }
+        .to raise_error(ActiveModel::MissingAttributeError, /ordering column 'score' is not loaded.*select it \(unaliased\)/)
+    end
+
+    # Same root cause: a stored non-NULL value its type casts to nil (an
+    # unparseable datetime string, a custom type) is not a SQL NULL, and
+    # keying the next page on `IS NULL` skipped rows.
+    it "raises ArgumentError, never a NULL boundary, for a stored value that casts to nil" do
+      two_is_nil = Class.new(ActiveModel::Type::Integer) do
+        def deserialize(value)
+          value.to_i == 2 ? nil : super
+        end
+      end
+      model = Class.new(TestModel) do
+        self.table_name = "nullable_items"
+        attribute :score, two_is_nil.new
+      end
+
+      cursor = nil
+      walk = lambda do
+        10.times do
+          controller = make_controller({ per_page: 1, cursor: cursor }.compact)
+          controller.cursor_paginated(model.all, order: :score)
+          cursor = controller.cursor_pagination_meta[:next_cursor]
+          break unless cursor
+        end
+      end
+      expect(&walk).to raise_error(ArgumentError, /ordering column 'score' holds a stored value that casts to nil/)
+    end
+
     # Regressions of the fail-loudly design this replaced: one NULL row far
     # past page 1 made page 1 raise, and every page paid an extra
     # EXISTS (... IS NULL) — a full scan when the column has no NULLs.

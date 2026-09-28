@@ -25,7 +25,9 @@ module ConcernsOnRails
     # Reads params[:cursor] (the opaque token from X-Next-Cursor) and
     # params[:per_page]. The primary key is always appended as a tiebreaker.
     # Ordering columns are chosen in code (never from params), must live on the
-    # base model's table, and be selected by the relation. A column the schema
+    # base model's table, and be selected by the relation UNALIASED (a select
+    # alias shadowing one — `UPPER(name) AS name` — hands the cursor a value
+    # the WHERE never compares against). A column the schema
     # allows NULL in is paginated with its NULLs LAST, whatever the direction
     # and adapter (see cursor_order_nodes) — every row exactly once, no
     # errors and no extra queries; NOT NULL columns keep plain `col dir` SQL.
@@ -45,11 +47,12 @@ module ConcernsOnRails
     # Malformed or mismatched cursors raise CursorPaginatable::InvalidCursor;
     # on real controllers a rescue_from is registered automatically and renders
     # a 400 (via Respondable's render_error when included). Override
-    # #render_invalid_cursor to customize the body. Cursors are opaque but NOT
-    # signed — boundary values are cast through the model's attribute types
-    # and bound by Arel (no injection) and the relation's scoping still
-    # applies, so treat a cursor as a page position, never an authorization
-    # boundary.
+    # #render_invalid_cursor to customize the body. Cursors are opaque but
+    # unsigned by default — boundary values are cast through the model's
+    # attribute types and bound by Arel (no injection) and the relation's
+    # scoping still applies, so treat a cursor as a page position, never an
+    # authorization boundary. `signed:` appends an HMAC-SHA256 and rejects
+    # tampered or unsigned tokens (see validate_signed!).
     #
     # Do not combine with Controllers::Sortable#sorted — cursor_paginated uses
     # reorder, which replaces any prior ORDER BY (including Models::Sortable's
@@ -510,15 +513,34 @@ module ConcernsOnRails
       # keyed the next page on a value the column never holds — "ITEM-10"
       # sorts before every lowercase name, and the walk restarted at page one
       # forever. A NULL is a legitimate boundary on a nullable column (encoded
-      # as JSON null; the predicate handles it); on a NOT NULL column it can
-      # only mean the value was never loaded, so it fails loudly.
+      # as JSON null; the predicate handles it) — but only a value the
+      # database returned as NULL. read_attribute answers nil just as quietly
+      # for a column the relation did not select, and for a stored non-NULL
+      # value its attribute type casts to nil (an unparseable datetime
+      # string, a custom type); minting either as a NULL boundary would key
+      # the next page on `col IS NULL` and silently skip rows. Both fail
+      # loudly, as the public reader did: an unselected column raises
+      # MissingAttributeError, a nil cast of a non-NULL value ArgumentError.
+      # (A value the DRIVER already hands over as nil — mysql2 does that for
+      # a zero date — is indistinguishable from NULL here.)
       def cursor_boundary_value!(model, record, col)
-        value = record.read_attribute(col)
-        return value unless value.nil? && !model.columns_hash[col.to_s]&.null
+        name = col.to_s
+        unless record.has_attribute?(name)
+          raise ActiveModel::MissingAttributeError,
+                "#{CursorPaginatable.name}: ordering column '#{col}' is not loaded on the page-boundary row " \
+                "(id: #{record.read_attribute(model.primary_key).inspect}) — select it (unaliased) in the relation"
+        end
 
+        value = record.read_attribute(name)
+        return value unless value.nil?
+
+        stored_null = record.read_attribute_before_type_cast(name).nil?
+        return nil if stored_null && model.columns_hash[name]&.null
+
+        reason = stored_null ? "is NOT NULL but read as NULL — is it selected unaliased?" : "holds a stored value that casts to nil"
         raise ArgumentError,
-              "#{CursorPaginatable.name}: NOT NULL ordering column '#{col}' read as NULL on the page-boundary " \
-              "row (id: #{record.read_attribute(model.primary_key).inspect}) — is it selected by the relation?"
+              "#{CursorPaginatable.name}: ordering column '#{col}' #{reason} (page-boundary row id: " \
+              "#{record.read_attribute(model.primary_key).inspect}); it cannot be a cursor boundary"
       end
 
       # Explicit is_a? checks (NOT acts_like?, which needs an un-required
