@@ -226,6 +226,34 @@ describe ConcernsOnRails::Auditable do
       p = AuditProduct.create!(price: 1)
       expect(p.audit_trail.first).not_to have_key("by")
     end
+
+    # The macro validates actor: with respond_to?(:call), but every Proc was
+    # instance_exec'd — so a `->(record)` lambda raised ArgumentError on
+    # every save. It is called with the record (Support::Callable).
+    it "calls a ->(record) actor lambda with the record" do
+      klass = Class.new(TestModel) do
+        self.table_name = "audit_products"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :price, actor: ->(record) { "editor-#{record.price}" }
+      end
+      rec = klass.create!(price: 1)
+      rec.update!(price: 2)
+
+      expect(rec.audit_trail.map { |entry| entry["by"] }).to eq(%w[editor-1 editor-2])
+    end
+
+    it "passes the record to a callable object whose #call takes it" do
+      actor = Class.new { def call(record) = "svc-#{record.name}" }.new
+      klass = Class.new(TestModel) do
+        self.table_name = "audit_products"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :price, actor: actor
+      end
+
+      expect(klass.create!(name: "bob", price: 1).audit_trail.first["by"]).to eq("svc-bob")
+    end
   end
 
   describe "#audit_trail" do

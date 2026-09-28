@@ -2,14 +2,19 @@ module ConcernsOnRails
   module Support
     # Invokes a user-supplied option that the macro accepted because it
     # `respond_to?(:call)` — Throttleable's `by:`, WebhookVerifiable's
-    # `secret:`, Deprecatable's `notify:` (receiver: the controller) and
-    # CounterCacheable's `if:` (receiver: the record). The call sites used to
-    # `instance_exec(&option)`, which only a Proc survives: any other callable
-    # object passed validation at boot and then raised TypeError ("wrong
-    # argument type ... (expected Proc)") on every request / save.
+    # `secret:`, Deprecatable's `notify:` (receiver: the controller),
+    # CounterCacheable's `if:` and Auditable's `actor:` (receiver: the
+    # record). The call sites used to `instance_exec(&option)`, which only a
+    # Proc survives: any other callable object passed validation at boot and
+    # then raised TypeError ("wrong argument type ... (expected Proc)") on
+    # every request / save, and a `->(c)` lambda raised ArgumentError.
     #
-    # Dispatch follows Throttleable's `if:` (and Rails' own before_action
-    # conditionals), keyed on the Proc's arity:
+    # Dispatch is arity-aware like Throttleable's `if:` (and Rails' own
+    # before_action conditionals) but NOT identical to it: `if:` instance_execs
+    # only an arity-0 Proc and passes the controller to everything else
+    # (`->(*)`, `proc { |c| }` and every callable object included). Here every
+    # Proc the old instance_exec could already run keeps running on the
+    # receiver, and only what it could not run is called instead:
     #
     #   * a lambda with no REQUIRED parameter (`-> { request.remote_ip }`,
     #     `->(*) { ... }`, `->(c = nil) { ... }`) is instance_exec'd on the
