@@ -307,7 +307,8 @@ resolver with its absolute ceiling), `NumericOperand` (Filterable's exact numeri
 reader), `UniqueRetry` (bounded `RecordNotUnique` retry; `savepoint:` makes each attempt
 its own savepoint so a retry works inside a caller's transaction on PostgreSQL),
 `HookedWrite` (the one before-hook → write → after-hook path: own `requires_new`
-savepoint, true only once the after-hook returns, and on abort the `restore:` attributes
+savepoint, true only once the after-hook returns, and on abort the WHOLE AttributeSet (a
+deep_dup, already-read mutable values deep-copied), the last save's mutations, forced changes
 and the record's identity are put back — unread attributes restored raw, never
 deserialized, so encrypted fields are never decrypted), `ErrorEnvelope` (the shared `render_error`-or-inline error
 renderer used by seven controller concerns), `FilterParameterRegistry` (live
@@ -325,11 +326,14 @@ fast-path predicate — every named instance method still owned by the concern, 
 unoverridden — plus the transactional `find_each` batch runner shared by every `*_all` verb:
 Integer count, DB-side filtering for idempotency, rollback via `ActiveRecord::RecordNotSaved`
 on a failed record — and `each_record`, the ONLY way to `find_each` a relation: it strips the
-ORDER (error_on_ignored_order) and resolves a LIMIT/OFFSET to plucked PKs first, since bare
-`find_each` keeps the limit but pages by PK), `HookedWrite` (the hooked-verb savepoint; on abort
-restores the WHOLE AttributeSet via deep_dup — never by reading values, which decrypts),
-`AssociationScope` (`unfiltered(record, name)`: an association's rows without the TARGET's
-default scopes — built inside `klass.unscoped { }` — for cascades/deep copies), `VaryHeader` (the shared `Vary` appender behind Localizable's
+ORDER (error_on_ignored_order), resolves a LIMIT/OFFSET to plucked PKs first (bare `find_each`
+keeps the limit but pages by PK), and yields each record once even over a has_many join),
+`AssociationScope` (`unfiltered(record, name)`, for the cascade and deep copies: the
+association's own scope with ONLY the gem's hiding predicates unscoped — SoftDeletable's column
+while its default scope is on, Publishable's under `default_scope: true` — and the association's
+own predicates on them put back; app default scopes (tenant, discriminator) still apply, and a
+limited association (has_one) ranks its reader's rows first), `VaryHeader` (the shared `Vary`
+appender behind Localizable's
 `Accept-Language` and Timezoneable's `Time-Zone`: appends, de-duplicates case-insensitively,
 leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —
 seeds `Accept` itself whenever Rails' own `_set_vary_header` would have, since that only
