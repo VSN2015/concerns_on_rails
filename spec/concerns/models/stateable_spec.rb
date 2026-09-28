@@ -141,6 +141,7 @@ describe ConcernsOnRails::Stateable do
           t.string :status
           t.boolean :flagged
           t.boolean :active
+          t.datetime :archived_at
         end
       end
     end
@@ -198,6 +199,40 @@ describe ConcernsOnRails::Stateable do
       parent.stateable_by :status, states: %i[pending live]
 
       expect { parent.include(ConcernsOnRails::Activatable) }.not_to raise_error
+    end
+
+    # Only a method Stateable itself defined is retired; one the class
+    # wrote itself is its own, whatever it is named.
+    context "when the class defined a stale name itself" do
+      it "keeps a subclass's own method written above its re-declaration" do
+        stub_const("RetiredTicket", parent)
+        stub_const("RetiredReport", Class.new(parent) do
+          def archived? = archived_at.present?
+          stateable_by :status, states: %i[draft published]
+        end)
+
+        expect(RetiredReport.new(archived_at: Time.current).archived?).to be(true)
+        expect(RetiredReport.new).not_to respond_to(:archive!) # the generated ones still go
+      end
+
+      it "keeps a subclass's own class method written above its re-declaration" do
+        stub_const("RetiredTicket", parent)
+        stub_const("RetiredReport", Class.new(parent) do
+          def self.archived = where.not(archived_at: nil)
+          stateable_by :status, states: %i[draft closed]
+        end)
+
+        expect(RetiredReport.archived.to_sql).to include(TestDatabase.quoted_column(:archived_at))
+        expect(RetiredReport).not_to respond_to(:published) # the generated stale scope still goes
+      end
+
+      it "keeps a method the same class wrote after its first declaration" do
+        parent.class_eval { def archived? = archived_at.present? }
+        parent.stateable_by :status, states: %i[draft published]
+
+        expect(parent.new(archived_at: Time.current).archived?).to be(true)
+        expect(parent.stateable_owned_methods[:instance]).not_to include(:archived?)
+      end
     end
 
     # Hidden in a module of the subclass's own, never with undef_method on
@@ -508,6 +543,7 @@ describe ConcernsOnRails::Stateable do
         before do
           ActiveRecord::Schema.define do
             create_table(:trashed_members, force: true) do |t|
+              t.string :type
               t.string :status
               t.datetime :deleted_at
             end
@@ -544,6 +580,44 @@ describe ConcernsOnRails::Stateable do
           klass = member_model
           klass.stateable_by :status, states: %i[pending live]
           expect(klass.active.to_sql).to include(TestDatabase.quoted_column(:deleted_at))
+        end
+
+        it "leaves no stray unaffixed scope when the concern renames its own after the hand-back" do
+          klass = member_model do
+            stateable_by :status, states: %i[pending live]
+            soft_deletable_by prefix: :trash
+          end
+          expect(klass).to respond_to(:trash_active)
+          expect(klass).not_to respond_to(:active)
+        end
+
+        # SoftDeletable's retire! refuses to affix on a subclass, so the
+        # rename the call-time check would ask for can never come there.
+        it "refuses at class load a subclass state taking the PARENT's include-time scope" do
+          stub_const("TrashedMember", Class.new(TestModel) do
+            self.table_name = "trashed_members"
+            include ConcernsOnRails::SoftDeletable
+            include ConcernsOnRails::Stateable
+          end)
+          expect { Class.new(TrashedMember) { stateable_by :status, states: %i[pending active] } }
+            .to raise_error(ArgumentError, /generated scope 'active'/)
+        end
+
+        # The concern must be INCLUDED before stateable_by; only its affixing
+        # macro may come after. Included later, it would replace Stateable's
+        # scope at include time, so the reverse-order check refuses it.
+        it "refuses the concern included after stateable_by, even when its macro affixes" do
+          expect do
+            Class.new(TestModel) do
+              self.table_name = "trashed_members"
+              include ConcernsOnRails::Stateable
+
+              stateable_by :status, states: %i[pending active]
+              include ConcernsOnRails::SoftDeletable
+
+              soft_deletable_by prefix: :trash
+            end
+          end.to raise_error(ArgumentError, /SoftDeletable: scope 'active' collides/)
         end
 
         it "still refuses a scope the other concern's macro defined itself (not an include-time default)" do

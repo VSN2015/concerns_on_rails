@@ -55,11 +55,14 @@ module ConcernsOnRails
     #     concern's (`.active`, `restore!`) — raises ArgumentError at macro
     #     time; use prefix:/suffix: to disambiguate. Exception: a scope that is
     #     still SoftDeletable's/Publishable's/Schedulable's include-time
-    #     default, which that concern's own affixing macro renames (before or
-    #     after this one) — until it does, calling the shared scope raises.
+    #     default on this class's own singleton (the concern included BEFORE
+    #     stateable_by), which that concern's affixing macro renames (called
+    #     before or after this one) — until it does, calling the shared scope
+    #     raises.
     #   * Re-declaring (same class or an STI subclass) replaces the config and
     #     the generated methods: names the new declaration no longer lists are
-    #     removed (hidden in a subclass). An omitted default: keeps the earlier
+    #     removed (hidden in a subclass), unless the class redefined them
+    #     itself. An omitted default: keeps the earlier
     #     one while it is still a declared state (else, or with `default: nil`,
     #     the column's DB default applies).
     #   * Guarded transitions check the in-memory state: two processes firing the
@@ -157,6 +160,7 @@ module ConcernsOnRails
           stateable_adopt_names!(*stateable_guard_collisions!)
           stateable_define_states
           stateable_define_transitions
+          stateable_record_defined!
           stateable_apply_default
         end
 
@@ -305,7 +309,9 @@ module ConcernsOnRails
         # macro's prefix:/suffix: is what renames them — possibly on a later
         # line (`stateable_by ... states: %i[pending active]` then
         # `soft_deletable_by prefix: :trash`). A state may take such a name
-        # while it is still that concern's untouched include-time scope; the
+        # while it is still that concern's untouched include-time scope on THIS
+        # class's singleton (Affix.include_time_scope_owner: an inherited one
+        # can never be renamed here, so it is refused at class load); the
         # shared scope then raises when CALLED until the concern's macro has
         # moved its own off the name (stateable_scope_body), so a rename that
         # never comes is still caught. Returns [instance names, scope names,
@@ -342,10 +348,13 @@ module ConcernsOnRails
         # subclass re-declared with `states: %i[open closed]` must stop
         # answering its parent's `archive!` and `.draft` (a stale setter wrote
         # a state it never declared), and a stale owned name would make the
-        # reverse-order check refuse a legitimate sibling.
+        # reverse-order check refuse a legitimate sibling. Only a method
+        # Stateable itself defined is retired: one the class (re)defined
+        # itself — `def archived? = archived_at.present?` above a subclass's
+        # re-declaration — is left alone and simply stops being owned.
         def stateable_adopt_names!(instance_names, scope_names, deferred)
           owned = stateable_owned_methods
-          (owned[:instance] - instance_names).each { |name| stateable_retire_method!(self, name) }
+          (owned[:instance] - instance_names).each { |name| stateable_retire_method!(self, name, :instance) }
           (owned[:scope] - scope_names).each { |name| stateable_retire_scope!(name) }
 
           self.stateable_owned_methods = { instance: instance_names.freeze, scope: scope_names.freeze }.freeze
@@ -355,24 +364,52 @@ module ConcernsOnRails
         # A retired scope that had taken over another concern's still-unrenamed
         # include-time scope hands the name back to that concern's method.
         def stateable_retire_scope!(name)
+          return unless stateable_generated?(singleton_class, name, :scope)
+
           owner = stateable_deferred_scopes[name]
           captured = owner && ConcernsOnRails::Support::Affix.include_time_scope(self, owner, name)
           return singleton_class.send(:define_method, name, captured) if captured
 
-          stateable_retire_method!(singleton_class, name)
+          stateable_retire_method!(singleton_class, name, :scope)
         end
 
-        # Retire `name` from `mod` (the class, or its singleton for a scope):
-        # remove it where this class defined it, and if a stale copy is still
-        # reachable from an ancestor CLASS (a parent's declaration), hide it.
-        # A module's method — a column's generated attribute method a state
-        # predicate had shadowed — just shows through again.
-        def stateable_retire_method!(mod, name)
-          mod.send(:remove_method, name) if mod.method_defined?(name, false) || mod.private_method_defined?(name, false)
-          return unless mod.method_defined?(name) || mod.private_method_defined?(name)
-          return unless mod.instance_method(name).owner.is_a?(Class)
+        # Retire `name` from `mod` (the class, or its singleton for a scope)
+        # while what answers it is still a method a stateable_by defined:
+        # remove it where this class defined it, and if an ancestor's
+        # generated copy (a parent's declaration) is still reachable, hide it.
+        # Anything else — the class's or a parent's own override, a module's
+        # method such as a column's generated attribute method a state
+        # predicate had shadowed — is left to answer.
+        def stateable_retire_method!(mod, name, kind)
+          return unless stateable_generated?(mod, name, kind)
 
-          stateable_hide_inherited!(mod, name)
+          mod.send(:remove_method, name) if mod.method_defined?(name, false) || mod.private_method_defined?(name, false)
+          stateable_hide_inherited!(mod, name) if stateable_generated?(mod, name, kind)
+        end
+
+        # Whether `mod` currently answers `name` with exactly the method a
+        # stateable_by recorded on the class that owns it (see
+        # stateable_record_defined!) — never a user's own override.
+        def stateable_generated?(mod, name, kind)
+          return false unless mod.method_defined?(name) || mod.private_method_defined?(name)
+
+          method = mod.instance_method(name)
+          owner = method.owner
+          return false unless owner.is_a?(Class)
+
+          declarer = owner.singleton_class? ? owner.attached_object : owner
+          method == declarer.instance_variable_get(:@stateable_defined_methods)&.dig(kind, name)
+        end
+
+        # The UnboundMethods this declaration just defined, per class (an
+        # ivar, never inherited), so a later re-declaration retires only
+        # those — as Support::Affix.capture does for the scope-retiring concerns.
+        def stateable_record_defined!
+          owned = stateable_owned_methods
+          @stateable_defined_methods = {
+            instance: owned[:instance].to_h { |name| [name, instance_method(name)] },
+            scope: owned[:scope].to_h { |name| [name, singleton_class.instance_method(name)] }
+          }.freeze
         end
 
         # Hidden in a RetiredMethods module of this class's own rather than

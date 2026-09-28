@@ -174,12 +174,16 @@ module ConcernsOnRails
       # `name` still is on `klass` — the very method `capture` recorded, not
       # yet renamed by that concern's macro — or nil. Stateable lets a state
       # take such a name, because the concern's own later affixing macro is
-      # what moves its scope off it (see include_time_scope).
+      # what moves its scope off it (see include_time_scope). Only a scope on
+      # klass's OWN singleton qualifies: one inherited from a parent can
+      # never be renamed here (retire! refuses to affix on a subclass).
       def include_time_scope_owner(klass, name)
         singleton = klass.singleton_class
         return nil unless singleton.method_defined?(name)
 
         current = singleton.instance_method(name)
+        return nil unless current.owner == singleton
+
         INCLUDE_TIME_SCOPES.each_key.find { |label| include_time_scope(klass, label, name) == current }
       end
 
