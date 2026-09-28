@@ -192,7 +192,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `key:` (PBKDF2, lazy Proc), missing key raises at first use. `<field>_ciphertext`
   / `<field>_encrypted?` readers; wrong-key/tamper/malformed → `DecryptionError`.
   Normalizes-before-encrypt and masks-decrypted for free; RAISES if a field is
-  also `auditable_by` (either declaration order). Ciphertext is
+  also `auditable_by` (either declaration order), or a friendly_id slug source — the
+  `sluggable_by` field, a `candidates:` entry, an `alias_attribute` of one (chains followed),
+  a bare friendly_id base (at the macro where it can, else at save). Ciphertext is
   non-deterministic ⇒ unsearchable; opt into `blind_index: true` (or
   `{ column:, expression: }`) for a deterministic-HMAC companion column +
   `find_by_<field>`/`where_<field>`/`<field>_fingerprint` finders (nil values
@@ -231,11 +233,13 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   reload. `anonymized?`, `.anonymized`/`.not_anonymized`, batch
   `anonymize_all!` (count of rows actually erased; skips stamped; a vetoed record is
   skipped, each record in its own savepoint). Clears the Auditable trail when an
-  erased field is tracked. Never blocked by crypto state: presence-only strategies never
+  erased field (a rewritten slug included) is tracked, and Addressable's `fingerprint:` when a
+  mapped column is erased. Never blocked by crypto state: presence-only strategies never
   decrypt, and `:hash`/callables on an undecryptable value write a fresh random 64-hex.
   `slug:` (`:auto` default / `true` / `false`) rewrites a friendly_id slug built from an
   anonymized COLUMN to a random slug sized to the column limit (≥ 16 hex, collision retried)
-  and deletes its history rows; `:auto` can't see through methods/Procs.
+  and deletes its history rows; `:auto` resolves `alias_attribute` sources but can't see through
+  methods/Procs.
 - **`Duplicable`** — concern-aware deep copy. `duplicable_by associations:,
   reset:, suffix:` (optional macro; associations validated at macro time —
   has_many/has_one deep-copied, HABTM re-linked, belongs_to/:through
@@ -352,7 +356,9 @@ boot), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomV
 `Callable` (arity-aware `invoke` for the callable options the macros accept — Throttleable
 `by:`, WebhookVerifiable `secret:`, Deprecatable `notify:`, CounterCacheable `if:`,
 Auditable `actor:`; deliberately NOT Throttleable `if:`'s dispatch),
-`SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
+`SlugSources` (what a friendly_id slug is built from — Sluggable's field/`candidates:` or a bare
+friendly_id base, `alias_attribute` resolved — for the Encryptable/Sluggable guards and
+Anonymizable's `slug: :auto`), `SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
 allow-list trees + the includes/paths/as_json shapes for Includable), `Affix` (affixed
 scope/accessor-name computation + `prefix: true` normalization, shared by Activatable,
 Expirable, Lockable, Anonymizable, Stateable, Storable, Publishable, SoftDeletable and
@@ -379,7 +385,10 @@ appender behind Localizable's
 leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —
 seeds `Accept` itself whenever Rails' own `_set_vary_header` would have, since that only
 fires while the header is still blank).
-`lib/concerns_on_rails/railtie.rb` loads only when `Rails::Railtie` is defined.
+`lib/concerns_on_rails/railtie.rb` loads only when `Rails::Railtie` is defined — required by
+`core.rb` too, so a directly required concern file (`require: false` hosts) gets it; an
+`after_initialize` hook installs the filter for files required during or after boot (eager
+load, `config/initializers`), extending every class's own `filter_attributes` copy.
 
 ### Test structure
 
