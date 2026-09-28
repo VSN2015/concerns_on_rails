@@ -276,6 +276,35 @@ describe ConcernsOnRails::Support::BatchOps do
         expect(seen_ids(NotedItem.joins(:batch_notes))).to eq(items.map(&:id))
       end
 
+      # Re-querying the joined relation by the plucked keys loaded every
+      # joined row: limit(1) over 50 notes built 50 NotedItems (find_each on
+      # master built 1).
+      it "instantiates no joined copies of a limited relation's records" do
+        BatchNote.insert_all(Array.new(47) { { noted_item_id: items.first.id } })
+        instantiated = 0
+        counter = lambda do |*, payload|
+          instantiated += payload[:record_count] if payload[:class_name] == "NotedItem"
+        end
+
+        seen = ActiveSupport::Notifications.subscribed(counter, "instantiation.active_record") do
+          seen_ids(NotedItem.joins(:batch_notes).order(:id).limit(1))
+        end
+
+        expect(seen).to eq([items.first.id])
+        expect(instantiated).to eq(1)
+      end
+
+      it "still applies the relation's own conditions to a joined slice" do
+        items.last.update!(state: "done")
+
+        seen = []
+        described_class.each_record(NotedItem.joins(:batch_notes).where(state: "new").order(:id).limit(10)) do |r|
+          seen << r.id
+        end
+
+        expect(seen).to eq([items.first.id])
+      end
+
       it "counts each record once in run" do
         count = described_class.run(NotedItem.joins(:batch_notes).order(:id).limit(2), label: "Test") { true }
 

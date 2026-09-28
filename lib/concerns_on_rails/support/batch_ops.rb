@@ -109,10 +109,16 @@ module ConcernsOnRails
       # see a parent once per child — `Post.joins(:comments).publish_all`
       # published (and ran after_publish on) one post three times through
       # stale copies and counted 3, where the fast path's
-      # `update_all ... WHERE id IN (...)` touches it once. Keys are
-      # de-duplicated, and since every query orders by primary key a repeat
-      # arrives right after its first copy and is skipped — no DISTINCT,
-      # which PostgreSQL cannot apply to a json column.
+      # `update_all ... WHERE id IN (...)` touches it once. On the limited
+      # path a joined relation's slice is re-plucked — ids only, so every
+      # condition (default scopes, the verb's idempotency filter) is checked
+      # again without instantiating a joined row — and the records are then
+      # loaded from their own table by those ids: re-querying the joined
+      # relation built one Post per comment (`limit(1)` over 50 comments
+      # instantiated 50). No DISTINCT, which PostgreSQL cannot apply to a
+      # json column. find_each over an unlimited joined relation still
+      # returns the repeats; every query orders by primary key, so a repeat
+      # arrives right after its first copy and is skipped.
       def each_record(relation)
         previous = NO_KEY
         each_row(relation) do |record|
@@ -132,9 +138,25 @@ module ConcernsOnRails
 
         key = relation.klass.primary_key
         rows = relation.unscope(:order, :limit, :offset)
+        order = Array(key).to_h { |column| [column, :asc] }
         limited_keys(relation, key).uniq.sort.each_slice(BATCH_SIZE) do |slice|
-          rows.where(key => slice).reorder(Array(key).to_h { |column| [column, :asc] }).each(&)
+          slice_rows = rows.where(key => slice)
+          slice_rows = unjoined(slice_rows, key) if joined?(rows)
+          slice_rows.reorder(order).each(&)
         end
+      end
+
+      def joined?(relation)
+        relation.joins_values.any? || relation.left_outer_joins_values.any?
+      end
+
+      # The slice's records loaded from their own table: the keys still
+      # matching `rows` (joins, default scopes and all) are plucked, then
+      # loaded without the joins (or the where/select/group that may name the
+      # joined tables). Preloads, locks and readonly survive.
+      def unjoined(rows, key)
+        rows.unscope(:where, :select, :joins, :left_outer_joins, :group, :having, :from)
+            .distinct(false).where(key => rows.pluck(key).uniq)
       end
 
       # find_each's default batch size, so a limited relation pages the same.
@@ -150,7 +172,7 @@ module ConcernsOnRails
 
         relation.klass.unscoped.from(relation, relation.klass.quoted_table_name).pluck(key)
       end
-      private_class_method :each_row, :limited_keys
+      private_class_method :each_row, :joined?, :unjoined, :limited_keys
 
       # The validate callbacks every ActiveRecord model carries out of the box
       # (Rails 7.1 registers :cant_modify_encrypted_attributes_when_frozen on
