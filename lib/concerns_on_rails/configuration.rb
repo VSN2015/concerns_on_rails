@@ -17,7 +17,8 @@ module ConcernsOnRails
   #
   # `audit_actor` is the fallback actor for Models::Auditable: a zero-arg
   # callable (a Proc is instance_exec'd on the record at save time, any other
-  # callable is #call'd), whose value is stamped as "by" on every audit entry
+  # callable is #call'd — with the record only when its #call requires an
+  # argument), whose value is stamped as "by" on every audit entry
   # of every model that passes no `actor:` of its own (`auditable_by ...,
   # actor: -> { ... }` still wins; an explicit `actor: nil`/`actor: false`
   # opts a model out). Typically `-> { Current.user&.id }`; nil or false

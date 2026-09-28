@@ -1205,4 +1205,43 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       expect(controller_class.cursor_paginatable_signed).to be(false)
     end
   end
+
+  # read_attribute answers the IN-MEMORY value: an unguarded after_initialize
+  # default made a stored NULL read as 0, so the cursor was keyed on 0 while
+  # the ORDER BY had placed the row among the NULLs — the walk repeated rows
+  # and missed one. The boundary is the database value the WHERE compares.
+  describe "a boundary column changed in memory (after_initialize default)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :defaulted_score_items, force: true do |t|
+          t.integer :score
+        end
+      end
+      [1, nil, 2, nil].each do |score|
+        ActiveRecord::Base.connection.execute(
+          "INSERT INTO defaulted_score_items (score) VALUES (#{score.nil? ? 'NULL' : score})"
+        )
+      end
+    end
+
+    after { ActiveRecord::Base.connection.drop_table(:defaulted_score_items) }
+
+    it "keys the cursor on the database value and walks every row once" do
+      model = Class.new(TestModel) do
+        self.table_name = "defaulted_score_items"
+        after_initialize { self.score ||= 0 }
+      end
+      controller_class = Class.new(FakeController) { include ConcernsOnRails::Controllers::CursorPaginatable }
+      seen = []
+      cursor = nil
+      10.times do
+        controller = controller_class.new(params: { per_page: 1, cursor: cursor }.compact)
+        seen.concat(controller.cursor_paginated(model.all, order: :score).map(&:id))
+        cursor = controller.cursor_pagination_meta[:next_cursor]
+        break unless cursor
+      end
+
+      expect(seen).to match_array(model.unscoped.pluck(:id))
+    end
+  end
 end

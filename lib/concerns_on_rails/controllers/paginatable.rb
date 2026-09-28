@@ -348,8 +348,17 @@ module ConcernsOnRails
         end.map(&:strip)
       end
 
+      # ER_DUP_FIELDNAME (1060), by error code — mysql2 #error_number,
+      # Trilogy #error_code — since a server with localized lc_messages
+      # translates the text; else by the English message.
       def paginatable_mysql_duplicate_column?(connection, error)
-        connection.adapter_name.match?(/mysql|trilogy/i) && error.message.match?(/Duplicate column name/i)
+        return false unless connection.adapter_name.match?(/mysql|trilogy/i)
+
+        cause = error.cause
+        reader = %i[error_number error_code].find { |name| cause.respond_to?(name) }
+        return cause.public_send(reader) == 1060 if reader
+
+        error.message.match?(/Duplicate column name/i)
       end
 
       # Both readers route through ScalarParam: `?page[]=1` / `?page[x]=1`

@@ -27,15 +27,25 @@ module ConcernsOnRails
     #     symbol proc (`:tenant_secret.to_proc`, parameters [[:req], [:rest]])
     #     is called with the receiver, keeping its own self;
     #   * any other callable (an object with #call, a Method) is called with
-    #     the receiver, unless its #call takes no arguments, in which case it
-    #     is called bare (`secret: SecretStore.method(:current)`).
+    #     the receiver only when its #call REQUIRES an argument, like the
+    #     lambda rule above; otherwise it is called bare — no parameters
+    #     (`secret: SecretStore.method(:current)`) or only optional/forwarded
+    #     ones (`def call(*)`, `def call(...)`, a delegate-generated Method,
+    #     a #call answered by method_missing), which is how Auditable always
+    #     called a non-Proc actor.
     module Callable
       module_function
 
       def invoke(receiver, callable)
         return invoke_proc(receiver, callable) if callable.is_a?(Proc)
 
-        arity(callable).zero? ? callable.call : callable.call(receiver)
+        requires_argument?(arity(callable)) ? callable.call(receiver) : callable.call
+      end
+
+      # Method#arity: n > 0 required, or -(n + 1) for n required before a
+      # splat — so -1 (optional/variadic only) requires nothing.
+      def requires_argument?(arity)
+        arity.positive? || arity < -1
       end
 
       def invoke_proc(receiver, callable)
@@ -47,7 +57,7 @@ module ConcernsOnRails
 
       # The arity of any callable: a Proc/Method answers directly (a Method's
       # own #call is variadic, arity -1), anything else through its #call;
-      # -1 ("takes the receiver") when #call is answered via method_missing.
+      # -1 (called bare) when #call is answered via method_missing.
       def arity(callable)
         return callable.arity if callable.is_a?(Proc) || callable.is_a?(Method)
 

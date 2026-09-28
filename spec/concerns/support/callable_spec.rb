@@ -36,12 +36,30 @@ RSpec.describe ConcernsOnRails::Support::Callable do
     expect(described_class.invoke(controller, ->(_c = nil) { tenant })).to eq("acme")
   end
 
-  it "calls a Method with an optional parameter, and a splat #call, with the receiver" do
-    splat = Class.new { def call(*args) = args.first.tenant }.new
-    optional = Class.new { def self.pick(receiver = nil) = receiver&.tenant }.method(:pick)
+  # Like the lambda rule, only a REQUIRED parameter means "hand me the
+  # receiver". Optional/forwarding signatures — `def call(*)`,
+  # `def call(...)`, a delegate-generated Method (arity -1) — are called
+  # bare, which is how Auditable always called a non-Proc actor: passing the
+  # record broke `config.audit_actor = Current.method(:user_id)`.
+  it "calls a Method with only an optional parameter, and a splat #call, bare" do
+    splat = Class.new { def call(*args) = args }.new
+    optional = Class.new { def self.pick(receiver = nil) = receiver }.method(:pick)
+    forwarding = Class.new do
+      def call(...) = actor(...)
+      def actor = "bare"
+    end.new
 
-    expect(described_class.invoke(controller, splat)).to eq("acme")
-    expect(described_class.invoke(controller, optional)).to eq("acme")
+    expect(described_class.invoke(controller, splat)).to eq([])
+    expect(described_class.invoke(controller, optional)).to be_nil
+    expect(described_class.invoke(controller, forwarding)).to eq("bare")
+  end
+
+  it "calls a #call with a required parameter (also before a splat) with the receiver" do
+    required = Class.new { def call(receiver) = receiver.tenant }.new
+    required_then_splat = Class.new { def call(receiver, *) = receiver.tenant }.new
+
+    expect(described_class.invoke(controller, required)).to eq("acme")
+    expect(described_class.invoke(controller, required_then_splat)).to eq("acme")
   end
 
   it "instance_execs a block-style proc and hands it the receiver as well" do
@@ -56,12 +74,12 @@ RSpec.describe ConcernsOnRails::Support::Callable do
     expect(described_class.invoke(controller, holder.method(:current))).to eq("method")
   end
 
-  it "hands the controller to a #call answered only through method_missing" do
+  it "calls a #call answered only through method_missing bare (no arity to read)" do
     ghost = Class.new do
       def respond_to_missing?(name, include_private = false) = name == :call || super
       def method_missing(name, *args) = name == :call ? args : super
     end.new
 
-    expect(described_class.invoke(controller, ghost)).to eq([controller])
+    expect(described_class.invoke(controller, ghost)).to eq([])
   end
 end

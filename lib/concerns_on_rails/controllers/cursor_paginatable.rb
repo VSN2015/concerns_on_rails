@@ -531,16 +531,25 @@ module ConcernsOnRails
                 "(id: #{record.read_attribute(model.primary_key).inspect}) — select it (unaliased) in the relation"
         end
 
-        value = record.read_attribute(name)
+        value, stored_null = cursor_database_value(record, name)
         return value unless value.nil?
-
-        stored_null = record.read_attribute_before_type_cast(name).nil?
         return nil if stored_null && model.columns_hash[name]&.null
 
         reason = stored_null ? "is NOT NULL but read as NULL — is it selected unaliased?" : "holds a stored value that casts to nil"
         raise ArgumentError,
               "#{CursorPaginatable.name}: ordering column '#{col}' #{reason} (page-boundary row id: " \
               "#{record.read_attribute(model.primary_key).inspect}); it cannot be a cursor boundary"
+      end
+
+      # [value, stored_null]. The WHERE compares the DATABASE value: one
+      # changed in memory (an after_initialize default turning NULL into 0)
+      # would key the cursor on a value the row's sort position does not
+      # have. Its raw stored form is not public API, so a changed value that
+      # reads nil in the database is taken as NULL.
+      def cursor_database_value(record, name)
+        return [record.attribute_in_database(name), true] if record.attribute_changed?(name)
+
+        [record.read_attribute(name), record.read_attribute_before_type_cast(name).nil?]
       end
 
       # Explicit is_a? checks (NOT acts_like?, which needs an un-required

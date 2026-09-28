@@ -822,6 +822,44 @@ describe ConcernsOnRails::Controllers::Paginatable do
       end
     end
 
+    # A server with localized lc_messages translates the text, so 1060 is
+    # recognised by the driver's error code first (mysql2 #error_number,
+    # Trilogy #error_code), and by the English message only without one.
+    describe "recognising MySQL's duplicate-column error (1060)" do
+      let(:controller) { controller_class.new(params: {}) }
+
+      # A StatementInvalid wrapping `cause` (as the adapters raise it).
+      def statement_invalid(message, cause = nil)
+        begin
+          raise cause if cause
+        rescue StandardError
+          raise ActiveRecord::StatementInvalid, message
+        end
+        raise ActiveRecord::StatementInvalid, message
+      rescue ActiveRecord::StatementInvalid => e
+        e
+      end
+
+      def detects?(controller, adapter_name, error)
+        controller.send(:paginatable_mysql_duplicate_column?, double("connection", adapter_name: adapter_name), error)
+      end
+
+      it "matches by error code, whatever the (localized) message says" do
+        mysql2 = Class.new(StandardError) { def error_number = 1060 }.new("Nom de colonne 'a' en double")
+        trilogy = Class.new(StandardError) { def error_code = 1060 }.new("Nom de colonne 'a' en double")
+        syntax = Class.new(StandardError) { def error_number = 1064 }.new("Duplicate column name 'a'")
+
+        expect(detects?(controller, "Mysql2", statement_invalid("Nom de colonne 'a' en double", mysql2))).to be(true)
+        expect(detects?(controller, "Trilogy", statement_invalid("Nom de colonne 'a' en double", trilogy))).to be(true)
+        expect(detects?(controller, "Mysql2", statement_invalid("Duplicate column name 'a'", syntax))).to be(false)
+      end
+
+      it "falls back to the English message without a driver code, and never fires off MySQL" do
+        expect(detects?(controller, "Mysql2", statement_invalid("Mysql2::Error: Duplicate column name 'a'"))).to be(true)
+        expect(detects?(controller, "PostgreSQL", statement_invalid("Duplicate column name 'a'"))).to be(false)
+      end
+    end
+
     it "re-raises any other error from the count subquery" do
       connection = PaginationMembership.connection
       allow(connection).to receive(:select_value).and_wrap_original do |original, sql, *args, **kwargs|

@@ -1453,7 +1453,7 @@ product.clear_audit_trail!                 # wipe the column (skips callbacks)
 
 One entry is recorded **per changed field per save** (creates record `"from" => nil`), appended in the same `INSERT`/`UPDATE` via `before_save` — zero extra queries.
 
-**Options**: `into:` (`:audit_log`), `actor:` (a lambda with no required parameter or a block is `instance_exec`'d on the record; a `->(record)` lambda, a symbol proc or any other callable is called with the record — bare when its `#call` takes no arguments; or a Symbol naming a record method such as `:updated_by_id`; omit it to take the gem-wide `config.audit_actor`, an explicit `nil`/`false` opts out of that; `"by"` omitted when it resolves to nil), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited), `max_value_length:` (`nil`; truncates long String `from`/`to` values to the first N characters + `…`).
+**Options**: `into:` (`:audit_log`), `actor:` (a lambda with no required parameter or a block is `instance_exec`'d on the record; a `->(record)` lambda, a symbol proc or any other callable is called with the record — bare unless its `#call` requires an argument; or a Symbol naming a record method such as `:updated_by_id`; omit it to take the gem-wide `config.audit_actor`, an explicit `nil`/`false` opts out of that; `"by"` omitted when it resolves to nil), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited), `max_value_length:` (`nil`; truncates long String `from`/`to` values to the first N characters + `…`).
 
 **Notes**
 - Writes that skip callbacks (`update_column(s)`, `touch`, `increment!`) are **not** audited; `save(validate: false)` is.

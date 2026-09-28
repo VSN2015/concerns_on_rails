@@ -585,4 +585,56 @@ describe ConcernsOnRails::Auditable do
       expect(ConcernsOnRails.config.audit_actor).to be_nil
     end
   end
+
+  describe "non-Proc actors with an optional/forwarding #call (called bare, as before Support::Callable)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :forwarding_actor_audits, force: true do |t|
+          t.integer :price
+          t.text :audit_log
+        end
+      end
+    end
+
+    after do
+      ConcernsOnRails.config.audit_actor = nil
+      ActiveRecord::Base.connection.drop_table(:forwarding_actor_audits)
+    end
+
+    # delegate generates `def user_id(...)`: Method#arity -1. Handing it the
+    # record raised ArgumentError on every audited save, app-wide.
+    it "calls a delegate-generated Method bare (gem-wide audit_actor)" do
+      holder = Module.new do
+        class << self
+          def user = Struct.new(:id).new(7)
+          delegate :id, to: :user, prefix: true
+        end
+      end
+      ConcernsOnRails.setup { |c| c.audit_actor = holder.method(:user_id) }
+      klass = Class.new(TestModel) do
+        self.table_name = "forwarding_actor_audits"
+        include ConcernsOnRails::Models::Auditable
+
+        auditable_by :price
+      end
+
+      record = klass.create!(price: 1)
+      expect(record.audit_trail.first["by"]).to eq(7)
+    end
+
+    it "calls a variadic callable object bare (model-level actor:)" do
+      forwarding = Class.new do
+        def call(...) = actor_id(...)
+        def actor_id = "svc"
+      end.new
+      klass = Class.new(TestModel) do
+        self.table_name = "forwarding_actor_audits"
+        include ConcernsOnRails::Models::Auditable
+
+        auditable_by :price, actor: forwarding
+      end
+
+      expect(klass.create!(price: 1).audit_trail.first["by"]).to eq("svc")
+    end
+  end
 end
