@@ -97,6 +97,20 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
       record.anonymize!
       expect(record.name).to eq("user-#{record.id}")
     end
+
+    # Only Procs and Methods answer #arity; asking a callable object for it
+    # was a NoMethodError at erasure time for a strategy the macro accepted.
+    it "supports callable objects (one- and two-arg #call)" do
+      one = Class.new { def call(value) = value && "gone" }.new
+      two = Class.new { def call(_value, record) = "user-#{record.id}" }.new
+      klass = model_class do
+        anonymizable :bio, with: one
+        anonymizable :name, with: two
+      end
+      record = klass.create!(bio: "hello", name: "Jane")
+      record.anonymize!
+      expect([record.bio, record.name]).to eq(["gone", "user-#{record.id}"])
+    end
   end
 
   describe "the write path" do

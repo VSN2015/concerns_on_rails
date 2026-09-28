@@ -194,7 +194,9 @@ module ConcernsOnRails
         (record["headers"] || {}).each { |name, value| response.set_header(name, value) }
         options = { body: record["body"], status: record["status"] }
         options[:content_type] = record["content_type"] if record["content_type"]
-        render(options)
+        result = render(options)
+        restore_idempotency_content_type_header(record["content_type_header"])
+        result
       end
 
       # Single funnel for all error outcomes. Uses Respondable's render_error
@@ -294,6 +296,8 @@ module ConcernsOnRails
 
         record = { "state" => "done", "status" => status, "body" => idempotency_response_body,
                    "content_type" => idempotency_response_content_type, "fingerprint" => fingerprint }
+        content_type_header = idempotency_response_content_type_header
+        record["content_type_header"] = content_type_header if content_type_header
         headers = idempotency_response_headers(rule)
         record["headers"] = headers unless headers.empty?
         store.write(cache_key, record, expires_in: rule[:ttl])
@@ -398,6 +402,29 @@ module ConcernsOnRails
         elsif response.respond_to?(:content_type)
           response.content_type
         end
+      end
+
+      # The exact Content-Type header the original carried, parameters and
+      # all. "content_type" alone (the media type) is not enough to replay it:
+      # render(content_type:) re-appends Rails' default "; charset=utf-8", so
+      # an RFC 9457 document — which Respondable renders WITHOUT a charset,
+      # the registration defines no parameters — came back as
+      # "application/problem+json; charset=utf-8". nil outside a real
+      # ActionDispatch::Response (records then replay the media type only,
+      # exactly as records written before this key existed do).
+      def idempotency_response_content_type_header
+        return nil unless respond_to?(:response) && response.respond_to?(:get_header)
+
+        response.get_header("Content-Type")
+      end
+
+      # Put the recorded header back after render set its own. Rails only
+      # fills in a default Content-Type at commit when none is set, so the
+      # exact original survives to the wire.
+      def restore_idempotency_content_type_header(header)
+        return if header.nil? || header.to_s.empty? || !response.respond_to?(:set_header)
+
+        response.set_header("Content-Type", header.to_s)
       end
 
       def emit_idempotency_key_header(key)

@@ -266,6 +266,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (prev cursors + `X-Prev-Cursor`/`X-Has-Prev`), `order_presets:`/`default_preset:`/
   `order_param:` (allow-listed client ordering; `InvalidOrderPreset` → 400),
   `predicate: :auto` (row-value tuple WHERE on PG/MySQL/SQLite, else OR-expansion).
+  A nullable ordering column forces the OR-expansion and sorts NULLs LAST in both
+  directions (PG `NULLS LAST`, else a `CASE` key); boundaries are the stored values of
+  columns selected UNALIASED (unselected → MissingAttributeError, nil-cast → ArgumentError).
 - **`Deprecatable`** — standards-based endpoint deprecation. `deprecate_actions *actions,
   deprecated_at:, sunset_at:, link:, successor:, after_sunset:, header_format:, notify:`
   (repeatable; no actions = catch-all; LAST matching rule wins). Emits RFC 9745
@@ -313,6 +316,9 @@ deserialized, so encrypted fields are never decrypted), `ErrorEnvelope` (the sha
 renderer used by seven controller concerns), `FilterParameterRegistry` (live
 filter_parameters registry consulted by the proc `ConcernsOnRails::Railtie` appends at
 boot), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,
+`Callable` (arity-aware `invoke` for the callable options the macros accept — Throttleable
+`by:`, WebhookVerifiable `secret:`, Deprecatable `notify:`, CounterCacheable `if:`,
+Auditable `actor:`; deliberately NOT Throttleable `if:`'s dispatch),
 `SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
 allow-list trees + the includes/paths/as_json shapes for Includable), `Affix` (affixed
 scope/accessor-name computation + `prefix: true` normalization, shared by Activatable,
