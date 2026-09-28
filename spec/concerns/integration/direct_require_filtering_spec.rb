@@ -95,17 +95,26 @@ RSpec.describe "filter_parameters when a concern file is required directly", :su
     out[(marker + 7)..]
   end
 
+  # ApplicationRecord's own `self.filter_attributes += [...]` (the documented
+  # way to extend the inspect filter) copies Base's list while it is
+  # eager-loaded — before the install — so that copy must be extended too.
   it "filters when an eager-loaded model file requires the concern (production boot)" do
     Dir.mktmpdir do |root|
       FileUtils.mkdir_p(File.join(root, "app/models"))
+      File.write(File.join(root, "app/models/application_record.rb"), <<~RUBY)
+        class ApplicationRecord < ActiveRecord::Base
+          self.abstract_class = true
+          self.filter_attributes += [:cvv]
+        end
+      RUBY
       File.write(File.join(root, "app/models/user.rb"), <<~RUBY)
         require "concerns_on_rails/models/lockable"
-        class User < ActiveRecord::Base
+        class User < ApplicationRecord
           include ConcernsOnRails::Models::Lockable
           lockable_by unlock_token: :unlock_token
         end
       RUBY
-      filtered = run_script.call(<<~RUBY)
+      filtered, inspected = run_script.call(<<~RUBY).split("|", 2)
         ENV["DATABASE_URL"] = "sqlite3::memory:"
         require "rails"
         require "active_record/railtie"
@@ -117,10 +126,21 @@ RSpec.describe "filter_parameters when a concern file is required directly", :su
           config.secret_key_base = "x" * 64
         end
         App.initialize!
+        ActiveRecord::Schema.verbose = false
+        ActiveRecord::Schema.define do
+          create_table(:users) do |t|
+            t.integer :failed_attempts, default: 0
+            t.datetime :locked_at
+            t.string :unlock_token
+          end
+        end
+        User.reset_column_information
         filter = ActiveSupport::ParameterFilter.new(Rails.application.env_config["action_dispatch.parameter_filter"])
-        print "__OUT__" + filter.filter("unlock_token" => "SECRET-TOKEN")["unlock_token"]
+        print "__OUT__" + [filter.filter("unlock_token" => "SECRET-TOKEN")["unlock_token"],
+                           User.new(unlock_token: "SECRET-TOKEN").inspect].join("|")
       RUBY
       expect(filtered).to eq("[FILTERED]")
+      expect(inspected).not_to include("SECRET-TOKEN")
     end
   end
 

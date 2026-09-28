@@ -33,11 +33,19 @@ module ConcernsOnRails
     # its initializers already. So install again once boot has finished. The
     # request filter reads config.filter_parameters itself (the same Array,
     # replaced in place when precompiled), but ActiveRecord copied it into
-    # filter_attributes at boot, so that copy is extended too.
+    # filter_attributes at boot, so that copy is extended too — and so is
+    # every class holding its own copy (an eager-loaded ApplicationRecord
+    # doing `self.filter_attributes += [:cvv]` copied Base's list before
+    # this ran; its models' #inspect would show the registry's fields).
     def self.install_after_boot(app)
       filter = install_filter_parameters(app.config)
       ActiveSupport.on_load(:active_record) do
-        self.filter_attributes += [filter] unless filter_attributes.include?(filter)
+        [self, *descendants].each do |klass|
+          next unless klass.equal?(self) || klass.instance_variable_defined?(:@filter_attributes)
+          next if klass.filter_attributes.include?(filter)
+
+          klass.filter_attributes += [filter]
+        end
       end
     end
   end
