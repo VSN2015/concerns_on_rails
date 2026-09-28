@@ -230,6 +230,35 @@ describe ConcernsOnRails::Publishable do
       parent.publishable_by :published_at, default_scope: true
       column = TestDatabase.quoted_column(:published_at)
       expect(parent.all.to_sql.scan(column).size).to eq(1)
+      expect(parent.default_scopes.size).to eq(1)
+    end
+
+    # Any default_scope costs the model Rails' statement cache for
+    # find/find_by and an evaluation on every `new`, so the lazily evaluated
+    # one is registered only once a class first asks for it.
+    context "when default_scope: true was never asked for" do
+      let(:plain) do
+        Class.new(TestModel) do
+          self.table_name = "redeclared_posts"
+          include ConcernsOnRails::Publishable
+        end
+      end
+
+      it "registers no default_scope at all" do
+        expect(plain.default_scopes).to be_empty
+        plain.publishable_by :published_at, default_scope: false
+        expect(plain.default_scopes).to be_empty
+      end
+
+      it "registers it for a subclass that turns it on, leaving the parent unscoped" do
+        stub_const("RedeclaredPost", plain)
+        stub_const("RedeclaredFeaturedPost", Class.new(plain) { publishable_by :published_at, default_scope: true })
+
+        RedeclaredFeaturedPost.create!(published_at: nil)
+        expect(RedeclaredFeaturedPost.count).to eq(0)
+        expect(RedeclaredPost.count).to eq(1)
+        expect(RedeclaredPost.default_scopes).to be_empty
+      end
     end
   end
 

@@ -13,6 +13,18 @@ module ConcernsOnRails
       # Distinguishes an omitted `default_scope:` (keep the current setting)
       # from an explicit false (turn it off).
       UNSET = Object.new.freeze
+      # The ONE default scope, evaluated lazily against the flag
+      # (SoftDeletable's pattern) and resolved through the names map, so an
+      # affixed model still filters. Appending a `default_scope` block per
+      # `default_scope: true` call made it permanent — a later
+      # `default_scope: false`, or an STI subclass's, could not undo it — and
+      # repeated `true` calls stacked duplicate predicates. Registered only
+      # once a class first asks for `default_scope: true`: any default_scope
+      # at all costs every model Rails' statement cache for find/find_by and
+      # an evaluation on every `new`, and the flag is off by default.
+      DEFAULT_SCOPE = proc do
+        publishable_default_scope ? public_send(publishable_scope_names.fetch(:published)) : all
+      end
 
       included do
         class_attribute :publishable_field, instance_accessor: false, default: :published_at
@@ -30,16 +42,6 @@ module ConcernsOnRails
         define_publishable_scopes(nil, nil)
         self.publishable_captured_scopes =
           ConcernsOnRails::Support::Affix.capture(self, SCOPE_BASES).freeze
-
-        # Registered ONCE and evaluated lazily against the flag (SoftDeletable's
-        # pattern). Appending a `default_scope` block per `default_scope: true`
-        # call made it permanent — a later `default_scope: false`, or an STI
-        # subclass's, could not undo it — and repeated `true` calls stacked
-        # duplicate predicates. Resolved through the names map, so an affixed
-        # model still filters.
-        default_scope do
-          publishable_default_scope ? public_send(publishable_scope_names.fetch(:published)) : all
-        end
       end
 
       class_methods do # rubocop:disable Metrics/BlockLength
@@ -63,7 +65,10 @@ module ConcernsOnRails
                                                     label: "ConcernsOnRails::Models::Publishable")
           end
 
-          self.publishable_default_scope = default_scope ? true : false unless default_scope.equal?(UNSET)
+          return if default_scope.equal?(UNSET)
+
+          self.publishable_default_scope = default_scope ? true : false
+          publishable_register_default_scope if publishable_default_scope
         end
 
         # True when the configured column is a boolean (vs a datetime timestamp);
@@ -155,6 +160,19 @@ module ConcernsOnRails
         end
 
         private
+
+        # Register DEFAULT_SCOPE once for this class and its subclasses — a
+        # no-op when it is already among the (possibly inherited)
+        # default_scopes. Routed through a helper so the `default_scope:`
+        # keyword doesn't shadow the `default_scope` macro inside
+        # `publishable_by`. (Entries are the callable on Rails 6.0, a
+        # DefaultScope wrapper exposing `scope` on 6.1+.)
+        def publishable_register_default_scope
+          registered = default_scopes.any? do |entry|
+            (entry.respond_to?(:scope) ? entry.scope : entry).equal?(DEFAULT_SCOPE)
+          end
+          default_scope(DEFAULT_SCOPE) unless registered
+        end
 
         # Scopes are built here rather than inline in `included do` so their
         # names can be affixed. `included do` calls this with no affix, so a
