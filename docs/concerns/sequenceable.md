@@ -57,7 +57,12 @@ end
 
 `sequenceable_by` is the configuration macro. Call it once per `field`; several fields may each have their own call. All options except the positional `field` argument are keyword arguments.
 
-**Re-declaring a field merges.** A later `sequenceable_by` for the same field, on the same class or on an STI subclass, changes only the options it passes. Every other option keeps its current (inherited or earlier) value. So `sequenceable_by :sequence, assign: :manual` on a `Draft` subclass keeps the parent's `into:`, `prefix:` and `reset:`. Omitting an option is different from passing `nil`: `into: nil` removes the column, `time_zone: nil` resets to the app default.
+**Re-declaring a field.** A later `sequenceable_by` for the same field, on the same class or on an STI subclass, follows one of two rules:
+
+- A call that passes **only `assign:` and/or `time_zone:`** (or nothing) keeps every other option at its current (inherited or earlier) value. So `sequenceable_by :sequence, assign: :manual` on a `Draft` subclass keeps the parent's `into:`, `prefix:`, `reset:` and `template:`. `time_zone: nil` resets the zone to the app default.
+- A call that passes **any other option** (`prefix:`, `template:`, `padding:`, `reset:`, `scope:`, `into:`, `separator:`, `start_at:`) restates the format. Every option it omits takes its default, exactly as in a first declaration. A subclass that changes only the prefix must repeat `into:`, `reset:`, `padding:` and the rest if it wants them.
+
+A partial format is never merged onto an inherited one, because the result would be a format nobody wrote down: a `prefix:` under an inherited `template:` (which ignores the prefix), or a subclass that adds only `scope:` but keeps rendering the parent's `INV-` numbers from a counter of its own.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
@@ -69,7 +74,7 @@ end
 | `start_at:` | Integer | `1` | The first value assigned when the scope/period has no rows yet. |
 | `scope:` | Symbol / Array of Symbols / nil | `nil` | Column or array of columns that partition the counter. Each distinct combination of scope-column values maintains its own independent counter. |
 | `reset:` | Symbol | `:never` | Restarts the counter at `start_at` each calendar period. Valid values: `:never`, `:year`, `:month`, `:day`. Any value other than `:never` requires a `created_at` column. |
-| `time_zone:` | String / `ActiveSupport::TimeZone` / nil | `nil` (app zone) | The zone `reset:` periods are cut in — for the `MAX` range and the period token alike. `nil` resolves at use time to the app's configured zone (`config.time_zone`, i.e. `Time.zone_default`), falling back to UTC. Never the per-request `Time.zone`. An unknown zone name raises `ArgumentError` at class-load time. Has no effect with `reset: :never`. |
+| `time_zone:` | String / Symbol / `ActiveSupport::TimeZone` / nil | `nil` (app zone) | The zone `reset:` periods are cut in — for the `MAX` range and the period token alike. `nil` resolves at use time to the app's configured zone (`config.time_zone`, i.e. `Time.zone_default`), falling back to UTC. Never the per-request `Time.zone`. An unknown zone name raises `ArgumentError` at class-load time. Has no effect with `reset: :never`. |
 | `template:` | Callable / nil | `nil` | A callable (e.g. a lambda) with signature `->(seq, record)` that returns the formatted string. When set, it completely overrides `prefix`, `padding`, `separator`, and the period token. Must respond to `#call`. |
 | `assign:` | Symbol | `:create` | When the number is assigned. `:create` numbers the field in the concern's `before_create` callback (the default). `:manual` skips it — the column stays `NULL` until `assign_<field>!` is called, so a draft can exist without consuming a number and numbering follows finalization order. Any other value raises `ArgumentError`. |
 
@@ -84,7 +89,7 @@ end
 
 ## Scopes
 
-`Sequenceable` does not add any ActiveRecord query scopes to the model.
+`Sequenceable` adds one scope per declared field, `pending_<field>`: the rows still awaiting a number (`WHERE <field> IS NULL`). It is described with the class methods below.
 
 ## Methods
 
@@ -94,9 +99,9 @@ end
 
 Returns the formatted display string for the configured field. When an `into:` column is configured and its value is present (i.e. already persisted), the stored value is returned directly. Otherwise the value is computed on the fly from the raw integer using the configured prefix, padding, separator, period, and template. Returns `nil` when the raw integer column is blank.
 
-**Numbering on create** *(automatic, via one `before_create`)*
+**Numbering on create** *(automatic, via one `before_create` per field)*
 
-The concern registers a single `before_create` the first time `sequenceable_by` is called and it is inherited by subclasses. At create it walks the receiving class's **current** configuration and numbers every field declared `assign: :create`, computing the next value and, when `into:` is configured, the formatted string. Assignment is skipped when the integer column already has a value (caller-supplied values are respected).
+The concern registers one `before_create` per field, at the field's first `assign: :create` declaration, and subclasses inherit it. So a field sits where you declared it among your own callbacks: a field a subclass declares after its own `before_create` is numbered after that callback runs. At create, the callback checks the receiving class's **current** declaration of the field and, when it is `assign: :create`, computes the next value and, when `into:` is configured, the formatted string. Assignment is skipped when the integer column already has a value (caller-supplied values are respected). Re-declaring a field never adds a second callback.
 
 Because the callback reads the configuration at run time, re-declaring a field changes its mode: `sequenceable_by :sequence, assign: :manual` on an STI subclass (or later on the same class) stops that class numbering at create, while the parent and any subclass that does not re-declare keep numbering. The last declaration wins.
 
@@ -220,6 +225,24 @@ draft.finalize!
 draft.number                             # => "INV-00001"
 ```
 
+**A draft STI subclass of a numbered parent**
+
+Re-declare with **only** `assign:`. The subclass keeps every other option, including the parent's `template:` object, so it shares the parent's counter and finalizes into the same series:
+
+```ruby
+class Invoice < ApplicationRecord
+  include ConcernsOnRails::Sequenceable
+
+  sequenceable_by :sequence, into: :number, template: ->(seq, _r) { "INV/#{seq}" }
+end
+
+class DraftInvoice < Invoice
+  sequenceable_by :sequence, assign: :manual   # right: same config, same counter
+end
+```
+
+Do not repeat the parent's options. Repeating any format option restates the whole format, and a `template:` written again is a **new lambda**. Procs compare by identity, so `template: ->(seq, _r) { "INV/#{seq}" }` in the subclass does not match the parent's, and the subclass gets a separate series. That series renders the same strings from a counter of its own, so it reissues `INV/1`.
+
 ## Notes & gotchas
 
 **Concurrency is best-effort.** The next value is `MAX(field) + 1` within the scope/period, read in one `SELECT` just before the `INSERT`. The concern has no retry loop of its own. Two concurrent creates can read the same `MAX` and both try to use the same value. The only reliable guarantee is a **scoped unique index** on the sequence column (and on the `into:` column, if used). With the index in place, the losing write raises `ActiveRecord::RecordNotUnique`, and `ConcernsOnRails::Support::UniqueRetry.with_retries` turns that into a fresh attempt:
@@ -268,18 +291,20 @@ Apps that never change `Time.zone` per request see no change, because the defaul
 - Declared on the STI **base** — every subclass draws from one table-wide counter, so `Credit` and `Debit` rows sharing a unique `sequence` column never collide.
 - Declared on **each subclass** (`Invoice` with `prefix: "INV-"`, `CreditNote` with `prefix: "CN-"`) — each keeps its own gap-free sequence, INV-0001, INV-0002, CN-0001.
 - A subclass that merely inherits a parent's declaration shares the parent's counter.
-- A subclass that **re-declares** `sequenceable_by` with a format no ancestor uses (comparing the full merged `prefix`, `template`, `padding`, `reset`, `scope`, `into`, `separator` and `start_at`) numbers its own series (with its descendants). The parent's `MAX` still spans every row of the table, so the parent series may show a **gap** after those rows — never a duplicate, even when a subclass starts declaring its own sequence after a deploy.
-- **Invariant: one visible format = one counter and one zone.** A re-declaration whose merged format is identical to an inherited owner's keeps that owner's counter. The check walks up the chain (parent, then *its* inherited owner, …). So a `Draft < Invoice` with `sequenceable_by :sequence, assign: :manual` finalizes into the same `INV-` series without reissuing a number, and so does a subclass that went `CN-` and back to `INV-`. `assign:` is not part of the format.
-- Keeping an owner's format but changing `time_zone:` (with `reset:` enabled) raises `ArgumentError` at class-load time. The two classes would cut the same "20260926" day at different instants over one counter, and both could issue `20260926-1`. A different zone with a different format is fine, because it is a separate series. An explicit zone equal to the default (e.g. `"Etc/UTC"` when the app runs in UTC) is not a conflict.
-- Sibling subclasses that each declare the same format with no declaring ancestor in common cannot be detected; give them distinct prefixes or use `scope: :type`.
+- A subclass that **re-declares** `sequenceable_by` with a format tuple no ancestor uses numbers its own series (with its descendants). The tuple is the full `prefix`, `template`, `padding`, `reset`, `scope`, `into`, `separator` and `start_at`, after the re-declaration rules above. The parent's `MAX` still spans every row of the table, so the parent series may show a **gap** after those rows — never a duplicate, even when a subclass starts declaring its own sequence after a deploy.
+- **Rule: an identical format tuple shares the owner's counter.** A re-declaration whose tuple is identical to an inherited owner's keeps that owner's counter. The check walks up the chain (parent, then *its* inherited owner, …). So a `Draft < Invoice` with `sequenceable_by :sequence, assign: :manual` finalizes into the same `INV-` series without reissuing a number, and so does a subclass that went `CN-` and back to `INV-`. `assign:` and `time_zone:` are not part of the tuple.
+- **The comparison is exact, not visual.** A tuple that differs only in `scope:`, `start_at:` or `into:`, or one that repeats a `template:` as a new lambda (Procs compare by identity), is a separate series even though it renders the same strings, so it **can reissue the parent's numbers**. Give such a series a distinct prefix, or use `scope: :type`. Sibling subclasses that each declare the same format with no declaring ancestor in common are not detected either.
+- **One zone per shared counter.** A class that shares an owner's counter (with `reset:` enabled) must cut the same periods: both `time_zone:` omitted, or both explicit and the same zone. Aliases count as the same zone (`"Kolkata"` and `"Asia/Calcutta"`). Anything else raises `ArgumentError` at class-load time, because the two classes would cut the same "20260926" day at different instants over one counter and both could issue `20260926-1`. That includes an explicit zone against an omitted one that equals `config.time_zone` today: the omitted zone is resolved at use time, and `config.time_zone` may be applied after the model loads. A different zone with a different format is fine, because it is a separate series, and so are classes numbering over different tables under an abstract declarer.
 - Declared on an **abstract** class, each concrete table (and its STI subtree) keeps its own counter.
 - `scope: :type` on the base partitions one declaration per type.
 
 For **independent per-type series without gaps**, declare once on the base with `scope: :type`.
 
-**Index per type.** Per-subclass (or re-declared) series share one integer column, so their numbers overlap across types. Index `(type, <field>)` — or the scope columns plus the field — not the field alone.
+**Index per type.** Per-subclass series (declared on each subclass, or re-declared with a different format) share one integer column, so their numbers overlap across types. Index `(type, <field>)` — or the scope columns plus the field — not the field alone.
 
 **Upgrading from 1.29.0 or earlier:** a per-type series that used to number per subclass while *inheriting* a base declaration now shares the table-wide counter. Its next number jumps once to the table-wide MAX + 1, leaving a one-time gap. Declare `scope: :type` to keep per-type numbering.
+
+**Upgrading from 1.30.0 or earlier:** a re-declaration that passes only `assign:` and/or `time_zone:` (or nothing) used to reset every other option to its default; it now keeps them. A subclass declared that way used to number its own series in the default format; it now uses the parent's format and counter. Rows it numbered before the upgrade have no `into:` value, so `formatted_<field>` renders them in the parent's format. Backfill their `into:` column first, or restate the subclass's old format explicitly. Re-declarations that pass any format option still start from the defaults, as before. The one change for them: a tuple identical to an inherited owner's now shares that owner's counter instead of numbering a subclass-only series that could reissue the owner's numbers.
 
 `next_<field>` previews exactly what the receiving class's next `create!` gets in every one of these setups — under `scope: :type`, an omitted `type:` resolves to the receiver's own STI name (NULL for the base).
 

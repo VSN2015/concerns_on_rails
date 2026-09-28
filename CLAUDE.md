@@ -75,7 +75,23 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Tokenizable`** — multiple security-token columns. `type:` `:urlsafe`/`:hex`/
   `:alphanumeric`/`:numeric`, `length:`; `regenerate_/revoke_/<field>?` + uniqueness retry.
 - **`Sequenceable`** — ordered reference numbers (invoice/order numbers). `into:`, `prefix:`,
-  `padding:`, `scope:`, `reset:` (`:year`/`:month`/`:day`), `template:`.
+  `padding:`, `scope:`, `reset:` (`:year`/`:month`/`:day`), `template:`, `assign:`
+  (`:create`/`:manual`), `time_zone:` (`reset:` periods — MAX range AND token — are cut in ONE
+  fixed zone, default `Time.zone_default` resolved at use time, never the request's `Time.zone`;
+  `sequenceable_period_time(field)` hands that instant to templates). Under STI the
+  series is MAX over the DECLARING class's relation (an abstract declarer falls back to the
+  receiver's concrete STI base): base-declared numbers table-wide, per-subclass declarations
+  number per type, and a subclass that re-declares can leave a GAP in the parent series but
+  never a duplicate (`scope: :type` for gap-free per-type series; index `(type, column)`).
+  A re-declaration passing ONLY `assign:`/`time_zone:` (or nothing) inherits the rest — the
+  Draft case; any other option restates the format from the defaults. Its owner is the first
+  inherited owner whose full format tuple is IDENTICAL (Procs by identity, so a Draft
+  re-declares only `assign:`), else itself; sharing an owner under `reset:` needs both zones
+  omitted or both explicit and equal (macro-time raise, skipped across numbering relations).
+  One symbol `before_create` per field, at its first `:create` declaration, reads `assign:` at
+  run time. With `into:` + `reset:` (no `template:`) the MAX also counts rows whose STORED
+  value carries the period's `prefix+token+separator` stem (pre-fix request-zone numbers).
+  `assign_<field>!` restores the field on a failed save so a UniqueRetry retry draws afresh.
 - **`Schedulable`** — start/end window (`starts_at`/`ends_at`); `current`/`upcoming`/`expired`
   scopes (affixable via `prefix:`/`suffix:`) + predicates.
 - **`Expirable`** — single expiry column (default `expires_at`); `active`/`expired`/
