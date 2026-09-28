@@ -233,6 +233,56 @@ describe ConcernsOnRails::Support::BatchOps do
       expect(items.size).to eq(3)
     end
 
+    # The limited path re-queried `relation.unscope(:order, :limit, :offset)`,
+    # which keeps the JOIN but not the limit: a has_many join returned the
+    # parent once per joined child (find_each on an unlimited relation did
+    # the same), so a verb ran on it — through stale copies — three times.
+    describe "over a has_many join" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :batch_notes, force: true do |t|
+            t.integer :noted_item_id
+          end
+        end
+        stub_const("BatchNote", Class.new(TestModel) { self.table_name = "batch_notes" })
+        noted = Class.new(TestModel)
+        stub_const("NotedItem", noted) # joins(:assoc) needs a named class
+        noted.class_eval do
+          self.table_name = "batch_items"
+          has_many :batch_notes, class_name: "BatchNote"
+        end
+      end
+
+      let!(:items) do
+        Array.new(2) do
+          item = NotedItem.create!(state: "new")
+          3.times { BatchNote.create!(noted_item_id: item.id) }
+          item
+        end
+      end
+
+      def seen_ids(relation)
+        seen = []
+        described_class.each_record(relation) { |record| seen << record.id }
+        seen
+      end
+
+      it "yields each record of a limited relation once" do
+        expect(seen_ids(NotedItem.joins(:batch_notes).order(:id).limit(1))).to eq([items.first.id])
+        expect(seen_ids(NotedItem.joins(:batch_notes).order(id: :desc).limit(4))).to eq(items.map(&:id))
+      end
+
+      it "yields each record of an unlimited relation once" do
+        expect(seen_ids(NotedItem.joins(:batch_notes))).to eq(items.map(&:id))
+      end
+
+      it "counts each record once in run" do
+        count = described_class.run(NotedItem.joins(:batch_notes).order(:id).limit(2), label: "Test") { true }
+
+        expect(count).to eq(1)
+      end
+    end
+
     it "handles a composite primary key", min_rails: "7.1" do
       ActiveRecord::Schema.define do
         create_table :batch_pairs, primary_key: %i[a b], force: true do |t|

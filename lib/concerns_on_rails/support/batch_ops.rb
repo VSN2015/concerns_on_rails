@@ -90,8 +90,8 @@ module ConcernsOnRails
         end
       end
 
-      # `find_each` over exactly the rows `relation` selects — the iteration
-      # every batch verb, cascade and sweep goes through.
+      # `find_each` over exactly the rows `relation` selects, each record
+      # ONCE — the iteration every batch verb, cascade and sweep goes through.
       #
       # `find_each` pages by primary key, so it IGNORES the relation's ORDER
       # (raising outright under `error_on_ignored_order`, which a Sortable
@@ -104,12 +104,35 @@ module ConcernsOnRails
       # BATCH_SIZE keys (in key order) per query — handing the whole list to
       # find_each re-sent every key in every batch. Plucked rather than an
       # IN (subquery): MySQL rejects LIMIT inside IN (...).
-      def each_record(relation, &)
+      #
+      # A has_many JOIN returns a row per joined child, so both paths would
+      # see a parent once per child — `Post.joins(:comments).publish_all`
+      # published (and ran after_publish on) one post three times through
+      # stale copies and counted 3, where the fast path's
+      # `update_all ... WHERE id IN (...)` touches it once. Keys are
+      # de-duplicated, and since every query orders by primary key a repeat
+      # arrives right after its first copy and is skipped — no DISTINCT,
+      # which PostgreSQL cannot apply to a json column.
+      def each_record(relation)
+        previous = NO_KEY
+        each_row(relation) do |record|
+          key = record.id
+          next if key == previous
+
+          previous = key
+          yield record
+        end
+      end
+
+      NO_KEY = Object.new.freeze
+      private_constant :NO_KEY
+
+      def each_row(relation, &)
         return relation.unscope(:order).find_each(&) unless relation.limit_value || relation.offset_value
 
         key = relation.klass.primary_key
         rows = relation.unscope(:order, :limit, :offset)
-        limited_keys(relation, key).sort.each_slice(BATCH_SIZE) do |slice|
+        limited_keys(relation, key).uniq.sort.each_slice(BATCH_SIZE) do |slice|
           rows.where(key => slice).reorder(Array(key).to_h { |column| [column, :asc] }).each(&)
         end
       end
@@ -127,6 +150,7 @@ module ConcernsOnRails
 
         relation.klass.unscoped.from(relation, relation.klass.quoted_table_name).pluck(key)
       end
+      private_class_method :each_row, :limited_keys
 
       # The validate callbacks every ActiveRecord model carries out of the box
       # (Rails 7.1 registers :cant_modify_encrypted_attributes_when_frozen on
