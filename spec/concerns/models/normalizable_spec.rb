@@ -253,6 +253,29 @@ describe ConcernsOnRails::Models::Normalizable do
         user.update_attribute(:email, "a@b.com")
         expect(user.reload.code).to eq("x!")
       end
+
+      # Prepended: a before_save registered earlier (Encryptable's blind
+      # index, Auditable's entry, Addressable's fingerprint) must see the value
+      # that gets stored, not the raw one.
+      it "runs ahead of a before_save registered before the concern" do
+        seen = nil
+        klass = Class.new(TestModel) do
+          self.table_name = "normalized_accounts"
+          before_save { seen = email }
+          include ConcernsOnRails::Models::Normalizable
+
+          normalizable :email, with: :email
+        end
+        user = klass.create!(email: "a@b.com")
+        user.update_attribute(:email, "  NEW@B.COM ")
+        expect(seen).to eq("new@b.com")
+      end
+
+      it "registers the backstop once, however often the macro is re-declared" do
+        model.normalizable :email, with: :strip
+        filters = model._save_callbacks.map(&:filter)
+        expect(filters.count(:normalizable_apply_unvalidated)).to eq(1)
+      end
     end
   end
 

@@ -171,7 +171,7 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 
 ## Composition with other concerns
 
-- **Normalizable** — normalization runs `before_validation` on the plaintext; encryption happens later, at the DB-serialization boundary. So the stored ciphertext is always of the *normalized* value, regardless of `include` order.
+- **Normalizable** — normalization runs on the plaintext in `before_validation`, and, for saves that skip validation (`update_attribute`, `save(validate: false)`), in a `before_save` backstop that Normalizable *prepends* to the save callbacks — so it runs ahead of the blind-index refresh (also a `before_save`) whichever concern was included first. Encryption happens later still, at the DB-serialization boundary. So the stored ciphertext and the blind-index fingerprint are both of the *normalized* value, regardless of `include` order, and `find_by_<field>` finds what was stored. (`update_column(s)`/`update_all` skip callbacks: they neither normalize nor refresh the index.)
 - **Maskable** — `masked_<field>` masks the *decrypted* value; the column stays ciphertext. Order-independent.
 - **Auditable** — auditing an encrypted field would persist its plaintext into the audit column, so declaring a field with **both** `encryptable` and `auditable_by` **raises**. Audit a non-sensitive companion column instead.
 - **Searchable / Filterable** — encrypted columns are **not** searchable: non-deterministic ciphertext (random IV) means the same plaintext never produces the same bytes, so `where(:ssn)`, `LIKE`, and prefix matching cannot work. For exact-match lookups, add a [blind index](#querying-encrypted-fields-blind-index) and query the `<field>_bidx` column (via `find_by_<field>` / `where_<field>`).

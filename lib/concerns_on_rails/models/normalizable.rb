@@ -107,7 +107,12 @@ module ConcernsOnRails
         before_validation :apply_normalizations
         # Backstop for the saves that skip validation — update_attribute,
         # save(validate: false) — which otherwise stored the raw value.
-        before_save :normalizable_apply_unvalidated
+        # PREPENDED: callbacks run in registration order, and a sibling's
+        # earlier before_save (Encryptable's blind index, Auditable's entry,
+        # Addressable's fingerprint) must see the value that gets stored, not
+        # the raw one — whichever order the concerns were included in.
+        # Registered once, here; re-declaring `normalizable` only merges rules.
+        before_save :normalizable_apply_unvalidated, prepend: true
       end
 
       class_methods do
