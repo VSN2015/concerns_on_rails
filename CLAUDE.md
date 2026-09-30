@@ -227,7 +227,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `anonymizable *fields, with:` (presets :nullify/:redact/:hash/:email/
   :random_hex or callable; repeatable, rules merge; `stamp:` default
   :anonymized_at with `false` opt-out; `clear_audit_trail:`; `prefix:`/
-  `suffix:` scope affixes). `anonymize!` = hooks + ONE update_columns UPDATE
+  `suffix:` scope affixes). `anonymize!` = hooks + ONE update_columns UPDATE (an
+  `update_all` bumping lock_version in SQL under optimistic locking)
   in a transaction (deliberately skips validations/callbacks; values
   serialize through attribute types so encryptable fields stay ciphertext) +
   reload. `anonymized?`, `.anonymized`/`.not_anonymized`, batch

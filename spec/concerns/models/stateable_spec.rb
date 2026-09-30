@@ -464,7 +464,7 @@ describe ConcernsOnRails::Stateable do
         end.to raise_error(ArgumentError, /'lock!'.*prefix: or suffix:/)
       end
 
-      it "refuses it under lock: true too (the concern's own row lock calls lock!)" do
+      it "refuses it under lock: true too" do
         expect do
           define_model(:lock_true_events) do
             stateable_by :status, states: %i[open locked], lock: true,
@@ -733,14 +733,19 @@ describe ConcernsOnRails::Stateable do
   describe "lock: true (1.26)" do
     let(:klass) do
       ActiveRecord::Schema.define do
-        create_table(:locked_orders, force: true) { |t| t.string :status }
+        create_table(:locked_orders, force: true) do |t|
+          t.string :status
+          t.string :note
+        end
       end
       Class.new(TestModel) do
         self.table_name = "locked_orders"
         include ConcernsOnRails::Stateable
 
-        stateable_by :status, states: %i[draft published], default: :draft, lock: true,
-                              transitions: { publish: { from: :draft, to: :published } }
+        stateable_by :status, states: %i[draft review published archived], default: :draft, lock: true,
+                              transitions: { submit: { from: :draft, to: :review },
+                                             publish: { from: %i[draft review], to: :published },
+                                             archive: { to: :archived } }
       end
     end
 
@@ -758,7 +763,131 @@ describe ConcernsOnRails::Stateable do
       # Without the lock, the stale in-memory 'draft' passes the guard and the
       # event fires twice (hooks and all) — the check-then-write race.
       expect { stale.publish! }
-        .to raise_error(ConcernsOnRails::Models::Stateable::InvalidTransition)
+        .to raise_error(ConcernsOnRails::Models::Stateable::InvalidTransition, /from 'published'/)
+      expect(stale.status).to eq("published") # the row's state, as the reload used to show
+      expect(stale).not_to be_changed
+    end
+
+    # RA-06: the row lock used to be with_lock, whose reload refuses a record
+    # with unsaved changes ("Locking a record with unpersisted changes is not
+    # supported") — `ticket.note = "..."; ticket.resolve!` crashed.
+    it "transitions a record with pending changes and saves them with the state (as lock: false does)" do
+      record = klass.create!
+      record.note = "fixed in 1.2"
+
+      expect(record.publish!).to be(true)
+
+      expect(klass.find(record.id).attributes.slice("status", "note"))
+        .to eq("status" => "published", "note" => "fixed in 1.2")
+      expect(record).not_to be_changed
+    end
+
+    it "keeps pending changes in memory (no reload) when the locked row fails the guard" do
+      record = klass.create!
+      klass.find(record.id).publish!
+      record.note = "draft notes"
+
+      expect { record.submit! }.to raise_error(ConcernsOnRails::Models::Stateable::InvalidTransition)
+
+      expect(record.note).to eq("draft notes")
+      expect(record.note_changed?).to be(true)
+      expect(klass.find(record.id).attributes.slice("status", "note")).to eq("status" => "published", "note" => nil)
+    end
+
+    it "transitions from the row's state when that state also passes the guard (the reload's contract)" do
+      record = klass.create!
+      klass.find(record.id).submit! # draft -> review elsewhere
+
+      expect(record.publish!).to be(true) # publish is allowed from draft AND review
+
+      expect(klass.find(record.id).status).to eq("published")
+    end
+
+    it "an any-state event on a stale copy still fires, handing the hooks the row's state" do
+      record = klass.create!
+      klass.find(record.id).submit!
+      seen = []
+      klass.define_method(:before_transition) { |event, from, to| seen << [event, from, to] }
+
+      expect(record.archive!).to be(true)
+
+      expect(seen).to eq([[:archive, "review", "archived"]])
+      expect(klass.find(record.id).status).to eq("archived")
+    end
+
+    it "reads the state with a locking SELECT of that column (not a full reload)" do
+      record = klass.create!
+      reads = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+        reads << payload[:sql] if payload[:name] != "SCHEMA" && payload[:sql].match?(/\ASELECT/i) && payload[:sql].include?("locked_orders")
+      end
+      begin
+        record.publish!
+      ensure
+        ActiveSupport::Notifications.unsubscribe(subscriber)
+      end
+
+      expect(reads.size).to eq(1)
+      expect(reads.first).to include(TestDatabase.quoted_column("status"))
+      expect(reads.first).not_to include("*")
+      expect(reads.first).to include("FOR UPDATE") unless TestDatabase.sqlite?
+    end
+
+    it "raises RecordNotFound when the row has gone (as the reload did)" do
+      record = klass.create!
+      klass.where(id: record.id).delete_all
+
+      expect { record.publish! }.to raise_error(ActiveRecord::RecordNotFound)
+    end
+
+    it "an aborted transition leaves the adopted row state in memory, not the stale one" do
+      record = klass.create!
+      klass.find(record.id).submit!
+      klass.define_method(:after_transition) { |*| raise ActiveRecord::Rollback }
+
+      expect(record.publish!).to be(false)
+
+      expect(record.status).to eq("review")
+      expect(klass.find(record.id).status).to eq("review")
+    end
+
+    context "with a lock_version column" do
+      let(:versioned) do
+        ActiveRecord::Schema.define do
+          create_table(:versioned_orders, force: true) do |t|
+            t.string :status
+            t.string :note
+            t.integer :lock_version, default: 0, null: false
+          end
+        end
+        Class.new(TestModel) do
+          self.table_name = "versioned_orders"
+          include ConcernsOnRails::Stateable
+
+          stateable_by :status, states: %i[draft published archived], default: :draft, lock: true,
+                                transitions: { publish: { from: :draft, to: :published }, archive: { to: :archived } }
+        end
+      end
+
+      it "saves pending changes with the transition and stays saveable" do
+        record = versioned.create!
+        record.note = "ready"
+
+        expect(record.publish!).to be(true)
+
+        expect(record.lock_version).to eq(versioned.where(id: record.id).pick(:lock_version))
+        expect { record.update!(note: "shipped") }.not_to raise_error
+      end
+
+      it "a stale copy raises StaleObjectError instead of being silently reloaded over" do
+        record = versioned.create!
+        versioned.find(record.id).update!(note: "edited elsewhere")
+        record.note = "mine"
+
+        expect { record.archive! }.to raise_error(ActiveRecord::StaleObjectError)
+        expect(versioned.find(record.id).attributes.slice("status", "note"))
+          .to eq("status" => "draft", "note" => "edited elsewhere")
+      end
     end
   end
 

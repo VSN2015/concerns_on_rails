@@ -3,6 +3,7 @@ require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/locking"
 
 module ConcernsOnRails
   module Models
@@ -179,8 +180,22 @@ module ConcernsOnRails
       # Push expiry forward by `by:`. If the record has no expiry yet, or has
       # already expired, the new expiry is `now + by`. Otherwise it's added to
       # the existing expiry.
+      #
+      # "Existing" is the STORED expiry, read under a row lock (SELECT ...
+      # FOR UPDATE of that column, no reload) in the transaction the write
+      # joins — not this instance's copy of it. The extension is relative, and
+      # computing it from the copy lost one of two concurrent renewals (both
+      # workers read the old expiry, both wrote old + 30 days). An expiry
+      # assigned but not yet saved is an explicit edit, not a stale read, so it
+      # is extended as assigned; a new record has no row and extends its own.
+      # Other unsaved changes are saved with it, as `update` always has.
       def extend_expiry!(by:)
-        update(self.class.expirable_field => expiry_extension_base + by)
+        field = self.class.expirable_field
+        return update(field => expiry_extension_base(self[field]) + by) if new_record? || will_save_change_to_attribute?(field)
+
+        ConcernsOnRails::Support::Locking.with_row_lock(self, field) do |row|
+          update(field => expiry_extension_base(row ? row[field.to_s] : self[field]) + by)
+        end
       end
 
       # Returns an ActiveSupport::Duration of how long until expiry, or nil
@@ -198,8 +213,7 @@ module ConcernsOnRails
       # Internal helper for extend_expiry! — not part of the public API
       # (postfix private: the keyword form trips RuboCop's scope analysis
       # against the `private` inside the class_methods block).
-      def expiry_extension_base
-        value = self[self.class.expirable_field]
+      def expiry_extension_base(value)
         now = Time.zone.now
         value.nil? || value <= now ? now : value
       end

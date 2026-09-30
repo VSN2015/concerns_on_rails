@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/callable"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/locking"
 
 module ConcernsOnRails
   module Models
@@ -42,6 +43,13 @@ module ConcernsOnRails
     #   * Adjustments use `update_counters` — a single SQL `COALESCE(col,0) ± 1`,
     #     atomic under concurrency — and run inside the record's own save
     #     transaction, so a rolled-back save rolls back the counter too.
+    #   * Optimistic locking on the parent: each adjustment's UPDATE bumps the
+    #     parent's `lock_version` in SQL, and the parent instance the child's
+    #     association holds (the one `post.comments.create!` was called on, or
+    #     the one passed as `post:`) gets the bump — and the counter delta —
+    #     mirrored in memory, as Rails' native counter cache does through
+    #     increment!, so it saves afterwards without StaleObjectError. Other
+    #     loaded copies of the parent go stale, as they would natively.
     #   * A `belongs_to ..., primary_key: :code` is honoured everywhere: the
     #     parent row is addressed by the association key (not its `id`), both by
     #     the live adjustments and by `recount_counter_caches!`.
@@ -448,7 +456,7 @@ module ConcernsOnRails
 
         reflection = counter_cacheable_reflection(rule)
         { klass: reflection.klass, key_column: reflection.association_primary_key.to_s, parent_key: parent_key,
-          column: rule[:count_column], delta: delta, touch: rule[:touch] }
+          column: rule[:count_column], delta: delta, touch: rule[:touch], association: rule[:association] }
       end
 
       # One update_counters per distinct (parent class, key column, key value):
@@ -462,9 +470,56 @@ module ConcernsOnRails
           counters = counter_cacheable_merged_counters(group)
           next if counters.empty?
 
-          counters[:touch] = true if group.any? { |adj| adj[:touch] }
-          klass.unscoped.where(key_column => parent_key).update_counters(counters)
+          touch = group.any? { |adj| adj[:touch] }
+          affected = klass.unscoped.where(key_column => parent_key).update_counters(touch ? counters.merge(touch: true) : counters)
+          counter_cacheable_sync_targets(klass, key_column, parent_key, group, counters) if affected.positive?
         end
+      end
+
+      # The UPDATE above bumped the parent row's lock_version (update_counters
+      # goes through update_all), but no parent instance. Rails' native counter
+      # cache adjusts the loaded belongs_to target with increment!, which
+      # mirrors the counter AND the lock_version bump in memory; without that
+      # the very parent `post.comments.create!` was called on raised
+      # StaleObjectError on its next save. Same here, for every instance this
+      # record's associations hold for that row — once per instance, however
+      # many rules (associations) share the UPDATE. Only under optimistic
+      # locking: elsewhere the loaded parent is left exactly as before
+      # (documented: reload it to read the counter).
+      def counter_cacheable_sync_targets(klass, key_column, parent_key, group, counters)
+        return unless klass.locking_enabled?
+
+        targets = group.map { |adj| adj[:association] }.uniq.filter_map do |name|
+          target = association(name).target
+          target if counter_cacheable_target_row?(target, key_column, parent_key)
+        end
+        targets.uniq(&:object_id).each { |target| counter_cacheable_sync_target(target, klass, counters) }
+      end
+
+      # The instance is a live copy of the adjusted row — matched by its key,
+      # so a reparent syncs the new parent the writer assigned or the OLD one
+      # a foreign-key reassignment left loaded, whichever the UPDATE touched.
+      def counter_cacheable_target_row?(target, key_column, parent_key)
+        target.is_a?(ActiveRecord::Base) && target.persisted? && !target.frozen? &&
+          target.has_attribute?(key_column) && target[key_column].to_s == parent_key.to_s
+      end
+
+      # increment!'s in-memory half: each counter moves by its delta (COALESCE
+      # to 0, like the SQL) and stays clean — a counter the caller assigned
+      # and has not saved is theirs to write, so it is left pending — then the
+      # lock_version bump. Mirroring the counter is what keeps the lock sync
+      # safe: a current lock_version over a stale count would let a full-row
+      # save (partial updates off) write the old count back.
+      def counter_cacheable_sync_target(target, klass, counters)
+        counters.each do |column, delta|
+          name = column.to_s
+          next unless target.has_attribute?(name)
+          next if target.will_save_change_to_attribute?(name)
+
+          target[name] = target[name].to_i + delta
+          target.send(:clear_attribute_change, name)
+        end
+        ConcernsOnRails::Support::Locking.mirror_bump!(target, klass)
       end
 
       # Sum per column, dropping zero-sum entries (nothing to write).

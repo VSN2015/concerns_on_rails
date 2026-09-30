@@ -136,6 +136,111 @@ describe ConcernsOnRails::Expirable do
       token.extend_expiry!(by: 1.day)
       expect(token.expires_at.to_i).to eq((original + 1.day).to_i)
     end
+
+    # TS-03: a relative write computed from the instance's copy lost one of two
+    # concurrent extensions. Both instances load before either writes, so the
+    # second must read the ROW (under a row lock; SQLite has none, but the
+    # read-the-row logic is what this exercises on every adapter).
+    it "compounds concurrent extensions: it extends the stored expiry, not the instance's copy" do
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        base = Time.utc(2026, 2, 1, 12, 0, 0)
+        id = ApiToken.create!(value: "license", expires_at: base).id
+        worker_a = ApiToken.find(id)
+        worker_b = ApiToken.find(id)
+
+        expect(worker_a.extend_expiry!(by: 30.days)).to be(true)
+        expect(worker_b.extend_expiry!(by: 30.days)).to be(true)
+
+        expect(ApiToken.find(id).expires_at).to eq(base + 60.days)
+        expect(worker_b.expires_at).to eq(base + 60.days)
+      end
+    end
+
+    it "restarts from now when the STORED expiry has lapsed, whatever the instance holds" do
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        id = ApiToken.create!(value: "license", expires_at: 10.days.from_now).id
+        stale = ApiToken.find(id)
+        ApiToken.find(id).expire!
+
+        stale.extend_expiry!(by: 1.day)
+
+        expect(ApiToken.find(id).expires_at).to eq(Time.zone.now + 1.day)
+      end
+    end
+
+    it "extends an expiry assigned but not yet saved from that value (an explicit edit, not a stale read)" do
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        token = ApiToken.create!(value: "license", expires_at: 10.days.from_now)
+        token.expires_at = 2.days.from_now
+
+        token.extend_expiry!(by: 1.day)
+
+        expect(ApiToken.find(token.id).expires_at).to eq(Time.zone.now + 3.days)
+      end
+    end
+
+    it "reads the row with a locking SELECT, keeping the instance's other unsaved changes" do
+      token = ApiToken.create!(value: "license", expires_at: 1.day.from_now)
+      token.value = "renamed"
+      reads = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+        reads << payload[:sql] if payload[:name] != "SCHEMA" && payload[:sql].match?(/\ASELECT/i) && payload[:sql].include?("expires_at")
+      end
+      begin
+        token.extend_expiry!(by: 1.day)
+      ensure
+        ActiveSupport::Notifications.unsubscribe(subscriber)
+      end
+
+      expect(ApiToken.find(token.id).value).to eq("renamed")
+      expect(reads.size).to eq(1)
+      expect(reads.first).to include("FOR UPDATE") unless TestDatabase.sqlite?
+    end
+
+    it "saves a new record from its in-memory value (no row to read)" do
+      freeze_time do
+        token = ApiToken.new(value: "fresh")
+        token.extend_expiry!(by: 1.day)
+        expect(token).to be_persisted
+        expect(token.reload.expires_at).to eq(Time.zone.now + 1.day)
+      end
+    end
+
+    context "with a lock_version column" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :versioned_licenses, force: true do |t|
+            t.datetime :expires_at
+            t.integer :lock_version, default: 0, null: false
+          end
+        end
+      end
+
+      let(:license_class) do
+        Class.new(TestModel) do
+          self.table_name = "versioned_licenses"
+          include ConcernsOnRails::Expirable
+
+          expirable_by
+        end
+      end
+
+      it "a stale second worker raises StaleObjectError instead of silently losing an extension" do
+        travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+          base = Time.utc(2026, 2, 1, 12, 0, 0)
+          id = license_class.create!(expires_at: base).id
+          worker_a = license_class.find(id)
+          worker_b = license_class.find(id)
+
+          worker_a.extend_expiry!(by: 30.days)
+
+          expect { worker_b.extend_expiry!(by: 30.days) }.to raise_error(ActiveRecord::StaleObjectError)
+          expect(license_class.find(id).expires_at).to eq(base + 30.days)
+          expect(worker_b.reload.extend_expiry!(by: 30.days)).to be(true)
+          expect(license_class.find(id).expires_at).to eq(base + 60.days)
+        end
+      end
+    end
   end
 
   describe "#time_until_expiry" do

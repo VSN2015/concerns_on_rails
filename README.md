@@ -758,6 +758,11 @@ token.clear_expiry!                 # never expires (nil)
 - If `expires_at` is `nil` or in the past → new value is `now + by`
 - If `expires_at` is still in the future → `by` is added to the existing value
 
+The existing value is the one **stored**, read under a row lock (`SELECT ... FOR UPDATE` of that column,
+no reload) — so two workers renewing the same license concurrently compound (+30 days twice = +60), where the
+in-memory copy used to lose one. An expiry you assigned but have not saved (and a new record) extends from the
+instance's value; under optimistic locking a stale instance raises `StaleObjectError` rather than losing a renewal.
+
 **Lifecycle hooks** — override `before_expire` / `after_expire` on the model; they fire around a write that
 actually expires the record (`expire!` with a past-or-now time, and `expire_all`). They and the write share
 their own savepoint. A hook that raises, or vetoes with `raise ActiveRecord::Rollback`, undoes the expiry:
@@ -1164,6 +1169,13 @@ A hook that vetoes with `raise ActiveRecord::Rollback` rolls the transition back
 even inside your own transaction. After an aborted transition, the state and its `<state>_at` stamp go back to
 their previous in-memory values, so a retry is guarded against the real state.
 
+**Row lock** — `lock: true` makes each guarded `<event>!` lock the row (`SELECT <state> ... FOR UPDATE`) and
+check the guard against the **row's** state, closing the check-then-write race between two processes. The
+record is not reloaded, so pending changes save with the transition (`ticket.note = "fixed"; ticket.resolve!`),
+as with `lock: false`. When another process has moved the state, the row's state is taken into memory and the
+guard decides from it (a disallowed event raises `InvalidTransition`; an allowed one fires with the row's state
+as `from`); with optimistic locking a stale instance raises `StaleObjectError` instead of being reloaded over.
+
 **Prefix / suffix** — avoid clashes when the state names overlap with other concerns or scopes:
 
 ```ruby
@@ -1540,6 +1552,7 @@ unlike Publishable/Expirable/Activatable, this one has no validators gate.
 - The lock itself is a conditional `UPDATE` (only while the row is unlocked), so concurrent failures crossing the threshold lock once: the loser adopts the existing lock and unlock token and fires no hooks.
 - Expiry is **lazy**: readers and scopes treat a stale lock as unlocked but never write. The column is cleared by the next `unlock_access!` or failed attempt (quietly there — no unlock hooks fire from a failed login).
 - `lock_access!` persists via one conditional `UPDATE` (only while the row is unlocked in the database — a concurrent loser adopts the winner's lock and fires no hooks) and `unlock_access!` via `update_columns` — validations and AR callbacks deliberately bypassed so an otherwise-invalid record can still be locked (this also skips `updated_at`/`Auditable`). The `before/after_lock`, `before/after_unlock` hooks run in a transaction; `after_lock` is the place for the "account locked" email.
+- Optimistic locking: the raw writes (the increment, the lock claim, the lapsed-lock reset, the unlock-token claim) bump `lock_version` in SQL and mirror the bump into the instance as Rails' `increment!` does, so the same instance — and the record `unlock_by_token` returns — saves afterwards without `StaleObjectError`.
 - Reach for Devise's `lockable` when you need its unlock emails or per-strategy unlocks (the `unlock_token:` option covers a self-service unlock link; sending it is up to your `after_lock`).
 
 ---
@@ -1644,7 +1657,7 @@ Comment.recount_counter_caches!    # repair drift / backfill every counter
 Comment.recount_counter_caches!(:post, parents: imported_posts)   # repair just these parents (ids, records or a relation)
 ```
 
-Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose. A destroy decrements only when its DELETE actually removed the row (as Rails' native counter cache does) — destroying a stale second instance, or a never-saved record, writes nothing — and it reads the parent and the `if:` verdict from the **persisted** values, so an unsaved reparent or condition flip can't redirect it. A `belongs_to ..., primary_key: :code` is honoured: parents are addressed by that key (live adjustments and `recount_counter_caches!` alike), never by `id`. A child destroyed by its parent's own `has_many ..., dependent: :destroy` does not decrement that parent (as with Rails' native counter cache) — the row is going away, and bumping it first would trip the parent's `lock_version`. A `has_one` replacement, where the parent survives, still decrements. With `lock_version` on the parent, two pre-existing cases can still raise `StaleObjectError`: destroying a parent whose counted child hangs off a `has_one ..., dependent: :destroy`, and a `has_many :through ..., dependent: :destroy` (Rails deletes the join rows without `destroyed_by_association`).
+Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose. A destroy decrements only when its DELETE actually removed the row (as Rails' native counter cache does) — destroying a stale second instance, or a never-saved record, writes nothing — and it reads the parent and the `if:` verdict from the **persisted** values, so an unsaved reparent or condition flip can't redirect it. A `belongs_to ..., primary_key: :code` is honoured: parents are addressed by that key (live adjustments and `recount_counter_caches!` alike), never by `id`. A child destroyed by its parent's own `has_many ..., dependent: :destroy` does not decrement that parent (as with Rails' native counter cache) — the row is going away, and bumping it first would trip the parent's `lock_version`. A `has_one` replacement, where the parent survives, still decrements. With `lock_version` on the parent, each adjustment bumps it in SQL, and the parent instance the child's association holds (`post.comments.create!`'s `post`, or the one passed as `post:`) gets the bump and the counter delta mirrored in memory, as Rails' native counter cache does with `increment!` — so `post.update!` afterwards doesn't raise `StaleObjectError`. Two pre-existing cases can still raise it: destroying a parent whose counted child hangs off a `has_one ..., dependent: :destroy`, and a `has_many :through ..., dependent: :destroy` (Rails deletes the join rows without `destroyed_by_association`).
 
 **Options** (`counter_cacheable_by association, …`, repeatable — re-declaring the same association + `count:` replaces that rule, e.g. an STI subclass narrowing it with `if:`): `count:` (the parent column; default `"<table_name>_count"`), `if:` (a callable evaluated against the record — counts only when truthy; the previous state is reconstructed for updates), `touch:` (`false`; also bump the parent's `updated_at`).
 
@@ -1705,7 +1718,7 @@ Reads pick the key by the envelope's id, so old and new rows coexist; `find_by_<
 - `ssn_ciphertext` is `nil` while the field has an unsaved change (so it can never return the plaintext you just assigned), and `ssn_encrypted?` asks whether what is stored really is an envelope. After a save or `update_columns` it is exactly what was written (on Rails 6.0–7.0, which re-serialize in memory with a fresh IV, that costs one raw `SELECT` of the encrypted columns per write).
 - `update_column(s)` on an encrypted field DOES encrypt (the value still serializes through the attribute type), but it skips validations, callbacks, dirty tracking and the blind-index refresh — so a value written that way is unsearchable until the row is saved normally. Declaring a field with both `encryptable` and `auditable_by` raises (either order), and so does slugging one — an encrypted field as the `sluggable_by` source or a `candidates:` entry, or a bare friendly_id base (a slug is its plaintext); what a declaration cannot see is refused at save. **Upgrading:** a model that slugged an encrypted field before this release stored plaintext slugs — point the slug at a safe field, `regenerate_slug!` every row, and delete the stale `friendly_id_slugs` history rows ([snippet](docs/concerns/encryptable.md#upgrading-slugs-built-from-an-encrypted-field)).
 - Wrong key / tampered ciphertext / malformed envelope raise `Encryption::DecryptionError`. Encrypted field names are auto-registered with Rails' `filter_parameters` (via the gem's railtie), so they're redacted from request logs.
-- Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` streams with `find_each` and rewrites each row with one UPDATE — no validations/callbacks (only the ciphertext changes), guarded on the ciphertext it read so a concurrent write is never reverted, and skipping any field with an unsaved change. A row whose key id is no longer configured raises `DecryptionError` naming the id.
+- Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` streams with `find_each` and rewrites each row with one UPDATE — no validations/callbacks (only the ciphertext changes), no `lock_version` bump (so records open in edit forms don't go stale), guarded on the ciphertext it read so a concurrent write is never reverted, and skipping any field with an unsaved change. A row whose key id is no longer configured raises `DecryptionError` naming the id.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need Rails-managed key infrastructure (KMS, per-record keys) or deterministic encryption.
 
 ---
@@ -1736,6 +1749,7 @@ User.where(...).anonymize_all!     # batch; returns the count, skips stamped rec
 
 **Notes**
 - Deliberately `update_columns`: erasure is never blocked by validations and never runs callbacks that could copy old values elsewhere. Values still serialize through the attribute types, so an `encryptable` field stores a fresh ciphertext envelope — never plaintext.
+- Optimistic locking: with a `lock_version` column the single UPDATE goes through `update_all`, which bumps `lock_version` in SQL (the row's value + 1). An edit form loaded before the erasure then raises `StaleObjectError` instead of writing the personal data back, and a stale anonymizing instance still erases.
 - `before_anonymize`/`after_anonymize` hooks run inside the write's own savepoint; the record reloads afterwards (erasure is terminal for the instance). A hook that raises, or vetoes with `raise ActiveRecord::Rollback`, undoes the erasure and restores the in-memory values. `anonymize!` then returns `false`, even inside your own transaction.
 - `anonymize_all!` makes as much progress as it can. Each record is erased in its own savepoint, so a record whose hook vetoes (for example, one under a legal hold) is skipped and the others are still erased. The return value counts only the records actually erased. A hook that *raises* an exception is still an error: it propagates and rolls the batch back.
 - Never blocked by crypto state: `:nullify` reads nothing, `:redact`/`:email`/`:random_hex` only check presence (from the stored ciphertext for an encrypted field — no decryption), and `:hash`/callables write a fresh random 64-hex value (cast through the field's type) when an encrypted value cannot be decrypted — random per row, so unique indexes survive — and one bad row never rolls back `anonymize_all!`.
