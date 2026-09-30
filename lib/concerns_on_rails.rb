@@ -86,6 +86,8 @@ module ConcernsOnRails
     autoload :NumericOperand,          "concerns_on_rails/support/numeric_operand"
     autoload :Callable,                "concerns_on_rails/support/callable"
     autoload :SlugSources,             "concerns_on_rails/support/slug_sources"
+    autoload :GeneratedValues,         "concerns_on_rails/support/generated_values"
+    autoload :EncryptedLookup,         "concerns_on_rails/support/encrypted_lookup"
   end
 end
 

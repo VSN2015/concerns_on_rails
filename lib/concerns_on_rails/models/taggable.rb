@@ -61,6 +61,9 @@ module ConcernsOnRails
         class_attribute :taggable_field, instance_accessor: false, default: DEFAULT_FIELD
         class_attribute :taggable_delimiter, instance_accessor: false, default: DEFAULT_DELIMITER
         class_attribute :taggable_downcase, instance_accessor: false, default: false
+        # Whether taggable_by has run (the :tags default is only a fallback) —
+        # Encryptable's macro-time guard checks declared columns only.
+        class_attribute :taggable_declared, instance_accessor: false, default: false
       end
 
       # Real module (not `class_methods do`) so the private query helpers live
@@ -73,9 +76,11 @@ module ConcernsOnRails
           # An empty delimiter would split every stored value into characters.
           raise ArgumentError, "#{LABEL}: delimiter: must be a non-empty String" if delimiter.to_s.empty?
 
+          taggable_guard_encryptable!(field.to_sym)
           self.taggable_field = field.to_sym
           self.taggable_delimiter = delimiter.to_s
           self.taggable_downcase = downcase
+          self.taggable_declared = true
           ensure_columns!(LABEL, taggable_field, types: :string)
 
           before_validation :taggable_normalize!
@@ -84,6 +89,9 @@ module ConcernsOnRails
         # Records carrying the given tags. `any: true` matches ANY tag (OR);
         # the default requires ALL tags (AND). Returns a chainable relation.
         def tagged_with(*names, any: false)
+          # The macro-time guards cover every declared column; this catches the
+          # undeclared :tags default (see taggable_guard_encryptable!).
+          taggable_guard_encryptable!(taggable_field)
           tags = taggable_clean_all(names)
           return all if tags.empty?
 
@@ -182,6 +190,19 @@ module ConcernsOnRails
         end
 
         private
+
+        # An `encryptable` column holds ciphertext under a random IV, so
+        # tagged_with's LIKE silently matched nothing (all_tags, decrypted in
+        # Ruby, still listed the tags). Mirror of Encryptable's macro-time
+        # guard for the reverse order (taggable_by declared AFTER encryptable),
+        # and tagged_with's call-time backstop.
+        def taggable_guard_encryptable!(field)
+          return unless respond_to?(:encryptable_rules) && encryptable_rules.key?(field)
+
+          raise ArgumentError,
+                "#{LABEL}: ':#{field}' is encrypted (Encryptable), so tagged_with's LIKE would run against the " \
+                "ciphertext and never match. Tag a non-encrypted column instead."
+        end
 
         # Splits each entry on the delimiter before cleaning: a tag can never
         # contain the delimiter (the column format has no way to escape it),

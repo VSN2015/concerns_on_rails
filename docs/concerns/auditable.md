@@ -58,7 +58,7 @@ Configures the tracked fields and the audit column. Every column (tracked fields
 
 ## Entry format
 
-One entry is recorded **per changed tracked field per save**; all entries of one save share the same timestamp. On create, entries are recorded with `"from" => nil`.
+One entry is recorded **per changed tracked field per save**; all entries of one save share the same timestamp. On create, entries are recorded with `"from" => nil` — including a tracked column a sibling generates in `before_create`, after this concern's `before_save` capture: a [Sequenceable](sequenceable.md) number, a [Tokenizable](tokenizable.md)/[Hashable](hashable.md) value, or a [Sluggable](sluggable.md) slug built from one. Those producers report the value (`Support::GeneratedValues`) and the creation entry is rebuilt to include it, whatever the include or declaration order (the trail is rebuilt from the persisted column, so nothing is recorded twice).
 
 ```json
 { "field": "price", "from": 100, "to": 200, "at": "2026-06-10T12:34:56.123456Z", "by": "admin@shop.com" }

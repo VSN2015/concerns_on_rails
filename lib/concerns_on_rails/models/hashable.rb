@@ -1,6 +1,8 @@
 require "active_support/concern"
 require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/encrypted_lookup"
+require "concerns_on_rails/support/generated_values"
 require "concerns_on_rails/support/random_value"
 require "concerns_on_rails/support/unique_retry"
 require "securerandom"
@@ -184,26 +186,35 @@ module ConcernsOnRails
       end
 
       # Assigns the generated value only when the field is blank,
-      # so callers can still pass an explicit value at create time.
+      # so callers can still pass an explicit value at create time. It runs in
+      # before_create, after every sibling's before_validation/before_save, so
+      # the value is reported to the ones that derive from it (Encryptable's
+      # blind index, a slug built from the code, Auditable's creation entry —
+      # Support::GeneratedValues).
       def assign_hashable_value
         field = self.class.hashable_field
         return if self[field].present?
 
-        self[field] = if self.class.hashable_unique
-                        unique_hashable_value(field)
-                      else
-                        self.class.generate_hashable_value
-                      end
+        ConcernsOnRails::Support::GeneratedValues.watch(self, [field]) do
+          self[field] = if self.class.hashable_unique
+                          unique_hashable_value(field)
+                        else
+                          self.class.generate_hashable_value
+                        end
+        end
       end
 
       # Best-effort uniqueness: retry on an in-Ruby collision before insert. Pair
       # with a unique DB index for the real guarantee (mirrors Tokenizable).
       # Checked against the STI base class: a subclass's own relation carries
-      # its type condition and would miss a sibling subclass's value.
+      # its type condition and would miss a sibling subclass's value. An
+      # encrypted field is checked through its blind index (the ciphertext
+      # column never matches); one without an index cannot be checked at all.
       def unique_hashable_value(field)
         ConcernsOnRails::Models::Hashable::MAX_GENERATION_ATTEMPTS.times do
           candidate = self.class.generate_hashable_value
-          return candidate unless self.class.base_class.unscoped.exists?(field => candidate)
+          condition = ConcernsOnRails::Support::EncryptedLookup.condition(self.class, field, candidate)
+          return candidate if condition.nil? || !self.class.base_class.unscoped.exists?(condition)
         end
         raise "ConcernsOnRails::Models::Hashable: could not generate a unique value for '#{field}' " \
               "after #{ConcernsOnRails::Models::Hashable::MAX_GENERATION_ATTEMPTS} attempts"

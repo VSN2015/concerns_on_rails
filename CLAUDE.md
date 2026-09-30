@@ -194,7 +194,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   Normalizes-before-encrypt and masks-decrypted for free; RAISES if a field is
   also `auditable_by` (either declaration order), or a friendly_id slug source — the
   `sluggable_by` field, a `candidates:` entry, an `alias_attribute` of one (chains followed),
-  a bare friendly_id base (at the macro where it can, else at save). Ciphertext is
+  a bare friendly_id base (at the macro where it can, else at save), or a `searchable_by`/
+  `taggable_by` column (either order; undeclared Taggable `:tags` at `tagged_with`). Ciphertext is
   non-deterministic ⇒ unsearchable; opt into `blind_index: true` (or
   `{ column:, expression: }`) for a deterministic-HMAC companion column +
   `find_by_<field>`/`where_<field>`/`<field>_fingerprint` finders (nil values
@@ -358,7 +359,12 @@ boot), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomV
 Auditable `actor:`; deliberately NOT Throttleable `if:`'s dispatch),
 `SlugSources` (what a friendly_id slug is built from — Sluggable's field/`candidates:` or a bare
 friendly_id base, `alias_attribute` resolved — for the Encryptable/Sluggable guards and
-Anonymizable's `slug: :auto`), `SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
+Anonymizable's `slug: :auto`), `GeneratedValues` (producers that assign in `before_create` —
+Tokenizable, Hashable, Sequenceable — `watch` the write and report the changed columns; the
+consumers' hooks run in a FIXED order — Sluggable's slug, Encryptable's blind index, Auditable's
+creation entry — so none depends on include order), `EncryptedLookup` (equality on a maybe-
+`encryptable` column: the blind index, or nil when there is none — Tokenizable's finders raise on
+nil, the uniqueness prechecks skip), `SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
 allow-list trees + the includes/paths/as_json shapes for Includable), `Affix` (affixed
 scope/accessor-name computation + `prefix: true` normalization, shared by Activatable,
 Expirable, Lockable, Anonymizable, Stateable, Storable, Publishable, SoftDeletable and

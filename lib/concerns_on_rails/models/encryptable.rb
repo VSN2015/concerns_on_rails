@@ -291,6 +291,7 @@ module ConcernsOnRails
             field = field.to_sym
             encryptable_guard_auditable!(field)
             encryptable_guard_sluggable!(field)
+            encryptable_guard_queryable!(field)
             bi = encryptable_normalize_blind_index(field, blind_index)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
@@ -513,6 +514,34 @@ module ConcernsOnRails
             "the decrypted plaintext in the slug column. Slug from a non-sensitive field instead."
         end
 
+        # Macro-time guard for the order Searchable/Taggable-first: `search` and
+        # `tagged_with` are LIKE queries on the column, which holds ciphertext
+        # under a random IV, so they would silently match nothing. Searchable
+        # and Taggable mirror this for the reverse order. An undeclared
+        # Taggable (its :tags default, a taggable_by may still follow) is left
+        # to tagged_with's call-time check.
+        def encryptable_guard_queryable!(field)
+          concern = if encryptable_searched_field?(field)
+                      "Searchable (search)"
+                    elsif encryptable_tagged_field?(field)
+                      "Taggable (tagged_with)"
+                    end
+          return unless concern
+
+          raise ArgumentError,
+                "#{LABEL}: ':#{field}' is also queried by #{concern}, whose LIKE match would run against the " \
+                "ciphertext and never find a row. Query a non-encrypted column instead (a blind index gives " \
+                "exact-match lookups: `blind_index: true`, then where_#{field})."
+        end
+
+        def encryptable_searched_field?(field)
+          respond_to?(:searchable_fields) && searchable_fields.map(&:to_sym).include?(field)
+        end
+
+        def encryptable_tagged_field?(field)
+          respond_to?(:taggable_declared) && taggable_declared && taggable_field.to_sym == field
+        end
+
         # Redact encrypted fields from Rails parameter logging. The gem-level
         # registry is consulted at filter time by the proc ConcernsOnRails::
         # Railtie appends to config.filter_parameters at boot — so fields
@@ -656,8 +685,22 @@ module ConcernsOnRails
       # Recompute each blind-index column from the (changed) plaintext just
       # before the row is written, so the fingerprint always matches the value.
       def encryptable_refresh_blind_indexes
-        self.class.encryptable_rules.each do |field, rule|
-          bi = rule[:blind_index]
+        encryptable_refresh_blind_indexes_for(self.class.encryptable_rules.keys)
+      end
+
+      # Support::GeneratedValues consumer. A token / code / number generated in
+      # before_create arrives AFTER the before_save refresh above, so without
+      # this the row was INSERTed with a NULL fingerprint and find_by_<field>
+      # never found a freshly created record.
+      def encryptable_generated_values_assigned(columns)
+        encryptable_refresh_blind_indexes_for(columns)
+      end
+
+      def encryptable_refresh_blind_indexes_for(fields)
+        rules = self.class.encryptable_rules
+        fields.each do |field|
+          rule = rules[field.to_sym]
+          bi = rule && rule[:blind_index]
           next unless bi
           next unless public_send("#{field}_changed?")
 
