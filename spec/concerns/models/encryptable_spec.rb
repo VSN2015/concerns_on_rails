@@ -370,6 +370,20 @@ describe ConcernsOnRails::Models::Encryptable do
         expect(klass.find(record.id).meeting_at).to eq(Time.utc(2026, 10, 1, 13))
         expect(klass.find(record.id).meeting_at_changed?).to be(false)
       end
+
+      # A plaintext not in the gem's own ISO8601 form (a plain column adopted
+      # under on_missing_key: :passthrough) is a DATABASE value: it is read
+      # the way a datetime column reads one, in default_timezone (UTC), and
+      # only then shown in Time.zone. It is not wall-clock time in Time.zone.
+      it "reads a zone-less stored plaintext as UTC, like a datetime column reads the database" do
+        ConcernsOnRails.encryption.key = nil
+        ConcernsOnRails.encryption.on_missing_key = :passthrough
+        record = klass.create!
+        klass.where(id: record.id).update_all("meeting_at = '2026-10-01 13:00:00'")
+
+        expect(klass.find(record.id).meeting_at).to eq(Time.utc(2026, 10, 1, 13))
+        expect(klass.find(record.id).meeting_at.time_zone.name).to eq("America/New_York")
+      end
     end
   end
 

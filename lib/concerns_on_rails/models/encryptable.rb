@@ -212,11 +212,21 @@ module ConcernsOnRails
         end
 
         # The stored plaintext is the UTC ISO8601 String `stringify` writes,
-        # read strictly. Anything else is read as user input.
+        # read strictly. Any other form (a plain column adopted under
+        # on_missing_key: :passthrough) is a DATABASE value, so it is read the
+        # way ActiveRecord reads a datetime column: in default_timezone, and
+        # only then shown in Time.zone.
         def read_time(plaintext)
           ConcernsOnRails::Support::TimeValue.read(plaintext, zone_aware: zone_aware?)
         rescue ArgumentError
-          cast_typed(plaintext)
+          read_foreign_time(plaintext)
+        rescue StandardError
+          nil
+        end
+
+        def read_foreign_time(plaintext)
+          time = ConcernsOnRails::Support::TimeValue.cast(plaintext, zone_aware: false)
+          time && ConcernsOnRails::Support::TimeValue.present(time, zone_aware: zone_aware?)
         rescue StandardError
           nil
         end

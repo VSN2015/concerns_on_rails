@@ -379,10 +379,11 @@ module ConcernsOnRails
         kept.size == values.size ? nil : kept
       end
 
-      # Only to classify the member: `where` still casts the raw value itself.
+      # Only to classify the member: `where` still casts the raw value itself,
+      # so a type whose cast raises is left to fail (or not) exactly as before.
       def filterable_equality_cast(column_type, member)
         column_type.cast(member)
-      rescue ArgumentError, TypeError, RangeError
+      rescue StandardError
         nil
       end
 
