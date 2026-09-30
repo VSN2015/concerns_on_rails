@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/time_value"
 
 module ConcernsOnRails
   module Models
@@ -185,18 +186,22 @@ module ConcernsOnRails
         schedulable_expired?
       end
 
+      # start! / finish! / reschedule! cast each time through its column's type
+      # first. One that cannot be parsed ("junk") raises ArgumentError and
+      # nothing is written; it used to cast to nil, CLEAR the column and
+      # return true. nil still clears a side.
       def start!(time = Time.zone.now)
         field = self.class.schedulable_starts_at_field
         raise "ConcernsOnRails::Models::Schedulable: starts_at field not configured" unless field
 
-        update(field => time)
+        update(field => schedulable_cast_time(field, time))
       end
 
       def finish!(time = Time.zone.now)
         field = self.class.schedulable_ends_at_field
         raise "ConcernsOnRails::Models::Schedulable: ends_at field not configured" unless field
 
-        update(field => time)
+        update(field => schedulable_cast_time(field, time))
       end
 
       # Update either or both window columns: only the keywords you pass are
@@ -213,10 +218,16 @@ module ConcernsOnRails
           field = kind == :starts_at ? self.class.schedulable_starts_at_field : self.class.schedulable_ends_at_field
           raise ArgumentError, "ConcernsOnRails::Models::Schedulable: #{kind} column is not configured" unless field
 
-          [field, value]
+          [field, schedulable_cast_time(field, value)]
         end
         update(attrs)
       end
+
+      # Postfix private, like the checks below.
+      def schedulable_cast_time(field, value)
+        ConcernsOnRails::Support::TimeValue.cast_argument!(self.class, field, value, label: "ConcernsOnRails::Models::Schedulable")
+      end
+      private :schedulable_cast_time
 
       # Postfix private — the keyword form trips RuboCop's scope analysis
       # against the `private` inside the class_methods block (Publishable's

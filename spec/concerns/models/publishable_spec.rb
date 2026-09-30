@@ -150,6 +150,48 @@ describe ConcernsOnRails::Publishable do
       expect(article.reload.scheduled?).to be true
       expect(article.published?).to be false
     end
+
+    it "#publish_at! accepts a parseable String, cast like an assignment" do
+      article = Article.create!(title: "t")
+      expect(article.publish_at!("2020-01-01 00:00:00")).to be(true)
+      expect(article.reload.published_at).to eq(Time.utc(2020, 1, 1))
+    end
+
+    # "junk" cast to nil, so the verb wrote NULL, fired the publish hooks and
+    # returned true. Expirable already refused such a time.
+    context "with a time that cannot be parsed" do
+      let(:hooked) do
+        Class.new(TestModel) do
+          self.table_name = "articles"
+          include ConcernsOnRails::Publishable
+
+          publishable_by :published_at
+
+          attr_reader :log
+
+          def before_publish
+            (@log ||= []) << :before_publish
+          end
+        end
+      end
+
+      ["junk", "2026-13-45 99:99", 42, 1.hour].each do |bad|
+        it "#publish_at!(#{bad.inspect}) raises ArgumentError before any hook runs, and writes nothing" do
+          article = hooked.create!(title: "t", published_at: 1.day.from_now)
+
+          expect { article.publish_at!(bad) }
+            .to raise_error(ArgumentError, /cannot be parsed as a time for 'published_at'/)
+          expect(article.log).to be_nil
+          expect(article.reload).to be_scheduled
+        end
+      end
+
+      it "keeps publish_at!(nil) writing NULL, as before" do
+        article = hooked.create!(title: "t", published_at: 1.day.from_now)
+        expect(article.publish_at!(nil)).to be(true)
+        expect(article.reload).to be_draft
+      end
+    end
   end
 
   describe "default_scope: true" do

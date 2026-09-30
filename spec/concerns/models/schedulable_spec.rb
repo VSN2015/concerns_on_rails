@@ -152,6 +152,36 @@ describe ConcernsOnRails::Schedulable do
       expect(promo.starts_at.to_i).to eq(starts.to_i)
       expect(promo.ends_at.to_i).to eq(ends.to_i)
     end
+
+    it "accepts parseable Strings, cast like an assignment" do
+      promo = Promotion.create!(name: "X")
+      promo.start!("2020-01-01 00:00:00")
+      promo.reschedule!(ends_at: "2020-02-01 00:00:00")
+      expect(promo.reload.starts_at).to eq(Time.utc(2020, 1, 1))
+      expect(promo.ends_at).to eq(Time.utc(2020, 2, 1))
+    end
+
+    # "junk" cast to nil, so start!/finish! CLEARED the column and returned
+    # true. Expirable already refused such a time.
+    ["junk", "2026-13-45 99:99", 42, 1.hour].each do |bad|
+      it "raises ArgumentError on #{bad.inspect} and writes nothing" do
+        starts = Time.utc(2026, 1, 1)
+        promo = Promotion.create!(name: "X", starts_at: starts)
+
+        expect { promo.start!(bad) }.to raise_error(ArgumentError, /cannot be parsed as a time for 'starts_at'/)
+        expect { promo.finish!(bad) }.to raise_error(ArgumentError, /cannot be parsed as a time for 'ends_at'/)
+        expect { promo.reschedule!(starts_at: Time.utc(2027, 1, 1), ends_at: bad) }
+          .to raise_error(ArgumentError, /cannot be parsed as a time for 'ends_at'/)
+        expect([promo.reload.starts_at, promo.ends_at]).to eq([starts, nil])
+      end
+    end
+
+    it "keeps nil meaning 'clear this side'" do
+      promo = Promotion.create!(name: "X", starts_at: Time.utc(2026, 1, 1), ends_at: Time.utc(2026, 2, 1))
+      promo.reschedule!(ends_at: nil)
+      promo.start!(nil)
+      expect([promo.reload.starts_at, promo.ends_at]).to eq([nil, nil])
+    end
   end
 
   describe "custom field configuration" do

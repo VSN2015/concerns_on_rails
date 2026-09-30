@@ -4,6 +4,7 @@ require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/association_scope"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/time_value"
 
 module ConcernsOnRails
   module Models
@@ -258,7 +259,10 @@ module ConcernsOnRails
       def after_restore; end
 
       # `at:` sets the timestamp (default now) — it is what the cascade uses to
-      # hand the parent's exact timestamp down, and lets callers backdate.
+      # hand the parent's exact timestamp down, and lets callers backdate. It
+      # is cast through the column's type up front. A time that cannot be
+      # parsed ("junk") raises ArgumentError before any hook runs; it used to
+      # cast to nil, delete nothing and still return true.
       #
       # The hooks, the write and the cascade share one savepoint
       # (Support::HookedWrite): a raising hook — or one vetoing with
@@ -267,6 +271,9 @@ module ConcernsOnRails
       # in-memory stamp is put back so a retry is not swallowed by the
       # `deleted?` guard. A failed validation rolls back the before hook too.
       def soft_delete!(at: Time.zone.now)
+        at = ConcernsOnRails::Support::TimeValue.cast_argument!(
+          self.class, self.class.soft_delete_field, at, label: "ConcernsOnRails::Models::SoftDeletable"
+        )
         return true if deleted?
 
         ConcernsOnRails::Support::HookedWrite.run(self, before: :before_soft_delete, after: :after_soft_delete) do
