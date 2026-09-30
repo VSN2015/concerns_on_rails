@@ -709,4 +709,126 @@ describe ConcernsOnRails::Storable do
       end
     end
   end
+
+  # A :datetime key used to be cast with a bare ActiveModel DateTime: a
+  # zone-less String was UTC, a Date was UTC midnight, and reads were plain
+  # UTC Times. A real datetime column on the same model reads that input in
+  # Time.zone, so a datetime-local form value "2026-10-01T09:00" (09:00 New
+  # York = 13:00 UTC) was stored four hours off. Every Rails app sets
+  # time_zone_aware_attributes; the harness does not, so it is set here.
+  describe "a :datetime key in a time-zone-aware app" do
+    around { |example| Time.use_zone("America/New_York") { example.run } }
+
+    # A real datetime column to compare with. clear_cache! drops the prepared
+    # `SELECT *` earlier examples cached with the old column list.
+    before do
+      ActiveRecord::Base.connection.add_column :storable_accounts, :trial_column_ends_at, :datetime
+      ActiveRecord::Base.connection.clear_cache!
+    end
+
+    let(:klass) do
+      model_class do
+        self.time_zone_aware_attributes = true
+        storable_by :settings, trial_ends_at: { type: :datetime }
+      end
+    end
+
+    it "parses a zone-less String (form input) in Time.zone, like a datetime column" do
+      account = klass.new(trial_column_ends_at: "2026-10-01T09:00", trial_ends_at: "2026-10-01T09:00")
+      account.save!
+
+      expect(account.trial_column_ends_at.getutc).to eq(Time.utc(2026, 10, 1, 13)) # 09:00 EDT
+      expect(account.trial_ends_at).to eq(account.trial_column_ends_at)
+      expect(account.reload.trial_ends_at).to eq(account.trial_column_ends_at)
+      # The stored format is unchanged: UTC ISO8601 with microseconds.
+      expect(JSON.parse(account.read_attribute(:settings))["trial_ends_at"]).to eq("2026-10-01T13:00:00.000000Z")
+    end
+
+    it "reads back as a TimeWithZone in the reader's Time.zone, like a datetime column" do
+      account = klass.create!(trial_ends_at: Time.utc(2026, 10, 1, 13), trial_column_ends_at: Time.utc(2026, 10, 1, 13))
+
+      reloaded = klass.find(account.id)
+      expect(reloaded.trial_column_ends_at.time_zone.name).to eq("America/New_York")
+      expect(reloaded.trial_ends_at).to be_a(ActiveSupport::TimeWithZone)
+      expect(reloaded.trial_ends_at.time_zone.name).to eq("America/New_York")
+      expect(reloaded.trial_ends_at.hour).to eq(9)
+      Time.use_zone("Tokyo") { expect(klass.find(account.id).trial_ends_at.hour).to eq(22) }
+    end
+
+    it "treats a Date as midnight in Time.zone, like a datetime column" do
+      account = klass.new(trial_ends_at: Date.new(2026, 10, 1), trial_column_ends_at: Date.new(2026, 10, 1))
+
+      expect(account.trial_ends_at).to eq(account.trial_column_ends_at)
+      expect(account.trial_ends_at.getutc).to eq(Time.utc(2026, 10, 1, 4))
+    end
+
+    it "reads a row stored before the fix (UTC ISO8601) as the same instant" do
+      account = klass.create!
+      account.update_column(:settings, JSON.generate("trial_ends_at" => "2026-10-01T13:00:00.000000Z"))
+
+      expect(klass.find(account.id).trial_ends_at).to eq(Time.utc(2026, 10, 1, 13))
+    end
+
+    it "where_<key> parses its argument exactly as the writer does" do
+      account = klass.create!(trial_ends_at: "2026-10-01T09:00")
+      klass.create!(trial_ends_at: "2026-10-01T13:00")
+
+      expect(klass.where_trial_ends_at("2026-10-01T09:00")).to eq([account])
+      expect(klass.where_trial_ends_at(Date.new(2026, 10, 1))).to eq([])
+      expect(klass.where_trial_ends_at(Time.utc(2026, 10, 1, 13))).to eq([account])
+    end
+
+    it "keeps the UTC semantics for a key named in skip_time_zone_conversion_for_attributes" do
+      skipped = model_class do
+        self.time_zone_aware_attributes = true
+        self.skip_time_zone_conversion_for_attributes = [:trial_ends_at]
+        storable_by :settings, trial_ends_at: { type: :datetime }
+      end
+      account = skipped.create!(trial_ends_at: "2026-10-01T09:00")
+
+      expect(skipped.find(account.id).trial_ends_at).to eq(Time.utc(2026, 10, 1, 9))
+      expect(skipped.find(account.id).trial_ends_at).not_to be_a(ActiveSupport::TimeWithZone)
+    end
+  end
+
+  describe "a :datetime key under default_timezone = :local (no time-zone-aware attributes)" do
+    def default_timezone=(value)
+      if ActiveRecord.respond_to?(:default_timezone=)
+        ActiveRecord.default_timezone = value
+      else
+        ActiveRecord::Base.default_timezone = value
+      end
+    end
+
+    around do |example|
+      previous_tz = ENV.fetch("TZ", nil)
+      ENV["TZ"] = "Asia/Tokyo"
+      self.default_timezone = :local
+      example.run
+    ensure
+      self.default_timezone = :utc
+      ENV["TZ"] = previous_tz
+    end
+
+    # A real datetime column to compare with. clear_cache! drops the prepared
+    # `SELECT *` earlier examples cached with the old column list.
+    before do
+      ActiveRecord::Base.connection.add_column :storable_accounts, :trial_column_ends_at, :datetime
+      ActiveRecord::Base.connection.clear_cache!
+    end
+
+    let(:klass) { model_class { storable_by :settings, trial_ends_at: { type: :datetime } } }
+
+    it "reads a zone-less String and a Date as local time, and reads back local, like a datetime column" do
+      from_string = klass.create!(trial_column_ends_at: "2026-10-01T09:00", trial_ends_at: "2026-10-01T09:00")
+      from_date = klass.create!(trial_column_ends_at: Date.new(2026, 10, 1), trial_ends_at: Date.new(2026, 10, 1))
+
+      [from_string, from_date].each do |account|
+        reloaded = klass.find(account.id)
+        expect(reloaded.trial_ends_at).to eq(reloaded.trial_column_ends_at)
+        expect(reloaded.trial_ends_at.utc_offset).to eq(9 * 3600)
+      end
+      expect(klass.find(from_string.id).trial_ends_at.getutc).to eq(Time.utc(2026, 10, 1, 0))
+    end
+  end
 end

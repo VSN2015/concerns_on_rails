@@ -317,6 +317,60 @@ describe ConcernsOnRails::Models::Encryptable do
       klass.create!(meeting_at: local)
       expect(local.utc_offset).to eq(7 * 3600)
     end
+
+    # The cast parsed a zone-less String with Time.iso8601 (the process's
+    # SYSTEM zone) or ActiveModel's DateTime (UTC), a Date as UTC midnight, and
+    # read back plain UTC Times. A datetime column on the same model reads that
+    # input in Time.zone. Every Rails app sets time_zone_aware_attributes; the
+    # harness does not, so it is set here.
+    describe "type: :datetime in a time-zone-aware app" do
+      around { |example| Time.use_zone("America/New_York") { example.run } }
+
+      # A real datetime column to compare with. clear_cache! drops the prepared
+      # `SELECT *` earlier examples cached with the old column list.
+      before do
+        ActiveRecord::Base.connection.add_column :encryptable_records, :meeting_column_at, :datetime
+        ActiveRecord::Base.connection.clear_cache!
+      end
+
+      let(:klass) do
+        model_class do
+          self.time_zone_aware_attributes = true
+          encryptable :meeting_at, type: :datetime
+        end
+      end
+
+      it "parses a zone-less String in Time.zone, like a datetime column" do
+        record = klass.new(meeting_at: "2026-10-01T09:00", meeting_column_at: "2026-10-01T09:00")
+
+        expect(record.meeting_column_at.getutc).to eq(Time.utc(2026, 10, 1, 13)) # 09:00 EDT
+        expect(record.meeting_at).to eq(record.meeting_column_at)
+        record.save!
+        expect(klass.find(record.id).meeting_at).to eq(record.meeting_column_at)
+      end
+
+      it "treats a Date as midnight in Time.zone, like a datetime column" do
+        record = klass.new(meeting_at: Date.new(2026, 10, 1), meeting_column_at: Date.new(2026, 10, 1))
+        expect(record.meeting_at).to eq(record.meeting_column_at)
+      end
+
+      it "reads back as a TimeWithZone in the reader's Time.zone" do
+        record = klass.create!(meeting_at: Time.utc(2026, 10, 1, 13))
+
+        reloaded = klass.find(record.id)
+        expect(reloaded.meeting_at).to be_a(ActiveSupport::TimeWithZone)
+        expect([reloaded.meeting_at.time_zone.name, reloaded.meeting_at.hour]).to eq(["America/New_York", 9])
+        Time.use_zone("Tokyo") { expect(klass.find(record.id).meeting_at.hour).to eq(22) }
+      end
+
+      it "reads a row written before the fix (a UTC ISO8601 plaintext) as the same instant" do
+        plain = model_class { encryptable :meeting_at, type: :datetime }
+        record = plain.create!(meeting_at: Time.utc(2026, 10, 1, 13))
+
+        expect(klass.find(record.id).meeting_at).to eq(Time.utc(2026, 10, 1, 13))
+        expect(klass.find(record.id).meeting_at_changed?).to be(false)
+      end
+    end
   end
 
   describe "composition" do

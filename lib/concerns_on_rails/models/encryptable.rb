@@ -38,6 +38,9 @@ module ConcernsOnRails
     #
     # `type:` casts the decrypted value (reuses the Storable caster set:
     # :string default, :integer, :float, :decimal, :boolean, :date, :datetime).
+    # A :datetime field behaves like a datetime column on the same model: under
+    # time_zone_aware_attributes, zone-less input is read in Time.zone and the
+    # value is a TimeWithZone. The plaintext is always UTC ISO8601.
     # `key:` overrides the gem-level key per field (a String or a Proc).
     #
     # BLIND INDEX (`blind_index: true` or a Hash): because encryption is
@@ -156,10 +159,18 @@ module ConcernsOnRails
       # deserialize decrypts on the read-from-DB path. An immutable value type,
       # so dirty tracking compares the cast plaintext — a re-save of unchanged
       # data is not dirtied by GCM's random IV.
+      #
+      # A :datetime field follows `owner`'s time_zone_aware_attributes for
+      # `name`, like a datetime column on that model (Support::TimeValue):
+      # zone-less input is read in Time.zone and values are TimeWithZones.
+      # The plaintext is always UTC ISO8601, so this is read at cast time and
+      # never changes what is stored.
       class EncryptedType < ActiveModel::Type::Value
-        def initialize(type: :string, key: nil)
+        def initialize(type: :string, key: nil, owner: nil, name: nil)
           @type = type
           @key = key
+          @owner = owner
+          @name = name
           super()
         end
 
@@ -175,7 +186,7 @@ module ConcernsOnRails
           plaintext = read_plaintext(value)
           return nil if plaintext.nil?
 
-          cast_typed(plaintext)
+          @type == :datetime ? read_time(plaintext) : cast_typed(plaintext)
         end
 
         # typed plaintext -> DB ciphertext
@@ -193,11 +204,25 @@ module ConcernsOnRails
         def cast_typed(value)
           case @type
           when :decimal  then to_big_decimal(value)
-          when :datetime then to_time(value)
+          when :datetime then ConcernsOnRails::Support::TimeValue.cast(value, zone_aware: zone_aware?)
           else CASTERS[@type].cast(value)
           end
         rescue StandardError
           nil
+        end
+
+        # The stored plaintext is the UTC ISO8601 String `stringify` writes,
+        # read strictly. Anything else is read as user input.
+        def read_time(plaintext)
+          ConcernsOnRails::Support::TimeValue.read(plaintext, zone_aware: zone_aware?)
+        rescue ArgumentError
+          cast_typed(plaintext)
+        rescue StandardError
+          nil
+        end
+
+        def zone_aware?
+          !@owner.nil? && ConcernsOnRails::Support::TimeValue.zone_aware?(@owner, @name)
         end
 
         # Canonical, reversible String form fed to the cipher: cast to the typed
@@ -226,22 +251,6 @@ module ConcernsOnRails
           return nil if value.nil?
 
           value.is_a?(BigDecimal) ? value : BigDecimal(value.to_s)
-        end
-
-        def to_time(value)
-          case value
-          when nil then nil
-          when ActiveSupport::TimeWithZone, Time then value
-          when DateTime then value.to_time
-          when Date then Time.utc(value.year, value.month, value.day)
-          when String
-            begin
-              Time.iso8601(value)
-            rescue ArgumentError
-              CASTERS[:datetime].cast(value)
-            end
-          else CASTERS[:datetime].cast(value)
-          end
         end
 
         # Gem-keyed fields stamp the configured key_id so rotation can tell old
@@ -297,7 +306,7 @@ module ConcernsOnRails
             bi = encryptable_normalize_blind_index(field, blind_index)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
-            attribute field, EncryptedType.new(type: type, key: key)
+            attribute field, EncryptedType.new(type: type, key: key, owner: self, name: field)
             encryptable_define_helpers(field)
             encryptable_define_blind_index(field, bi) if bi
             encryptable_register_filter_parameter(field)
