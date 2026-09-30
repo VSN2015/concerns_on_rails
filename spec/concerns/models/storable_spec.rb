@@ -789,6 +789,38 @@ describe ConcernsOnRails::Storable do
       expect(skipped.find(account.id).trial_ends_at).to eq(Time.utc(2026, 10, 1, 9))
       expect(skipped.find(account.id).trial_ends_at).not_to be_a(ActiveSupport::TimeWithZone)
     end
+
+    # datetime_select posts a multiparameter Hash. It was cast as UTC
+    # wall-clock time and then moved into Time.zone, so 09:00 became 05:00.
+    it "reads datetime_select (multiparameter) input as wall-clock time in Time.zone, like a column" do
+      parts = { "1i" => "2026", "2i" => "10", "3i" => "1", "4i" => "09", "5i" => "00" }
+      attributes = %w[trial_ends_at trial_column_ends_at].each_with_object({}) do |name, all|
+        parts.each { |part, value| all["#{name}(#{part})"] = value }
+      end
+      account = klass.new(attributes)
+
+      expect(account.trial_column_ends_at.getutc).to eq(Time.utc(2026, 10, 1, 13)) # 09:00 EDT
+      expect(account.trial_ends_at).to eq(account.trial_column_ends_at)
+    end
+
+    # A String or Proc default: came back exactly as declared (a String, a
+    # plain UTC Time), unlike the same value stored under the key.
+    it "casts a String or Proc default: through the path a stored value takes" do
+      defaulted = model_class do
+        self.time_zone_aware_attributes = true
+        storable_by :settings, trial_ends_at: { type: :datetime, default: "2026-10-01T09:00" },
+                               renews_at: { type: :datetime, default: -> { Time.utc(2026, 10, 1, 13) } },
+                               lapses_at: { type: :datetime, default: "not a time" }
+      end
+      account = defaulted.new
+
+      expect(account.trial_ends_at).to be_a(ActiveSupport::TimeWithZone)
+      expect(account.trial_ends_at.getutc).to eq(Time.utc(2026, 10, 1, 13)) # 09:00 in Time.zone
+      expect(account.renews_at).to be_a(ActiveSupport::TimeWithZone)
+      expect(account.renews_at.hour).to eq(9)
+      expect(account.lapses_at).to be_nil
+      expect(account.trial_ends_at_changed?).to be(false)
+    end
   end
 
   describe "a :datetime key under default_timezone = :local (no time-zone-aware attributes)" do

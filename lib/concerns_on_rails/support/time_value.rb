@@ -30,6 +30,8 @@ module ConcernsOnRails
       # ("10000-01-01" sorts before "2026-01-01"). Year 0 does not exist in
       # SQL, and PostgreSQL rejects it.
       YEARS = (1..9999)
+      # A zone designator ending a String: Z, or an offset (+09:00, -0400, +09).
+      ZONED = /(?:Z|[+-]\d{2}(?::?\d{2})?)\z/i
 
       module_function
 
@@ -53,16 +55,32 @@ module ConcernsOnRails
       # exactly as they do on assignment. A blank value is returned untouched:
       # each verb keeps its own meaning for it (`expire!(nil)` means now,
       # `publish_at!(nil)` writes NULL). Any other value that casts to no time
-      # or date raises ArgumentError. Before this check, "junk" cast to nil and
-      # the verb wrote NULL but still reported success.
+      # or date raises ArgumentError, and so does a String that names no year
+      # (see names_year?). Before this check, "junk" cast to nil and the verb
+      # wrote NULL but still reported success.
       def cast_argument!(klass, field, value, label:, accepts: "a Time or a parseable String")
         return value if value.blank?
 
-        cast = klass.type_for_attribute(field.to_s).cast(value)
+        cast = names_year?(value) ? klass.type_for_attribute(field.to_s).cast(value) : nil
         return cast if temporal?(cast)
 
         raise ArgumentError,
               "#{label}: #{value.inspect} cannot be parsed as a time for '#{field}' — pass #{accepts}"
+      end
+
+      # A String argument must name a year. Under time-zone awareness the
+      # column's cast is Time.zone.parse, which finds a date in almost
+      # anything: "junk" is June 1st ("jun"), "maybe" May 1st, "Monday" and
+      # "10:30" today. ISO 8601, RFC 2822, HTTP dates, "Oct 1 2026" and
+      # "2026-10-01 10:30" all name one. Anything that is not a String is
+      # judged by its cast alone. Only the verbs check this: assigning to the
+      # column still casts exactly as ActiveRecord does.
+      def names_year?(value)
+        return true unless value.is_a?(::String)
+
+        ::Date._parse(value).key?(:year)
+      rescue ArgumentError # Date._parse refuses a String longer than 128 characters
+        false
       end
 
       # ---- virtual datetimes (Storable keys, Encryptable fields) ---------
@@ -103,10 +121,25 @@ module ConcernsOnRails
       # `default_timezone = :local`, otherwise the instant as stored. Every
       # value the gem writes is UTC ISO8601, so existing rows read unchanged.
       # `raw` is that String, or a Time that a serialized column already
-      # decoded. A String that is not ISO8601 raises ArgumentError (callers
-      # keep their own nil-on-garbage rule).
+      # decoded. nil for a value that is not a time.
       def read(raw, zone_aware:)
-        present(raw.is_a?(::Time) ? raw : ::Time.iso8601(raw.to_s), zone_aware: zone_aware)
+        time = raw.is_a?(::Time) ? raw : stored_time(raw.to_s)
+        time && present(time, zone_aware: zone_aware)
+      end
+
+      # The gem writes UTC ISO8601 ("...Z"), read strictly by Time.iso8601.
+      # Time.iso8601 also reads a zone-less "...T13:00:00", but in the
+      # SERVER's zone, so only a String carrying Z or an offset takes that
+      # path. Any other form is a database value, read in default_timezone
+      # as ActiveRecord reads a datetime column.
+      def stored_time(string)
+        (ZONED.match?(string) && iso8601(string)) || cast_in_default_timezone(string)
+      end
+
+      def iso8601(string)
+        ::Time.iso8601(string)
+      rescue ArgumentError
+        nil
       end
 
       def present(time, zone_aware:)
@@ -118,11 +151,19 @@ module ConcernsOnRails
 
       def cast_in_zone(value, zone)
         case value
+        when ::Hash then wall_clock_in_zone(cast_in_default_timezone(value), zone)
         when ::String then parse_in_zone(value, zone)
         when ::DateTime then value.to_time.in_time_zone(zone)
         when ::Date then zone.local(value.year, value.month, value.day)
         else cast_in_default_timezone(value)&.in_time_zone(zone)
         end
+      end
+
+      # A multiparameter Hash (datetime_select) holds wall-clock fields: cast
+      # without a zone, then read those fields in Time.zone, as
+      # TimeZoneConverter#cast does (Time.zone.local_to_utc).
+      def wall_clock_in_zone(time, zone)
+        time && zone.local_to_utc(time).in_time_zone(zone)
       end
 
       # Time.zone.parse first, as String#in_time_zone does. If it finds no date

@@ -186,6 +186,23 @@ describe ConcernsOnRails::Publishable do
         end
       end
 
+      # Under time-zone awareness the column's cast is Time.zone.parse:
+      # "junk" is June 1st, "maybe" May 1st, "Monday" today. A String must
+      # name a year.
+      it "refuses words Time.zone.parse would read as a date, in a time-zone-aware app" do
+        zoned = Class.new(hooked) { self.time_zone_aware_attributes = true }
+        article = zoned.create!(title: "t")
+
+        Time.use_zone("America/New_York") do
+          %w[junk maybe decimal marching Monday 10:30].each do |garbage|
+            expect { article.publish_at!(garbage) }.to raise_error(ArgumentError, /cannot be parsed as a time/), garbage
+          end
+          expect(article.publish_at!("Oct 1 2026")).to be(true)
+        end
+        expect(article.reload.published_at).to eq(Time.utc(2026, 10, 1, 4)) # midnight New York
+        expect(article.log).to eq(%i[before_publish])
+      end
+
       it "keeps publish_at!(nil) writing NULL, as before" do
         article = hooked.create!(title: "t", published_at: 1.day.from_now)
         expect(article.publish_at!(nil)).to be(true)

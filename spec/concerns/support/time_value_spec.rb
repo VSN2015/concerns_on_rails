@@ -56,6 +56,34 @@ RSpec.describe ConcernsOnRails::Support::TimeValue do
       end
       expect { cast!("junk", accepts: "a Time, or nil for now") }.to raise_error(ArgumentError, /pass a Time, or nil for now\z/)
     end
+
+    # Under time-zone awareness the column's cast is Time.zone.parse, which
+    # finds a date in almost anything: "junk" is June 1st ("jun"), "Monday"
+    # and "10:30" are today. A String argument must name a year.
+    context "when the model is time-zone-aware" do
+      around { |example| Time.use_zone("America/New_York") { example.run } }
+
+      let(:klass) do
+        Class.new(TestModel) do
+          self.table_name = "time_value_records"
+          self.time_zone_aware_attributes = true
+        end
+      end
+
+      it "refuses a String without a year, however leniently Time.zone.parse would read it" do
+        (%w[junk maybe decimal marching Monday 10:30 tomorrow 2026] + ["1 Oct", "x" * 200]).each do |word|
+          expect { cast!(word) }.to raise_error(ArgumentError, /cannot be parsed as a time for 'happened_at'/), word
+        end
+      end
+
+      it "still accepts ISO 8601, RFC 2822, HTTP dates and the everyday spellings" do
+        ["2026-10-01T10:30:00Z", "2026-10-01T10:30:00.5+09:00", "Thu, 01 Oct 2026 10:30:00 +0000",
+         "Thu, 01 Oct 2026 10:30:00 GMT", "Oct 1 2026", "2026-10-01 10:30", "2026-10-01"].each do |ok|
+          expect(cast!(ok)).to be_a(ActiveSupport::TimeWithZone), ok
+        end
+        expect(cast!("2026-10-01 10:30").hour).to eq(10)
+      end
+    end
   end
 
   describe ".zone_aware?" do
@@ -94,6 +122,12 @@ RSpec.describe ConcernsOnRails::Support::TimeValue do
         expect(described_class.cast(DateTime.new(2026, 10, 1, 13), zone_aware: true).hour).to eq(9)
       end
 
+      it "reads multiparameter (datetime_select) input as wall-clock time in Time.zone" do
+        cast = described_class.cast({ 1 => 2026, 2 => 10, 3 => 1, 4 => 9, 5 => 0 }, zone_aware: true)
+        expect(cast).to be_a(ActiveSupport::TimeWithZone)
+        expect(cast.getutc).to eq(Time.utc(2026, 10, 1, 13))
+      end
+
       it "casts garbage and impossible dates to nil" do
         expect(described_class.cast("garbage", zone_aware: true)).to be_nil
         expect(described_class.cast("2026-13-45", zone_aware: true)).to be_nil
@@ -105,7 +139,21 @@ RSpec.describe ConcernsOnRails::Support::TimeValue do
         read = described_class.read("2026-10-01T13:00:00.123456Z", zone_aware: true)
         expect(read).to be_a(ActiveSupport::TimeWithZone)
         expect([read.hour, read.usec]).to eq([9, 123_456])
-        expect { described_class.read("not a time", zone_aware: true) }.to raise_error(ArgumentError)
+        expect(described_class.read("not a time", zone_aware: true)).to be_nil
+      end
+
+      # A stored value without Z or an offset is a database value: UTC under
+      # default_timezone :utc, never the server's zone (Time.iso8601's reading).
+      it "reads a zone-less stored value in default_timezone, whatever the server's zone" do
+        previous_tz = ENV.fetch("TZ", nil)
+        ENV["TZ"] = "Asia/Tokyo"
+        %w[2026-10-01T13:00:00 2026-10-01T13:00:00.000000].push("2026-10-01 13:00:00").each do |stored|
+          expect(described_class.read(stored, zone_aware: true)).to eq(Time.utc(2026, 10, 1, 13)), stored
+          expect(described_class.read(stored, zone_aware: false)).to eq(Time.utc(2026, 10, 1, 13)), stored
+        end
+        expect(described_class.read("2026-10-01T22:00:00+09:00", zone_aware: false)).to eq(Time.utc(2026, 10, 1, 13))
+      ensure
+        ENV["TZ"] = previous_tz
       end
     end
 

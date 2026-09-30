@@ -318,6 +318,23 @@ describe ConcernsOnRails::Models::Encryptable do
       expect(local.utc_offset).to eq(7 * 3600)
     end
 
+    # Time.iso8601 reads a zone-less "...T13:00:00" in the SERVER's zone. Only
+    # a plaintext carrying Z or an offset takes that path; any other form is a
+    # database value, read in default_timezone (UTC) as a datetime column is.
+    it "reads a zone-less ISO8601 plaintext in default_timezone, not the server's zone" do
+      previous_tz = ENV.fetch("TZ", nil)
+      ENV["TZ"] = "Asia/Tokyo"
+      klass = model_class { encryptable :meeting_at, type: :datetime }
+      ConcernsOnRails.encryption.key = nil
+      ConcernsOnRails.encryption.on_missing_key = :passthrough
+      record = klass.create!
+      klass.where(id: record.id).update_all("meeting_at = '2026-10-01T13:00:00'")
+
+      expect(klass.find(record.id).meeting_at).to eq(Time.utc(2026, 10, 1, 13))
+    ensure
+      ENV["TZ"] = previous_tz
+    end
+
     # The cast parsed a zone-less String with Time.iso8601 (the process's
     # SYSTEM zone) or ActiveModel's DateTime (UTC), a Date as UTC midnight, and
     # read back plain UTC Times. A datetime column on the same model reads that
@@ -383,6 +400,30 @@ describe ConcernsOnRails::Models::Encryptable do
 
         expect(klass.find(record.id).meeting_at).to eq(Time.utc(2026, 10, 1, 13))
         expect(klass.find(record.id).meeting_at.time_zone.name).to eq("America/New_York")
+      end
+
+      # The type pinned the DECLARING class, so a subclass's own override was
+      # ignored, although real columns and Storable keys honour it.
+      it "honours a subclass's skip_time_zone_conversion_for_attributes, like a column does" do
+        child = Class.new(klass) { self.skip_time_zone_conversion_for_attributes = %i[meeting_at meeting_column_at] }
+        record = child.new(meeting_at: "2026-10-01T09:00", meeting_column_at: "2026-10-01T09:00")
+
+        expect(record.meeting_column_at).to eq(Time.utc(2026, 10, 1, 9)) # the column skips conversion
+        expect(record.meeting_at).to eq(record.meeting_column_at)
+        expect(klass.new(meeting_at: "2026-10-01T09:00").meeting_at.getutc).to eq(Time.utc(2026, 10, 1, 13))
+      end
+
+      # datetime_select posts a multiparameter Hash. It was cast as UTC
+      # wall-clock time and then moved into Time.zone, so 09:00 became 05:00.
+      it "reads datetime_select (multiparameter) input as wall-clock time in Time.zone, like a column" do
+        parts = { "1i" => "2026", "2i" => "10", "3i" => "1", "4i" => "09", "5i" => "00" }
+        attributes = %w[meeting_at meeting_column_at].each_with_object({}) do |name, all|
+          parts.each { |part, value| all["#{name}(#{part})"] = value }
+        end
+        record = klass.new(attributes)
+
+        expect(record.meeting_column_at.getutc).to eq(Time.utc(2026, 10, 1, 13)) # 09:00 EDT
+        expect(record.meeting_at).to eq(record.meeting_column_at)
       end
     end
   end
@@ -803,6 +844,111 @@ describe ConcernsOnRails::Models::Encryptable do
         expect { model_class { encryptable :email, blind_index: { expression: 42 } } }
           .to raise_error(ArgumentError, /must be callable/)
       end
+    end
+  end
+
+  # The blind index hashed `value.to_s`: the CAST value on write, the RAW
+  # argument on lookup. Under time-zone awareness the written :datetime is a
+  # TimeWithZone in the request's zone, so `find_by_meeting_at(the same
+  # instant)` missed as soon as the zones differed (and a String never found a
+  # typed field). Both sides now hash the canonical plaintext the cipher gets;
+  # lookups also try the old digest, so rows indexed before stay findable.
+  describe "blind index on a typed field (canonical fingerprint)" do
+    before do
+      connection = ActiveRecord::Base.connection
+      %i[meeting_at_bidx age_bidx amount_bidx].each { |column| connection.add_column :encryptable_records, column, :string }
+      connection.clear_cache!
+    end
+
+    let(:klass) do
+      model_class do
+        self.time_zone_aware_attributes = true
+        encryptable :meeting_at, type: :datetime, blind_index: true
+        encryptable :age, type: :integer, blind_index: true
+        encryptable :amount, type: :decimal, blind_index: true
+      end
+    end
+
+    # What the code before this change wrote: the digest of `value.to_s`.
+    def legacy_digest(value)
+      config = ConcernsOnRails.encryption
+      ConcernsOnRails::Support::Encryptor.blind_index(value.to_s, key: config.resolve_material(nil), salt: config.key_derivation_salt)
+    end
+
+    let(:instant) { Time.utc(2026, 10, 1, 13) }
+
+    it "finds a :datetime record by the very Time it was written with, in a non-UTC zone" do
+      Time.use_zone("America/New_York") do
+        record = klass.create!(meeting_at: instant)
+
+        expect(klass.find_by_meeting_at(instant)).to eq(record)
+        expect(klass.where_meeting_at(instant).to_a).to eq([record])
+      end
+    end
+
+    it "finds it whatever zone the writer and the reader run in, by any rendering of the instant" do
+      record = Time.use_zone("Tokyo") { klass.create!(meeting_at: "2026-10-01T13:00:00Z") }
+
+      Time.use_zone("UTC") do
+        expect(klass.find_by_meeting_at(klass.find(record.id).meeting_at)).to eq(record)
+        expect(klass.find_by_meeting_at(instant)).to eq(record)
+      end
+      Time.use_zone("America/New_York") do
+        expect(klass.find_by_meeting_at("2026-10-01T13:00:00Z")).to eq(record)
+        expect(klass.find_by_meeting_at("2026-10-01T09:00")).to eq(record) # wall clock in Time.zone, as the writer reads it
+        expect(klass.find_by_meeting_at(instant.in_time_zone("Tokyo"))).to eq(record)
+        expect(klass.meeting_at_fingerprint(instant)).to eq(klass.find(record.id).meeting_at_bidx)
+      end
+    end
+
+    it "casts a lookup through the field's type, so any spelling of the value finds it" do
+      record = klass.create!(age: 42, amount: BigDecimal("19.99"))
+
+      expect([klass.find_by_age("042"), klass.find_by_age(" 42 "), klass.find_by_age(42)]).to eq([record] * 3)
+      expect([klass.find_by_amount("19.990"), klass.find_by_amount(BigDecimal("19.99"))]).to eq([record] * 2)
+    end
+
+    it "writes the same digest whatever zone reencrypt! runs in" do
+      record = Time.use_zone("Tokyo") { klass.create!(meeting_at: instant) }
+      ConcernsOnRails.configure_encryption do |c|
+        c.key = "concerns-on-rails-encryptable-rotated-key"
+        c.key_id = 1
+        c.previous_keys = { 0 => TEST_KEY }
+      end
+
+      expect(Time.use_zone("Pacific/Honolulu") { klass.find(record.id).reencrypt! }).to be(true)
+      expect(klass.find(record.id).meeting_at_bidx).to eq(Time.use_zone("Tokyo") { klass.meeting_at_fingerprint(instant) })
+      expect(Time.use_zone("UTC") { klass.find_by_meeting_at(instant) }).to eq(record)
+    end
+
+    it "hands expression: the typed value, a :datetime in UTC, so the request zone never reaches the digest" do
+      dated = model_class do
+        self.time_zone_aware_attributes = true
+        encryptable :meeting_at, type: :datetime, blind_index: { expression: :to_date.to_proc }
+      end
+      record = Time.use_zone("Tokyo") { dated.create!(meeting_at: Time.utc(2026, 10, 1, 20)) } # Oct 2 in Tokyo
+
+      expect(Time.use_zone("America/New_York") { dated.find_by_meeting_at(Time.utc(2026, 10, 1, 5)) }).to eq(record)
+    end
+
+    it "still finds a row indexed before the change, and the documented reindex moves it to the canonical digest" do
+      record = klass.create!(meeting_at: instant, age: 42)
+      record.update_columns(meeting_at_bidx: legacy_digest(instant))
+      # Every other type's canonical form IS its to_s: nothing to reindex.
+      expect(klass.find(record.id).age_bidx).to eq(legacy_digest(42))
+
+      # The value the old code was looked up with still matches...
+      expect(klass.find_by_meeting_at(instant)).to eq(record)
+      # ...but only the canonical digest knows every other rendering.
+      expect(klass.find_by_meeting_at("2026-10-01T13:00:00Z")).to be_nil
+
+      # The reindex recipe in docs/concerns/encryptable.md:
+      klass.unscoped.where.not(meeting_at: nil).find_each do |row|
+        row.update_columns(meeting_at_bidx: klass.meeting_at_fingerprint(row.meeting_at))
+      end
+
+      expect(klass.find_by_meeting_at("2026-10-01T13:00:00Z")).to eq(record)
+      expect(klass.find(record.id).meeting_at_bidx).to eq(klass.meeting_at_fingerprint(instant))
     end
   end
 

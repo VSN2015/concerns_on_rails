@@ -513,11 +513,24 @@ module ConcernsOnRails
       # Symbols, true/false) as they are. A Class/Module is an identity, not
       # a value — Rails 6.0's deep_dup would hand back an anonymous copy.
       def storable_default(spec)
-        default = spec[:default]
+        value = storable_raw_default(spec[:default])
+        spec[:type] == :datetime ? storable_as_stored(spec, value) : value
+      end
+
+      def storable_raw_default(default)
         return instance_exec(&default) if default.is_a?(Proc)
         return default if default.is_a?(Module)
 
         default.deep_dup
+      end
+
+      # A :datetime default reads back exactly as the same value stored under
+      # the key would: through the writer's cast, then the reader's (a
+      # TimeWithZone under time_zone_aware_attributes). A String default used
+      # to come back as that String.
+      def storable_as_stored(spec, value)
+        stored = storable_cast_write(spec, value)
+        stored.nil? ? nil : storable_cast_read(spec, stored)
       end
 
       # ---- storage codec ----

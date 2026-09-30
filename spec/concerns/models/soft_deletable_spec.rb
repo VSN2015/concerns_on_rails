@@ -106,6 +106,19 @@ describe ConcernsOnRails::SoftDeletable do
       expect(record.reload.updated_at).to eq t
     end
 
+    # soft_delete!(at: params[:at]) with the param absent or empty wrote NULL,
+    # fired the hooks and returned true with nothing deleted.
+    [nil, '', '   '].each do |blank|
+      it "soft_delete!(at: #{blank.inspect}) means now, like expire!" do
+        record.callback_log = []
+        freeze_time do
+          expect(record.soft_delete!(at: blank)).to be(true)
+          expect(record.reload.deleted_at).to eq(Time.zone.now)
+        end
+        expect(record.callback_log).to eq(%i[before_soft_delete after_soft_delete])
+      end
+    end
+
     it 'accepts a parseable String for at:, cast like an assignment' do
       expect(record.soft_delete!(at: '2020-01-01 00:00:00')).to be(true)
       expect(record.reload.deleted_at).to eq(Time.utc(2020, 1, 1))
