@@ -55,6 +55,21 @@ describe ConcernsOnRails::Searchable do
       expect(Post.search("   ").count).to eq(2)
     end
 
+    it "ignores leading/trailing whitespace in the query (mode: :any)" do
+      hit = Post.create!(title: "Rails", body: "")
+      Post.create!(title: "Other", body: "")
+
+      expect(Post.search(" rails ").to_a).to eq([hit])
+      expect(Post.search("rails ").to_sql).not_to include("rails %")
+    end
+
+    it "keeps interior whitespace in the query (mode: :any)" do
+      hit = Post.create!(title: "Ruby on Rails", body: "")
+      Post.create!(title: "Rails on Ruby", body: "")
+
+      expect(Post.search("  ruby on ").to_a).to eq([hit])
+    end
+
     it "treats % in the query as a literal, not a wildcard" do
       Post.create!(title: "100% certain", body: "")
       Post.create!(title: "100 percent",  body: "")

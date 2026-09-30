@@ -54,7 +54,7 @@ patient.reencrypt!                         # one record
 - **The sweep covers the whole table.** Called on the model itself, `needs_reencryption` and `reencrypt_all!` bypass the `default_scope`: rows hidden by SoftDeletable or Publishable's `default_scope: true` still hold ciphertext under the old key, and once that key leaves `previous_keys` they could never be decrypted again — a `restore!` would bring back an unreadable record. Called on a **relation** (`Patient.where(org_id: 1).reencrypt_all!`, an association, a `scoping` block) they cover exactly that relation, default scope included like any other chain; start from `unscoped` (`Patient.unscoped.where(org_id: 1).reencrypt_all!`) to include hidden rows in a subset. Run step 4's check on the model, not on a relation.
 
 - **Blind indexes during the window.** `find_by_<field>` / `where_<field>` match the digest under the current key **and** every previous key, so a row indexed under key 0 is still found before it is re-encrypted; `<field>_fingerprint` returns the current-key digest (what gets written). `reencrypt_all!` rewrites the index column too.
-- **`reencrypt_all!` writes one UPDATE per row** — no validations, no callbacks, no `updated_at` bump: the values do not change, only their ciphertext, and an Auditable capture or webhook must not fire for a key rotation. Each row is valid before and after, so there is no wrapping transaction to hold. This is the one `*_all` verb that does NOT go through `Support::BatchOps`: it is re-runnable rather than atomic, so a row that raises mid-stream leaves the rows before it already rotated, and re-running picks up the rest.
+- **`reencrypt_all!` writes one UPDATE per row** — no validations, no callbacks, no `updated_at` bump, and no `lock_version` bump on a model with optimistic locking (the column is pinned to itself in the UPDATE): the values do not change, only their ciphertext, so an Auditable capture or webhook must not fire for a key rotation, and a record someone has open in an edit form during the sweep must not turn into a `StaleObjectError`. Each row is valid before and after, so there is no wrapping transaction to hold. This is the one `*_all` verb that does NOT go through `Support::BatchOps`: it is re-runnable rather than atomic, so a row that raises mid-stream leaves the rows before it already rotated, and re-running picks up the rest.
 - **Safe to run against a live table.** Each row's UPDATE is guarded on the exact ciphertext it was read with (`WHERE id = ? AND ssn = <ciphertext at load>`), so a value the app wrote between the read and the write is never reverted to the stale plaintext — the row is simply skipped, and it needs no rotating anyway because that write already used the current key. For the same reason `record.reencrypt!` skips a field with an unsaved change instead of committing it without validations. A successful `reencrypt!` reloads the record, so its `<field>_ciphertext` / `<field>_key_id` describe what is now at rest.
 - **Per-field `key:` fields are outside rotation.** They always stamp key id 0, decrypt with their own key, and are skipped by `needs_reencryption` / `reencrypt_all!`. Rotate them by changing the field key and re-saving.
 - **Unknown key id.** A row whose id is neither `key_id` nor in `previous_keys` raises `DecryptionError` ("encrypted with unknown key id N") — you removed a previous key too early.
@@ -171,9 +171,10 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 
 ## Composition with other concerns
 
-- **Normalizable** — normalization runs `before_validation` on the plaintext; encryption happens later, at the DB-serialization boundary. So the stored ciphertext is always of the *normalized* value, regardless of `include` order.
+- **Normalizable** — normalization runs on the plaintext in `before_validation`, and, for saves that skip validation (`update_attribute`, `save(validate: false)`), in a `before_save` backstop that Normalizable *prepends* to the save callbacks — so it runs ahead of the blind-index refresh (also a `before_save`) whichever concern was included first. Encryption happens later still, at the DB-serialization boundary. So the stored ciphertext and the blind-index fingerprint are both of the *normalized* value, regardless of `include` order, and `find_by_<field>` finds what was stored. (`update_column(s)`/`update_all` skip callbacks: they neither normalize nor refresh the index.)
 - **Maskable** — `masked_<field>` masks the *decrypted* value; the column stays ciphertext. Order-independent.
 - **Auditable** — auditing an encrypted field would persist its plaintext into the audit column, so declaring a field with **both** `encryptable` and `auditable_by` **raises**. Audit a non-sensitive companion column instead.
+- **Sluggable** — a friendly_id slug is plaintext of its source (`"123-45-6789"`), so an encrypted field named as the `sluggable_by` field or in its `candidates:` (nested arrays included) — or as a bare `friendly_id :field, use: :slugged` base — **raises** at declaration. Shapes a declaration cannot see (Sluggable included without `sluggable_by`, which slugs the implicit `:name`; friendly_id declared after `encryptable`) are refused at save time, before the row is written, with the same `ArgumentError`. A method or Proc candidate that reads an encrypted field under another name cannot be detected — keep encrypted values out of those yourself.
 - **Searchable / Filterable** — encrypted columns are **not** searchable: non-deterministic ciphertext (random IV) means the same plaintext never produces the same bytes, so `where(:ssn)`, `LIKE`, and prefix matching cannot work. For exact-match lookups, add a [blind index](#querying-encrypted-fields-blind-index) and query the `<field>_bidx` column (via `find_by_<field>` / `where_<field>`).
 
 ## Security notes
@@ -191,9 +192,38 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - The envelope is versioned (`ver`/`alg`/`key_id`): `key_id` drives [key rotation](#key-rotation); `alg 0x11` (deterministic encryption) is still reserved, so it can be added later without a data migration.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need deterministic search, KMS-backed or per-record keys, or Rails-managed key infrastructure.
 
+## Upgrading: slugs built from an encrypted field
+
+Earlier releases let an encrypted field be a slug source (`sluggable_by :ssn`, a
+`candidates:` entry, Sluggable's implicit `:name`, or a bare `friendly_id :ssn`
+base). The slug column then stored that field's **plaintext**, and friendly_id
+`history` kept every earlier plaintext slug in `friendly_id_slugs`. Such a model
+now raises when it is declared or saved. To clean up existing rows:
+
+1. Point the slug at a non-sensitive field (`sluggable_by :public_id`, or
+   `friendly_id :public_id, use: :slugged`).
+2. Regenerate every slug from it, then delete the history rows that still hold
+   the old plaintext slugs:
+
+```ruby
+Customer.unscoped.find_each do |customer|        # unscoped: soft-deleted / hidden rows too
+  customer.regenerate_slug!                      # Sluggable
+  # customer.update!(slug: nil)                  # bare friendly_id: nil forces a new slug
+end
+
+current_slugs = Customer.unscoped.where.not(slug: nil).select(:slug)
+FriendlyId::Slug.where(sluggable_type: "Customer")
+                .where.not(slug: current_slugs)  # NOT IN: a NULL in the list would match nothing
+                .delete_all
+```
+
+Old URLs built from the sensitive value stop resolving, which is the point. If
+the slug column is also audited (Auditable), its trail holds the plaintext
+slugs too — clear it with `clear_audit_trail!`.
+
 ## Changed in 1.22.0
 
 - `where_<field>(nil)` / `find_by_<field>(nil)` return `none`/nil instead of matching every row without a fingerprint (`bidx IS NULL`).
 - Encrypted field names register with Rails parameter filtering through a live registry consulted by a proc the gem's railtie appends at boot — redaction now works with boot-time filter snapshots (ActiveRecord `filter_attributes`, lograge-style initializers) and lazily-loaded model classes.
 - PBKDF2-derived keys are memoized (bounded, mutex-guarded); previously every encrypt/decrypt/blind-index call re-ran the 65,536-iteration KDF.
-- The encrypted×audited overlap raises at macro time from both declaration orders.
+- The encrypted×audited and encrypted×slug-source overlaps raise at macro time from both declaration orders.

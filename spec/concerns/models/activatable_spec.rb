@@ -110,6 +110,47 @@ describe ConcernsOnRails::Activatable do
       record.toggle_active!
       expect(record.reload.active).to be true
     end
+
+    # with_lock reloads, and Rails refuses to reload a record with unsaved
+    # changes ("Locking a record with unpersisted changes is not supported").
+    it "#toggle_active! on a record with pending changes saves them with the flip" do
+      record = Subscription.create!(name: "n", active: true)
+      record.name = "renamed"
+
+      expect(record.toggle_active!).to be(true)
+
+      expect(Subscription.find(record.id).attributes.slice("name", "active")).to eq("name" => "renamed", "active" => false)
+      expect(record).not_to be_changed
+    end
+
+    it "#toggle_active! with pending changes flips the ROW's flag, read under the lock" do
+      record = Subscription.create!(name: "n", active: true)
+      Subscription.find(record.id).update!(active: false) # toggled elsewhere
+      record.name = "renamed"
+
+      record.toggle_active!
+
+      expect(Subscription.find(record.id).attributes.slice("name", "active")).to eq("name" => "renamed", "active" => true)
+    end
+
+    it "#toggle_active! on a new record saves it activated (no row to lock yet), as before" do
+      record = Subscription.new(name: "fresh")
+
+      expect(record.toggle_active!).to be(true)
+
+      expect(record).to be_persisted
+      expect(Subscription.find(record.id).active).to be(true)
+    end
+
+    it "#toggle_active! on a clean stale copy still reloads under the lock, as before" do
+      record = Subscription.create!(name: "n", active: true)
+      Subscription.find(record.id).update!(name: "edited elsewhere", active: false)
+
+      record.toggle_active!
+
+      expect(record.name).to eq("edited elsewhere")
+      expect(Subscription.find(record.id).active).to be(true)
+    end
   end
 
   describe "custom field configuration" do

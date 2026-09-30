@@ -1063,6 +1063,139 @@ describe ConcernsOnRails::SoftDeletable do
       expect(deleted_at(CascComment, other_comment)).to be_nil
     end
 
+    # The cascade loaded dependents through the association's scope, which
+    # merges in EVERY default scope of the child — so a child hiding its
+    # drafts (Publishable default_scope: true) kept them live under a
+    # soft-deleted parent, and a restore could not bring them back.
+    describe "into a child with another default_scope" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :casc_drafts, force: true do |t|
+            t.integer :casc_post_id
+            t.string :body
+            t.integer :tenant_id
+            t.integer :casc_author_id
+            t.datetime :published_at
+            t.datetime :deleted_at, precision: 6
+          end
+        end
+        stub_const("CascDraft", Class.new(ActiveRecord::Base) do
+          self.table_name = "casc_drafts"
+          include ConcernsOnRails::SoftDeletable
+          include ConcernsOnRails::Publishable
+
+          soft_deletable_by :deleted_at
+          publishable_by :published_at, default_scope: true
+          belongs_to :casc_post
+        end)
+        CascPost.has_many :casc_drafts
+        CascPost.soft_deletable_by :deleted_at, cascade: :casc_drafts
+      end
+
+      after { ActiveRecord::Base.connection.drop_table(:casc_drafts) }
+
+      it "soft-deletes and restores the children that default scope hides" do
+        draft = CascDraft.create!(casc_post: post, published_at: nil)
+        live = CascDraft.create!(casc_post: post, published_at: 1.day.ago)
+        other = CascDraft.create!(casc_post: CascPost.create!(title: "q"), published_at: nil)
+
+        post.soft_delete!
+        expect(deleted_at(CascDraft, draft)).to eq(deleted_at(CascPost, post))
+        expect(deleted_at(CascDraft, live)).to eq(deleted_at(CascPost, post))
+        expect(deleted_at(CascDraft, other)).to be_nil
+
+        post.restore!
+        expect(deleted_at(CascDraft, draft)).to be_nil
+        expect(deleted_at(CascDraft, live)).to be_nil
+      end
+
+      # Peeling the child's hiding predicates let has_one's LIMIT 1 pick the
+      # hidden draft (the lower id): the cascade deleted it and left the
+      # visible child — the one `post.featured_draft` returns — live.
+      it "soft-deletes and restores the has_one child its reader returns" do
+        CascPost.has_one :featured_draft, class_name: "CascDraft"
+        CascPost.soft_deletable_by :deleted_at, cascade: :featured_draft
+        old_draft = CascDraft.create!(casc_post: post, body: "old draft", published_at: nil)
+        shown = CascDraft.create!(casc_post: post, body: "shown", published_at: 1.day.ago)
+        expect(post.featured_draft).to eq(shown)
+
+        post.soft_delete!
+        expect(deleted_at(CascDraft, shown)).to eq(deleted_at(CascPost, post))
+        expect(deleted_at(CascDraft, old_draft)).to be_nil
+
+        post.restore!
+        expect(deleted_at(CascDraft, shown)).to be_nil
+      end
+
+      it "still reaches a has_one draft when the reader returns none" do
+        CascPost.has_one :featured_draft, class_name: "CascDraft"
+        CascPost.soft_deletable_by :deleted_at, cascade: :featured_draft
+        draft = CascDraft.create!(casc_post: post, published_at: nil)
+
+        post.soft_delete!
+
+        expect(deleted_at(CascDraft, draft)).to eq(deleted_at(CascPost, post))
+      end
+
+      # The cascade's own `unscope(where: :deleted_at)` matched the column by
+      # NAME on any table, so a default scope hiding comments of deleted
+      # authors through a JOIN was stripped and those comments cascaded too.
+      it "leaves children an app default scope hides through a joined table's same-named column" do
+        ActiveRecord::Schema.define do
+          create_table :casc_authors, force: true do |t|
+            t.datetime :deleted_at, precision: 6
+          end
+        end
+        stub_const("CascAuthor", Class.new(ActiveRecord::Base) { self.table_name = "casc_authors" })
+        stub_const("CascAuthored", Class.new(ActiveRecord::Base) do
+          self.table_name = "casc_drafts"
+          include ConcernsOnRails::SoftDeletable
+
+          soft_deletable_by :deleted_at
+          belongs_to :casc_author, class_name: "CascAuthor", optional: true
+          default_scope { joins(:casc_author).where(casc_authors: { deleted_at: nil }) }
+        end)
+        CascPost.has_many :authored, class_name: "CascAuthored", foreign_key: :casc_post_id
+        CascPost.soft_deletable_by :deleted_at, cascade: :authored
+        live = CascAuthor.create!
+        gone = CascAuthor.create!(deleted_at: 1.day.ago)
+        visible = CascAuthored.unscoped.create!(casc_post_id: post.id, casc_author_id: live.id)
+        hidden = CascAuthored.unscoped.create!(casc_post_id: post.id, casc_author_id: gone.id)
+
+        post.soft_delete!
+        expect(deleted_at(CascAuthored, visible)).to eq(deleted_at(CascPost, post))
+        expect(deleted_at(CascAuthored, hidden)).to be_nil
+
+        post.restore!
+        expect(deleted_at(CascAuthored, visible)).to be_nil
+      ensure
+        ActiveRecord::Base.connection.drop_table(:casc_authors, if_exists: true)
+      end
+
+      # Only the gem's own hiding predicates are peeled — an application's
+      # tenant default scope still applies, as it does for Rails' own
+      # `dependent:`, so a shared parent never cascades into another
+      # tenant's rows.
+      it "leaves another tenant's children alone" do
+        stub_const("CascTenantDraft", Class.new(ActiveRecord::Base) do
+          self.table_name = "casc_drafts"
+          include ConcernsOnRails::SoftDeletable
+
+          soft_deletable_by :deleted_at
+          default_scope { where(tenant_id: 1) }
+        end)
+        CascPost.has_many :tenant_drafts, class_name: "CascTenantDraft", foreign_key: :casc_post_id
+        CascPost.soft_deletable_by :deleted_at, cascade: :tenant_drafts
+        mine = CascTenantDraft.create!(casc_post_id: post.id, tenant_id: 1)
+        theirs = CascTenantDraft.unscoped.create!(casc_post_id: post.id, tenant_id: 2)
+
+        post.soft_delete!
+
+        expect(deleted_at(CascTenantDraft, mine)).to eq(deleted_at(CascPost, post))
+        expect(deleted_at(CascTenantDraft, theirs)).to be_nil
+      end
+    end
+
     it "exposes the configured cascade" do
       expect(CascPost.soft_delete_cascade).to eq(%i[casc_comments casc_cover])
       expect(CascCover.soft_delete_cascade).to eq([])

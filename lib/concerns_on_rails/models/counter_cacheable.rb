@@ -1,5 +1,8 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/callable"
+require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/locking"
 
 module ConcernsOnRails
   module Models
@@ -40,6 +43,15 @@ module ConcernsOnRails
     #   * Adjustments use `update_counters` — a single SQL `COALESCE(col,0) ± 1`,
     #     atomic under concurrency — and run inside the record's own save
     #     transaction, so a rolled-back save rolls back the counter too.
+    #   * Optimistic locking on the parent: each adjustment's UPDATE bumps the
+    #     parent's `lock_version` in SQL, and the parent instance the child's
+    #     association holds (the one `post.comments.create!` was called on, or
+    #     the one passed as `post:`) gets the bump — and the counter delta —
+    #     mirrored in memory (increment!'s in-memory half; a counter the
+    #     caller assigned and has not saved is left pending), so it saves
+    #     afterwards without StaleObjectError. A rolled-back save of the child
+    #     takes the mirror back off it. Other loaded copies of the parent go
+    #     stale, as they would natively.
     #   * A `belongs_to ..., primary_key: :code` is honoured everywhere: the
     #     parent row is addressed by the association key (not its `id`), both by
     #     the live adjustments and by `recount_counter_caches!`.
@@ -58,7 +70,9 @@ module ConcernsOnRails
     #     associations.
     #   * `recount_counter_caches!` rewrites every parent's counter and, for a
     #     conditional counter, scans the children in Ruby (portable across
-    #     adapters, but O(n)) — a maintenance operation, run it offline.
+    #     adapters, but O(n)) — a maintenance operation, run it offline. On an
+    #     STI table it tallies every class's rows under that class's own rule,
+    #     so it repairs the shared column from whichever class it is called on.
     #   * Reach for the `counter_culture` gem when you need multi-level rollups,
     #     delta columns, or after-commit execution.
     module CounterCacheable
@@ -84,6 +98,10 @@ module ConcernsOnRails
 
         # Declare one counter. Repeatable — each call maintains another column
         # (rules accumulate, reassigned never mutated, so subclasses inherit).
+        # A rule is keyed by (association, count column): re-declaring the same
+        # counter REPLACES that rule, in place, for this class — so an STI
+        # subclass can narrow an inherited counter with `if:` — where appending
+        # a second rule made both fire and double-count every row.
         # `count:` defaults to "<table_name>_count" (e.g. comments → comments_count).
         def counter_cacheable_by(association, count: nil, touch: false, **options)
           association = association.to_sym
@@ -97,10 +115,10 @@ module ConcernsOnRails
           count_column = (count || "#{table_name}_count").to_sym
           counter_cacheable_ensure_parent_column!(reflection, count_column)
 
-          self.counter_cacheable_rules = counter_cacheable_rules + [{
+          counter_cacheable_store_rule(
             association: association, count_column: count_column,
             condition: condition, touch: touch ? true : false
-          }]
+          )
         end
 
         # Recompute every (or one) counter from scratch — drift repair / backfill.
@@ -120,6 +138,13 @@ module ConcernsOnRails
         end
 
         private
+
+        def counter_cacheable_store_rule(rule)
+          key = rule.values_at(:association, :count_column)
+          rules = counter_cacheable_rules
+          index = rules.index { |existing| existing.values_at(:association, :count_column) == key }
+          self.counter_cacheable_rules = index ? rules.dup.tap { |copy| copy[index] = rule } : rules + [rule]
+        end
 
         # An association nobody declared a counter for would otherwise filter the
         # rules down to nothing and report a silent success — or, with `parents:`,
@@ -217,12 +242,6 @@ module ConcernsOnRails
 
         def validate_counter_cacheable_touch!(touch)
           raise ArgumentError, "#{LABEL}: :touch must be true or false" unless [true, false].include?(touch)
-          return unless touch && ActiveRecord::VERSION::MAJOR < 6
-
-          # `update_counters(..., touch: true)` exists on Rails 6.0+; on 5.x the
-          # option would be read as a counter column literally named `touch` and
-          # produce a SQL error at runtime — fail loudly at macro time instead.
-          raise ArgumentError, "#{LABEL}: `touch: true` requires Rails >= 6.0"
         end
 
         # Validate the column on the PARENT table when its class is already
@@ -245,7 +264,6 @@ module ConcernsOnRails
           parent_class = reflection.klass
           key = counter_cacheable_parent_key(reflection)
           column = rule[:count_column]
-          condition = rule[:condition]
 
           # One transaction so a crash mid-repair can't leave every counter at
           # the zeroed intermediate state. A scoped repair locks its (bounded)
@@ -260,9 +278,9 @@ module ConcernsOnRails
               targets.lock.pluck(parent_class.primary_key)
             end
 
-            children = unscoped.where.not(fk => nil)
+            children = base_class.unscoped.where.not(fk => nil)
             children = children.where(fk => parent_ids) if parent_ids
-            counts = condition ? counter_cacheable_recount_tally(children, fk, condition) : children.group(fk).count
+            counts = counter_cacheable_tally(children, fk, rule)
 
             targets.update_all(column => 0)
             counter_cacheable_apply_tally(parent_class, key, column, counts)
@@ -285,13 +303,105 @@ module ConcernsOnRails
           end
         end
 
+        # { parent key => count } for one (association, column) counter. The
+        # column is shared by every class of an STI tree, and each class may
+        # carry its own rule for it (a subclass narrowing it with `if:`), so
+        # the rows are tallied per stored type under THAT class's effective
+        # rule and summed: a recount agrees with the live counts whichever
+        # class of the tree it is called on — the parent no longer counts
+        # subclass rows under its own rule, and a subclass no longer zeroes
+        # the column and re-tallies its own rows only. A table without an
+        # inheritance column is the one-class case.
+        def counter_cacheable_tally(children, foreign_key, rule)
+          type_column = inheritance_column.to_s
+          return counter_cacheable_rule_tally(children, foreign_key, rule) unless base_class.column_names.include?(type_column)
+
+          key = rule.values_at(:association, :count_column)
+          children.distinct.pluck(type_column).each_with_object(Hash.new(0)) do |type, tally|
+            klass = counter_cacheable_sti_class(type)
+            effective = counter_cacheable_rule_on(klass || base_class, key)
+            next unless effective
+
+            rows = counter_cacheable_type_rows(children.where(type_column => type), type_column, klass, effective)
+            counter_cacheable_rule_tally(rows, foreign_key, effective).each { |id, n| tally[id] += n }
+          end
+        end
+
+        # A stored type that no longer resolves (`klass` nil) can't be
+        # instantiated, so a conditional scan loads those rows WITHOUT the
+        # inheritance column: they then load as the base class, whose rule
+        # they fall back to. An unconditional rule never loads a row.
+        def counter_cacheable_type_rows(rows, type_column, klass, rule)
+          return rows if klass || rule[:condition].nil?
+
+          rows.select(*(base_class.column_names - [type_column]))
+        end
+
+        # The class a row stored as `type` loads as — blank => the base class,
+        # exactly as the loader decides — resolved WITHOUT building a record
+        # (`instantiate` would run after_find/after_initialize on a fabricated,
+        # type-only row). nil for a type that no longer resolves (a removed or
+        # renamed subclass): the caller falls back to the base class's rule
+        # rather than failing the whole repair, as the pure-SQL tally never did.
+        def counter_cacheable_sti_class(type)
+          type.blank? ? base_class : base_class.send(:find_sti_class, type)
+        rescue ActiveRecord::SubclassNotFound
+          nil
+        end
+
+        # The rule `klass` applies for this (association, column) counter, or nil.
+        def counter_cacheable_rule_on(klass, key)
+          return nil unless klass.respond_to?(:counter_cacheable_rules)
+
+          klass.counter_cacheable_rules.find { |candidate| candidate.values_at(:association, :count_column) == key }
+        end
+
+        def counter_cacheable_rule_tally(children, foreign_key, rule)
+          condition = rule[:condition]
+          condition ? counter_cacheable_recount_tally(children, foreign_key, condition) : children.group(foreign_key).count
+        end
+
         def counter_cacheable_recount_tally(children, foreign_key, condition)
           tally = Hash.new(0)
-          children.find_each do |record|
-            tally[record[foreign_key]] += 1 if record.instance_exec(&condition)
+          ConcernsOnRails::Support::BatchOps.each_record(children) do |record|
+            tally[record[foreign_key]] += 1 if ConcernsOnRails::Support::Callable.invoke(record, condition)
           end
           tally
         end
+      end
+
+      # The in-memory mirror onto the parent (counter_cacheable_sync_target)
+      # must be undone when the database change is: a rolled-back
+      # transaction or savepoint of this record's save — a caller's Rollback,
+      # a later callback raising, a Stateable/HookedWrite veto — rolls the
+      # parent row back, and the parent instance was left one version (and
+      # one count) ahead of it, so its next save raised StaleObjectError.
+      #
+      # Rails calls rolledback!/committed! on every record enrolled in the
+      # transaction — this record is, being the one saved — for savepoints
+      # and full transactions alike, on 6.0–8.1. Each mirror remembers the
+      # TransactionState it was made in; Rails propagates a rollback to the
+      # states of every savepoint nested in the rolled-back transaction
+      # (released ones included), so `rolledback?` says exactly whether that
+      # UPDATE was undone. A rollback therefore undoes only the mirrors it
+      # rolled back — an adjustment from a still-open outer transaction
+      # stays — and the final commit forgets the rest.
+      def rolledback!(**)
+        super
+      ensure
+        counter_cacheable_settle_mirrors!(committed: false)
+      end
+
+      def committed!(**)
+        super
+      ensure
+        counter_cacheable_settle_mirrors!(committed: true)
+      end
+
+      # A copy starts with no pending mirrors of its own.
+      def initialize_dup(other)
+        super
+        @counter_cacheable_mirrors = nil
       end
 
       private
@@ -382,7 +492,7 @@ module ConcernsOnRails
 
         reflection = counter_cacheable_reflection(rule)
         { klass: reflection.klass, key_column: reflection.association_primary_key.to_s, parent_key: parent_key,
-          column: rule[:count_column], delta: delta, touch: rule[:touch] }
+          column: rule[:count_column], delta: delta, touch: rule[:touch], association: rule[:association] }
       end
 
       # One update_counters per distinct (parent class, key column, key value):
@@ -396,9 +506,102 @@ module ConcernsOnRails
           counters = counter_cacheable_merged_counters(group)
           next if counters.empty?
 
-          counters[:touch] = true if group.any? { |adj| adj[:touch] }
-          klass.unscoped.where(key_column => parent_key).update_counters(counters)
+          touch = group.any? { |adj| adj[:touch] }
+          affected = klass.unscoped.where(key_column => parent_key).update_counters(touch ? counters.merge(touch: true) : counters)
+          counter_cacheable_sync_targets(klass, key_column, parent_key, group, counters) if affected.positive?
         end
+      end
+
+      # The UPDATE above bumped the parent row's lock_version (update_counters
+      # goes through update_all), but no parent instance. Rails' native counter
+      # cache adjusts the loaded belongs_to target with increment!, which
+      # mirrors the counter AND the lock_version bump in memory; without that
+      # the very parent `post.comments.create!` was called on raised
+      # StaleObjectError on its next save. Same here, for every instance this
+      # record's associations hold for that row — once per instance, however
+      # many rules (associations) share the UPDATE. Only under optimistic
+      # locking: elsewhere the loaded parent is left exactly as before
+      # (documented: reload it to read the counter).
+      def counter_cacheable_sync_targets(klass, key_column, parent_key, group, counters)
+        return unless klass.locking_enabled?
+
+        targets = group.map { |adj| adj[:association] }.uniq.filter_map do |name|
+          target = association(name).target
+          target if counter_cacheable_target_row?(target, key_column, parent_key)
+        end
+        targets.uniq(&:object_id).each { |target| counter_cacheable_sync_target(target, klass, counters) }
+      end
+
+      # The instance is a live copy of the adjusted row — matched by its key,
+      # so a reparent syncs the new parent the writer assigned or the OLD one
+      # a foreign-key reassignment left loaded, whichever the UPDATE touched.
+      def counter_cacheable_target_row?(target, key_column, parent_key)
+        target.is_a?(ActiveRecord::Base) && target.persisted? && !target.frozen? &&
+          target.has_attribute?(key_column) && target[key_column].to_s == parent_key.to_s
+      end
+
+      # increment!'s in-memory half: each counter moves by its delta (COALESCE
+      # to 0, like the SQL) and stays clean — a counter the caller assigned
+      # and has not saved is theirs to write, so it is left pending — then the
+      # lock_version bump. Mirroring the counter is what keeps the lock sync
+      # safe: a current lock_version over a stale count would let a full-row
+      # save (partial updates off) write the old count back.
+      def counter_cacheable_sync_target(target, klass, counters)
+        applied = counter_cacheable_apply_counters(target, counters, 1)
+        bumped = ConcernsOnRails::Support::Locking.mirror_bump!(target, klass)
+        counter_cacheable_remember_mirror(target, klass, applied, bumped)
+      end
+
+      # Move each (clean, loaded) counter by delta * sign; the columns moved.
+      def counter_cacheable_apply_counters(target, counters, sign)
+        counters.filter_map do |column, delta|
+          name = column.to_s
+          next unless target.has_attribute?(name)
+          next if target.will_save_change_to_attribute?(name)
+
+          target[name] = target[name].to_i + (delta * sign)
+          target.send(:clear_attribute_change, name)
+          [name, delta]
+        end.to_h
+      end
+
+      # Remember the mirror with the transaction it was made in (see
+      # rolledback!). Outside a transaction there is nothing to undo — the
+      # UPDATE committed on its own.
+      #
+      # This record is then enrolled in its transaction explicitly (Rails
+      # dedups by object id). A save already enrolls it, but not always in a
+      # way that guarantees the callbacks: Rails 6.0 enrolls only a record
+      # with after_commit/after_rollback callbacks — the rest sync their
+      # state lazily and are never sent rolledback! — and 6.1+ enrolls a
+      # record saved inside an open transaction only weakly (WeakMap).
+      def counter_cacheable_remember_mirror(target, klass, counters, bumped)
+        transaction = klass.connection.current_transaction
+        state = transaction.respond_to?(:state) ? transaction.state : nil
+        return unless state
+
+        entry = { target: target, klass: klass, counters: counters, bumped: bumped, state: state }
+        @counter_cacheable_mirrors = [*@counter_cacheable_mirrors, entry]
+        self.class.connection.add_transaction_record(self)
+      end
+
+      # Undo (newest first) every mirror whose transaction was rolled back;
+      # on the final commit, forget the others — they are durable now.
+      def counter_cacheable_settle_mirrors!(committed:)
+        mirrors = @counter_cacheable_mirrors
+        return if mirrors.nil? || mirrors.empty?
+
+        undone, kept = mirrors.partition { |entry| entry[:state].rolledback? }
+        undone.reverse_each { |entry| counter_cacheable_undo_mirror(entry) }
+        @counter_cacheable_mirrors = committed ? nil : kept
+      end
+
+      def counter_cacheable_undo_mirror(entry)
+        target = entry[:target]
+        return if target.frozen?
+
+        counter_cacheable_apply_counters(target, entry[:counters], -1)
+        ConcernsOnRails::Support::Locking.mirror_bump!(target, entry[:klass], by: -1) if entry[:bumped]
       end
 
       # Sum per column, dropping zero-sum entries (nothing to write).
@@ -419,7 +622,7 @@ module ConcernsOnRails
         condition = rule[:condition]
         return true unless condition
 
-        instance_exec(&condition) ? true : false
+        ConcernsOnRails::Support::Callable.invoke(self, condition) ? true : false
       end
 
       # Evaluate the condition against the record as it was BEFORE this save by
@@ -428,7 +631,7 @@ module ConcernsOnRails
         condition = rule[:condition]
         return true unless condition
 
-        counter_cacheable_with_attributes(counter_cacheable_changes) { instance_exec(&condition) ? true : false }
+        counter_cacheable_with_attributes(counter_cacheable_changes) { ConcernsOnRails::Support::Callable.invoke(self, condition) ? true : false }
       end
 
       # Temporarily put each changed attribute back to the FIRST value of its

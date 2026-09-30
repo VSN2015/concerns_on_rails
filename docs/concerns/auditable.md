@@ -28,11 +28,11 @@ end
 
 ## Database columns
 
-A single text column is required (the tracked fields are your existing columns).
+A single text (or native `json`/`jsonb`) column is required (the tracked fields are your existing columns).
 
 | Column | Type | Required | Notes |
 |--------|------|----------|-------|
-| `audit_log` (or your chosen `into:` column) | `text` | Yes | Stores the JSON array of entries; stays `NULL` until a tracked field first changes |
+| `audit_log` (or your chosen `into:` column) | `text` (or native `json`/`jsonb`) | Yes | Stores the JSON array of entries; stays `NULL` (read as `[]`) until a tracked field first changes. A native json column is written the array itself — declare it without a default (`t.json :audit_log`), since MySQL rejects a literal `DEFAULT` on a JSON column |
 
 ```ruby
 class AddAuditLogToProducts < ActiveRecord::Migration[7.1]
@@ -52,7 +52,7 @@ Configures the tracked fields and the audit column. Every column (tracked fields
 |--------|------|---------|-------------|
 | `*fields` | one or more `Symbol`s | — (required) | The attributes to track. Tracking the audit column itself raises `ArgumentError`. |
 | `into:` | `Symbol` | `:audit_log` | The text column the JSON history is written to. |
-| `actor:` | callable, `Symbol`, `false` or `nil` | unset (→ gem-wide `config.audit_actor`) | Who is stamped as `"by"`. A `Proc` is `instance_exec`'d on the record at save time, any other callable is `#call`ed, and a Symbol names a record method (`:updated_by_id`) — a Symbol naming no method raises `ArgumentError` at save time. **Omitting** the option falls back to `ConcernsOnRails.config.audit_actor`, resolved per save; passing an explicit `nil` or `false` records no `"by"` for this model, whatever is configured gem-wide. Anything else raises `ArgumentError`. |
+| `actor:` | callable, `Symbol`, `false` or `nil` | unset (→ gem-wide `config.audit_actor`) | Who is stamped as `"by"`. A lambda with no required parameter (or a block) is `instance_exec`'d on the record at save time; a `->(record) { … }` lambda, a symbol proc or a callable object is called with the record (bare unless its `#call` requires an argument); and a Symbol names a record method (`:updated_by_id`) — a Symbol naming no method raises `ArgumentError` at save time. **Omitting** the option falls back to `ConcernsOnRails.config.audit_actor`, resolved per save; passing an explicit `nil` or `false` records no `"by"` for this model, whatever is configured gem-wide. Anything else raises `ArgumentError`. |
 | `max_entries:` | positive `Integer` or `nil` | `200` | Keeps only the newest N entries (oldest are trimmed). `nil` disables trimming. |
 | `max_value_length:` | positive `Integer` or `nil` | `nil` | When set, `from`/`to` **String** values longer than the limit are stored as their first N characters plus a trailing `…` marker. Non-string values are never truncated. |
 
@@ -140,7 +140,7 @@ order.audited_changes_since(1.day.ago).map { |e| "#{e['field']}: #{e['from']} �
 - **Not concurrency-safe.** The read-modify-write of the JSON column means two simultaneous saves of the same row are last-writer-wins for the entries added in that race.
 - **Entries build on the persisted trail.** New entries are appended to the column's *database* value, so a save aborted by a later callback can't duplicate entries when retried. The flip side: assigning the audit column by hand in the same save as a tracked change is ignored — use `clear_audit_trail!` to reset the trail.
 - **Non-finite floats are stored as strings.** `NaN`/`Infinity` in a tracked float column serialize as `"NaN"`/`"Infinity"` instead of raising inside `before_save`.
-- **The actor proc runs on the record.** A `Proc` is `instance_exec`'d — the gem-wide one too — so both globals (`Current.user`) and the record's own attributes are in scope; any other callable is `#call`ed with no arguments, and a Symbol actor is sent to the record. Exceptions raised inside propagate (fail-fast). The resolved value is JSON-coerced like any entry value, so a Hash such as `{ id:, type: }` works.
+- **The actor proc runs on the record.** A lambda with no required parameter (or a block) is `instance_exec`'d — the gem-wide one too — so both globals (`Current.user`) and the record's own attributes are in scope. A `->(record) { … }` lambda (model-level only: the gem-wide setter rejects a lambda that demands arguments), a symbol proc or a callable object is called with the record instead — bare unless its `#call` requires an argument — and a Symbol actor is sent to the record. Exceptions raised inside propagate (fail-fast). The resolved value is JSON-coerced like any entry value, so a Hash such as `{ id:, type: }` works.
 - **Non-goals**: no reify/undo, no who-dunnit queries across models, no association tracking — reach for [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) or [`audited`](https://github.com/collectiveidea/audited) when you need a real audit store.
 
 ## Changed in 1.22.0

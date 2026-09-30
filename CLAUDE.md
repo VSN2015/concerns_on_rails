@@ -37,7 +37,10 @@ Model concerns live in `lib/concerns_on_rails/models/<name>.rb`, controller conc
 `lib/concerns_on_rails/controllers/<name>.rb`, and shared internal helpers in
 `lib/concerns_on_rails/support/<name>.rb`. `lib/concerns_on_rails.rb` is the loader —
 fully autoload-based since the post-1.22 DX wave (each concern file requires the support
-helpers it uses, so direct requires still work). `friendly_id`/`acts_as_list` load lazily
+helpers it uses, plus `concerns_on_rails/core` — `MissingDependency` and the gem-level
+singletons `deprecator`/`config`/`setup`/`encryption`/`filter_parameter_registry` — when it
+touches one, so direct requires still work; `spec/concerns/direct_require_spec.rb` requires
+every model/controller file alone in a subprocess). `friendly_id`/`acts_as_list` load lazily
 with Sluggable/Sortable (absent gem → `ConcernsOnRails::MissingDependency`, a LoadError
 subclass). Top-level aliases for the pre-1.6 module paths (e.g. `ConcernsOnRails::Sluggable`)
 resolve lazily via `const_missing` in `lib/concerns_on_rails/legacy_aliases.rb`. Gem-wide
@@ -61,7 +64,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `use_acts_as_list: false`.
 - **`Publishable`** — timestamp (default `published_at`) **or** boolean column; scopes
   `.published/.unpublished/.scheduled/.draft` (affixable via `prefix:`/`suffix:`) branch on
-  the column type. `default_scope: true` hides unpublished. Lifecycle hooks:
+  the column type. `default_scope: true` hides unpublished (ONE flag-driven default_scope,
+  registered only once a class first asks; an omitted `default_scope:` keeps the inherited
+  flag, an explicit `false` turns it off). Lifecycle hooks:
   `before/after_publish`, `before/after_unpublish`. Batch `publish_all`/`unpublish_all`
   (atomic; single-UPDATE fast path when the hooks/bang methods are unoverridden AND the
   model has no validators — `update` in the per-record path runs them, `update_all` doesn't).
@@ -79,11 +84,22 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Tokenizable`** — multiple security-token columns. `type:` `:urlsafe`/`:hex`/
   `:alphanumeric`/`:numeric`, `length:`; `regenerate_/revoke_/<field>?` + uniqueness retry.
 - **`Sequenceable`** — ordered reference numbers (invoice/order numbers). `into:`, `prefix:`,
-  `padding:`, `scope:`, `reset:` (`:year`/`:month`/`:day`), `template:`. Under STI the
+  `padding:`, `scope:`, `reset:` (`:year`/`:month`/`:day`), `template:`, `assign:`
+  (`:create`/`:manual`), `time_zone:` (`reset:` periods — MAX range AND token — are cut in ONE
+  fixed zone, default `Time.zone_default` resolved at use time, never the request's `Time.zone`;
+  `sequenceable_period_time(field)` hands that instant to templates). Under STI the
   series is MAX over the DECLARING class's relation (an abstract declarer falls back to the
   receiver's concrete STI base): base-declared numbers table-wide, per-subclass declarations
   number per type, and a subclass that re-declares can leave a GAP in the parent series but
   never a duplicate (`scope: :type` for gap-free per-type series; index `(type, column)`).
+  A re-declaration passing ONLY `assign:`/`time_zone:` inherits the rest — the Draft case;
+  any other call (a bare one too) restates the format from the defaults. Its owner is the first
+  inherited owner whose full format tuple is IDENTICAL (Procs by identity, so a Draft
+  re-declares only `assign:`), else itself; sharing an owner under `reset:` needs both zones
+  omitted or both explicit and equal (macro-time raise, skipped across numbering relations).
+  One symbol `before_create` per field, at its first `:create` declaration, reads `assign:` at
+  run time. With `into:` + `reset:` (no `template:`) the MAX also counts rows whose STORED
+  value carries the period's `prefix+token+separator` stem (pre-fix request-zone numbers).
   `assign_<field>!` restores the field on a failed save so a UniqueRetry retry draws afresh.
 - **`Schedulable`** — start/end window (`starts_at`/`ends_at`); `current`/`upcoming`/`expired`
   scopes (affixable via `prefix:`/`suffix:`) + predicates.
@@ -99,15 +115,25 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `activate_all`/`deactivate_all` (same validators-gated fast path as Publishable/Expirable).
 - **`Stateable`** — lightweight string-backed state machine: states, `default:`,
   `transitions:`, `prefix:`/`suffix:`, `lock:`, `timestamps:` (`<state>_at` stamped on entry;
-  Rails-owned `created_at`/`updated_at` refused at macro time; NOT affixed, so a state named
-  `published`/`deleted` collides with Publishable/SoftDeletable); guarded `<event>!` +
-  `may_<event>?`, `before/after_transition` plus per-event `before_/after_<event>` hooks
-  (invoked with `send`, so private overrides work). Batch `transition_all(event)` —
-  deliberately NO fast path, since the per-record path runs validations via `update!` and
-  `update_all` would skip them.
+  Rails-owned `created_at`/`updated_at` refused at macro time; NOT affixed). A generated
+  method/scope overriding an AR or sibling-concern method raises at macro time (the reverse
+  order via `Affix.refuse_stateable_names!`), EXCEPT a SoftDeletable/Publishable/Schedulable
+  include-time default scope on the class's OWN singleton (concern included first), which
+  that concern's later affixing macro renames — until it does, the shared scope raises when
+  called. Re-declaring retires the previous declaration's stale names — only the exact
+  UnboundMethods it recorded, never a user's own override (removed on the class; in a
+  subclass hidden behind private stubs in a `RetiredMethods` module — never `undef_method`,
+  which would block later includes; a dropped state hands an include-time scope back) — and
+  captures the field's cast type per declaring class. Guarded `<event>!` + `may_<event>?`, `before/after_transition` plus
+  per-event `before_/after_<event>` hooks (invoked with `send`, so private overrides work).
+  Batch `transition_all(event)` — deliberately NO fast path, since the per-record path runs
+  validations via `update!` and `update_all` would skip them.
 - **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all`,
   `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only).
-- **`Normalizable`** — `before_validation` normalization. Presets (`:email`, `:phone`,
+- **`Normalizable`** — `before_validation` normalization + a PREPENDED `before_save` backstop
+  for saves that skip validation (so an earlier sibling `before_save` — Encryptable's blind
+  index, Auditable, Addressable — sees the stored value; a field the validation pass already
+  normalized is skipped, so a Proc runs once per save). Presets (`:email`, `:phone`,
   `:squish`, …) or a Proc. (On Rails 7.1+, native `normalizes` is an alternative.)
 - **`Taggable`** — delimiter-joined tags in one string column (no join table). `tagged_with`,
   `all_tags`, boundary-safe and LIKE-escaped (tag and delimiter).
@@ -128,7 +154,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Lockable`** — failed-attempt tracking + account lockout ("Devise lockable-lite").
   `lockable_by attempts:, locked_at:, max_attempts:, unlock_in:, prefix:/suffix:`;
   `register_failed_attempt!` (atomic SQL increment), `access_locked?` (lazy expiry),
-  `lock_access!`/`unlock_access!` (update_columns + before/after hooks),
+  `lock_access!` (one conditional UPDATE claimed only while the row is unlocked — a stale
+  concurrent instance adopts the existing lock/token and fires no hooks; readonly/destroyed
+  preconditions replicated; `register_failed_attempt!`'s quiet lapsed-lock clear is conditional
+  the same way) / `unlock_access!` (update_columns) + before/after hooks,
   `reset_failed_attempts!`; expiry-aware `.locked`/`.unlocked` scopes. Batch
   `unlock_expired` (mirrors `unlock_access!`; no validators gate needed since
   `update_columns` already skips them; returns 0 without a query when `unlock_in` is nil).
@@ -163,7 +192,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `key:` (PBKDF2, lazy Proc), missing key raises at first use. `<field>_ciphertext`
   / `<field>_encrypted?` readers; wrong-key/tamper/malformed → `DecryptionError`.
   Normalizes-before-encrypt and masks-decrypted for free; RAISES if a field is
-  also `auditable_by` (either declaration order). Ciphertext is
+  also `auditable_by` (either declaration order), or a friendly_id slug source — the
+  `sluggable_by` field, a `candidates:` entry, an `alias_attribute` of one (chains followed),
+  a bare friendly_id base (at the macro where it can, else at save). Ciphertext is
   non-deterministic ⇒ unsearchable; opt into `blind_index: true` (or
   `{ column:, expression: }`) for a deterministic-HMAC companion column +
   `find_by_<field>`/`where_<field>`/`<field>_fingerprint` finders (nil values
@@ -183,7 +214,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`CounterCacheable`** — conditional denormalized counters ("counter_culture-lite"),
   declared on the CHILD. `counter_cacheable_by association, count:, if:, touch:`
   (repeatable; belongs_to must be declared first; polymorphic rejected;
-  `touch:` raises on Rails < 6). Atomic `update_counters` adjustments inside
+  re-declaring the same association + `count:` REPLACES that rule, so an STI subclass can
+  narrow it with `if:`; on an STI table the recount tallies each stored `type` under its
+  class's rule — resolved via `find_sti_class`, never by instantiating, and an unresolvable
+  type falls back to the base class's rule). Atomic `update_counters` adjustments inside
   the save transaction covering the reparent × condition-flip matrix;
   `recount_counter_caches!` drift repair (transactional, one UPDATE per
   distinct tally value). Destroy decrements only when the DELETE removed a row, reads the
@@ -193,17 +227,20 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `anonymizable *fields, with:` (presets :nullify/:redact/:hash/:email/
   :random_hex or callable; repeatable, rules merge; `stamp:` default
   :anonymized_at with `false` opt-out; `clear_audit_trail:`; `prefix:`/
-  `suffix:` scope affixes). `anonymize!` = hooks + ONE update_columns UPDATE
+  `suffix:` scope affixes). `anonymize!` = hooks + ONE update_columns UPDATE (an
+  `update_all` bumping lock_version in SQL under optimistic locking)
   in a transaction (deliberately skips validations/callbacks; values
   serialize through attribute types so encryptable fields stay ciphertext) +
   reload. `anonymized?`, `.anonymized`/`.not_anonymized`, batch
   `anonymize_all!` (count of rows actually erased; skips stamped; a vetoed record is
   skipped, each record in its own savepoint). Clears the Auditable trail when an
-  erased field is tracked. Never blocked by crypto state: presence-only strategies never
+  erased field (a rewritten slug included) is tracked, and Addressable's `fingerprint:` when a
+  mapped column is erased. Never blocked by crypto state: presence-only strategies never
   decrypt, and `:hash`/callables on an undecryptable value write a fresh random 64-hex.
   `slug:` (`:auto` default / `true` / `false`) rewrites a friendly_id slug built from an
   anonymized COLUMN to a random slug sized to the column limit (≥ 16 hex, collision retried)
-  and deletes its history rows; `:auto` can't see through methods/Procs.
+  and deletes its history rows; `:auto` resolves `alias_attribute` sources but can't see through
+  methods/Procs.
 - **`Duplicable`** — concern-aware deep copy. `duplicable_by associations:,
   reset:, suffix:` (optional macro; associations validated at macro time —
   has_many/has_one deep-copied, HABTM re-linked, belongs_to/:through
@@ -266,6 +303,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (prev cursors + `X-Prev-Cursor`/`X-Has-Prev`), `order_presets:`/`default_preset:`/
   `order_param:` (allow-listed client ordering; `InvalidOrderPreset` → 400),
   `predicate: :auto` (row-value tuple WHERE on PG/MySQL/SQLite, else OR-expansion).
+  A nullable ordering column forces the OR-expansion and sorts NULLs LAST in both
+  directions (PG `NULLS LAST`, else a `CASE` key); boundaries are the stored values of
+  columns selected UNALIASED (unselected → MissingAttributeError, nil-cast → ArgumentError).
 - **`Deprecatable`** — standards-based endpoint deprecation. `deprecate_actions *actions,
   deprecated_at:, sunset_at:, link:, successor:, after_sunset:, header_format:, notify:`
   (repeatable; no actions = catch-all; LAST matching rule wins). Emits RFC 9745
@@ -307,13 +347,24 @@ resolver with its absolute ceiling), `NumericOperand` (Filterable's exact numeri
 reader), `UniqueRetry` (bounded `RecordNotUnique` retry; `savepoint:` makes each attempt
 its own savepoint so a retry works inside a caller's transaction on PostgreSQL),
 `HookedWrite` (the one before-hook → write → after-hook path: own `requires_new`
-savepoint, true only once the after-hook returns, and on abort the `restore:` attributes
+savepoint, true only once the after-hook returns, and on abort the WHOLE AttributeSet (a
+deep_dup, already-read mutable values deep-copied), the last save's mutations, forced changes
 and the record's identity are put back — unread attributes restored raw, never
-deserialized, so encrypted fields are never decrypted), `ErrorEnvelope` (the shared `render_error`-or-inline error
+deserialized, so encrypted fields are never decrypted), `Locking` (keeping an instance in step with its
+row around raw SQL: `mirror_bump!` copies Rails' `increment!` in-memory lock_version sync (+1, never
+adopting the row's value; `by: -1` undoes it), `pinned` keeps an `update_all` from bumping lock_version,
+`with_row_lock` reads named columns with SELECT … FOR UPDATE without reloading, and `with_locked_column`
+— Stateable `lock: true`, Activatable `toggle_active!` — reloads a clean record under the lock
+(`with_lock`) and reads + adopts only the column for one with unsaved changes), `ErrorEnvelope` (the shared `render_error`-or-inline error
 renderer used by seven controller concerns), `FilterParameterRegistry` (live
 filter_parameters registry consulted by the proc `ConcernsOnRails::Railtie` appends at
 boot), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,
-`SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
+`Callable` (arity-aware `invoke` for the callable options the macros accept — Throttleable
+`by:`, WebhookVerifiable `secret:`, Deprecatable `notify:`, CounterCacheable `if:`,
+Auditable `actor:`; deliberately NOT Throttleable `if:`'s dispatch),
+`SlugSources` (what a friendly_id slug is built from — Sluggable's field/`candidates:` or a bare
+friendly_id base, `alias_attribute` resolved — for the Encryptable/Sluggable guards and
+Anonymizable's `slug: :auto`), `SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
 allow-list trees + the includes/paths/as_json shapes for Includable), `Affix` (affixed
 scope/accessor-name computation + `prefix: true` normalization, shared by Activatable,
 Expirable, Lockable, Anonymizable, Stateable, Storable, Publishable, SoftDeletable and
@@ -324,12 +375,26 @@ and a subclass never rips a scope out from under its parent), `BatchOps` (the ho
 fast-path predicate — every named instance method still owned by the concern, i.e.
 unoverridden — plus the transactional `find_each` batch runner shared by every `*_all` verb:
 Integer count, DB-side filtering for idempotency, rollback via `ActiveRecord::RecordNotSaved`
-on a failed record), `VaryHeader` (the shared `Vary` appender behind Localizable's
+on a failed record — and `each_record`, the ONLY way to `find_each` a relation: it strips the
+ORDER (error_on_ignored_order), resolves a LIMIT/OFFSET to plucked PKs first (bare `find_each`
+keeps the limit but pages by PK), and yields each record once even over a has_many join (a
+joined limited slice is re-plucked, then loaded unjoined — one instance per record)),
+`AssociationScope` (`unfiltered(record, name)`, for the cascade and deep copies: the
+association's own scope minus ONLY the gem's hiding predicates on the child's OWN table —
+SoftDeletable's column while its default scope is on, Publishable's under `default_scope: true` —
+matched by Arel attribute, not `unscope(where:)`'s any-table column name, with the association's
+own predicates on them put back; app default scopes (tenant, discriminator, joined-table
+same-named columns) still apply, and a limited association (has_one) ranks its reader's rows
+first; `without(relation, columns)` is the same table-qualified peel), `VaryHeader` (the shared `Vary`
+appender behind Localizable's
 `Accept-Language` and Timezoneable's `Time-Zone`: appends, de-duplicates case-insensitively,
 leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —
 seeds `Accept` itself whenever Rails' own `_set_vary_header` would have, since that only
 fires while the header is still blank).
-`lib/concerns_on_rails/railtie.rb` loads only when `Rails::Railtie` is defined.
+`lib/concerns_on_rails/railtie.rb` loads only when `Rails::Railtie` is defined — required by
+`core.rb` too, so a directly required concern file (`require: false` hosts) gets it; an
+`after_initialize` hook installs the filter for files required during or after boot (eager
+load, `config/initializers`), extending every class's own `filter_attributes` copy.
 
 ### Test structure
 
