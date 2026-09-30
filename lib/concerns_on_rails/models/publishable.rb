@@ -3,6 +3,7 @@ require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/time_value"
 
 module ConcernsOnRails
   module Models
@@ -10,13 +11,35 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       SCOPE_BASES = %i[published unpublished scheduled draft].freeze
+      # Distinguishes an omitted `default_scope:` (keep the current setting)
+      # from an explicit false (turn it off).
+      UNSET = Object.new.freeze
+      # The ONE default scope, evaluated lazily against the flag
+      # (SoftDeletable's pattern) and resolved through the names map, so an
+      # affixed model still filters. Appending a `default_scope` block per
+      # `default_scope: true` call made it permanent — a later
+      # `default_scope: false`, or an STI subclass's, could not undo it — and
+      # repeated `true` calls stacked duplicate predicates. Registered only
+      # once a class first asks for `default_scope: true`: any default_scope
+      # at all costs every model Rails' statement cache for find/find_by and
+      # an evaluation on every `new`, and the flag is off by default.
+      DEFAULT_SCOPE = proc do
+        publishable_default_scope ? public_send(publishable_scope_names.fetch(:published)) : all
+      end
 
       included do
         class_attribute :publishable_field, instance_accessor: false, default: :published_at
         class_attribute :publishable_scope_names, instance_accessor: false,
                                                   default: SCOPE_BASES.to_h { |b| [b, b] }.freeze
         class_attribute :publishable_captured_scopes, instance_accessor: false, default: {}.freeze
+        # Whether `.all` hides unpublished rows. OFF unless publishable_by
+        # passes `default_scope: true`; a call passing it explicitly (true or
+        # false) sets it, a call omitting it keeps the current value.
+        class_attribute :publishable_default_scope, instance_accessor: false, default: false
 
+        ConcernsOnRails::Support::Affix.refuse_stateable_names!(
+          self, Publishable.public_instance_methods(false), kind: :instance, label: "ConcernsOnRails::Models::Publishable"
+        )
         define_publishable_scopes(nil, nil)
         self.publishable_captured_scopes =
           ConcernsOnRails::Support::Affix.capture(self, SCOPE_BASES).freeze
@@ -28,7 +51,11 @@ module ConcernsOnRails
         # Pass `default_scope: true` to hide unpublished records by default
         # (`.all` then returns only published). The negative scopes
         # (.unpublished/.scheduled/.draft) unscope the field, so they still work.
-        def publishable_by(field = nil, default_scope: false, prefix: nil, suffix: nil)
+        # Omitting `default_scope:` keeps the current (possibly inherited)
+        # setting — an STI subclass re-declaring only to change prefix: must not
+        # silently expose drafts; only an explicit `default_scope: false` turns
+        # it off.
+        def publishable_by(field = nil, default_scope: UNSET, prefix: nil, suffix: nil)
           self.publishable_field = field || :published_at
           @publishable_boolean_column = nil
           ensure_columns!("ConcernsOnRails::Models::Publishable", publishable_field, types: :datetime)
@@ -39,7 +66,10 @@ module ConcernsOnRails
                                                     label: "ConcernsOnRails::Models::Publishable")
           end
 
-          enable_published_default_scope if default_scope
+          return if default_scope.equal?(UNSET)
+
+          self.publishable_default_scope = default_scope ? true : false
+          publishable_register_default_scope if publishable_default_scope
         end
 
         # True when the configured column is a boolean (vs a datetime timestamp);
@@ -132,6 +162,19 @@ module ConcernsOnRails
 
         private
 
+        # Register DEFAULT_SCOPE once for this class and its subclasses — a
+        # no-op when it is already among the (possibly inherited)
+        # default_scopes. Routed through a helper so the `default_scope:`
+        # keyword doesn't shadow the `default_scope` macro inside
+        # `publishable_by`. (Entries are the callable on Rails 6.0, a
+        # DefaultScope wrapper exposing `scope` on 6.1+.)
+        def publishable_register_default_scope
+          registered = default_scopes.any? do |entry|
+            (entry.respond_to?(:scope) ? entry.scope : entry).equal?(DEFAULT_SCOPE)
+          end
+          default_scope(DEFAULT_SCOPE) unless registered
+        end
+
         # Scopes are built here rather than inline in `included do` so their
         # names can be affixed. `included do` calls this with no affix, so a
         # model that only includes the concern keeps the default names; an
@@ -147,6 +190,7 @@ module ConcernsOnRails
           self.publishable_scope_names = SCOPE_BASES.to_h do |base|
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
+          ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, publishable_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::Publishable")
 
           # See publishable_true_predicate for why the boolean branch is not
           # `where(field => true)`. (The timestamp branch is an Arel `<=`,
@@ -180,13 +224,6 @@ module ConcernsOnRails
               unscope(where: publishable_field).where(publishable_field => nil)
             end
           }
-        end
-
-        # Routed through a helper so the `default_scope:` keyword doesn't shadow
-        # the `default_scope` macro inside `publishable_by`.
-        def enable_published_default_scope
-          published_scope = publishable_scope_names.fetch(:published)
-          default_scope { public_send(published_scope) }
         end
 
         # "Not currently published", built against the CURRENT relation: the
@@ -269,6 +306,9 @@ module ConcernsOnRails
       # they no longer silently skip). Raises on a boolean publishable column:
       # the Time would cast to `true` and silently publish NOW instead of
       # scheduling — a boolean column cannot represent a future publish.
+      # A time that cannot be parsed ("junk") raises ArgumentError before any
+      # hook runs: it used to cast to nil, write NULL and still return true.
+      # nil (or blank) keeps writing NULL, as it always has.
       # Example:
       #   record.publish_at!(1.day.from_now)
       def publish_at!(time)
@@ -279,6 +319,9 @@ module ConcernsOnRails
                 "publish immediately. Use publish!/unpublish!, or a datetime column to schedule."
         end
 
+        time = ConcernsOnRails::Support::TimeValue.cast_argument!(
+          self.class, self.class.publishable_field, time, label: "ConcernsOnRails::Models::Publishable"
+        )
         publishable_write_with_hooks(time, :publish)
       end
 
@@ -292,7 +335,7 @@ module ConcernsOnRails
       def publishable_write_with_hooks(value, kind)
         field = self.class.publishable_field
         before, after = kind == :publish ? %i[before_publish after_publish] : %i[before_unpublish after_unpublish]
-        ConcernsOnRails::Support::HookedWrite.run(self, before: before, after: after, restore: [field]) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: before, after: after) do
           update(field => value)
         end
       end

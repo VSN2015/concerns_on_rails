@@ -1,4 +1,5 @@
 require "permittable"
+require "concerns_on_rails/core"
 
 module ConcernsOnRails
   module Controllers

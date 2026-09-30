@@ -1,6 +1,8 @@
 require "active_support/concern"
+require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/time_value"
 require "active_support/core_ext/object/deep_dup"
 require "active_model/type"
 require "bigdecimal"
@@ -59,6 +61,13 @@ module ConcernsOnRails
     #     ungarbageable values cast to nil (ActiveModel semantics). :decimal is
     #     stored precision-safe as a String (BigDecimal), :date/:datetime as
     #     ISO8601 strings (datetime in UTC, microsecond precision).
+    #   * A :datetime key behaves like a datetime column on the same model.
+    #     Under time_zone_aware_attributes (every Rails app), a zone-less
+    #     String (a datetime-local form value) is wall-clock time in Time.zone,
+    #     a Date is midnight there, and the reader returns a TimeWithZone in
+    #     the current Time.zone. Otherwise both follow
+    #     `ActiveRecord.default_timezone` (UTC by default). `where_<key>` parses
+    #     its argument the same way. The stored UTC form does not change.
     #   * Reserved option names: passing key specs as keyword arguments means a
     #     key literally named `prefix`, `suffix` or `query` would be swallowed
     #     by the macro options — declare those via the positional Hash escape
@@ -272,7 +281,7 @@ module ConcernsOnRails
         # would otherwise emit means something different on every adapter
         # (`= ''` matches empty strings on PostgreSQL/MySQL, `= NULL` nothing).
         def storable_query_value(spec, value)
-          stored = Casting.write(spec[:type], value)
+          stored = Casting.write(spec[:type], value, zone_aware: Casting.zone_aware?(self, spec))
           if stored.nil?
             raise ArgumentError,
                   "#{LABEL}: where_#{spec[:accessor]}: #{value.inspect} is not a valid :#{spec[:type]} value"
@@ -454,7 +463,7 @@ module ConcernsOnRails
       def storable_set(column, key, value)
         spec = storable_spec(column, key)
         hash = storable_decoded(column, self[column]).dup
-        hash[key.to_s] = storable_cast_write(spec[:type], value)
+        hash[key.to_s] = storable_cast_write(spec, value)
         storable_assign(column, hash)
       end
 
@@ -494,19 +503,34 @@ module ConcernsOnRails
         raw = hash[skey]
         return nil if raw.nil?
 
-        storable_cast_read(spec[:type], raw)
+        storable_cast_read(spec, raw)
       end
 
-      # A Proc default is instance_exec'd per call; a mutable Hash/Array default
-      # is deep-duped per call so one instance's mutation never leaks into another.
+      # A Proc default is instance_exec'd per call; any other default is
+      # deep-duped per call so one instance's in-place mutation never leaks
+      # into another — a Hash/Array, but equally an unfrozen String (`<<`) or
+      # a Time. deep_dup leaves non-duplicable values (nil, Integers,
+      # Symbols, true/false) as they are. A Class/Module is an identity, not
+      # a value — Rails 6.0's deep_dup would hand back an anonymous copy.
       def storable_default(spec)
-        default = spec[:default]
-        return instance_exec(&default) if default.is_a?(Proc)
+        value = storable_raw_default(spec[:default])
+        spec[:type] == :datetime ? storable_as_stored(spec, value) : value
+      end
 
-        case default
-        when Hash, Array then default.deep_dup
-        else default
-        end
+      def storable_raw_default(default)
+        return instance_exec(&default) if default.is_a?(Proc)
+        return default if default.is_a?(Module)
+
+        default.deep_dup
+      end
+
+      # A :datetime default reads back exactly as the same value stored under
+      # the key would: through the writer's cast, then the reader's (a
+      # TimeWithZone under time_zone_aware_attributes). A String default used
+      # to come back as that String.
+      def storable_as_stored(spec, value)
+        stored = storable_cast_write(spec, value)
+        stored.nil? ? nil : storable_cast_read(spec, stored)
       end
 
       # ---- storage codec ----
@@ -584,15 +608,23 @@ module ConcernsOnRails
       # ---- casting ----
       # Shared by the instance readers/writers and the class-level query
       # scopes: the stored representation of a value for a key type.
+      # `zone_aware:` only matters for :datetime (see zone_aware?).
       module Casting
         module_function
 
-        def read(type, raw)
+        # A :datetime key converts to Time.zone exactly when a datetime
+        # attribute named like its accessor would: the model's
+        # time_zone_aware_attributes (minus skip_time_zone_conversion_for_attributes).
+        def zone_aware?(klass, spec)
+          spec[:type] == :datetime && ConcernsOnRails::Support::TimeValue.zone_aware?(klass, spec[:accessor])
+        end
+
+        def read(type, raw, zone_aware: false)
           case type
           when :json     then raw.deep_dup
           when :decimal  then read_decimal(raw)
           when :date     then CASTERS[:date].cast(raw)
-          when :datetime then read_time(raw)
+          when :datetime then ConcernsOnRails::Support::TimeValue.read(raw, zone_aware: zone_aware)
           else CASTERS[type].cast(raw)
           end
         rescue StandardError
@@ -607,18 +639,12 @@ module ConcernsOnRails
           BigDecimal(raw.to_s)
         end
 
-        def read_time(raw)
-          return raw if raw.is_a?(Time)
-
-          Time.iso8601(raw.to_s)
-        end
-
-        def write(type, value)
+        def write(type, value, zone_aware: false)
           case type
           when :json     then value
           when :decimal  then write_decimal(value)
           when :date     then write_date(value)
-          when :datetime then write_datetime(value)
+          when :datetime then write_datetime(value, zone_aware: zone_aware)
           else CASTERS[type].cast(value)
           end
         end
@@ -638,34 +664,27 @@ module ConcernsOnRails
         end
 
         # UTC iso8601(6): microsecond precision, the lesson CursorPaginatable
-        # learned. getutc, not utc — Time#utc mutates its receiver, so a plain
-        # `where_trial_ends_at(t)` would rewrite the caller's Time in place (and
-        # raise FrozenError on a frozen one) for what is only a read.
-        def write_datetime(value)
-          coerce_time(value)&.getutc&.iso8601(6)
-        end
-
-        # A bare Date becomes midnight UTC (deterministic — Date#to_time would
-        # anchor to the host's zone).
-        def coerce_time(value)
-          case value
-          when nil then nil
-          when ActiveSupport::TimeWithZone, Time then value
-          when DateTime then value.to_time
-          when Date then Time.utc(value.year, value.month, value.day)
-          else CASTERS[:datetime].cast(value)
-          end
+        # learned. Support::TimeValue.cast reads a zone-less String or a Date
+        # the way a datetime column on the same model would: in Time.zone
+        # under time_zone_aware_attributes, otherwise in
+        # `ActiveRecord.default_timezone`. It used to be UTC whatever the app's
+        # zone was. TimeValue.utc takes a UTC copy: Time#utc converts in place,
+        # so a plain `where_trial_ends_at(t)` would rewrite the caller's Time
+        # (and raise FrozenError on a frozen one) for what is only a read.
+        def write_datetime(value, zone_aware: false)
+          time = ConcernsOnRails::Support::TimeValue.cast(value, zone_aware: zone_aware)
+          time && ConcernsOnRails::Support::TimeValue.utc(time).iso8601(6)
         rescue ArgumentError, TypeError
           nil
         end
       end
 
-      def storable_cast_read(type, raw)
-        Casting.read(type, raw)
+      def storable_cast_read(spec, raw)
+        Casting.read(spec[:type], raw, zone_aware: Casting.zone_aware?(self.class, spec))
       end
 
-      def storable_cast_write(type, value)
-        Casting.write(type, value)
+      def storable_cast_write(spec, value)
+        Casting.write(spec[:type], value, zone_aware: Casting.zone_aware?(self.class, spec))
       end
 
       # ---- validation ----
@@ -686,7 +705,7 @@ module ConcernsOnRails
             raw = decoded[skey]
             next if raw.nil?
 
-            value = storable_cast_read(spec[:type], raw)
+            value = storable_cast_read(spec, raw)
             errors.add(spec[:accessor], "is not included in the list") unless allowed.include?(value)
           end
         end

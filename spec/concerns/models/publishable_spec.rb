@@ -150,6 +150,65 @@ describe ConcernsOnRails::Publishable do
       expect(article.reload.scheduled?).to be true
       expect(article.published?).to be false
     end
+
+    it "#publish_at! accepts a parseable String, cast like an assignment" do
+      article = Article.create!(title: "t")
+      expect(article.publish_at!("2020-01-01 00:00:00")).to be(true)
+      expect(article.reload.published_at).to eq(Time.utc(2020, 1, 1))
+    end
+
+    # "junk" cast to nil, so the verb wrote NULL, fired the publish hooks and
+    # returned true. Expirable already refused such a time.
+    context "with a time that cannot be parsed" do
+      let(:hooked) do
+        Class.new(TestModel) do
+          self.table_name = "articles"
+          include ConcernsOnRails::Publishable
+
+          publishable_by :published_at
+
+          attr_reader :log
+
+          def before_publish
+            (@log ||= []) << :before_publish
+          end
+        end
+      end
+
+      ["junk", "2026-13-45 99:99", 42, 1.hour].each do |bad|
+        it "#publish_at!(#{bad.inspect}) raises ArgumentError before any hook runs, and writes nothing" do
+          article = hooked.create!(title: "t", published_at: 1.day.from_now)
+
+          expect { article.publish_at!(bad) }
+            .to raise_error(ArgumentError, /cannot be parsed as a time for 'published_at'/)
+          expect(article.log).to be_nil
+          expect(article.reload).to be_scheduled
+        end
+      end
+
+      # Under time-zone awareness the column's cast is Time.zone.parse:
+      # "junk" is June 1st, "maybe" May 1st, "Monday" today. A String must
+      # name a year.
+      it "refuses words Time.zone.parse would read as a date, in a time-zone-aware app" do
+        zoned = Class.new(hooked) { self.time_zone_aware_attributes = true }
+        article = zoned.create!(title: "t")
+
+        Time.use_zone("America/New_York") do
+          %w[junk maybe decimal marching Monday 10:30].each do |garbage|
+            expect { article.publish_at!(garbage) }.to raise_error(ArgumentError, /cannot be parsed as a time/), garbage
+          end
+          expect(article.publish_at!("Oct 1 2026")).to be(true)
+        end
+        expect(article.reload.published_at).to eq(Time.utc(2026, 10, 1, 4)) # midnight New York
+        expect(article.log).to eq(%i[before_publish])
+      end
+
+      it "keeps publish_at!(nil) writing NULL, as before" do
+        article = hooked.create!(title: "t", published_at: 1.day.from_now)
+        expect(article.publish_at!(nil)).to be(true)
+        expect(article.reload).to be_draft
+      end
+    end
   end
 
   describe "default_scope: true" do
@@ -177,6 +236,99 @@ describe ConcernsOnRails::Publishable do
       expect(ScopedPost.draft.map(&:title)).to eq(["draft"])
       expect(ScopedPost.scheduled.map(&:title)).to eq(["future"])
       expect(ScopedPost.unscoped.count).to eq(3)
+    end
+  end
+
+  # The default scope is registered once and reads a flag (SoftDeletable/
+  # Sortable's pattern) — a permanent default_scope block per `true` call
+  # could never be undone. An explicit value sets it; omitting keeps it.
+  describe "re-declaring default_scope:" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :redeclared_posts, force: true do |t|
+          t.string :type
+          t.datetime :published_at
+        end
+      end
+    end
+
+    let(:parent) do
+      Class.new(TestModel) do
+        self.table_name = "redeclared_posts"
+        include ConcernsOnRails::Publishable
+
+        publishable_by :published_at, default_scope: true
+      end
+    end
+
+    it "lets an STI subclass turn an inherited default_scope: true off" do
+      stub_const("RedeclaredPost", parent)
+      stub_const("RedeclaredPreviewPost", Class.new(parent) { publishable_by :published_at, default_scope: false })
+
+      RedeclaredPreviewPost.create!(published_at: nil)
+      expect(RedeclaredPreviewPost.count).to eq(1)
+      expect(RedeclaredPost.count).to eq(0)
+    end
+
+    it "keeps an inherited default_scope: true when a subclass omits the option" do
+      stub_const("RedeclaredPost", parent)
+      stub_const("RedeclaredNewsPost", Class.new(parent) { publishable_by :published_at })
+
+      RedeclaredNewsPost.create!(published_at: nil)
+      live = RedeclaredNewsPost.create!(published_at: 1.day.ago)
+      expect(RedeclaredNewsPost.all.to_a).to eq([live]) # drafts stay hidden
+    end
+
+    it "lets a later call on the same class turn it off" do
+      parent.publishable_by :published_at, default_scope: false
+      parent.create!(published_at: nil)
+      expect(parent.count).to eq(1)
+    end
+
+    it "does not stack a second predicate when default_scope: true is repeated" do
+      parent.publishable_by :published_at, default_scope: true
+      column = TestDatabase.quoted_column(:published_at)
+      expect(parent.all.to_sql.scan(column).size).to eq(1)
+      expect(parent.default_scopes.size).to eq(1)
+    end
+
+    # Any default_scope costs the model Rails' statement cache for
+    # find/find_by and an evaluation on every `new`, so the lazily evaluated
+    # one is registered only once a class first asks for it.
+    context "when default_scope: true was never asked for" do
+      let(:plain) do
+        Class.new(TestModel) do
+          self.table_name = "redeclared_posts"
+          include ConcernsOnRails::Publishable
+        end
+      end
+
+      it "registers no default_scope at all" do
+        expect(plain.default_scopes).to be_empty
+        plain.publishable_by :published_at, default_scope: false
+        expect(plain.default_scopes).to be_empty
+      end
+
+      it "registers it for a subclass that turns it on, leaving the parent and a sibling unscoped" do
+        stub_const("RedeclaredPost", plain)
+        stub_const("RedeclaredFeaturedPost", Class.new(plain) { publishable_by :published_at, default_scope: true })
+        stub_const("RedeclaredBlogPost", Class.new(plain))
+
+        RedeclaredFeaturedPost.create!(published_at: nil)
+        RedeclaredBlogPost.create!(published_at: nil)
+        expect(RedeclaredFeaturedPost.count).to eq(0)
+        expect(RedeclaredFeaturedPost.unscoped.count).to eq(1)
+        expect(RedeclaredBlogPost.count).to eq(1)
+        expect(RedeclaredPost.count).to eq(2)
+        expect(RedeclaredPost.default_scopes).to be_empty
+      end
+
+      it "exposes drafts again after true then false on the same class" do
+        plain.publishable_by :published_at, default_scope: true
+        plain.publishable_by :published_at, default_scope: false
+        plain.create!(published_at: nil)
+        expect(plain.count).to eq(1)
+      end
     end
   end
 
@@ -451,6 +603,48 @@ describe ConcernsOnRails::Publishable do
 
       expect(HookedArticle.publish_all).to eq(2)
       expect(HookedArticle.published_ids).to match_array([a.id, b.id])
+    end
+
+    # A has_many JOIN yields the parent once per joined child, so the
+    # per-record path published it through each stale copy: after_publish ran
+    # three times and the count said 3 — the fast path's update_all touches
+    # the row once.
+    describe "over a has_many join" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :batch_comments, force: true do |t|
+            t.integer :joined_article_id
+          end
+        end
+        stub_const("BatchComment", Class.new(TestModel) { self.table_name = "batch_comments" })
+        joined = Class.new(TestModel)
+        stub_const("JoinedArticle", joined) # joins(:assoc) needs a named class
+        joined.class_eval do
+          self.table_name = "batch_articles"
+          include ConcernsOnRails::Publishable
+
+          publishable_by
+          has_many :batch_comments, class_name: "BatchComment"
+
+          cattr_accessor :hook_calls, default: 0
+
+          def after_publish
+            self.class.hook_calls += 1
+          end
+        end
+        article = joined.create!(published_at: nil)
+        3.times { BatchComment.create!(joined_article_id: article.id) }
+      end
+
+      it "publishes a limited relation's record once" do
+        expect(JoinedArticle.joins(:batch_comments).limit(1).publish_all).to eq(1)
+        expect(JoinedArticle.hook_calls).to eq(1)
+      end
+
+      it "publishes an unlimited relation's record once" do
+        expect(JoinedArticle.joins(:batch_comments).publish_all).to eq(1)
+        expect(JoinedArticle.hook_calls).to eq(1)
+      end
     end
 
     it "rolls the whole batch back when a record fails" do

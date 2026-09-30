@@ -2,7 +2,9 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/association_scope"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/time_value"
 
 module ConcernsOnRails
   module Models
@@ -27,6 +29,9 @@ module ConcernsOnRails
         # with this record (their models must include SoftDeletable too).
         class_attribute :soft_delete_cascade, instance_accessor: false, default: [].freeze
 
+        ConcernsOnRails::Support::Affix.refuse_stateable_names!(
+          self, SoftDeletable.public_instance_methods(false), kind: :instance, label: "ConcernsOnRails::Models::SoftDeletable"
+        )
         define_soft_delete_scopes(nil, nil)
         self.soft_delete_captured_scopes =
           ConcernsOnRails::Support::Affix.capture(self, SCOPE_BASES).freeze
@@ -164,6 +169,7 @@ module ConcernsOnRails
           end.freeze
 
           soft_deleted_name = soft_delete_scope_names.fetch(:soft_deleted)
+          ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, soft_delete_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::SoftDeletable")
 
           scope soft_delete_scope_names[:active],
                 -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
@@ -254,6 +260,11 @@ module ConcernsOnRails
 
       # `at:` sets the timestamp (default now) — it is what the cascade uses to
       # hand the parent's exact timestamp down, and lets callers backdate.
+      # nil or blank also means now, as for expire!: `at: params[:at]` with
+      # the param absent used to write NULL, delete nothing and return true.
+      # Any other value is cast through the column's type up front, and one
+      # that cannot be parsed as a time raises ArgumentError before any hook
+      # runs.
       #
       # The hooks, the write and the cascade share one savepoint
       # (Support::HookedWrite): a raising hook — or one vetoing with
@@ -262,10 +273,13 @@ module ConcernsOnRails
       # in-memory stamp is put back so a retry is not swallowed by the
       # `deleted?` guard. A failed validation rolls back the before hook too.
       def soft_delete!(at: Time.zone.now)
+        at = Time.zone.now if at.blank?
+        at = ConcernsOnRails::Support::TimeValue.cast_argument!(
+          self.class, self.class.soft_delete_field, at, label: "ConcernsOnRails::Models::SoftDeletable"
+        )
         return true if deleted?
 
-        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_soft_delete, after: :after_soft_delete,
-                                                        restore: [self.class.soft_delete_field]) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_soft_delete, after: :after_soft_delete) do
           next false unless soft_delete_write(at)
 
           soft_delete_cascade_dependents!(at)
@@ -278,8 +292,7 @@ module ConcernsOnRails
         return true unless deleted?
 
         stamp = self[self.class.soft_delete_field]
-        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_restore, after: :after_restore,
-                                                        restore: [self.class.soft_delete_field]) do
+        ConcernsOnRails::Support::HookedWrite.run(self, before: :before_restore, after: :after_restore) do
           next false unless soft_delete_write(nil)
 
           restore_cascaded_dependents!(stamp)
@@ -351,16 +364,28 @@ module ConcernsOnRails
 
       # Yields the records of every cascade association matching `deleted:`
       # (false → not deleted, a timestamp → deleted at exactly that time).
-      # The association's default scope is peeled off so deleted rows are
-      # reachable; has_one is handled through the same relation.
+      # Support::AssociationScope removes the gem's own hiding predicates on
+      # the child's own table — its SoftDeletable one, so deleted rows are
+      # reachable, and Publishable's `default_scope: true`, whose drafts the
+      # cascade used to leave live under a deleted parent. Every other
+      # default-scope predicate (a tenant, a discriminator on a shared table,
+      # a joined table's same-named column) still applies, as it does for
+      # Rails' `dependent:`. The association's own
+      # conditions apply too; a has_one acts on the child its reader returns
+      # (a hidden one only when the reader returns none).
       def soft_delete_each_dependent(deleted:, &block)
         self.class.soft_delete_cascade.each do |name|
           reflection = self.class.reflect_on_association(name)
           self.class.send(:soft_delete_check_cascade_target!, name, reflection)
           field = reflection.klass.soft_delete_field
-          relation = association(name).scope.unscope(where: field)
+          # Also drops the association's own condition on the column (restore
+          # must reach deleted rows) — on the child's table only: a default
+          # scope's `joins(:author).where(authors: { deleted_at: nil })` stays.
+          relation = ConcernsOnRails::Support::AssociationScope.without(
+            ConcernsOnRails::Support::AssociationScope.unfiltered(self, name), field
+          )
           relation = deleted ? relation.where(field => deleted) : relation.where(field => nil)
-          relation.find_each(&block)
+          ConcernsOnRails::Support::BatchOps.each_record(relation, &block)
         end
       end
     end

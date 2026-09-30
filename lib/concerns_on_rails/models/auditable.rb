@@ -1,5 +1,8 @@
 require "active_support/concern"
+require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/callable"
+require "concerns_on_rails/support/time_value"
 require "bigdecimal"
 require "json"
 
@@ -7,7 +10,8 @@ module ConcernsOnRails
   module Models
     # Lightweight change history ("paper_trail-lite") stored as JSON entries in
     # a single text column on the same table — no extra tables, no versioning
-    # engine — so it works on any database, including SQLite.
+    # engine — so it works on any database, including SQLite. A native
+    # json/jsonb column works too (the trail is stored as a JSON array).
     #
     #   class Product < ApplicationRecord
     #     include ConcernsOnRails::Auditable
@@ -27,8 +31,9 @@ module ConcernsOnRails
     #   product.audited_changes_since(1.day.ago)
     #   product.clear_audit_trail!                 # wipe the column (skips callbacks)
     #
-    # Actor resolution ("by"): a model's `actor:` (a callable instance_exec'd
-    # on the record, or a Symbol naming a record method) wins; otherwise the
+    # Actor resolution ("by"): a model's `actor:` (a callable — `-> { ... }` is
+    # instance_exec'd on the record, `->(record) { ... }` is called with it —
+    # or a Symbol naming a record method) wins; otherwise the
     # gem-wide fallback `ConcernsOnRails.setup { |c| c.audit_actor = -> {
     # Current.user&.id } }` applies to every audited model at once. Only a
     # model that passes no `actor:` at all takes that fallback — an explicit
@@ -137,8 +142,9 @@ module ConcernsOnRails
       # Decoded audit entries, oldest first. [] for blank/corrupt columns.
       # Memoized per raw column value (rendering "last changed" for five fields
       # used to decode the whole trail five times); the returned Array is a
-      # fresh copy each call, but the entry Hashes are shared — treat them as
-      # read-only.
+      # fresh copy each call, but the entry Hashes are shared with the memo —
+      # treat them as read-only. (Never with the column value itself, so
+      # editing one can't rewrite the stored history.)
       def audit_trail
         raw = self[self.class.auditable_into]
         cached = @_auditable_trail
@@ -197,7 +203,25 @@ module ConcernsOnRails
         entries = auditable_persisted_trail + auditable_build_entries(tracked)
         max = self.class.auditable_max_entries
         entries = entries.last(max) if max
-        self[self.class.auditable_into] = JSON.generate(entries)
+        self[self.class.auditable_into] = auditable_encode(entries)
+      end
+
+      def auditable_encode(entries)
+        auditable_native_column? ? entries : JSON.generate(entries)
+      end
+
+      # A native json/jsonb column (or one the host app `serialize`d) encodes
+      # the value itself, so it is handed the Array: assigning the generated
+      # String stored a JSON string scalar wrapping the encoded trail. The
+      # same detection Models::Storable uses for its column.
+      def auditable_native_column?
+        name = self.class.auditable_into.to_s
+        type = self.class.type_for_attribute(name)
+        return true if defined?(ActiveRecord::Type::Serialized) && type.is_a?(ActiveRecord::Type::Serialized)
+
+        %i[json jsonb].include?(self.class.columns_hash[name]&.type)
+      rescue StandardError
+        false
       end
 
       # Cheap pre-check before materializing the full changes hash — most saves
@@ -242,15 +266,18 @@ module ConcernsOnRails
         auditable_json_value(auditable_actor_value(actor))
       end
 
-      # A Symbol names a method on the record; a Proc is instance_exec'd on it
-      # (globals and the record's own attributes in scope); any other callable
-      # is #call'd as-is — instance_exec needs a to_proc only Procs have.
+      # A Symbol names a method on the record; every callable goes through
+      # Support::Callable.invoke: a lambda with no required parameter (and a
+      # block) is instance_exec'd on the record (globals and its own
+      # attributes in scope), a `->(record) { ... }` lambda, a symbol proc or a
+      # callable object taking an argument is called WITH the record, and a
+      # zero-argument callable object is #call'd bare. Every Proc used to be
+      # instance_exec'd, so the `->(record)` lambda the macro accepted raised
+      # ArgumentError on every save.
       def auditable_actor_value(actor)
-        case actor
-        when Symbol then auditable_actor_send(actor)
-        when Proc then instance_exec(&actor)
-        else actor.call
-        end
+        return auditable_actor_send(actor) if actor.is_a?(Symbol)
+
+        ConcernsOnRails::Support::Callable.invoke(self, actor)
       end
 
       # Resolve-time guard: a Symbol naming no method would otherwise raise a
@@ -283,7 +310,10 @@ module ConcernsOnRails
         when nil, true, false, Integer, String then value
         when Float then auditable_float_value(value)
         when BigDecimal then value.to_s("F")
-        when Time, DateTime then value.to_time.utc.iso8601
+        # A UTC copy. The value is the record's own attribute (often the
+        # caller's Time), and Time#utc would convert it in place and raise
+        # FrozenError on a frozen one.
+        when Time, DateTime then ConcernsOnRails::Support::TimeValue.utc(value).iso8601
         when Date then value.iso8601
         when Symbol then value.to_s
         else value.as_json
@@ -307,8 +337,18 @@ module ConcernsOnRails
       end
 
       # Tolerant decode: blank, invalid JSON or non-array payloads become [].
+      # A native json column hands back the already-decoded Array (JSON.parse
+      # on it raised TypeError, failing every tracked save); a String is the
+      # text-column form — or a trail an earlier version stored in a json
+      # column as a JSON string scalar, which decodes back to that String.
+      # The json column's entries are the attribute value's OWN Hashes, so
+      # they are deep-copied: `audit_trail.first["to"] = "forged"` would
+      # otherwise be an in-place change the next (even untracked) save
+      # persisted, rewriting history. (JSON.parse's output is already
+      # detached from the attribute.)
       def auditable_decode(raw)
-        return [] if raw.nil? || raw.to_s.strip.empty?
+        return raw.grep(Hash).map(&:deep_dup) if raw.is_a?(Array)
+        return [] unless raw.is_a?(String) && !raw.strip.empty?
 
         parsed = JSON.parse(raw)
         parsed.is_a?(Array) ? parsed.grep(Hash) : []

@@ -90,7 +90,7 @@ Article.published.where(category: "news").order(:published_at)
 |---|---|
 | `publish!` | Sets the publish field to `Time.zone.now` and persists the record. Returns the `update` result. |
 | `unpublish!` | Sets the publish field to `nil` and persists the record. |
-| `publish_at!(time)` | Sets the publish field to `time` and persists the record. Pass a future time to schedule the record. |
+| `publish_at!(time)` | Sets the publish field to `time` and persists the record. Pass a future time to schedule the record. `time` is cast through the column's type. A value that is not a time raises `ArgumentError` before any hook runs, and nothing is written: a String must name a year (ISO 8601, RFC 2822, `"Oct 1 2026"` and `"2026-10-01 10:30"` all do; `"junk"`, `"Monday"` and `"10:30"` do not, although `Time.zone.parse` reads them as June 1st and today), and `42` or `1.hour` never cast. `nil` still writes `NULL` (and fires the publish hooks). |
 | `published?` | Returns `true` if the field is present and its value is `<= Time.zone.now`. |
 | `unpublished?` | Returns `true` if `published?` is `false` (logical inverse; covers both drafts and scheduled records). |
 | `scheduled?` | Returns `true` if the field is present and its value is `> Time.zone.now`. |
@@ -167,7 +167,7 @@ Post.unscoped.count         # => 3
 
 - **A boolean column's `.published` is a grouped `(= TRUE)`.** Rails copies a top-level equality condition from a scope onto records built through it. So a `default_scope: true` built on `where(is_published: true)` made every new record start out published. Wrapping the equality in an Arel Grouping hides it from that copy while keeping the index-friendly `= TRUE` form, so new records start unpublished. That includes `Post.published.new`. Rails 6.0 cannot `unscope` a Grouping, so there the scope is `<> FALSE`, which selects the same rows (`NULL` stays out) and is never copied either.
 
-- **Hooks can veto the write.** The hooks and the write run in their own savepoint (`Support::HookedWrite`). A hook that raises, or that calls `raise ActiveRecord::Rollback`, undoes the write. `publish!` / `unpublish!` / `publish_at!` then return `false` and nothing is written, even inside a caller's transaction. `publish_all` / `unpublish_all` raise `ActiveRecord::RecordNotSaved` and roll back the whole batch. A write that fails validation returns `false` and rolls back the before-hook's side effects. After any aborted write, the in-memory column value goes back to its previous value.
+- **Hooks can veto the write.** The hooks and the write run in their own savepoint (`Support::HookedWrite`). A hook that raises, or that calls `raise ActiveRecord::Rollback`, undoes the write. `publish!` / `unpublish!` / `publish_at!` then return `false` and nothing is written, even inside a caller's transaction. `publish_all` / `unpublish_all` raise `ActiveRecord::RecordNotSaved` and roll back the whole batch. A write that fails validation returns `false` and rolls back the before-hook's side effects. After any aborted write, every in-memory attribute goes back to its previous state — the column, and anything else the write changed (an Auditable trail entry appended by its `before_save`, a hook's assignment, even an in-place edit nested inside a json value) — so a later unrelated save cannot persist it. Unsaved edits made before the call stay, still dirty.
 
 - **`unpublished?` is not the inverse of `draft?` or `scheduled?` individually.** It is the complement of `published?` and therefore covers both drafts and scheduled records together.
 
@@ -177,7 +177,7 @@ Post.unscoped.count         # => 3
 
 - **`publish!` and `publish_at!` delegate to `update`.** Any `before_validation` or `before_save` callbacks on the model run normally. If those callbacks halt the chain, the timestamp is not persisted and the method returns `false`.
 
-- **`publishable_by` can be called multiple times.** Each subsequent call overwrites `publishable_field`. Only the final configuration is active. Re-calling with `default_scope: true` will stack an additional `default_scope` onto the class, which Rails evaluates as an AND of all default scopes — avoid re-calling in production code.
+- **`publishable_by` can be called multiple times.** Each subsequent call overwrites `publishable_field`. Only the final configuration is active. `default_scope:` is a flag read by one lazily evaluated `default_scope`, registered the first time a class passes `default_scope: true` (a model that never asks carries no default scope at all, so it keeps Rails' statement cache for `find`/`find_by`), so repeating `default_scope: true` does not stack a second predicate. A call that passes it explicitly sets it for that class — `default_scope: false` on a later call or an STI subclass turns it off — while a call that omits it keeps the current (inherited) value, so a subclass re-declaring for another reason never silently exposes drafts.
 
 - **No persistence of transition history.** The concern stores only the current timestamp; it does not record a log of publish/unpublish events. Pair with an auditing gem if a history trail is required.
 

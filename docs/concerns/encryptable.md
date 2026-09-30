@@ -101,9 +101,23 @@ Repeatable — each call declares more encrypted fields. Rules accumulate (reass
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `*fields` | `Symbol…` | — (required) | One or more `text`/`binary` columns to encrypt. |
-| `type:` | `Symbol` | `:string` | Casts the decrypted value: `:string`, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime` (the Storable caster set; `:decimal` precision-safe, `:datetime` UTC microseconds). |
+| `type:` | `Symbol` | `:string` | Casts the decrypted value: `:string`, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime` (the Storable caster set; `:decimal` precision-safe, `:datetime` UTC microseconds). A `:datetime` field behaves like a datetime column on the same model: see [Notes](#notes--gotchas). |
 | `key:` | `String` / `Proc` / `nil` | `nil` | Per-field key override (raw / hex / passphrase, or a lazy Proc). Falls back to the gem-level `ConcernsOnRails.encryption` key. |
 | `blind_index:` | `true` / `Hash` / `nil` | `nil` | Maintain a deterministic fingerprint column for exact-match lookups. `true` uses `<field>_bidx`; a Hash accepts `column:` and `expression:` (a callable normalizer applied on write and query). See below. |
+
+### Blind index of a typed field
+
+The fingerprint is the keyed HMAC of the field's **canonical plaintext**, which is exactly what the cipher encrypts: the value cast through the field's `type:`, a `:datetime` as UTC ISO8601 with microseconds. Writes and lookups take the same form. So `find_by_meeting_at` finds a record by any rendering of the instant (a `Time` in any zone, `"2026-10-01T13:00:00Z"`, or a zone-less String read the way the writer reads it), whatever `Time.zone` the writer and the reader ran in, and `find_by_age("42")` finds `age: 42`. `expression:` receives that cast value (a `:datetime` as a UTC `Time`), not the raw argument.
+
+Lookups also try the digest of the argument's own `to_s`, which is what the index hashed before this change. So a row indexed then is still found by the same lookup that found it then. For every type except `:datetime` the two digests are identical and nothing needs reindexing. For a **`:datetime` field** (or a typed field with an `expression:` that renders a time), rewrite the index once so that every rendering finds it:
+
+```ruby
+Meeting.unscoped.where.not(starts_at: nil).find_each do |meeting|
+  meeting.update_columns(starts_at_bidx: Meeting.starts_at_fingerprint(meeting.starts_at))
+end
+```
+
+`update_columns` writes only the digest column: no callbacks, and the ciphertext is untouched.
 
 ### Gem-level configuration — `ConcernsOnRails.encryption`
 
@@ -171,9 +185,10 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 
 ## Composition with other concerns
 
-- **Normalizable** — normalization runs `before_validation` on the plaintext; encryption happens later, at the DB-serialization boundary. So the stored ciphertext is always of the *normalized* value, regardless of `include` order.
+- **Normalizable** — normalization runs on the plaintext in `before_validation`, and, for saves that skip validation (`update_attribute`, `save(validate: false)`), in a `before_save` backstop that Normalizable *prepends* to the save callbacks — so it runs ahead of the blind-index refresh (also a `before_save`) whichever concern was included first. Encryption happens later still, at the DB-serialization boundary. So the stored ciphertext and the blind-index fingerprint are both of the *normalized* value, regardless of `include` order, and `find_by_<field>` finds what was stored. (`update_column(s)`/`update_all` skip callbacks: they neither normalize nor refresh the index.)
 - **Maskable** — `masked_<field>` masks the *decrypted* value; the column stays ciphertext. Order-independent.
 - **Auditable** — auditing an encrypted field would persist its plaintext into the audit column, so declaring a field with **both** `encryptable` and `auditable_by` **raises**. Audit a non-sensitive companion column instead.
+- **Sluggable** — a friendly_id slug is plaintext of its source (`"123-45-6789"`), so an encrypted field named as the `sluggable_by` field or in its `candidates:` (nested arrays included) — or as a bare `friendly_id :field, use: :slugged` base — **raises** at declaration. Shapes a declaration cannot see (Sluggable included without `sluggable_by`, which slugs the implicit `:name`; friendly_id declared after `encryptable`) are refused at save time, before the row is written, with the same `ArgumentError`. A method or Proc candidate that reads an encrypted field under another name cannot be detected — keep encrypted values out of those yourself.
 - **Searchable / Filterable** — encrypted columns are **not** searchable: non-deterministic ciphertext (random IV) means the same plaintext never produces the same bytes, so `where(:ssn)`, `LIKE`, and prefix matching cannot work. For exact-match lookups, add a [blind index](#querying-encrypted-fields-blind-index) and query the `<field>_bidx` column (via `find_by_<field>` / `where_<field>`).
 
 ## Security notes
@@ -187,13 +202,43 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 ## Notes & gotchas
 
 - `nil` stays `nil` (the column is left NULL) — a blank value is never encrypted.
+- **`type: :datetime` follows the model's time-zone settings, like a datetime column.** With `time_zone_aware_attributes` on (every Rails app), a zone-less String such as a `datetime-local` form value (`"2026-10-01T09:00"`) is wall-clock time in `Time.zone`, a `Date` is midnight in `Time.zone`, and the field reads back as an `ActiveSupport::TimeWithZone` in the current `Time.zone`. Without it, both follow `ActiveRecord.default_timezone` (UTC by default). A `datetime_select` (multiparameter) value is wall-clock time in `Time.zone` too. `skip_time_zone_conversion_for_attributes` is honored per field, and so is a subclass's own setting (each subclass owns its copy of the field's type). A stored plaintext without `Z` or an offset is read in `default_timezone`, never the server's zone. The plaintext is always UTC ISO8601 with microseconds, so rows written before this change read back as the same instant. Before, a zone-less String was parsed in the server's system zone (or UTC) and reads were plain UTC `Time`s. A frozen or non-UTC `Time` is stored correctly and never modified (it used to be converted in place, and a frozen one was saved as `NULL`).
 - Dirty tracking works on the decrypted plaintext: reassigning the same value is **not** dirty, and an unchanged field is not re-encrypted on save, despite the random IV.
 - The envelope is versioned (`ver`/`alg`/`key_id`): `key_id` drives [key rotation](#key-rotation); `alg 0x11` (deterministic encryption) is still reserved, so it can be added later without a data migration.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need deterministic search, KMS-backed or per-record keys, or Rails-managed key infrastructure.
+
+## Upgrading: slugs built from an encrypted field
+
+Earlier releases let an encrypted field be a slug source (`sluggable_by :ssn`, a
+`candidates:` entry, Sluggable's implicit `:name`, or a bare `friendly_id :ssn`
+base). The slug column then stored that field's **plaintext**, and friendly_id
+`history` kept every earlier plaintext slug in `friendly_id_slugs`. Such a model
+now raises when it is declared or saved. To clean up existing rows:
+
+1. Point the slug at a non-sensitive field (`sluggable_by :public_id`, or
+   `friendly_id :public_id, use: :slugged`).
+2. Regenerate every slug from it, then delete the history rows that still hold
+   the old plaintext slugs:
+
+```ruby
+Customer.unscoped.find_each do |customer|        # unscoped: soft-deleted / hidden rows too
+  customer.regenerate_slug!                      # Sluggable
+  # customer.update!(slug: nil)                  # bare friendly_id: nil forces a new slug
+end
+
+current_slugs = Customer.unscoped.where.not(slug: nil).select(:slug)
+FriendlyId::Slug.where(sluggable_type: "Customer")
+                .where.not(slug: current_slugs)  # NOT IN: a NULL in the list would match nothing
+                .delete_all
+```
+
+Old URLs built from the sensitive value stop resolving, which is the point. If
+the slug column is also audited (Auditable), its trail holds the plaintext
+slugs too — clear it with `clear_audit_trail!`.
 
 ## Changed in 1.22.0
 
 - `where_<field>(nil)` / `find_by_<field>(nil)` return `none`/nil instead of matching every row without a fingerprint (`bidx IS NULL`).
 - Encrypted field names register with Rails parameter filtering through a live registry consulted by a proc the gem's railtie appends at boot — redaction now works with boot-time filter snapshots (ActiveRecord `filter_attributes`, lograge-style initializers) and lazily-loaded model classes.
 - PBKDF2-derived keys are memoized (bounded, mutex-guarded); previously every encrypt/decrypt/blind-index call re-ran the 65,536-iteration KDF.
-- The encrypted×audited overlap raises at macro time from both declaration orders.
+- The encrypted×audited and encrypted×slug-source overlaps raise at macro time from both declaration orders.

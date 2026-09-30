@@ -425,6 +425,22 @@ describe ConcernsOnRails::Controllers::Filterable do
         expect(weighted_names(weight_lt: "1e3")).to eq(stocked)
       end
 
+      # "1e-400".to_f underflows to 0.0, and binding that as exact answered
+      # the filter for a DIFFERENT number: `weight = 1e-400` matched every
+      # 0.0 row and `weight < 1e-400` missed them.
+      it "never binds a nonzero literal that underflows as an exact 0.0" do
+        Product.where(name: "Chair").update_all(weight: 0.0)
+        others = stocked - ["Chair"]
+
+        expect(weighted_names(weight: "1e-400")).to eq([])
+        expect(weighted_names(weight_lt: "1e-400")).to eq(["Chair"])
+        expect(weighted_names(weight_lte: "1e-400")).to eq(["Chair"])
+        expect(weighted_names(weight_gt: "1e-400")).to eq(others)
+        expect(weighted_names(weight_gte: "-1e-400")).to eq(stocked)
+        expect(weighted_names(weight_lt: "-1e-400")).to eq([])
+        expect(weighted_names(weight: "0")).to eq(["Chair"])
+      end
+
       it "answers a JSON-body Float infinity like the string 1e400" do
         expect(names(stock_lt: Float::INFINITY)).to eq(stocked)
         expect(names(stock_lt: "1e400")).to eq(stocked)
@@ -449,6 +465,86 @@ describe ConcernsOnRails::Controllers::Filterable do
 
         expect(typed.new(params: { ext_lt: "4000000000" }).filtered(Product.order(:id)).pluck(:name))
           .to eq(["Lamp 100% cotton shade", "Desk"])
+      end
+    end
+
+    # A date or time Ruby casts fine but the database cannot hold was bound
+    # as-is. PostgreSQL raised DatetimeFieldOverflow for ?discontinued_at_lt=
+    # 300000-01-01 (a 500) and rejects year 0 outright. SQLite compares the
+    # text, so year 10000 sorted before 2026 and `lt` / `gt` answered
+    # backwards. Operands outside 0001-01-01..9999-12-31 never reach SQL now:
+    # they are answered per operator, the way out-of-range numbers are.
+    context "with a date or time outside years 0001..9999" do
+      before do
+        ActiveRecord::Schema.define { add_column :products, :launched_on, :date }
+        Product.reset_column_information
+        Product.where(name: "Desk").update_all(launched_on: Date.new(2026, 1, 1), discontinued_at: Time.utc(2026, 1, 1))
+      end
+
+      let(:above) { ["10000-01-01", "300000-01-01", "10000-01-01T00:00:00Z"] }
+      let(:below) { ["0000-01-01", "0000-06-01T12:00:00Z"] }
+
+      it "answers datetime comparisons per operator" do
+        above.each do |value|
+          expect(names(discontinued_at_lt: value)).to eq(["Desk"]), "lt #{value}"
+          expect(names(discontinued_at: { lte: value })).to eq(["Desk"]), "lte #{value}"
+          expect(names(discontinued_at_gt: value)).to eq([]), "gt #{value}"
+          expect(names(discontinued_at_gte: value)).to eq([]), "gte #{value}"
+        end
+        below.each do |value|
+          expect(names(discontinued_at_gt: value)).to eq(["Desk"]), "gt #{value}"
+          expect(names(discontinued_at_gte: value)).to eq(["Desk"]), "gte #{value}"
+          expect(names(discontinued_at_lt: value)).to eq([]), "lt #{value}"
+          expect(names(discontinued_at_lte: value)).to eq([]), "lte #{value}"
+        end
+      end
+
+      it "answers date comparisons the same way" do
+        dated = Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Filterable
+
+          filter_by :launched_on, operators: true
+        end
+        launched = ->(params) { dated.new(params: params).filtered(Product.order(:id)).pluck(:name) }
+
+        expect(launched.call(launched_on_lt: "10000-01-01")).to eq(["Desk"])
+        expect(launched.call(launched_on_gt: "300000-01-01")).to eq([])
+        expect(launched.call(launched_on_gte: "0000-01-01")).to eq(["Desk"])
+        expect(launched.call(launched_on_lte: "0000-01-01")).to eq([])
+        expect(launched.call(launched_on: "300000-01-01")).to eq([])
+        expect(launched.call(launched_on_not: "300000-01-01")).to eq(["Desk"])
+      end
+
+      it "matches nothing on equality, drops the value from an IN list, and excludes only NULLs on not / not_in" do
+        stamp = "2026-01-01T00:00:00Z" # Desk's
+
+        (above + below).each do |value|
+          expect(names(discontinued_at: value)).to eq([]), "eq #{value}"
+          expect(names(discontinued_at_in: value)).to eq([]), "in #{value}"
+          expect(names(discontinued_at_not: value)).to eq(["Desk"]), "not #{value}"
+          expect(names(discontinued_at_not_in: value)).to eq(["Desk"]), "not_in #{value}"
+        end
+        expect(names(discontinued_at: { in: ["300000-01-01", stamp] })).to eq(["Desk"])
+        expect(names(discontinued_at: { not_in: ["300000-01-01", stamp] })).to eq([])
+      end
+
+      it "still binds the years at both ends of the range" do
+        expect(names(discontinued_at_lt: "9999-12-31T23:59:59Z")).to eq(["Desk"])
+        expect(names(discontinued_at_gt: "9999-12-31T23:59:59Z")).to eq([])
+        expect(names(discontinued_at_gt: "0001-01-01")).to eq(["Desk"])
+        expect(names(discontinued_at_lt: "0001-01-01")).to eq([])
+      end
+
+      it "applies to a declared type: :datetime too" do
+        typed = Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Filterable
+
+          filter_by :discontinued_at, type: :datetime, operators: true
+        end
+        typed_names = ->(params) { typed.new(params: params).filtered(Product.order(:id)).pluck(:name) }
+
+        expect(typed_names.call(discontinued_at_lt: "300000-01-01")).to eq(["Desk"])
+        expect(typed_names.call(discontinued_at_gte: "300000-01-01")).to eq([])
       end
     end
 

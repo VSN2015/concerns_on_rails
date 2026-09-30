@@ -1,10 +1,14 @@
 require "active_support/concern"
+require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/slug_sources"
+require "concerns_on_rails/support/batch_ops"
 require "active_model/type"
 require "bigdecimal"
 require "time"
 require "concerns_on_rails/encryption"
 require "concerns_on_rails/support/encryptor"
+require "concerns_on_rails/support/time_value"
 
 module ConcernsOnRails
   module Models
@@ -34,6 +38,9 @@ module ConcernsOnRails
     #
     # `type:` casts the decrypted value (reuses the Storable caster set:
     # :string default, :integer, :float, :decimal, :boolean, :date, :datetime).
+    # A :datetime field behaves like a datetime column on the same model: under
+    # time_zone_aware_attributes, zone-less input is read in Time.zone and the
+    # value is a TimeWithZone. The plaintext is always UTC ISO8601.
     # `key:` overrides the gem-level key per field (a String or a Proc).
     #
     # BLIND INDEX (`blind_index: true` or a Hash): because encryption is
@@ -89,6 +96,11 @@ module ConcernsOnRails
         # declaration orders — here and in Auditable#auditable_by — so no
         # per-save backstop is needed.)
         before_save :encryptable_refresh_blind_indexes
+        # The slug guard DOES need one: a slug is plaintext of its source, and
+        # the macro-time checks cannot see every shape — Sluggable included
+        # without sluggable_by (it slugs the implicit :name), or friendly_id
+        # declared after `encryptable`. Checked before the row is written.
+        before_save :encryptable_guard_slug_source!
       end
 
       # Rails < 7.1 does not memoize ActiveModel::Attribute#value_for_database,
@@ -104,29 +116,60 @@ module ConcernsOnRails
 
       # Deterministic blind-index fingerprint for a field's value under the
       # CURRENT key, applying the field's normalization `expression:` — what
-      # the before_save refresh (and reencrypt!) writes. nil for a nil value.
-      def self.blind_fingerprint(rule, value)
-        blind_fingerprints(rule, value).first
+      # the before_save refresh (and reencrypt!) writes: the digest of the
+      # canonical plaintext (see blind_index_inputs). nil for a nil value.
+      # `type` is the field's attribute type (for how a String reads).
+      def self.blind_fingerprint(rule, value, type = nil)
+        blind_fingerprints(rule, value, type).first
       end
 
       # The fingerprints under every key that can currently decrypt — current
       # first, then `previous_keys` — so lookups keep finding rows whose index
       # was written before a rotation and not yet re-encrypted. A per-field
-      # `key:` has exactly one. Empty for a nil value.
-      def self.blind_fingerprints(rule, value)
-        bi = rule[:blind_index]
-        return [] if bi.nil? || value.nil?
+      # `key:` has exactly one. Each key digests every blind_index_inputs
+      # entry, the canonical one first. Empty for a nil value.
+      def self.blind_fingerprints(rule, value, type = nil)
+        return [] if rule[:blind_index].nil? || value.nil?
 
-        normalized = bi[:expression] ? bi[:expression].call(value) : value
-        return [] if normalized.nil?
+        inputs = blind_index_inputs(rule, value, type)
+        return [] if inputs.empty?
 
         config = ConcernsOnRails.encryption
         material = config.resolve_material(rule[:key])
-        return [normalized.to_s] if material == ConcernsOnRails::Encryption::PASSTHROUGH
+        return inputs if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
-        blind_index_materials(rule, config, material).map do |key|
-          ConcernsOnRails::Support::Encryptor.blind_index(normalized, key: key, salt: config.key_derivation_salt)
+        keys = blind_index_materials(rule, config, material)
+        inputs.flat_map do |input|
+          keys.map { |key| ConcernsOnRails::Support::Encryptor.blind_index(input, key: key, salt: config.key_derivation_salt) }
         end.uniq
+      end
+
+      # What a digest is taken of, the written one first:
+      #   1. the CANONICAL plaintext: the value cast through the field's type,
+      #      in the form the cipher gets (a :datetime as UTC ISO8601), or
+      #      `expression:` applied to that cast value (a :datetime handed over
+      #      as a UTC Time). No request zone reaches it, and a String finds a
+      #      typed field.
+      #   2. the value's own `to_s` (after `expression:`), which is what the
+      #      index hashed before, so a row indexed then is still found by the
+      #      same lookup. For every type but :datetime the two are the same.
+      def self.blind_index_inputs(rule, value, type)
+        type = EncryptedType.new(type: rule[:type], key: rule[:key]) unless type.respond_to?(:blind_index_value)
+        expression = rule[:blind_index][:expression]
+        [blind_index_canonical(type, expression, value), blind_index_legacy(expression, value)].compact.uniq
+      end
+
+      def self.blind_index_canonical(type, expression, value)
+        typed = type.blind_index_value(value)
+        return nil if typed.nil?
+
+        expression ? expression.call(typed)&.to_s : type.plaintext_of(typed)
+      end
+
+      def self.blind_index_legacy(expression, value)
+        (expression ? expression.call(value) : value)&.to_s
+      rescue StandardError
+        nil # an expression that only accepts the typed value
       end
 
       # A per-field key is one key; gem-keyed fields fingerprint under the
@@ -147,10 +190,18 @@ module ConcernsOnRails
       # deserialize decrypts on the read-from-DB path. An immutable value type,
       # so dirty tracking compares the cast plaintext — a re-save of unchanged
       # data is not dirtied by GCM's random IV.
+      #
+      # A :datetime field follows `owner`'s time_zone_aware_attributes for
+      # `name`, like a datetime column on that model (Support::TimeValue):
+      # zone-less input is read in Time.zone and values are TimeWithZones.
+      # The plaintext is always UTC ISO8601, so this is read at cast time and
+      # never changes what is stored.
       class EncryptedType < ActiveModel::Type::Value
-        def initialize(type: :string, key: nil)
+        def initialize(type: :string, key: nil, owner: nil, name: nil)
           @type = type
           @key = key
+          @owner = owner
+          @name = name
           super()
         end
 
@@ -166,7 +217,22 @@ module ConcernsOnRails
           plaintext = read_plaintext(value)
           return nil if plaintext.nil?
 
-          cast_typed(plaintext)
+          @type == :datetime ? read_time(plaintext) : cast_typed(plaintext)
+        end
+
+        # The typed value a blind index is computed from: the cast value, a
+        # :datetime as a UTC Time so no request zone reaches the digest. nil
+        # when the value does not cast.
+        def blind_index_value(value)
+          typed = cast_typed(value)
+          return typed unless @type == :datetime && typed
+
+          ConcernsOnRails::Support::TimeValue.utc(typed)
+        end
+
+        # The canonical plaintext of a typed value: what the cipher encrypts.
+        def plaintext_of(typed)
+          stringify(typed)
         end
 
         # typed plaintext -> DB ciphertext
@@ -184,11 +250,26 @@ module ConcernsOnRails
         def cast_typed(value)
           case @type
           when :decimal  then to_big_decimal(value)
-          when :datetime then to_time(value)
+          when :datetime then ConcernsOnRails::Support::TimeValue.cast(value, zone_aware: zone_aware?)
           else CASTERS[@type].cast(value)
           end
         rescue StandardError
           nil
+        end
+
+        # The stored plaintext is the UTC ISO8601 String `stringify` writes.
+        # Any other form (a plain column adopted under on_missing_key:
+        # :passthrough) is a DATABASE value: TimeValue.read reads it in
+        # default_timezone, as ActiveRecord reads a datetime column, and only
+        # then shows it in Time.zone.
+        def read_time(plaintext)
+          ConcernsOnRails::Support::TimeValue.read(plaintext, zone_aware: zone_aware?)
+        rescue StandardError
+          nil
+        end
+
+        def zone_aware?
+          !@owner.nil? && ConcernsOnRails::Support::TimeValue.zone_aware?(@owner, @name)
         end
 
         # Canonical, reversible String form fed to the cipher: cast to the typed
@@ -206,7 +287,9 @@ module ConcernsOnRails
           case @type
           when :decimal  then typed.to_s("F")
           when :date     then typed.iso8601
-          when :datetime then typed.utc.iso8601(6)
+          # A UTC copy: Time#utc converts in place, so it rewrote the caller's
+          # Time, and a frozen one raised here and saved the field as NULL.
+          when :datetime then ConcernsOnRails::Support::TimeValue.utc(typed).iso8601(6)
           else typed.to_s
           end
         end
@@ -215,22 +298,6 @@ module ConcernsOnRails
           return nil if value.nil?
 
           value.is_a?(BigDecimal) ? value : BigDecimal(value.to_s)
-        end
-
-        def to_time(value)
-          case value
-          when nil then nil
-          when ActiveSupport::TimeWithZone, Time then value
-          when DateTime then value.to_time
-          when Date then Time.utc(value.year, value.month, value.day)
-          when String
-            begin
-              Time.iso8601(value)
-            rescue ArgumentError
-              CASTERS[:datetime].cast(value)
-            end
-          else CASTERS[:datetime].cast(value)
-          end
         end
 
         # Gem-keyed fields stamp the configured key_id so rotation can tell old
@@ -273,6 +340,20 @@ module ConcernsOnRails
       module ClassMethods
         include ConcernsOnRails::Support::ColumnGuard
 
+        # A :datetime field's type follows its OWNER's time-zone settings, so
+        # each subclass gets a copy owned by itself: its own
+        # time_zone_aware_attributes / skip_time_zone_conversion_for_attributes
+        # decide, as they do for a datetime column (ActiveRecord decorates
+        # those per class). No other type reads the owner.
+        def inherited(subclass)
+          super
+          encryptable_rules.each do |field, rule|
+            next unless rule[:type] == :datetime
+
+            subclass.attribute field, EncryptedType.new(type: rule[:type], key: rule[:key], owner: subclass, name: field)
+          end
+        end
+
         # Declare one or more encrypted fields. Repeatable; per-field options.
         def encryptable(*fields, type: :string, key: nil, blind_index: nil)
           type = type.to_sym
@@ -282,10 +363,11 @@ module ConcernsOnRails
           fields.each do |field|
             field = field.to_sym
             encryptable_guard_auditable!(field)
+            encryptable_guard_sluggable!(field)
             bi = encryptable_normalize_blind_index(field, blind_index)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
-            attribute field, EncryptedType.new(type: type, key: key)
+            attribute field, EncryptedType.new(type: type, key: key, owner: self, name: field)
             encryptable_define_helpers(field)
             encryptable_define_blind_index(field, bi) if bi
             encryptable_register_filter_parameter(field)
@@ -353,7 +435,7 @@ module ConcernsOnRails
           return 0 if columns.empty? # e.g. only per-field-keyed fields were named
 
           count = 0
-          needs_reencryption(*columns).find_each do |record|
+          ConcernsOnRails::Support::BatchOps.each_record(needs_reencryption(*columns)) do |record|
             count += 1 if record.reencrypt!(*columns)
           end
           count
@@ -448,7 +530,7 @@ module ConcernsOnRails
           column = blind_index[:column]
 
           define_singleton_method("#{field}_fingerprint") do |value|
-            ConcernsOnRails::Models::Encryptable.blind_fingerprint(encryptable_rules.fetch(field), value)
+            ConcernsOnRails::Models::Encryptable.blind_fingerprint(encryptable_rules.fetch(field), value, type_for_attribute(field.to_s))
           end
           # Accepts one value, several, or an array — multiple values become an
           # IN query on the fingerprint column. Returns a Relation, so it chains
@@ -457,7 +539,8 @@ module ConcernsOnRails
           # key, so rows not yet re-encrypted after a rotation are still found.
           define_singleton_method("where_#{field}") do |*values|
             rule = encryptable_rules.fetch(field)
-            fingerprints = values.flatten.flat_map { |v| ConcernsOnRails::Models::Encryptable.blind_fingerprints(rule, v) }
+            type = type_for_attribute(field.to_s)
+            fingerprints = values.flatten.flat_map { |v| ConcernsOnRails::Models::Encryptable.blind_fingerprints(rule, v, type) }
             # A nil value has no fingerprint; passing it through would build
             # `WHERE bidx IS NULL` and match every unfingerprinted row instead
             # of "value is nil".
@@ -466,7 +549,8 @@ module ConcernsOnRails
             where(column => ConcernsOnRails::Models::Encryptable.blind_index_predicate(fingerprints))
           end
           define_singleton_method("find_by_#{field}") do |value|
-            fingerprints = ConcernsOnRails::Models::Encryptable.blind_fingerprints(encryptable_rules.fetch(field), value)
+            fingerprints = ConcernsOnRails::Models::Encryptable.blind_fingerprints(encryptable_rules.fetch(field), value,
+                                                                                   type_for_attribute(field.to_s))
             return nil if fingerprints.empty?
 
             find_by(column => ConcernsOnRails::Models::Encryptable.blind_index_predicate(fingerprints))
@@ -484,6 +568,26 @@ module ConcernsOnRails
                 "decrypted plaintext to the audit column. Remove it from auditable_by."
         end
 
+        # Macro-time guard for the order Sluggable-first: a friendly_id slug is
+        # plaintext of its source, so slugging an encrypted field would store
+        # the value in clear. Checks sources declared through sluggable_by
+        # (its `candidates:` included); Sluggable mirrors this for the reverse
+        # order.
+        # A bare friendly_id model (`friendly_id :ssn, use: :slugged`) is
+        # checked here too; Sluggable's implicit :name default is left to the
+        # save-time backstop, since a sluggable_by may still follow.
+        def encryptable_guard_sluggable!(field)
+          return if respond_to?(:sluggable_declared) && !sluggable_declared
+          return unless ConcernsOnRails::Support::SlugSources.names(self).include?(field.to_sym)
+
+          raise ArgumentError, encryptable_slug_source_message(field)
+        end
+
+        def encryptable_slug_source_message(field)
+          "#{LABEL}: ':#{field}' is also a slug source (Sluggable / friendly_id); the slug would store " \
+            "the decrypted plaintext in the slug column. Slug from a non-sensitive field instead."
+        end
+
         # Redact encrypted fields from Rails parameter logging. The gem-level
         # registry is consulted at filter time by the proc ConcernsOnRails::
         # Railtie appends to config.filter_parameters at boot — so fields
@@ -492,14 +596,23 @@ module ConcernsOnRails
         # (ActiveRecord filter_attributes, lograge-style initializers) see the
         # proc. The direct append remains as a fallback for apps that require
         # the gem after boot and for non-String param values.
+        #
+        # Only that best-effort fallback is rescued. The registry write is the
+        # load-bearing half and must never be swallowed — a blanket rescue
+        # once hid a NoMethodError here (the concern required without the
+        # gem's loader), and the field silently went unfiltered.
         def encryptable_register_filter_parameter(field)
           ConcernsOnRails.filter_parameter_registry.add(field)
           return unless defined?(Rails) && Rails.respond_to?(:application) && Rails.application
 
-          filters = Rails.application.config.filter_parameters
-          filters << field unless filters.include?(field)
-        rescue StandardError
-          nil
+          begin
+            filters = Rails.application.config.filter_parameters
+            filters << field unless filters.include?(field)
+          rescue NameError
+            raise
+          rescue StandardError
+            nil # e.g. a filter list frozen after boot — the registry covers it
+          end
         end
       end
 
@@ -625,6 +738,18 @@ module ConcernsOnRails
 
           self[bi[:column]] = ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, public_send(field))
         end
+      end
+
+      # Save-time backstop for the macro-time slug guards: raise (nothing is
+      # written) when the model's friendly_id slug is resolved from an
+      # encrypted field — whatever the declaration order, including
+      # Sluggable's implicit :name default and a method named like a field.
+      def encryptable_guard_slug_source!
+        klass = self.class
+        overlap = ConcernsOnRails::Support::SlugSources.names(klass) & klass.encryptable_rules.keys
+        return if overlap.empty?
+
+        raise ArgumentError, klass.send(:encryptable_slug_source_message, overlap.first)
       end
     end
   end

@@ -20,6 +20,7 @@ describe ConcernsOnRails::Models::Encryptable do
         t.text :email_bidx
         t.string :name
         t.text :audit_log
+        t.string :slug
         t.datetime :deleted_at
       end
     end
@@ -302,6 +303,129 @@ describe ConcernsOnRails::Models::Encryptable do
       record = klass.create!(meeting_at: t).reload
       expect(record.meeting_at.to_i).to eq(t.to_i)
     end
+
+    # Time#utc converts its receiver IN PLACE. The serializer rewrote the
+    # caller's own Time to UTC, and on a frozen one it raised FrozenError,
+    # which the type swallowed, so the field was saved as NULL.
+    it "stores a frozen non-UTC Time (:datetime) and never touches the caller's Time" do
+      klass = model_class { encryptable :meeting_at, type: :datetime }
+      frozen = Time.new(2026, 1, 2, 3, 4, 5, "+07:00").freeze
+      record = klass.create!(meeting_at: frozen)
+      expect(klass.find(record.id).meeting_at).to eq(frozen)
+
+      local = Time.new(2026, 1, 2, 3, 4, 5, "+07:00")
+      klass.create!(meeting_at: local)
+      expect(local.utc_offset).to eq(7 * 3600)
+    end
+
+    # Time.iso8601 reads a zone-less "...T13:00:00" in the SERVER's zone. Only
+    # a plaintext carrying Z or an offset takes that path; any other form is a
+    # database value, read in default_timezone (UTC) as a datetime column is.
+    it "reads a zone-less ISO8601 plaintext in default_timezone, not the server's zone" do
+      previous_tz = ENV.fetch("TZ", nil)
+      ENV["TZ"] = "Asia/Tokyo"
+      klass = model_class { encryptable :meeting_at, type: :datetime }
+      ConcernsOnRails.encryption.key = nil
+      ConcernsOnRails.encryption.on_missing_key = :passthrough
+      record = klass.create!
+      klass.where(id: record.id).update_all("meeting_at = '2026-10-01T13:00:00'")
+
+      expect(klass.find(record.id).meeting_at).to eq(Time.utc(2026, 10, 1, 13))
+    ensure
+      ENV["TZ"] = previous_tz
+    end
+
+    # The cast parsed a zone-less String with Time.iso8601 (the process's
+    # SYSTEM zone) or ActiveModel's DateTime (UTC), a Date as UTC midnight, and
+    # read back plain UTC Times. A datetime column on the same model reads that
+    # input in Time.zone. Every Rails app sets time_zone_aware_attributes; the
+    # harness does not, so it is set here.
+    describe "type: :datetime in a time-zone-aware app" do
+      around { |example| Time.use_zone("America/New_York") { example.run } }
+
+      # A real datetime column to compare with. clear_cache! drops the prepared
+      # `SELECT *` earlier examples cached with the old column list.
+      before do
+        ActiveRecord::Base.connection.add_column :encryptable_records, :meeting_column_at, :datetime
+        ActiveRecord::Base.connection.clear_cache!
+      end
+
+      let(:klass) do
+        model_class do
+          self.time_zone_aware_attributes = true
+          encryptable :meeting_at, type: :datetime
+        end
+      end
+
+      it "parses a zone-less String in Time.zone, like a datetime column" do
+        record = klass.new(meeting_at: "2026-10-01T09:00", meeting_column_at: "2026-10-01T09:00")
+
+        expect(record.meeting_column_at.getutc).to eq(Time.utc(2026, 10, 1, 13)) # 09:00 EDT
+        expect(record.meeting_at).to eq(record.meeting_column_at)
+        record.save!
+        expect(klass.find(record.id).meeting_at).to eq(record.meeting_column_at)
+      end
+
+      it "treats a Date as midnight in Time.zone, like a datetime column" do
+        record = klass.new(meeting_at: Date.new(2026, 10, 1), meeting_column_at: Date.new(2026, 10, 1))
+        expect(record.meeting_at).to eq(record.meeting_column_at)
+      end
+
+      it "reads back as a TimeWithZone in the reader's Time.zone" do
+        record = klass.create!(meeting_at: Time.utc(2026, 10, 1, 13))
+
+        reloaded = klass.find(record.id)
+        expect(reloaded.meeting_at).to be_a(ActiveSupport::TimeWithZone)
+        expect([reloaded.meeting_at.time_zone.name, reloaded.meeting_at.hour]).to eq(["America/New_York", 9])
+        Time.use_zone("Tokyo") { expect(klass.find(record.id).meeting_at.hour).to eq(22) }
+      end
+
+      it "reads a row written before the fix (a UTC ISO8601 plaintext) as the same instant" do
+        plain = model_class { encryptable :meeting_at, type: :datetime }
+        record = plain.create!(meeting_at: Time.utc(2026, 10, 1, 13))
+
+        expect(klass.find(record.id).meeting_at).to eq(Time.utc(2026, 10, 1, 13))
+        expect(klass.find(record.id).meeting_at_changed?).to be(false)
+      end
+
+      # A plaintext not in the gem's own ISO8601 form (a plain column adopted
+      # under on_missing_key: :passthrough) is a DATABASE value: it is read
+      # the way a datetime column reads one, in default_timezone (UTC), and
+      # only then shown in Time.zone. It is not wall-clock time in Time.zone.
+      it "reads a zone-less stored plaintext as UTC, like a datetime column reads the database" do
+        ConcernsOnRails.encryption.key = nil
+        ConcernsOnRails.encryption.on_missing_key = :passthrough
+        record = klass.create!
+        klass.where(id: record.id).update_all("meeting_at = '2026-10-01 13:00:00'")
+
+        expect(klass.find(record.id).meeting_at).to eq(Time.utc(2026, 10, 1, 13))
+        expect(klass.find(record.id).meeting_at.time_zone.name).to eq("America/New_York")
+      end
+
+      # The type pinned the DECLARING class, so a subclass's own override was
+      # ignored, although real columns and Storable keys honour it.
+      it "honours a subclass's skip_time_zone_conversion_for_attributes, like a column does" do
+        child = Class.new(klass) { self.skip_time_zone_conversion_for_attributes = %i[meeting_at meeting_column_at] }
+        record = child.new(meeting_at: "2026-10-01T09:00", meeting_column_at: "2026-10-01T09:00")
+
+        expect(record.meeting_column_at).to eq(Time.utc(2026, 10, 1, 9)) # the column skips conversion
+        expect(record.meeting_at).to eq(record.meeting_column_at)
+        expect(klass.new(meeting_at: "2026-10-01T09:00").meeting_at.getutc).to eq(Time.utc(2026, 10, 1, 13))
+      end
+
+      # datetime_select posts a multiparameter Hash. It was cast as UTC
+      # wall-clock time and then moved into Time.zone, so 09:00 became 05:00.
+      it "reads datetime_select (multiparameter) input as wall-clock time in Time.zone, like a column" do
+        parts = { "1i" => "2026", "2i" => "10", "3i" => "1", "4i" => "09", "5i" => "00" }
+        attributes = %w[meeting_at meeting_column_at].each_with_object({}) do |name, all|
+          parts.each { |part, value| all["#{name}(#{part})"] = value }
+        end
+        record = klass.new(attributes)
+
+        expect(record.meeting_column_at.getutc).to eq(Time.utc(2026, 10, 1, 13)) # 09:00 EDT
+        expect(record.meeting_at).to eq(record.meeting_column_at)
+      end
+    end
   end
 
   describe "composition" do
@@ -314,6 +438,25 @@ describe ConcernsOnRails::Models::Encryptable do
       end
       record = klass.create!(ssn: "  1 2 3  ").reload
       expect(record.ssn).to eq("1 2 3")
+    end
+
+    # Normalizable's before_save backstop (saves that skip validation) is
+    # prepended: registered after Encryptable's blind-index refresh, it ran
+    # after it, so the row stored the normalized value but fingerprinted the
+    # raw one and find_by_email missed it forever.
+    it "fingerprints the value Normalizable's before_save backstop stores (update_attribute)" do
+      klass = model_class do
+        include ConcernsOnRails::Models::Normalizable
+
+        encryptable :email, blind_index: true
+        normalizable :email, with: :email
+      end
+      user = klass.create!(email: "a@b.com")
+      user.update_attribute(:email, "  Foo@Example.COM ")
+
+      stored = user.reload.email
+      expect(stored).to eq("foo@example.com")
+      expect(klass.find_by_email(stored)).to eq(user)
     end
 
     it "masks the decrypted value (Maskable)" do
@@ -349,6 +492,206 @@ describe ConcernsOnRails::Models::Encryptable do
           auditable_by :ssn, into: :audit_log
         end
       end.to raise_error(ArgumentError, /Auditable/)
+    end
+
+    # A friendly_id slug is a plaintext derivative of its source: slugging an
+    # encrypted field stored "123-45-6789" in the slug column in clear.
+    describe "Sluggable guard (a slug is plaintext of its source)" do
+      it "raises when the encrypted field is the slug source (Sluggable first)" do
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            sluggable_by :ssn
+            encryptable :ssn
+          end
+        end.to raise_error(ArgumentError, /Sluggable/)
+      end
+
+      it "raises when the slug source is declared after encryption" do
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            encryptable :ssn
+            sluggable_by :ssn
+          end
+        end.to raise_error(ArgumentError, /Sluggable.*:ssn|:ssn.*Sluggable/)
+      end
+
+      it "raises when a slug candidate (nested included) names an encrypted field, either order" do
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            sluggable_by :name, candidates: [:name, %i[name ssn]]
+            encryptable :ssn
+          end
+        end.to raise_error(ArgumentError, /Sluggable/)
+
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            encryptable :ssn
+            sluggable_by :name, candidates: [:name, %i[name ssn]]
+          end
+        end.to raise_error(ArgumentError, /Sluggable/)
+      end
+
+      # alias_attribute's reader returns the column's value, so a slug built
+      # from the alias stored the plaintext SSN.
+      it "raises when a slug candidate is an alias_attribute of an encrypted field, either order" do
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            alias_attribute :tax_id, :ssn
+            sluggable_by :name, candidates: [:tax_id]
+            encryptable :ssn
+          end
+        end.to raise_error(ArgumentError, /:ssn.*slug source/)
+
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            encryptable :ssn
+            alias_attribute :tax_id, :ssn
+            sluggable_by :name, candidates: [:tax_id]
+          end
+        end.to raise_error(ArgumentError, /Sluggable/)
+
+        # An alias of an alias still reads the column on Rails <= 7.0.
+        expect do
+          model_class do
+            include ConcernsOnRails::Models::Sluggable
+
+            encryptable :ssn
+            alias_attribute :tax_id, :ssn
+            alias_attribute :tid, :tax_id
+            sluggable_by :name, candidates: [:tid]
+          end
+        end.to raise_error(ArgumentError, /Sluggable/)
+      end
+
+      # The macro-time guards cannot see every shape; a save-time backstop
+      # refuses to write a slug resolved from an encrypted field.
+      def raw_slug(klass, id)
+        klass.connection.select_value(
+          "SELECT #{TestDatabase.quoted_column('slug')} FROM encryptable_records WHERE id = #{id}"
+        )
+      end
+
+      it "refuses to save when Sluggable is included WITHOUT sluggable_by and slugs the encrypted :name (either order)" do
+        sluggable_first = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          encryptable :name
+        end
+        encryptable_first = model_class do
+          encryptable :name
+          include ConcernsOnRails::Models::Sluggable
+        end
+        stub_const("EncSlugImplicit", sluggable_first)
+        stub_const("EncSlugImplicitLate", encryptable_first)
+
+        [sluggable_first, encryptable_first].each do |klass|
+          expect { klass.create!(name: "Jane Smith") }.to raise_error(ArgumentError, /:name.*slug source/)
+          expect(klass.connection.select_value("SELECT COUNT(*) FROM encryptable_records").to_i).to eq(0)
+        end
+      end
+
+      it "raises for a bare friendly_id model whose base is encrypted (friendly_id first: macro time; after: save time)" do
+        expect do
+          model_class do
+            extend FriendlyId
+
+            friendly_id :ssn, use: :slugged
+            encryptable :ssn
+          end
+        end.to raise_error(ArgumentError, /:ssn.*slug source/)
+
+        late = model_class do
+          encryptable :ssn
+          extend FriendlyId
+
+          friendly_id :ssn, use: :slugged
+        end
+        stub_const("EncBareFriendlyLate", late)
+        expect { late.create!(ssn: "123-45-6789") }.to raise_error(ArgumentError, /:ssn.*slug source/)
+      end
+
+      it "also refuses save(validate: false), which skips friendly_id's before_validation" do
+        klass = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          encryptable :name
+        end
+        stub_const("EncSlugNoValidate", klass)
+        expect { klass.new(name: "Jane Smith").save(validate: false) }.to raise_error(ArgumentError)
+        expect(klass.connection.select_value("SELECT COUNT(*) FROM encryptable_records").to_i).to eq(0)
+      end
+
+      it "STI: a subclass encrypting its parent's implicit :name source is refused; the parent is not" do
+        parent = Class.new(TestModel) do
+          self.table_name = "encryptable_records"
+          include ConcernsOnRails::Models::Sluggable
+        end
+        stub_const("EncSlugParent", parent)
+        child = Class.new(parent) do
+          include ConcernsOnRails::Models::Encryptable
+
+          encryptable :name
+        end
+        stub_const("EncSlugChild", child)
+
+        expect(parent.create!(name: "Ok").slug).to eq("ok")
+        expect { child.create!(name: "Jane Smith") }.to raise_error(ArgumentError, /:name/)
+      end
+
+      it "no false positives: a safe slug source (explicit or the implicit :name) keeps slugging" do
+        explicit = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          sluggable_by :name
+          encryptable :ssn
+        end
+        stub_const("EncSlugSafe", explicit)
+        record = explicit.create!(name: "Hello World", ssn: "123-45-6789")
+        record.update!(name: "New Title", ssn: "999-99-9999")
+        record.regenerate_slug!
+        expect(raw_slug(explicit, record.id)).to eq("new-title")
+
+        implicit = model_class do
+          encryptable :ssn
+          include ConcernsOnRails::Models::Sluggable
+        end
+        stub_const("EncSlugSafeImplicit", implicit)
+        expect(raw_slug(implicit, implicit.create!(name: "Jane", ssn: "1").id)).to eq("jane")
+      end
+
+      it "a refused sluggable_by leaves the previous slug configuration in place" do
+        klass = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          encryptable :ssn
+        end
+        expect { klass.sluggable_by(:ssn) }.to raise_error(ArgumentError)
+        expect(klass.sluggable_field).to eq(:name)
+        expect(klass.sluggable_declared).to be(false)
+      end
+
+      it "leaves an unrelated slug source alone, and never writes the ciphertext's plaintext to the slug" do
+        klass = model_class do
+          include ConcernsOnRails::Models::Sluggable
+
+          encryptable :ssn
+          sluggable_by :name
+        end
+        record = klass.create!(name: "Jane Doe", ssn: "123-45-6789")
+        expect(raw_slug(klass, record.id)).to eq("jane-doe")
+      end
     end
   end
 
@@ -501,6 +844,111 @@ describe ConcernsOnRails::Models::Encryptable do
         expect { model_class { encryptable :email, blind_index: { expression: 42 } } }
           .to raise_error(ArgumentError, /must be callable/)
       end
+    end
+  end
+
+  # The blind index hashed `value.to_s`: the CAST value on write, the RAW
+  # argument on lookup. Under time-zone awareness the written :datetime is a
+  # TimeWithZone in the request's zone, so `find_by_meeting_at(the same
+  # instant)` missed as soon as the zones differed (and a String never found a
+  # typed field). Both sides now hash the canonical plaintext the cipher gets;
+  # lookups also try the old digest, so rows indexed before stay findable.
+  describe "blind index on a typed field (canonical fingerprint)" do
+    before do
+      connection = ActiveRecord::Base.connection
+      %i[meeting_at_bidx age_bidx amount_bidx].each { |column| connection.add_column :encryptable_records, column, :string }
+      connection.clear_cache!
+    end
+
+    let(:klass) do
+      model_class do
+        self.time_zone_aware_attributes = true
+        encryptable :meeting_at, type: :datetime, blind_index: true
+        encryptable :age, type: :integer, blind_index: true
+        encryptable :amount, type: :decimal, blind_index: true
+      end
+    end
+
+    # What the code before this change wrote: the digest of `value.to_s`.
+    def legacy_digest(value)
+      config = ConcernsOnRails.encryption
+      ConcernsOnRails::Support::Encryptor.blind_index(value.to_s, key: config.resolve_material(nil), salt: config.key_derivation_salt)
+    end
+
+    let(:instant) { Time.utc(2026, 10, 1, 13) }
+
+    it "finds a :datetime record by the very Time it was written with, in a non-UTC zone" do
+      Time.use_zone("America/New_York") do
+        record = klass.create!(meeting_at: instant)
+
+        expect(klass.find_by_meeting_at(instant)).to eq(record)
+        expect(klass.where_meeting_at(instant).to_a).to eq([record])
+      end
+    end
+
+    it "finds it whatever zone the writer and the reader run in, by any rendering of the instant" do
+      record = Time.use_zone("Tokyo") { klass.create!(meeting_at: "2026-10-01T13:00:00Z") }
+
+      Time.use_zone("UTC") do
+        expect(klass.find_by_meeting_at(klass.find(record.id).meeting_at)).to eq(record)
+        expect(klass.find_by_meeting_at(instant)).to eq(record)
+      end
+      Time.use_zone("America/New_York") do
+        expect(klass.find_by_meeting_at("2026-10-01T13:00:00Z")).to eq(record)
+        expect(klass.find_by_meeting_at("2026-10-01T09:00")).to eq(record) # wall clock in Time.zone, as the writer reads it
+        expect(klass.find_by_meeting_at(instant.in_time_zone("Tokyo"))).to eq(record)
+        expect(klass.meeting_at_fingerprint(instant)).to eq(klass.find(record.id).meeting_at_bidx)
+      end
+    end
+
+    it "casts a lookup through the field's type, so any spelling of the value finds it" do
+      record = klass.create!(age: 42, amount: BigDecimal("19.99"))
+
+      expect([klass.find_by_age("042"), klass.find_by_age(" 42 "), klass.find_by_age(42)]).to eq([record] * 3)
+      expect([klass.find_by_amount("19.990"), klass.find_by_amount(BigDecimal("19.99"))]).to eq([record] * 2)
+    end
+
+    it "writes the same digest whatever zone reencrypt! runs in" do
+      record = Time.use_zone("Tokyo") { klass.create!(meeting_at: instant) }
+      ConcernsOnRails.configure_encryption do |c|
+        c.key = "concerns-on-rails-encryptable-rotated-key"
+        c.key_id = 1
+        c.previous_keys = { 0 => TEST_KEY }
+      end
+
+      expect(Time.use_zone("Pacific/Honolulu") { klass.find(record.id).reencrypt! }).to be(true)
+      expect(klass.find(record.id).meeting_at_bidx).to eq(Time.use_zone("Tokyo") { klass.meeting_at_fingerprint(instant) })
+      expect(Time.use_zone("UTC") { klass.find_by_meeting_at(instant) }).to eq(record)
+    end
+
+    it "hands expression: the typed value, a :datetime in UTC, so the request zone never reaches the digest" do
+      dated = model_class do
+        self.time_zone_aware_attributes = true
+        encryptable :meeting_at, type: :datetime, blind_index: { expression: :to_date.to_proc }
+      end
+      record = Time.use_zone("Tokyo") { dated.create!(meeting_at: Time.utc(2026, 10, 1, 20)) } # Oct 2 in Tokyo
+
+      expect(Time.use_zone("America/New_York") { dated.find_by_meeting_at(Time.utc(2026, 10, 1, 5)) }).to eq(record)
+    end
+
+    it "still finds a row indexed before the change, and the documented reindex moves it to the canonical digest" do
+      record = klass.create!(meeting_at: instant, age: 42)
+      record.update_columns(meeting_at_bidx: legacy_digest(instant))
+      # Every other type's canonical form IS its to_s: nothing to reindex.
+      expect(klass.find(record.id).age_bidx).to eq(legacy_digest(42))
+
+      # The value the old code was looked up with still matches...
+      expect(klass.find_by_meeting_at(instant)).to eq(record)
+      # ...but only the canonical digest knows every other rendering.
+      expect(klass.find_by_meeting_at("2026-10-01T13:00:00Z")).to be_nil
+
+      # The reindex recipe in docs/concerns/encryptable.md:
+      klass.unscoped.where.not(meeting_at: nil).find_each do |row|
+        row.update_columns(meeting_at_bidx: klass.meeting_at_fingerprint(row.meeting_at))
+      end
+
+      expect(klass.find_by_meeting_at("2026-10-01T13:00:00Z")).to eq(record)
+      expect(klass.find(record.id).meeting_at_bidx).to eq(klass.meeting_at_fingerprint(instant))
     end
   end
 
