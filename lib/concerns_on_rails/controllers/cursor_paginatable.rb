@@ -613,15 +613,21 @@ module ConcernsOnRails
       # non-finite Float/BigDecimal is refused outright: it is never minted
       # and adapters disagree on how (or whether) to quote it.
       def cursor_bindable?(type, value)
-        return false if value.nil?
-        return false if (value.is_a?(Float) || value.is_a?(BigDecimal)) && !value.finite?
-        return false unless ConcernsOnRails::Support::TimeValue.representable?(value)
+        return false if cursor_never_minted?(value)
         return type.serializable?(value) if type.respond_to?(:serializable?)
 
         type.serialize(value)
         true
       rescue ::RangeError
         false
+      end
+
+      # nil, a non-finite Float/BigDecimal, or a date/time outside
+      # Support::TimeValue::YEARS: none of them is ever minted.
+      def cursor_never_minted?(value)
+        value.nil? ||
+          ((value.is_a?(Float) || value.is_a?(BigDecimal)) && !value.finite?) ||
+          !ConcernsOnRails::Support::TimeValue.representable?(value)
       end
 
       # Pre-bidirectional cursors carry no "d" — they are forward cursors and

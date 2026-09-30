@@ -29,7 +29,7 @@ module ConcernsOnRails
       # at 1000. SQLite compares the text, so it only orders four-digit years
       # ("10000-01-01" sorts before "2026-01-01"). Year 0 does not exist in
       # SQL, and PostgreSQL rejects it.
-      YEARS = (1..9999).freeze
+      YEARS = (1..9999)
 
       module_function
 

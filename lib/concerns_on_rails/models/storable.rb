@@ -281,7 +281,7 @@ module ConcernsOnRails
         # would otherwise emit means something different on every adapter
         # (`= ''` matches empty strings on PostgreSQL/MySQL, `= NULL` nothing).
         def storable_query_value(spec, value)
-          stored = Casting.write(spec[:type], value, zone_aware: Storable.zone_aware?(self, spec))
+          stored = Casting.write(spec[:type], value, zone_aware: Casting.zone_aware?(self, spec))
           if stored.nil?
             raise ArgumentError,
                   "#{LABEL}: where_#{spec[:accessor]}: #{value.inspect} is not a valid :#{spec[:type]} value"
@@ -595,9 +595,16 @@ module ConcernsOnRails
       # ---- casting ----
       # Shared by the instance readers/writers and the class-level query
       # scopes: the stored representation of a value for a key type.
-      # `zone_aware:` only matters for :datetime (see Storable.zone_aware?).
+      # `zone_aware:` only matters for :datetime (see zone_aware?).
       module Casting
         module_function
+
+        # A :datetime key converts to Time.zone exactly when a datetime
+        # attribute named like its accessor would: the model's
+        # time_zone_aware_attributes (minus skip_time_zone_conversion_for_attributes).
+        def zone_aware?(klass, spec)
+          spec[:type] == :datetime && ConcernsOnRails::Support::TimeValue.zone_aware?(klass, spec[:accessor])
+        end
 
         def read(type, raw, zone_aware: false)
           case type
@@ -659,19 +666,12 @@ module ConcernsOnRails
         end
       end
 
-      # A :datetime key converts to Time.zone exactly when a datetime
-      # attribute named like its accessor would: the model's
-      # time_zone_aware_attributes (minus skip_time_zone_conversion_for_attributes).
-      def self.zone_aware?(klass, spec)
-        spec[:type] == :datetime && ConcernsOnRails::Support::TimeValue.zone_aware?(klass, spec[:accessor])
-      end
-
       def storable_cast_read(spec, raw)
-        Casting.read(spec[:type], raw, zone_aware: Storable.zone_aware?(self.class, spec))
+        Casting.read(spec[:type], raw, zone_aware: Casting.zone_aware?(self.class, spec))
       end
 
       def storable_cast_write(spec, value)
-        Casting.write(spec[:type], value, zone_aware: Storable.zone_aware?(self.class, spec))
+        Casting.write(spec[:type], value, zone_aware: Casting.zone_aware?(self.class, spec))
       end
 
       # ---- validation ----

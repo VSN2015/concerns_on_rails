@@ -333,9 +333,7 @@ module ConcernsOnRails
       # list left empty matches nothing (`in`) or every non-NULL row
       # (`not_in`, exactly what `!=` / NOT IN would answer).
       def apply_filter_equality(relation, field, value, negate: false)
-        values = value.is_a?(Array) ? value : [value]
-        kept = filterable_numeric_equality_values(relation, field, values) ||
-               filterable_time_equality_values(relation, field, values)
+        kept = filterable_equality_values(relation, field, value.is_a?(Array) ? value : [value])
         return filterable_where(relation, field, value, negate) if kept.nil?
         return relation.none if kept == :uncastable
         return negate ? relation.where.not(field => nil) : relation.none if kept.empty?
@@ -359,6 +357,13 @@ module ConcernsOnRails
         return :uncastable if operands.any? { |operand| operand.status == :uncastable }
 
         operands.select { |operand| operand.status == :exact }.map(&:value)
+      end
+
+      # The members to keep on a numeric or date/time column, or nil to keep
+      # the raw value unchanged.
+      def filterable_equality_values(relation, field, values)
+        filterable_numeric_equality_values(relation, field, values) ||
+          filterable_time_equality_values(relation, field, values)
       end
 
       # A date or time no stored value can equal (outside TimeValue::YEARS)
