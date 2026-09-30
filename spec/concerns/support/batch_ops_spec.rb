@@ -155,5 +155,200 @@ describe ConcernsOnRails::Support::BatchOps do
         described_class.run(BatchItem.all, label: "Test", message: "failed to soft-delete record") { false }
       end.to raise_error(ActiveRecord::RecordNotSaved, /failed to soft-delete record/)
     end
+
+    # find_each pages by primary key: it dropped the relation's ORDER but kept
+    # its LIMIT, so `order(id: :desc).limit(2)` batched the two LOWEST ids —
+    # not the rows the fast path's update_all touches for the same relation.
+    it "visits exactly the rows an ordered, limited relation selects" do
+      ids = Array.new(4) { BatchItem.create!(state: "new").id }
+
+      count = described_class.run(BatchItem.order(id: :desc).limit(2), label: "Test") { |r| r.update(state: "done") }
+
+      expect(count).to eq(2)
+      expect(BatchItem.where(state: "done").pluck(:id).sort).to eq(ids.last(2))
+    end
+
+    it "honors an offset the same way" do
+      ids = Array.new(5) { BatchItem.create!(state: "new").id }
+
+      described_class.run(BatchItem.order(id: :desc).offset(1).limit(2), label: "Test") { |r| r.update(state: "done") }
+
+      expect(BatchItem.where(state: "done").pluck(:id).sort).to eq(ids[2, 2])
+    end
+
+    it "still applies the relation's own conditions once the limit is resolved" do
+      keep = BatchItem.create!(state: "keep")
+      2.times { BatchItem.create!(state: "new") }
+
+      described_class.run(BatchItem.where(state: "new").order(id: :desc).limit(5), label: "Test") do |r|
+        r.update(state: "done")
+      end
+
+      expect(keep.reload.state).to eq("keep")
+      expect(BatchItem.where(state: "done").count).to eq(2)
+    end
+
+    # Handing the whole plucked key list to find_each re-sent all of it in
+    # every 1000-row batch — quadratic in the limit.
+    it "sends at most one batch of keys per query for a large limited relation" do
+      BatchItem.insert_all(Array.new(2500) { { state: "new" } })
+      in_lists = []
+      counter = lambda do |*, payload|
+        sql = payload[:sql].to_s
+        in_lists << sql.scan(/\d+/).size if sql.include?("batch_items") && sql.match?(/ IN \(/)
+      end
+
+      seen = 0
+      ActiveSupport::Notifications.subscribed(counter, "sql.active_record") do
+        described_class.each_record(BatchItem.order(id: :desc).limit(2500)) { seen += 1 }
+      end
+
+      expect(seen).to eq(2500)
+      expect(in_lists.size).to eq(3)
+      expect(in_lists.max).to be <= 1010
+    end
+
+    it "handles a joined, DISTINCT relation ordered by a column it does not pluck" do
+      ActiveRecord::Schema.define do
+        create_table :batch_owners, force: true do |t|
+          t.string :name
+        end
+        add_column :batch_items, :batch_owner_id, :integer
+      end
+      stub_const("BatchOwner", Class.new(TestModel) { self.table_name = "batch_owners" })
+      joined = Class.new(TestModel)
+      stub_const("JoinedBatchItem", joined) # joins(:assoc) needs a named class
+      joined.class_eval do
+        self.table_name = "batch_items"
+        belongs_to :batch_owner, class_name: "BatchOwner", optional: true
+      end
+      owner = BatchOwner.create!(name: "o")
+      items = %w[c a b].map { |state| joined.create!(state: state, batch_owner_id: owner.id) }
+
+      seen = []
+      relation = joined.joins(:batch_owner).distinct.order(:state).limit(2)
+      described_class.each_record(relation) { |record| seen << record.state }
+
+      expect(seen.sort).to eq(%w[a b])
+      expect(items.size).to eq(3)
+    end
+
+    # The limited path re-queried `relation.unscope(:order, :limit, :offset)`,
+    # which keeps the JOIN but not the limit: a has_many join returned the
+    # parent once per joined child (find_each on an unlimited relation did
+    # the same), so a verb ran on it — through stale copies — three times.
+    describe "over a has_many join" do
+      before do
+        ActiveRecord::Schema.define do
+          create_table :batch_notes, force: true do |t|
+            t.integer :noted_item_id
+          end
+        end
+        stub_const("BatchNote", Class.new(TestModel) { self.table_name = "batch_notes" })
+        noted = Class.new(TestModel)
+        stub_const("NotedItem", noted) # joins(:assoc) needs a named class
+        noted.class_eval do
+          self.table_name = "batch_items"
+          has_many :batch_notes, class_name: "BatchNote"
+        end
+      end
+
+      let!(:items) do
+        Array.new(2) do
+          item = NotedItem.create!(state: "new")
+          3.times { BatchNote.create!(noted_item_id: item.id) }
+          item
+        end
+      end
+
+      def seen_ids(relation)
+        seen = []
+        described_class.each_record(relation) { |record| seen << record.id }
+        seen
+      end
+
+      it "yields each record of a limited relation once" do
+        expect(seen_ids(NotedItem.joins(:batch_notes).order(:id).limit(1))).to eq([items.first.id])
+        expect(seen_ids(NotedItem.joins(:batch_notes).order(id: :desc).limit(4))).to eq(items.map(&:id))
+      end
+
+      it "yields each record of an unlimited relation once" do
+        expect(seen_ids(NotedItem.joins(:batch_notes))).to eq(items.map(&:id))
+      end
+
+      # Re-querying the joined relation by the plucked keys loaded every
+      # joined row: limit(1) over 50 notes built 50 NotedItems (find_each on
+      # master built 1).
+      it "instantiates no joined copies of a limited relation's records" do
+        BatchNote.insert_all(Array.new(47) { { noted_item_id: items.first.id } })
+        instantiated = 0
+        counter = lambda do |*, payload|
+          instantiated += payload[:record_count] if payload[:class_name] == "NotedItem"
+        end
+
+        seen = ActiveSupport::Notifications.subscribed(counter, "instantiation.active_record") do
+          seen_ids(NotedItem.joins(:batch_notes).order(:id).limit(1))
+        end
+
+        expect(seen).to eq([items.first.id])
+        expect(instantiated).to eq(1)
+      end
+
+      it "still applies the relation's own conditions to a joined slice" do
+        items.last.update!(state: "done")
+
+        seen = []
+        described_class.each_record(NotedItem.joins(:batch_notes).where(state: "new").order(:id).limit(10)) do |r|
+          seen << r.id
+        end
+
+        expect(seen).to eq([items.first.id])
+      end
+
+      it "counts each record once in run" do
+        count = described_class.run(NotedItem.joins(:batch_notes).order(:id).limit(2), label: "Test") { true }
+
+        expect(count).to eq(1)
+      end
+    end
+
+    it "handles a composite primary key", min_rails: "7.1" do
+      ActiveRecord::Schema.define do
+        create_table :batch_pairs, primary_key: %i[a b], force: true do |t|
+          t.integer :a
+          t.integer :b
+        end
+      end
+      pair = Class.new(TestModel) { self.table_name = "batch_pairs" }
+      [[1, 1], [1, 2], [2, 1]].each { |a, b| pair.create!(a: a, b: b) }
+
+      seen = []
+      described_class.each_record(pair.order(a: :desc, b: :desc).limit(2)) { |r| seen << [r.a, r.b] }
+
+      expect(seen).to eq([[1, 2], [2, 1]])
+    end
+
+    describe "under error_on_ignored_order" do
+      around do |example|
+        config = ActiveRecord.respond_to?(:error_on_ignored_order=) ? ActiveRecord : ActiveRecord::Base
+        previous = config.error_on_ignored_order
+        config.error_on_ignored_order = true
+        example.run
+      ensure
+        config.error_on_ignored_order = previous
+      end
+
+      # A Sortable model's default_scope ORDER BY made every slow-path verb
+      # raise "Scoped order is ignored" instead of running.
+      it "does not raise for an ordered relation (a default_scope order included)" do
+        ordered = Class.new(TestModel) do
+          self.table_name = "batch_items"
+          default_scope { order(:state) }
+        end
+        2.times { ordered.create!(state: "new") }
+
+        expect(described_class.run(ordered.all, label: "Test") { |r| r.update(state: "done") }).to eq(2)
+      end
+    end
   end
 end

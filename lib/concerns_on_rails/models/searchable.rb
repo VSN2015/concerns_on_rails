@@ -67,6 +67,7 @@ module ConcernsOnRails
 
           ensure_columns!("ConcernsOnRails::Models::Searchable", fields)
           validate_search_options!(mode, match, ranked: ranked)
+          searchable_guard_encryptable!(fields)
 
           self.searchable_fields = fields.map(&:to_sym)
           self.searchable_mode = mode.to_sym
@@ -109,10 +110,15 @@ module ConcernsOnRails
       module ClassMethods
         private
 
+        # Surrounding whitespace is stripped in :any mode too — a trailing
+        # space from a search box otherwise became part of the LIKE pattern
+        # (`search("rails ")` => `LIKE '%rails %'`) and missed "Rails".
+        # Interior whitespace is kept: :any matches the query as one phrase.
         def search_terms(query)
-          return [] if query.nil? || query.to_s.strip.empty?
+          text = query.to_s.strip
+          return [] if text.empty?
 
-          searchable_mode == :all ? query.to_s.split : [query.to_s]
+          searchable_mode == :all ? text.split : [text]
         end
 
         # OR the per-field LIKE predicate for a single term.
@@ -167,6 +173,23 @@ module ConcernsOnRails
             end
           end
           node.else(tiers.size * fields.size)
+        end
+
+        # An `encryptable` column holds ciphertext under a random IV, so LIKE
+        # against it silently matches nothing. Mirror of Encryptable's
+        # macro-time guard, covering the reverse order (searchable_by declared
+        # AFTER encryptable). Checked before anything is assigned, so a refused
+        # declaration leaves the class as it was.
+        def searchable_guard_encryptable!(fields)
+          return unless respond_to?(:encryptable_rules)
+
+          overlap = fields.map(&:to_sym) & encryptable_rules.keys
+          return if overlap.empty?
+
+          raise ArgumentError,
+                "ConcernsOnRails::Models::Searchable: #{overlap.map { |f| ":#{f}" }.join(', ')} declared with both " \
+                "Encryptable and Searchable; search would run LIKE against the ciphertext and never match. " \
+                "Search a non-encrypted column instead (a blind index gives exact-match lookups: where_<field>)."
         end
 
         def validate_search_options!(mode, match, ranked: false)

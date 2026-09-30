@@ -1,5 +1,8 @@
 require "active_support/concern"
+require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/slug_sources"
+require "concerns_on_rails/support/batch_ops"
 require "active_model/type"
 require "bigdecimal"
 require "time"
@@ -89,6 +92,11 @@ module ConcernsOnRails
         # declaration orders — here and in Auditable#auditable_by — so no
         # per-save backstop is needed.)
         before_save :encryptable_refresh_blind_indexes
+        # The slug guard DOES need one: a slug is plaintext of its source, and
+        # the macro-time checks cannot see every shape — Sluggable included
+        # without sluggable_by (it slugs the implicit :name), or friendly_id
+        # declared after `encryptable`. Checked before the row is written.
+        before_save :encryptable_guard_slug_source!
       end
 
       # Rails < 7.1 does not memoize ActiveModel::Attribute#value_for_database,
@@ -282,6 +290,8 @@ module ConcernsOnRails
           fields.each do |field|
             field = field.to_sym
             encryptable_guard_auditable!(field)
+            encryptable_guard_sluggable!(field)
+            encryptable_guard_queryable!(field)
             bi = encryptable_normalize_blind_index(field, blind_index)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
@@ -353,7 +363,7 @@ module ConcernsOnRails
           return 0 if columns.empty? # e.g. only per-field-keyed fields were named
 
           count = 0
-          needs_reencryption(*columns).find_each do |record|
+          ConcernsOnRails::Support::BatchOps.each_record(needs_reencryption(*columns)) do |record|
             count += 1 if record.reencrypt!(*columns)
           end
           count
@@ -484,6 +494,54 @@ module ConcernsOnRails
                 "decrypted plaintext to the audit column. Remove it from auditable_by."
         end
 
+        # Macro-time guard for the order Sluggable-first: a friendly_id slug is
+        # plaintext of its source, so slugging an encrypted field would store
+        # the value in clear. Checks sources declared through sluggable_by
+        # (its `candidates:` included); Sluggable mirrors this for the reverse
+        # order.
+        # A bare friendly_id model (`friendly_id :ssn, use: :slugged`) is
+        # checked here too; Sluggable's implicit :name default is left to the
+        # save-time backstop, since a sluggable_by may still follow.
+        def encryptable_guard_sluggable!(field)
+          return if respond_to?(:sluggable_declared) && !sluggable_declared
+          return unless ConcernsOnRails::Support::SlugSources.names(self).include?(field.to_sym)
+
+          raise ArgumentError, encryptable_slug_source_message(field)
+        end
+
+        def encryptable_slug_source_message(field)
+          "#{LABEL}: ':#{field}' is also a slug source (Sluggable / friendly_id); the slug would store " \
+            "the decrypted plaintext in the slug column. Slug from a non-sensitive field instead."
+        end
+
+        # Macro-time guard for the order Searchable/Taggable-first: `search` and
+        # `tagged_with` are LIKE queries on the column, which holds ciphertext
+        # under a random IV, so they would silently match nothing. Searchable
+        # and Taggable mirror this for the reverse order. An undeclared
+        # Taggable (its :tags default, a taggable_by may still follow) is left
+        # to tagged_with's call-time check.
+        def encryptable_guard_queryable!(field)
+          concern = if encryptable_searched_field?(field)
+                      "Searchable (search)"
+                    elsif encryptable_tagged_field?(field)
+                      "Taggable (tagged_with)"
+                    end
+          return unless concern
+
+          raise ArgumentError,
+                "#{LABEL}: ':#{field}' is also queried by #{concern}, whose LIKE match would run against the " \
+                "ciphertext and never find a row. Query a non-encrypted column instead (a blind index gives " \
+                "exact-match lookups: `blind_index: true`, then where_#{field})."
+        end
+
+        def encryptable_searched_field?(field)
+          respond_to?(:searchable_fields) && searchable_fields.map(&:to_sym).include?(field)
+        end
+
+        def encryptable_tagged_field?(field)
+          respond_to?(:taggable_declared) && taggable_declared && taggable_field.to_sym == field
+        end
+
         # Redact encrypted fields from Rails parameter logging. The gem-level
         # registry is consulted at filter time by the proc ConcernsOnRails::
         # Railtie appends to config.filter_parameters at boot — so fields
@@ -492,14 +550,23 @@ module ConcernsOnRails
         # (ActiveRecord filter_attributes, lograge-style initializers) see the
         # proc. The direct append remains as a fallback for apps that require
         # the gem after boot and for non-String param values.
+        #
+        # Only that best-effort fallback is rescued. The registry write is the
+        # load-bearing half and must never be swallowed — a blanket rescue
+        # once hid a NoMethodError here (the concern required without the
+        # gem's loader), and the field silently went unfiltered.
         def encryptable_register_filter_parameter(field)
           ConcernsOnRails.filter_parameter_registry.add(field)
           return unless defined?(Rails) && Rails.respond_to?(:application) && Rails.application
 
-          filters = Rails.application.config.filter_parameters
-          filters << field unless filters.include?(field)
-        rescue StandardError
-          nil
+          begin
+            filters = Rails.application.config.filter_parameters
+            filters << field unless filters.include?(field)
+          rescue NameError
+            raise
+          rescue StandardError
+            nil # e.g. a filter list frozen after boot — the registry covers it
+          end
         end
       end
 
@@ -618,13 +685,39 @@ module ConcernsOnRails
       # Recompute each blind-index column from the (changed) plaintext just
       # before the row is written, so the fingerprint always matches the value.
       def encryptable_refresh_blind_indexes
-        self.class.encryptable_rules.each do |field, rule|
-          bi = rule[:blind_index]
+        encryptable_refresh_blind_indexes_for(self.class.encryptable_rules.keys)
+      end
+
+      # Support::GeneratedValues consumer. A token / code / number generated in
+      # before_create arrives AFTER the before_save refresh above, so without
+      # this the row was INSERTed with a NULL fingerprint and find_by_<field>
+      # never found a freshly created record.
+      def encryptable_generated_values_assigned(columns)
+        encryptable_refresh_blind_indexes_for(columns)
+      end
+
+      def encryptable_refresh_blind_indexes_for(fields)
+        rules = self.class.encryptable_rules
+        fields.each do |field|
+          rule = rules[field.to_sym]
+          bi = rule && rule[:blind_index]
           next unless bi
           next unless public_send("#{field}_changed?")
 
           self[bi[:column]] = ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, public_send(field))
         end
+      end
+
+      # Save-time backstop for the macro-time slug guards: raise (nothing is
+      # written) when the model's friendly_id slug is resolved from an
+      # encrypted field — whatever the declaration order, including
+      # Sluggable's implicit :name default and a method named like a field.
+      def encryptable_guard_slug_source!
+        klass = self.class
+        overlap = ConcernsOnRails::Support::SlugSources.names(klass) & klass.encryptable_rules.keys
+        return if overlap.empty?
+
+        raise ArgumentError, klass.send(:encryptable_slug_source_message, overlap.first)
       end
     end
   end

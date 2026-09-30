@@ -1,5 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/encrypted_lookup"
+require "concerns_on_rails/support/generated_values"
 require "concerns_on_rails/support/random_value"
 require "concerns_on_rails/support/unique_retry"
 require "active_support/security_utils"
@@ -81,7 +83,7 @@ module ConcernsOnRails
           # Build a fresh hash so subclasses don't mutate the parent's config.
           self.tokenizable_fields = tokenizable_fields.merge(field => { type: type, length: length, expires_in: expires_in })
 
-          before_create -> { assign_tokenizable_value(field) }
+          before_create -> { tokenizable_assign_on_create(field) }
 
           define_tokenizable_methods(field)
           define_tokenizable_expiry_methods(field) if expires_in
@@ -138,10 +140,16 @@ module ConcernsOnRails
         # already-fetched candidate. For a truly constant-time lookup, store and
         # query a digest instead of the raw token. An expired token never
         # authenticates.
+        #
+        # An `encryptable` token column holds ciphertext with a random IV, so
+        # the equality runs on its blind index instead (the decrypted value is
+        # then secure_compared as usual). Without a blind index no query can
+        # find the row, so this raises rather than failing every login as nil.
         def timing_safe_find(field, value)
+          tokenizable_refuse_unqueryable!(field)
           return nil if value.blank?
 
-          candidate = find_by(field => value)
+          candidate = find_by(ConcernsOnRails::Support::EncryptedLookup.condition(self, field, value))
           return nil unless candidate
 
           stored = candidate[field].to_s
@@ -154,14 +162,38 @@ module ConcernsOnRails
 
         # Single use: authenticate, then revoke with a conditional UPDATE keyed
         # on the token still being there — if a concurrent consumer got in
-        # first, the UPDATE touches 0 rows and this call returns nil.
+        # first, the UPDATE touches 0 rows and this call returns nil. For an
+        # encrypted token both the key and the revocation go through the blind
+        # index, which is cleared too (update_all skips Encryptable's refresh,
+        # and a stale digest would keep find_by_<field> resolving the row).
         def consume_tokenizable_value(field, value)
           record = public_send("authenticate_by_#{field}", value)
           return nil unless record
 
-          revoked = unscoped.where(primary_key => record.id, field => value)
-                            .update_all(record.send(:tokenizable_revoked_attributes, field))
+          revoked = unscoped.where(primary_key => record.id)
+                            .where(ConcernsOnRails::Support::EncryptedLookup.condition(self, field, value))
+                            .update_all(tokenizable_consumed_attributes(record, field))
           revoked == 1 ? record.reload : nil
+        end
+
+        def tokenizable_consumed_attributes(record, field)
+          attributes = record.send(:tokenizable_revoked_attributes, field)
+          index = ConcernsOnRails::Support::EncryptedLookup.index_column(self, field)
+          index ? attributes.merge(index => nil) : attributes
+        end
+
+        # Checked when the finder is CALLED, not at tokenizable_by: encrypting a
+        # token at rest without a blind index is a supported combination (the
+        # token is generated, stored and compared on the loaded record), only
+        # the lookup by value is impossible — and `encryptable` may be declared
+        # before or after this macro.
+        def tokenizable_refuse_unqueryable!(field)
+          return unless ConcernsOnRails::Support::EncryptedLookup.unqueryable?(self, field)
+
+          raise ArgumentError,
+                "#{LABEL}: '#{field}' is encrypted (Encryptable) without a blind index, so no query can find a " \
+                "record by its token — authenticate_by_#{field} / consume_#{field} would never match. " \
+                "Declare `encryptable :#{field}, blind_index: true`."
         end
 
         def validate_tokenizable_options!(type, length, expires_in)
@@ -202,11 +234,14 @@ module ConcernsOnRails
       # times — useful for short codes; a unique DB index is still the real
       # guarantee. Shared by create-time assignment and regenerate_<field>!.
       # Checked against the STI base class: a subclass's own relation carries
-      # its type condition and would miss a sibling subclass's token.
+      # its type condition and would miss a sibling subclass's token. An
+      # encrypted field is checked through its blind index (the ciphertext
+      # column never matches); one without an index cannot be checked at all.
       def tokenizable_unique_value(field)
         MAX_GENERATION_ATTEMPTS.times do
           candidate = self.class.generate_tokenizable_value(field)
-          return candidate unless self.class.base_class.unscoped.exists?(field => candidate)
+          condition = ConcernsOnRails::Support::EncryptedLookup.condition(self.class, field, candidate)
+          return candidate if condition.nil? || !self.class.base_class.unscoped.exists?(condition)
         end
 
         raise "#{LABEL}: could not generate a unique value for '#{field}' " \
@@ -214,6 +249,15 @@ module ConcernsOnRails
       end
 
       private
+
+      # The before_create path: generate (and stamp the expiry), then tell the
+      # siblings that already ran — Encryptable's blind index, a slug built
+      # from the token, Auditable's creation entry (Support::GeneratedValues).
+      def tokenizable_assign_on_create(field)
+        ConcernsOnRails::Support::GeneratedValues.watch(self, [field, tokenizable_expiry_column_for(field)]) do
+          assign_tokenizable_value(field)
+        end
+      end
 
       # A fresh token plus, for an expiring field, a fresh expiry.
       def tokenizable_generated_attributes(field)

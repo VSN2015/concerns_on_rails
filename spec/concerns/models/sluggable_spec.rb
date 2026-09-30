@@ -78,6 +78,24 @@ describe ConcernsOnRails::Sluggable do
     end.to raise_error(ArgumentError)
   end
 
+  it "leaves the previous declaration in place when a re-declaration names a missing column" do
+    ActiveRecord::Schema.define do
+      create_table :invalid_pages, force: true do |t|
+        t.string :title
+        t.string :slug
+      end
+    end
+    klass = Class.new(TestModel) do
+      self.table_name = "invalid_pages"
+      include ConcernsOnRails::Models::Sluggable
+
+      sluggable_by :title
+    end
+
+    expect { klass.sluggable_by :nonexistent_field }.to raise_error(ArgumentError, /nonexistent_field/)
+    expect(klass.sluggable_field).to eq(:title)
+  end
+
   it "supports dynamic sluggable field" do
     ActiveRecord::Schema.define do
       create_table :dynamic_pages, force: true do |t|
