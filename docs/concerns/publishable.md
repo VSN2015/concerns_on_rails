@@ -90,7 +90,7 @@ Article.published.where(category: "news").order(:published_at)
 |---|---|
 | `publish!` | Sets the publish field to `Time.zone.now` and persists the record. Returns the `update` result. |
 | `unpublish!` | Sets the publish field to `nil` and persists the record. |
-| `publish_at!(time)` | Sets the publish field to `time` and persists the record. Pass a future time to schedule the record. |
+| `publish_at!(time)` | Sets the publish field to `time` and persists the record. Pass a future time to schedule the record. `time` is cast through the column's type (a parseable String works). A value that cannot be parsed as a time (`"junk"`, `42`) raises `ArgumentError` before any hook runs, and nothing is written. `nil` still writes `NULL`. |
 | `published?` | Returns `true` if the field is present and its value is `<= Time.zone.now`. |
 | `unpublished?` | Returns `true` if `published?` is `false` (logical inverse; covers both drafts and scheduled records). |
 | `scheduled?` | Returns `true` if the field is present and its value is `> Time.zone.now`. |

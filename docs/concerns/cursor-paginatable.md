@@ -91,6 +91,7 @@ Cursors are URL-safe Base64 of a JSON payload that pins the **table** and the **
 - cursors minted on another model or under a different `order:` configuration,
 - tampered values (non-scalar entries, wrong value count),
 - boundary values the column cannot hold — ones that cast to `nil` (`1e400` on an integer column, a non-date string on a datetime one) or cannot be bound (an integer beyond the column's range). These used to reach the WHERE as `(col, id) > (NULL, 1)` and return an empty 200 that silently ended the walk,
+- a date or time outside years 0001..9999 (`ConcernsOnRails::Support::TimeValue::YEARS`, checked in UTC). It casts fine, but PostgreSQL raised `DatetimeFieldOverflow` on it (a 500) and SQLite compared it as text. The gem never mints one; a boundary row stored past year 9999 (possible only on PostgreSQL) cannot be paged past,
 - `prev`-direction cursors replayed against a forward-only configuration.
 
 On real controllers a `rescue_from InvalidCursor, with: :render_invalid_cursor` is registered automatically (exactly like ErrorHandleable's handlers), so a garbage `?cursor=` becomes a clean 400 instead of a 500. On bare objects without `rescue_from`, the error propagates.

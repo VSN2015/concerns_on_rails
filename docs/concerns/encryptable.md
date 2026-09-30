@@ -101,7 +101,7 @@ Repeatable — each call declares more encrypted fields. Rules accumulate (reass
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `*fields` | `Symbol…` | — (required) | One or more `text`/`binary` columns to encrypt. |
-| `type:` | `Symbol` | `:string` | Casts the decrypted value: `:string`, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime` (the Storable caster set; `:decimal` precision-safe, `:datetime` UTC microseconds). |
+| `type:` | `Symbol` | `:string` | Casts the decrypted value: `:string`, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime` (the Storable caster set; `:decimal` precision-safe, `:datetime` UTC microseconds). A `:datetime` field behaves like a datetime column on the same model: see [Notes](#notes--gotchas). |
 | `key:` | `String` / `Proc` / `nil` | `nil` | Per-field key override (raw / hex / passphrase, or a lazy Proc). Falls back to the gem-level `ConcernsOnRails.encryption` key. |
 | `blind_index:` | `true` / `Hash` / `nil` | `nil` | Maintain a deterministic fingerprint column for exact-match lookups. `true` uses `<field>_bidx`; a Hash accepts `column:` and `expression:` (a callable normalizer applied on write and query). See below. |
 
@@ -188,6 +188,7 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 ## Notes & gotchas
 
 - `nil` stays `nil` (the column is left NULL) — a blank value is never encrypted.
+- **`type: :datetime` follows the model's time-zone settings, like a datetime column.** With `time_zone_aware_attributes` on (every Rails app), a zone-less String such as a `datetime-local` form value (`"2026-10-01T09:00"`) is wall-clock time in `Time.zone`, a `Date` is midnight in `Time.zone`, and the field reads back as an `ActiveSupport::TimeWithZone` in the current `Time.zone`. Without it, both follow `ActiveRecord.default_timezone` (UTC by default). `skip_time_zone_conversion_for_attributes` is honored per field. The plaintext is always UTC ISO8601 with microseconds, so rows written before this change read back as the same instant. Before, a zone-less String was parsed in the server's system zone (or UTC) and reads were plain UTC `Time`s. A frozen or non-UTC `Time` is stored correctly and never modified (it used to be converted in place, and a frozen one was saved as `NULL`).
 - Dirty tracking works on the decrypted plaintext: reassigning the same value is **not** dirty, and an unchanged field is not re-encrypted on save, despite the random IV.
 - The envelope is versioned (`ver`/`alg`/`key_id`): `key_id` drives [key rotation](#key-rotation); `alg 0x11` (deterministic encryption) is still reserved, so it can be added later without a data migration.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need deterministic search, KMS-backed or per-record keys, or Rails-managed key infrastructure.

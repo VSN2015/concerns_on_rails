@@ -468,6 +468,7 @@ in memory.
 
 **Notes**
 - "Published" means `published_at` is set **and** in the past — so future-dated posts stay unpublished until their time arrives.
+- `publish_at!` casts its argument through the column's type (a parseable String works). A value that cannot be parsed as a time (`"junk"`, `42`) raises `ArgumentError` before any hook runs; it used to write `NULL` and return `true`. `nil` still writes `NULL`.
 - No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`). An explicit `default_scope: false` on a later call or an STI subclass turns it off again; omitting the option keeps the current (inherited) setting.
 - A boolean publishable column works too (`publishable_by :is_published`). Its `.published` scope is `(is_published = TRUE)`, wrapped in parentheses (an Arel Grouping) so that Rails does not copy the condition onto new records built through the scope. So with `default_scope: true` a new record still starts unpublished, and so does `Post.published.new`. The predicate stays in the index-friendly `= TRUE` form, so a partial index `WHERE published = true` still matches. On Rails 6.0, which cannot `unscope` a Grouping, the scope uses `is_published <> FALSE` instead; it selects the same rows.
 
@@ -557,6 +558,7 @@ end
 post.soft_delete!        # comments + cover soft-deleted in the same transaction, with the post's exact timestamp
 post.restore!            # brings back the comments/cover the cascade deleted — NOT a comment someone trashed last week
 post.soft_delete!(at: 1.day.ago)   # new at: keyword — backdate, or hand a timestamp down a cascade
+post.soft_delete!(at: "junk")      # ArgumentError before any hook runs (it used to delete nothing and return true)
 ```
 
 Dependents go through their own `soft_delete!` / `restore!` (hooks and nested cascades run). A dependent
@@ -718,6 +720,7 @@ Expirable also defines) belongs to whichever concern is included last.
 **Notes**
 - Boundary semantics: **inclusive start, exclusive end** — active at exactly `starts_at`, not at exactly `ends_at`.
 - A `nil` end means "never expires"; a `nil` start means "not yet started".
+- `start!` / `finish!` / `reschedule!` cast each time through its column's type (a parseable String works). A value that cannot be parsed as a time (`"junk"`, `42`) raises `ArgumentError` and nothing is written; it used to clear the column. `nil` still clears a side.
 - No `default_scope`; chain `.current` explicitly.
 
 ---
@@ -1616,6 +1619,7 @@ Account.where_theme(nil)         # unset key, explicit null, or NULL column
 **Notes**
 - Works on a plain `text` column (JSON encoded/decoded internally), a native `json`/`jsonb` column, or a column the host app already `serialize`d — detected automatically. `serialize` itself is never used, so the Rails 7.1 API drift is irrelevant.
 - nil vs unset: a written `nil` (explicit JSON null) reads back as `nil` and does **not** fall back to the default; `reset_<key>` removes the key so the default applies again. `:decimal` is stored as a precision-safe string, `:date`/`:datetime` as ISO8601 (datetime in UTC at microsecond precision).
+- A `:datetime` key behaves like a datetime column on the same model. With `time_zone_aware_attributes` on (every Rails app), a zone-less String (a `datetime-local` form value) is wall-clock time in `Time.zone`, a `Date` is midnight there, and the reader returns an `ActiveSupport::TimeWithZone` in the current `Time.zone`. Without it, both follow `ActiveRecord.default_timezone`. `where_<key>` parses its argument the same way. The stored UTC form is unchanged, so existing rows read back as the same instant.
 - Writing one key dirties (and saves) the **whole column** — concurrent writers to different keys are last-write-wins on the hash. Undeclared keys are preserved. `:json` readers return a dup: reassign, don't mutate in place.
 - Generated names are collision-checked against existing methods and columns at macro time (`ArgumentError`; affix to escape). Read-side casting never raises — corrupt column JSON decodes as `{}`, garbage values cast to `nil`.
 - **Querying**: every key gets a `where_<accessor>(value)` equality scope — `json_extract` on SQLite, `->>` on PostgreSQL (a `text` column is cast to `jsonb`), `JSON_UNQUOTE(JSON_EXTRACT())` on MySQL/MariaDB, which also gets a `JSON_TYPE` predicate so a stored JSON `null` is never confused with the string `"null"`. The value is cast exactly as the writer stores it (`where_items_per_page("50")` works; one that will not cast raises), and `where_<key>(nil)` matches an unset key, an explicit JSON null and a `NULL` column on all three. Defaults are **not** queryable (a never-written key is absent in the DB). `:json` keys, other adapters and a column that is also `encryptable` (ciphertext, not JSON — either declaration order) raise; `query: false` opts out, and a `where_<accessor>` the model already defines is left alone with a deprecation warning rather than overwritten. A row holding blank or corrupt JSON reads as an unset key on SQLite (`json_valid` guard) but aborts the whole query on PostgreSQL and MySQL — there is no portable guard. Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) for jsonb operators, ranges or containment queries.
@@ -1678,7 +1682,7 @@ Patient.find_by_email("a@b.com")     # exact-match lookup via the blind index
 Patient.where_email("a@b.com")       # chainable Relation (accepts arrays too)
 ```
 
-**Options** (`encryptable *fields, …`, repeatable): `type:` (cast the decrypted value — `:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`), `key:` (per-field override; a String or lazy Proc), `blind_index:` (`true`, or `{ column:, expression: }` — maintains a deterministic keyed-HMAC companion column, default `<field>_bidx`, for equality lookups; `expression:` normalizes symmetrically on write and query).
+**Options** (`encryptable *fields, …`, repeatable): `type:` (cast the decrypted value — `:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`; a `:datetime` field behaves like a datetime column on the model: under `time_zone_aware_attributes` zone-less input is read in `Time.zone` and it reads back as a `TimeWithZone`, while the plaintext stays UTC ISO8601), `key:` (per-field override; a String or lazy Proc), `blind_index:` (`true`, or `{ column:, expression: }` — maintains a deterministic keyed-HMAC companion column, default `<field>_bidx`, for equality lookups; `expression:` normalizes symmetrically on write and query).
 
 **Key rotation** — bump the key id, keep the old key for decrypting, re-encrypt, drop the old key:
 
@@ -1911,7 +1915,7 @@ end
 
 **Notes**
 - The primary key is always appended as a tiebreaker, so duplicate values never skip or repeat rows; ordering columns are chosen **in code** (never from params), must be **selected by the relation, unaliased**, and may be nullable: a column the schema allows NULL in paginates with its **NULLs last** in either direction on every adapter, returning every row exactly once with no extra queries. PostgreSQL uses `NULLS LAST`; other adapters use a `CASE WHEN col IS NULL` sort key, and the keyset WHERE uses the OR-expansion. NOT NULL columns keep the plain, index-friendly SQL, so prefer them on large tables. Boundary values are the stored column values (`read_attribute`), so an overridden attribute reader cannot derail the walk; a boundary column the relation did not select raises `ActiveModel::MissingAttributeError`, and a stored non-NULL value that its attribute type casts to nil (an unparseable datetime string) raises `ArgumentError` — neither is minted as a NULL boundary. A select alias that shadows an ordering column (`select(:id, "UPPER(name) AS name")`) is not detected: the cursor would carry the alias's value while the WHERE compares the column, repeating or skipping rows — alias under another name instead. Re-declaring `cursor_paginate_by` (e.g. in a subclass) changes only the options passed — the rest, `signed:` included, are inherited.
-- Cursors are opaque, table/order-pinned tokens — a malformed, cross-endpoint, or stale-config cursor renders a 400 (`invalid_cursor`; override `render_invalid_cursor` to customize, delegates to Respondable's `render_error` when present). Unsigned by default: a client can mint different boundary values, but values are cast through the model's attribute types and bound by Arel (no injection) and the relation's own scoping still applies — treat a cursor as a page position, never an authorization boundary. **`signed: true`** (or a String key, or a callable for rotating keys) appends a URL-safe HMAC-SHA256 to every cursor and rejects tampered or unsigned tokens with the same 400, so clients can no longer hand-craft positions at all; `true` uses `Rails.application.secret_key_base`. Turning it on invalidates in-flight cursors (clients restart from page one).
+- Cursors are opaque, table/order-pinned tokens — a malformed, cross-endpoint, or stale-config cursor renders a 400 (`invalid_cursor`; override `render_invalid_cursor` to customize, delegates to Respondable's `render_error` when present). Unsigned by default: a client can mint different boundary values, but values are cast through the model's attribute types and bound by Arel (no injection); a value the column cannot hold — a timestamp outside years 0001..9999 included — is the same 400, never a database error and the relation's own scoping still applies — treat a cursor as a page position, never an authorization boundary. **`signed: true`** (or a String key, or a callable for rotating keys) appends a URL-safe HMAC-SHA256 to every cursor and rejects tampered or unsigned tokens with the same 400, so clients can no longer hand-craft positions at all; `true` uses `Rails.application.secret_key_base`. Turning it on invalidates in-flight cursors (clients restart from page one).
 - `cursor_paginated` uses `reorder` (replaces any `default_scope` ORDER BY) and returns a loaded Array. Don't wrap it with the controller Sortable's `sorted` — pass `order:` per call instead.
 - Forward-only by default — `bidirectional: true` (macro or per call) adds prev cursors and `X-Has-Prev`/`X-Prev-Cursor`; direction is pinned in the token, so prev tokens replayed on forward-only endpoints 400 and old direction-less tokens stay valid. `order_presets: { newest: {...}, top: {...} }` (+ `default_preset:`, `order_param:`) lets clients pick a **named** ordering from an allow-list. `predicate: :auto` upgrades the keyset WHERE to a row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when directions are uniform — composite-index friendly — falling back to the portable OR-expansion (`:row`/`:or` force a strategy).
 - Use Paginatable when you need page numbers and totals.
@@ -1976,6 +1980,11 @@ Numeric columns are read **strictly, never truncated**, in every form (direct `?
   `lt`/`lte` below the minimum) match nothing, the opposite direction matches every non-NULL row; for
   equality it matches nothing (and drops out of an `in` list), for `not`/`not_in` it excludes nothing
   but NULLs.
+- Dates and times get the same per-operator answer outside the portable range `0001-01-01`..`9999-12-31`
+  (the SQL standard's, which every adapter can store and order): `?happened_at_lt=300000-01-01` is every
+  non-NULL row, `_gt` none, and such a value equals nothing. It used to reach the database: PostgreSQL
+  raised `DatetimeFieldOverflow` (a 500) and SQLite, comparing text, sorted year 10000 before 2026.
+  (Rows PostgreSQL holds beyond year 9999 are outside what these filters consider.)
 
 `contains`/`starts_with` apply to string/text columns only; on any other column (integer, decimal,
 datetime, uuid, a PostgreSQL array, …) they match **nothing** — PostgreSQL has no `LIKE` for those types. Matching is
