@@ -468,7 +468,7 @@ in memory.
 
 **Notes**
 - "Published" means `published_at` is set **and** in the past — so future-dated posts stay unpublished until their time arrives.
-- `publish_at!` casts its argument through the column's type (a parseable String works). A value that cannot be parsed as a time (`"junk"`, `42`) raises `ArgumentError` before any hook runs; it used to write `NULL` and return `true`. `nil` still writes `NULL`.
+- `publish_at!` casts its argument through the column's type. A value that is not a time raises `ArgumentError` before any hook runs: a String must name a year (ISO 8601, RFC 2822, `"Oct 1 2026"` and `"2026-10-01 10:30"` all do; `"junk"`, `"Monday"` and `"10:30"` do not, although `Time.zone.parse` reads them as June 1st and today), and `42` or `1.hour` never cast. It used to write `NULL` and return `true`. `nil` still writes `NULL` (and fires the publish hooks).
 - No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`). An explicit `default_scope: false` on a later call or an STI subclass turns it off again; omitting the option keeps the current (inherited) setting.
 - A boolean publishable column works too (`publishable_by :is_published`). Its `.published` scope is `(is_published = TRUE)`, wrapped in parentheses (an Arel Grouping) so that Rails does not copy the condition onto new records built through the scope. So with `default_scope: true` a new record still starts unpublished, and so does `Post.published.new`. The predicate stays in the index-friendly `= TRUE` form, so a partial index `WHERE published = true` still matches. On Rails 6.0, which cannot `unscope` a Grouping, the scope uses `is_published <> FALSE` instead; it selects the same rows.
 
@@ -558,7 +558,8 @@ end
 post.soft_delete!        # comments + cover soft-deleted in the same transaction, with the post's exact timestamp
 post.restore!            # brings back the comments/cover the cascade deleted — NOT a comment someone trashed last week
 post.soft_delete!(at: 1.day.ago)   # new at: keyword — backdate, or hand a timestamp down a cascade
-post.soft_delete!(at: "junk")      # ArgumentError before any hook runs (it used to delete nothing and return true)
+post.soft_delete!(at: params[:at]) # absent or blank means now, like expire! (it used to write NULL and return true)
+post.soft_delete!(at: "junk")      # ArgumentError before any hook runs: a String must name a year
 ```
 
 Dependents go through their own `soft_delete!` / `restore!` (hooks and nested cascades run). A dependent
@@ -720,7 +721,7 @@ Expirable also defines) belongs to whichever concern is included last.
 **Notes**
 - Boundary semantics: **inclusive start, exclusive end** — active at exactly `starts_at`, not at exactly `ends_at`.
 - A `nil` end means "never expires"; a `nil` start means "not yet started".
-- `start!` / `finish!` / `reschedule!` cast each time through its column's type (a parseable String works). A value that cannot be parsed as a time (`"junk"`, `42`) raises `ArgumentError` and nothing is written; it used to clear the column. `nil` still clears a side.
+- `start!` / `finish!` / `reschedule!` cast each time through its column's type. A value that is not a time raises `ArgumentError` and nothing is written (it used to clear the column): a String must name a year (ISO 8601, RFC 2822, `"Oct 1 2026"` and `"2026-10-01 10:30"` all do; `"junk"`, `"Monday"` and `"10:30"` do not, although `Time.zone.parse` reads them as June 1st and today), and `42` or `1.hour` never cast. `nil` still clears a side.
 - No `default_scope`; chain `.current` explicitly.
 
 ---
@@ -751,7 +752,7 @@ ApiToken.expiring_within(1.day)  # future expiry within the next 1 day
 ```ruby
 token.expire!                       # expires_at = now (nil or "" also mean now)
 token.expire!(2.hours.from_now)     # explicit time (a Time, or a parseable String)
-token.expire!("garbage")            # ArgumentError, raised before any hook runs
+token.expire!("garbage")            # ArgumentError, raised before any hook runs (a String must name a year)
 token.expire_in!(15.minutes)        # absolute lifetime from now, whatever the current expiry
 token.extend_expiry!(by: 1.day)     # pushes expiry forward
 token.clear_expiry!                 # never expires (nil)
@@ -1619,7 +1620,7 @@ Account.where_theme(nil)         # unset key, explicit null, or NULL column
 **Notes**
 - Works on a plain `text` column (JSON encoded/decoded internally), a native `json`/`jsonb` column, or a column the host app already `serialize`d — detected automatically. `serialize` itself is never used, so the Rails 7.1 API drift is irrelevant.
 - nil vs unset: a written `nil` (explicit JSON null) reads back as `nil` and does **not** fall back to the default; `reset_<key>` removes the key so the default applies again. `:decimal` is stored as a precision-safe string, `:date`/`:datetime` as ISO8601 (datetime in UTC at microsecond precision).
-- A `:datetime` key behaves like a datetime column on the same model. With `time_zone_aware_attributes` on (every Rails app), a zone-less String (a `datetime-local` form value) is wall-clock time in `Time.zone`, a `Date` is midnight there, and the reader returns an `ActiveSupport::TimeWithZone` in the current `Time.zone`. Without it, both follow `ActiveRecord.default_timezone`. `where_<key>` parses its argument the same way. The stored UTC form is unchanged, so existing rows read back as the same instant.
+- A `:datetime` key behaves like a datetime column on the same model. With `time_zone_aware_attributes` on (every Rails app), a zone-less String (a `datetime-local` form value) is wall-clock time in `Time.zone`, a `Date` is midnight there, and the reader returns an `ActiveSupport::TimeWithZone` in the current `Time.zone`. Without it, both follow `ActiveRecord.default_timezone`. `where_<key>` parses its argument the same way, a `datetime_select` value is wall-clock time in `Time.zone`, and a `default:` reads back as the same value stored would. The stored UTC form is unchanged, so existing rows read back as the same instant.
 - Writing one key dirties (and saves) the **whole column** — concurrent writers to different keys are last-write-wins on the hash. Undeclared keys are preserved. `:json` readers return a dup: reassign, don't mutate in place.
 - Generated names are collision-checked against existing methods and columns at macro time (`ArgumentError`; affix to escape). Read-side casting never raises — corrupt column JSON decodes as `{}`, garbage values cast to `nil`.
 - **Querying**: every key gets a `where_<accessor>(value)` equality scope — `json_extract` on SQLite, `->>` on PostgreSQL (a `text` column is cast to `jsonb`), `JSON_UNQUOTE(JSON_EXTRACT())` on MySQL/MariaDB, which also gets a `JSON_TYPE` predicate so a stored JSON `null` is never confused with the string `"null"`. The value is cast exactly as the writer stores it (`where_items_per_page("50")` works; one that will not cast raises), and `where_<key>(nil)` matches an unset key, an explicit JSON null and a `NULL` column on all three. Defaults are **not** queryable (a never-written key is absent in the DB). `:json` keys, other adapters and a column that is also `encryptable` (ciphertext, not JSON — either declaration order) raise; `query: false` opts out, and a `where_<accessor>` the model already defines is left alone with a deprecation warning rather than overwritten. A row holding blank or corrupt JSON reads as an unset key on SQLite (`json_valid` guard) but aborts the whole query on PostgreSQL and MySQL — there is no portable guard. Reach for [`store_attribute`](https://github.com/palkan/store_attribute) / [`jsonb_accessor`](https://github.com/madeintandem/jsonb_accessor) for jsonb operators, ranges or containment queries.
@@ -1682,7 +1683,7 @@ Patient.find_by_email("a@b.com")     # exact-match lookup via the blind index
 Patient.where_email("a@b.com")       # chainable Relation (accepts arrays too)
 ```
 
-**Options** (`encryptable *fields, …`, repeatable): `type:` (cast the decrypted value — `:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`; a `:datetime` field behaves like a datetime column on the model: under `time_zone_aware_attributes` zone-less input is read in `Time.zone` and it reads back as a `TimeWithZone`, while the plaintext stays UTC ISO8601), `key:` (per-field override; a String or lazy Proc), `blind_index:` (`true`, or `{ column:, expression: }` — maintains a deterministic keyed-HMAC companion column, default `<field>_bidx`, for equality lookups; `expression:` normalizes symmetrically on write and query).
+**Options** (`encryptable *fields, …`, repeatable): `type:` (cast the decrypted value — `:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`; a `:datetime` field behaves like a datetime column on the model: under `time_zone_aware_attributes` zone-less input is read in `Time.zone` and it reads back as a `TimeWithZone`, while the plaintext stays UTC ISO8601), `key:` (per-field override; a String or lazy Proc), `blind_index:` (`true`, or `{ column:, expression: }` — maintains a deterministic keyed-HMAC companion column, default `<field>_bidx`, for equality lookups; `expression:` normalizes symmetrically on write and query; the digest is of the canonical plaintext, so a `:datetime` is found by any rendering of the instant in any `Time.zone` and a String finds a typed field — rows indexed before still match the lookup that found them, and `:datetime` fields should be [reindexed once](docs/concerns/encryptable.md#blind-index-of-a-typed-field)).
 
 **Key rotation** — bump the key id, keep the old key for decrypting, re-encrypt, drop the old key:
 
