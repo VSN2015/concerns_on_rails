@@ -47,9 +47,11 @@ module ConcernsOnRails
     #     parent's `lock_version` in SQL, and the parent instance the child's
     #     association holds (the one `post.comments.create!` was called on, or
     #     the one passed as `post:`) gets the bump — and the counter delta —
-    #     mirrored in memory, as Rails' native counter cache does through
-    #     increment!, so it saves afterwards without StaleObjectError. Other
-    #     loaded copies of the parent go stale, as they would natively.
+    #     mirrored in memory (increment!'s in-memory half; a counter the
+    #     caller assigned and has not saved is left pending), so it saves
+    #     afterwards without StaleObjectError. A rolled-back save of the child
+    #     takes the mirror back off it. Other loaded copies of the parent go
+    #     stale, as they would natively.
     #   * A `belongs_to ..., primary_key: :code` is honoured everywhere: the
     #     parent row is addressed by the association key (not its `id`), both by
     #     the live adjustments and by `recount_counter_caches!`.
@@ -368,6 +370,40 @@ module ConcernsOnRails
         end
       end
 
+      # The in-memory mirror onto the parent (counter_cacheable_sync_target)
+      # must be undone when the database change is: a rolled-back
+      # transaction or savepoint of this record's save — a caller's Rollback,
+      # a later callback raising, a Stateable/HookedWrite veto — rolls the
+      # parent row back, and the parent instance was left one version (and
+      # one count) ahead of it, so its next save raised StaleObjectError.
+      #
+      # Rails calls rolledback!/committed! on every record enrolled in the
+      # transaction — this record is, being the one saved — for savepoints
+      # and full transactions alike, on 6.0–8.1. Each mirror remembers the
+      # TransactionState it was made in; Rails propagates a rollback to the
+      # states of every savepoint nested in the rolled-back transaction
+      # (released ones included), so `rolledback?` says exactly whether that
+      # UPDATE was undone. A rollback therefore undoes only the mirrors it
+      # rolled back — an adjustment from a still-open outer transaction
+      # stays — and the final commit forgets the rest.
+      def rolledback!(**)
+        super
+      ensure
+        counter_cacheable_settle_mirrors!(committed: false)
+      end
+
+      def committed!(**)
+        super
+      ensure
+        counter_cacheable_settle_mirrors!(committed: true)
+      end
+
+      # A copy starts with no pending mirrors of its own.
+      def initialize_dup(other)
+        super
+        @counter_cacheable_mirrors = nil
+      end
+
       private
 
       def counter_cacheable_run_create
@@ -511,15 +547,61 @@ module ConcernsOnRails
       # safe: a current lock_version over a stale count would let a full-row
       # save (partial updates off) write the old count back.
       def counter_cacheable_sync_target(target, klass, counters)
-        counters.each do |column, delta|
+        applied = counter_cacheable_apply_counters(target, counters, 1)
+        bumped = ConcernsOnRails::Support::Locking.mirror_bump!(target, klass)
+        counter_cacheable_remember_mirror(target, klass, applied, bumped)
+      end
+
+      # Move each (clean, loaded) counter by delta * sign; the columns moved.
+      def counter_cacheable_apply_counters(target, counters, sign)
+        counters.filter_map do |column, delta|
           name = column.to_s
           next unless target.has_attribute?(name)
           next if target.will_save_change_to_attribute?(name)
 
-          target[name] = target[name].to_i + delta
+          target[name] = target[name].to_i + (delta * sign)
           target.send(:clear_attribute_change, name)
-        end
-        ConcernsOnRails::Support::Locking.mirror_bump!(target, klass)
+          [name, delta]
+        end.to_h
+      end
+
+      # Remember the mirror with the transaction it was made in (see
+      # rolledback!). Outside a transaction there is nothing to undo — the
+      # UPDATE committed on its own.
+      #
+      # This record is then enrolled in its transaction explicitly (Rails
+      # dedups by object id). A save already enrolls it, but not always in a
+      # way that guarantees the callbacks: Rails 6.0 enrolls only a record
+      # with after_commit/after_rollback callbacks — the rest sync their
+      # state lazily and are never sent rolledback! — and 6.1+ enrolls a
+      # record saved inside an open transaction only weakly (WeakMap).
+      def counter_cacheable_remember_mirror(target, klass, counters, bumped)
+        transaction = klass.connection.current_transaction
+        state = transaction.respond_to?(:state) ? transaction.state : nil
+        return unless state
+
+        entry = { target: target, klass: klass, counters: counters, bumped: bumped, state: state }
+        @counter_cacheable_mirrors = [*@counter_cacheable_mirrors, entry]
+        self.class.connection.add_transaction_record(self)
+      end
+
+      # Undo (newest first) every mirror whose transaction was rolled back;
+      # on the final commit, forget the others — they are durable now.
+      def counter_cacheable_settle_mirrors!(committed:)
+        mirrors = @counter_cacheable_mirrors
+        return if mirrors.nil? || mirrors.empty?
+
+        undone, kept = mirrors.partition { |entry| entry[:state].rolledback? }
+        undone.reverse_each { |entry| counter_cacheable_undo_mirror(entry) }
+        @counter_cacheable_mirrors = committed ? nil : kept
+      end
+
+      def counter_cacheable_undo_mirror(entry)
+        target = entry[:target]
+        return if target.frozen?
+
+        counter_cacheable_apply_counters(target, entry[:counters], -1)
+        ConcernsOnRails::Support::Locking.mirror_bump!(target, entry[:klass], by: -1) if entry[:bumped]
       end
 
       # Sum per column, dropping zero-sum entries (nothing to write).

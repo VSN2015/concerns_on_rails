@@ -350,7 +350,12 @@ its own savepoint so a retry works inside a caller's transaction on PostgreSQL),
 savepoint, true only once the after-hook returns, and on abort the WHOLE AttributeSet (a
 deep_dup, already-read mutable values deep-copied), the last save's mutations, forced changes
 and the record's identity are put back — unread attributes restored raw, never
-deserialized, so encrypted fields are never decrypted), `ErrorEnvelope` (the shared `render_error`-or-inline error
+deserialized, so encrypted fields are never decrypted), `Locking` (keeping an instance in step with its
+row around raw SQL: `mirror_bump!` copies Rails' `increment!` in-memory lock_version sync (+1, never
+adopting the row's value; `by: -1` undoes it), `pinned` keeps an `update_all` from bumping lock_version,
+`with_row_lock` reads named columns with SELECT … FOR UPDATE without reloading, and `with_locked_column`
+— Stateable `lock: true`, Activatable `toggle_active!` — reloads a clean record under the lock
+(`with_lock`) and reads + adopts only the column for one with unsaved changes), `ErrorEnvelope` (the shared `render_error`-or-inline error
 renderer used by seven controller concerns), `FilterParameterRegistry` (live
 filter_parameters registry consulted by the proc `ConcernsOnRails::Railtie` appends at
 boot), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,

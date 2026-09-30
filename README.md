@@ -966,7 +966,8 @@ per record so the hooks and validations still run, and a record that fails to sa
 `ActiveRecord::RecordNotSaved` and rolls the whole batch back. `deactivate_all` is gated the
 same way by `deactivate!`/`before_deactivate`/`after_deactivate`, so overriding only
 `after_deactivate` leaves `activate_all` on the fast path. `toggle_active!`'s row lock has
-no batch analogue.
+no batch analogue. It reloads a clean record under the lock; a record with unsaved changes (which
+`with_lock` refuses) has only the flag read under the lock, and its changes save with the flip.
 
 **Notes**
 - `NULL` is treated as inactive (same convention as most apps' "unset = off").
@@ -1169,12 +1170,12 @@ A hook that vetoes with `raise ActiveRecord::Rollback` rolls the transition back
 even inside your own transaction. After an aborted transition, the state and its `<state>_at` stamp go back to
 their previous in-memory values, so a retry is guarded against the real state.
 
-**Row lock** — `lock: true` makes each guarded `<event>!` lock the row (`SELECT <state> ... FOR UPDATE`) and
-check the guard against the **row's** state, closing the check-then-write race between two processes. The
-record is not reloaded, so pending changes save with the transition (`ticket.note = "fixed"; ticket.resolve!`),
-as with `lock: false`. When another process has moved the state, the row's state is taken into memory and the
-guard decides from it (a disallowed event raises `InvalidTransition`; an allowed one fires with the row's state
-as `from`); with optimistic locking a stale instance raises `StaleObjectError` instead of being reloaded over.
+**Row lock** — `lock: true` makes each guarded `<event>!` lock the row (`SELECT ... FOR UPDATE`) and check the
+guard against the **row's** state, closing the check-then-write race between two processes. A record without
+unsaved changes is reloaded under the lock (`with_lock`), so hooks and the write see the committed row. One
+**with** unsaved changes (`ticket.note = "fixed"; ticket.resolve!`) can't be reloaded without losing them, so only
+its state column is read and adopted, and the changes save with the transition, as with `lock: false`; under
+optimistic locking such a record raises `StaleObjectError` if the row changed since it was loaded.
 
 **Prefix / suffix** — avoid clashes when the state names overlap with other concerns or scopes:
 
@@ -1657,7 +1658,7 @@ Comment.recount_counter_caches!    # repair drift / backfill every counter
 Comment.recount_counter_caches!(:post, parents: imported_posts)   # repair just these parents (ids, records or a relation)
 ```
 
-Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose. A destroy decrements only when its DELETE actually removed the row (as Rails' native counter cache does) — destroying a stale second instance, or a never-saved record, writes nothing — and it reads the parent and the `if:` verdict from the **persisted** values, so an unsaved reparent or condition flip can't redirect it. A `belongs_to ..., primary_key: :code` is honoured: parents are addressed by that key (live adjustments and `recount_counter_caches!` alike), never by `id`. A child destroyed by its parent's own `has_many ..., dependent: :destroy` does not decrement that parent (as with Rails' native counter cache) — the row is going away, and bumping it first would trip the parent's `lock_version`. A `has_one` replacement, where the parent survives, still decrements. With `lock_version` on the parent, each adjustment bumps it in SQL, and the parent instance the child's association holds (`post.comments.create!`'s `post`, or the one passed as `post:`) gets the bump and the counter delta mirrored in memory, as Rails' native counter cache does with `increment!` — so `post.update!` afterwards doesn't raise `StaleObjectError`. Two pre-existing cases can still raise it: destroying a parent whose counted child hangs off a `has_one ..., dependent: :destroy`, and a `has_many :through ..., dependent: :destroy` (Rails deletes the join rows without `destroyed_by_association`).
+Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose. A destroy decrements only when its DELETE actually removed the row (as Rails' native counter cache does) — destroying a stale second instance, or a never-saved record, writes nothing — and it reads the parent and the `if:` verdict from the **persisted** values, so an unsaved reparent or condition flip can't redirect it. A `belongs_to ..., primary_key: :code` is honoured: parents are addressed by that key (live adjustments and `recount_counter_caches!` alike), never by `id`. A child destroyed by its parent's own `has_many ..., dependent: :destroy` does not decrement that parent (as with Rails' native counter cache) — the row is going away, and bumping it first would trip the parent's `lock_version`. A `has_one` replacement, where the parent survives, still decrements. With `lock_version` on the parent, each adjustment bumps it in SQL, and the parent instance the child's association holds (`post.comments.create!`'s `post`, or the one passed as `post:`) gets the bump and the counter delta mirrored in memory (the in-memory half of native `increment!`; a counter you assigned and haven't saved is left pending as assigned) — so `post.update!` afterwards doesn't raise `StaleObjectError` — and a rolled-back save of the child takes the mirror back off the parent. Two pre-existing cases can still raise it: destroying a parent whose counted child hangs off a `has_one ..., dependent: :destroy`, and a `has_many :through ..., dependent: :destroy` (Rails deletes the join rows without `destroyed_by_association`).
 
 **Options** (`counter_cacheable_by association, …`, repeatable — re-declaring the same association + `count:` replaces that rule, e.g. an STI subclass narrowing it with `if:`): `count:` (the parent column; default `"<table_name>_count"`), `if:` (a callable evaluated against the record — counts only when truthy; the previous state is reconstructed for updates), `touch:` (`false`; also bump the parent's `updated_at`).
 

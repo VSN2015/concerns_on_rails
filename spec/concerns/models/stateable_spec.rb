@@ -815,8 +815,9 @@ describe ConcernsOnRails::Stateable do
       expect(klass.find(record.id).status).to eq("archived")
     end
 
-    it "reads the state with a locking SELECT of that column (not a full reload)" do
+    it "reads only the state with a locking SELECT when the record has pending changes" do
       record = klass.create!
+      record.note = "pending"
       reads = []
       subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
         reads << payload[:sql] if payload[:name] != "SCHEMA" && payload[:sql].match?(/\ASELECT/i) && payload[:sql].include?("locked_orders")
@@ -831,24 +832,131 @@ describe ConcernsOnRails::Stateable do
       expect(reads.first).to include(TestDatabase.quoted_column("status"))
       expect(reads.first).not_to include("*")
       expect(reads.first).to include("FOR UPDATE") unless TestDatabase.sqlite?
+      expect(klass.find(record.id).note).to eq("pending")
     end
 
-    it "raises RecordNotFound when the row has gone (as the reload did)" do
+    it "raises RecordNotFound when the row has gone (clean record: the reload's own error)" do
       record = klass.create!
       klass.where(id: record.id).delete_all
 
       expect { record.publish! }.to raise_error(ActiveRecord::RecordNotFound)
     end
 
-    it "an aborted transition leaves the adopted row state in memory, not the stale one" do
+    it "raises RecordNotFound when the row has gone (record with pending changes)" do
+      record = klass.create!
+      record.note = "pending"
+      klass.where(id: record.id).delete_all
+
+      expect { record.publish! }.to raise_error(ActiveRecord::RecordNotFound)
+      expect(record.note).to eq("pending")
+    end
+
+    it "an aborted transition of a record with pending changes leaves the adopted row state in memory" do
       record = klass.create!
       klass.find(record.id).submit!
       klass.define_method(:after_transition) { |*| raise ActiveRecord::Rollback }
+      record.note = "pending"
 
       expect(record.publish!).to be(false)
 
       expect(record.status).to eq("review")
+      expect(record.note).to eq("pending")
       expect(klass.find(record.id).status).to eq("review")
+    end
+
+    # PR #124 review (R124-02..05): a record WITHOUT pending changes keeps the
+    # with_lock path it always had — reloaded under the lock, so every
+    # attribute (lock_version included) is the committed row's. Only a record
+    # with pending changes, which cannot be reloaded without losing them,
+    # takes the column-only locked read.
+    describe "a clean record is reloaded under the lock, as before" do
+      # One table name per shape: SQLite pools prepared statements by SQL
+      # text, and a statement prepared against the other shape would read
+      # its column list.
+      def create_tickets(lock_version:)
+        @tickets_table = lock_version ? "versioned_lock_tickets" : "lock_tickets"
+        ActiveRecord::Schema.define do
+          create_table (lock_version ? :versioned_lock_tickets : :lock_tickets), force: true do |t|
+            t.string :title
+            t.string :status
+            t.integer :lock_version, default: 0, null: false if lock_version
+          end
+        end
+      end
+
+      def ticket_model(&body)
+        table = @tickets_table
+        Class.new(TestModel) do
+          self.table_name = table
+          include ConcernsOnRails::Stateable
+
+          stateable_by :status, states: %i[open resolved closed], default: :open, lock: true,
+                                transitions: { resolve: { from: :open, to: :resolved },
+                                               close: { from: %i[open resolved], to: :closed } }
+          class_eval(&body) if body
+        end
+      end
+
+      it "partial updates off: a stale copy's transition does not write its stale columns over a concurrent edit" do
+        create_tickets(lock_version: false)
+        klass = ticket_model
+        klass.public_send(klass.respond_to?(:partial_updates=) ? :partial_updates= : :partial_writes=, false)
+        ticket = klass.create!(title: "old")
+        stale = klass.find(ticket.id)
+        klass.find(ticket.id).update!(title: "new")
+
+        stale.close!
+
+        expect(klass.find(ticket.id).attributes.slice("title", "status")).to eq("title" => "new", "status" => "closed")
+      end
+
+      it "hooks and validations see the committed row" do
+        create_tickets(lock_version: false)
+        seen = []
+        klass = ticket_model { define_method(:before_transition) { |*| seen << title } }
+        ticket = klass.create!(title: "old")
+        stale = klass.find(ticket.id)
+        klass.find(ticket.id).update!(title: "new")
+
+        stale.close!
+
+        expect(seen).to eq(["new"])
+      end
+
+      it "lock_version model: a copy another process transitioned still fires an event the row's state allows" do
+        create_tickets(lock_version: true)
+        klass = ticket_model
+        ticket = klass.create!(title: "t")
+        stale = klass.find(ticket.id)
+        klass.find(ticket.id).resolve!
+
+        expect { stale.close! }.not_to raise_error
+        expect(klass.find(ticket.id).status).to eq("closed")
+      end
+
+      it "lock_version model: transition_all is not rolled back by a concurrent edit of a batched row" do
+        create_tickets(lock_version: true)
+        klass = ticket_model do
+          define_method(:before_transition) do |*|
+            self.class.unscoped.where.not(id: id).where(title: "b").update_all(title: "b2") if title == "a"
+          end
+        end
+        klass.create!(title: "a")
+        klass.create!(title: "b")
+
+        expect { klass.transition_all(:close) }.not_to raise_error
+        expect(klass.pluck(:status)).to eq(%w[closed closed])
+      end
+
+      it "lock_version model: a record loaded with a partial select still transitions" do
+        create_tickets(lock_version: true)
+        klass = ticket_model
+        ticket = klass.create!(title: "t")
+        partial = klass.select(:id, :status).find(ticket.id)
+
+        expect { partial.resolve! }.not_to raise_error
+        expect(klass.find(ticket.id).status).to eq("resolved")
+      end
     end
 
     context "with a lock_version column" do
@@ -879,7 +987,9 @@ describe ConcernsOnRails::Stateable do
         expect { record.update!(note: "shipped") }.not_to raise_error
       end
 
-      it "a stale copy raises StaleObjectError instead of being silently reloaded over" do
+      # Its pending changes were made against a copy the row has moved on
+      # from — exactly what optimistic locking exists to refuse.
+      it "a stale copy WITH pending changes raises StaleObjectError" do
         record = versioned.create!
         versioned.find(record.id).update!(note: "edited elsewhere")
         record.note = "mine"
@@ -887,6 +997,7 @@ describe ConcernsOnRails::Stateable do
         expect { record.archive! }.to raise_error(ActiveRecord::StaleObjectError)
         expect(versioned.find(record.id).attributes.slice("status", "note"))
           .to eq("status" => "draft", "note" => "edited elsewhere")
+        expect(record.note).to eq("mine")
       end
     end
   end

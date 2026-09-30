@@ -68,13 +68,14 @@ module ConcernsOnRails
     #     the column's DB default applies).
     #   * Guarded transitions check the in-memory state: two processes firing the
     #     same <event>! concurrently can both pass the guard (check-then-write).
-    #     `lock: true` closes that race — each <event>! locks the row
-    #     (SELECT <state> ... FOR UPDATE) and re-checks the guard against the
-    #     row's state first; when that differs from the instance's, the row's
-    #     state is taken into memory (as the reload of with_lock used to) and
-    #     the guard decides from it. Only the state column is read — the record
-    #     is NOT reloaded — so unsaved changes are kept and saved with the
-    #     transition, as with `lock: false`. Costs one SELECT per transition.
+    #     `lock: true` closes that race — each <event>! locks the row and
+    #     re-checks the guard against the row's state first. A record without
+    #     unsaved changes is reloaded under the lock (with_lock). One WITH
+    #     unsaved changes can't be reloaded, so only its state column is read
+    #     (SELECT <state> ... FOR UPDATE) and adopted, and the changes save
+    #     with the transition, as with `lock: false` — under optimistic
+    #     locking a stale one raises StaleObjectError. One SELECT per
+    #     transition.
     module Stateable
       extend ActiveSupport::Concern
 
@@ -568,40 +569,17 @@ module ConcernsOnRails
       # Instance-level guarded transition body, shared by every `<event>!`.
       # With `lock: true` the guard is re-checked under a row lock against the
       # row's committed state — closing the check-then-write race between two
-      # concurrent transitions.
-      #
-      # Not with_lock: its lock! RELOADS the record, which Rails refuses for a
-      # record with unsaved changes ("Locking a record with unpersisted changes
-      # is not supported"), so `ticket.note = "..."; ticket.resolve!` crashed
-      # under `lock: true` while `lock: false` saved the note with the state.
-      # Only the state column is read (Support::Locking.with_row_lock), inside
-      # the transaction the write then joins.
+      # concurrent transitions. Support::Locking.with_locked_column: a record
+      # without unsaved changes is reloaded under the lock (with_lock, as
+      # always); one WITH unsaved changes — which with_lock refused ("Locking
+      # a record with unpersisted changes is not supported") — has only its
+      # state column read and adopted, and its changes save with the state.
       def stateable_perform_transition!(field, to, from, event, name)
         return stateable_execute_transition!(field, to, from, event, name) unless self.class.stateable_lock && persisted?
 
-        ConcernsOnRails::Support::Locking.with_row_lock(self, field) do |row|
-          raise ActiveRecord::RecordNotFound.new(stateable_missing_row_message, self.class.name, self.class.primary_key, id) unless row
-
-          stateable_adopt_state!(field, row[field.to_s])
+        ConcernsOnRails::Support::Locking.with_locked_column(self, field) do
           stateable_execute_transition!(field, to, from, event, name)
         end
-      end
-
-      # The row's state wins over the instance's copy: another process may
-      # have moved it since this record was loaded. It becomes the in-memory
-      # state (clean, as a reload would leave it), so the guard, the hooks'
-      # `from` and the write all see the state the row really has — and a
-      # write back to the stale in-memory value still reaches the row. Nothing
-      # else is touched.
-      def stateable_adopt_state!(field, stored)
-        return if self[field] == stored && !will_save_change_to_attribute?(field)
-
-        self[field] = stored
-        clear_attribute_change(field)
-      end
-
-      def stateable_missing_row_message
-        "Couldn't find #{self.class.name} with '#{self.class.primary_key}'=#{id}"
       end
 
       # Hooks and the state write share ONE transaction, so a raising

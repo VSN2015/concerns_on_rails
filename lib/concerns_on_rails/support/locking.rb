@@ -24,6 +24,9 @@ module ConcernsOnRails
     # SELECT ... FOR UPDATE and leaves the instance alone. (SQLite ignores FOR
     # UPDATE — its writers are serialized by the database lock instead — but
     # the value read is still the row's, not the instance's.)
+    # `with_locked_column` picks between the two for a concern verb's
+    # read-modify-write: the reload whenever it is possible, the column-only
+    # read only when unsaved changes rule the reload out.
     #
     # The optimistic helpers do nothing on a model without a locking column,
     # so such a model's SQL and in-memory state are exactly what they were.
@@ -35,13 +38,14 @@ module ConcernsOnRails
       # UPDATE bumped the column), mirror the bump as increment! does. Skipped
       # when the column was not selected into the instance. true when it
       # mirrored.
-      def mirror_bump!(record, klass = record.class)
+      # `by: -1` takes a mirrored bump back (the UPDATE was rolled back).
+      def mirror_bump!(record, klass = record.class, by: 1)
         return false unless klass.locking_enabled?
 
         column = klass.locking_column
         return false unless record.has_attribute?(column)
 
-        record[column] += 1
+        record[column] += by
         record.send(:clear_attribute_change, column)
         true
       end
@@ -72,6 +76,50 @@ module ConcernsOnRails
           row = klass.unscoped.where(primary_key => record.id).lock.limit(1).pluck(primary_key, *names).first
           yield(row && names.zip(row.drop(1)).to_h)
         end
+      end
+
+      # The row lock behind a concern verb that reads `column` and then
+      # writes it (Stateable `lock: true`, Activatable#toggle_active!). Yields
+      # inside the lock's transaction and returns the block's value.
+      #
+      # * No unsaved changes (or not persisted): with_lock, as these verbs
+      #   always did — the record is RELOADED under the lock, so every
+      #   attribute, lock_version included, is the committed row's. Hooks and
+      #   validations see no stale value, a full-row save (partial updates
+      #   off) writes none back, and a copy that is merely out of date still
+      #   saves under optimistic locking.
+      # * Unsaved changes: the reload is impossible (Rails refuses it, and it
+      #   would discard them), so only `column` is read — with_row_lock — and
+      #   taken into memory; the block's write then saves the pending changes
+      #   with it. Nothing else is refreshed. Under optimistic locking such a
+      #   record raises StaleObjectError when the row has moved on since it
+      #   was loaded: its changes were made against a stale copy. A row that
+      #   has gone raises RecordNotFound, as the reload does.
+      def with_locked_column(record, column, &)
+        return record.with_lock(&) unless record.persisted? && record.has_changes_to_save?
+
+        with_row_lock(record, column) do |row|
+          klass = record.class
+          unless row
+            raise ActiveRecord::RecordNotFound.new(
+              "Couldn't find #{klass.name} with '#{klass.primary_key}'=#{record.id}", klass.name, klass.primary_key, record.id
+            )
+          end
+
+          adopt!(record, column, row[column.to_s])
+          yield
+        end
+      end
+
+      # Take the row's `value` for `column` into memory, clean — as a reload
+      # leaves it — so a guard reads it and a write back to the in-memory
+      # value the row no longer has still reaches the row.
+      def adopt!(record, column, value)
+        name = column.to_s
+        return if record[name] == value && !record.will_save_change_to_attribute?(name)
+
+        record[name] = value
+        record.send(:clear_attribute_change, name)
       end
     end
   end

@@ -210,6 +210,7 @@ describe "optimistic locking across raw writes" do
         belongs_to :ol_post, class_name: "OlPost", optional: true, inverse_of: :ol_comments
         counter_cacheable_by :ol_post, touch: touch
         counter_cacheable_by :ol_post, count: :approved_count, if: -> { approved? }
+        after_create { raise "boom" if body == "boom" }
       end)
     end
 
@@ -332,6 +333,123 @@ describe "optimistic locking across raw writes" do
         expect(post.lock_version).to eq(OlPost.where(id: post.id).pick(:lock_version))
       end
 
+      # PR #124 review (R124-01/01b): the mirror is undone when the database
+      # change is — a rolled-back transaction or savepoint of the CHILD's
+      # save rolls the parent row back, and the parent instance with it.
+      it "a rolled-back transaction takes the mirrored delta and bump back off the parent" do
+        post = OlPost.create!(title: "t")
+
+        ActiveRecord::Base.transaction do
+          post.ol_comments.create!(body: "x", approved: true)
+          raise ActiveRecord::Rollback
+        end
+
+        expect(OlPost.where(id: post.id).pick(:lock_version, :ol_comments_count)).to eq([0, 0])
+        expect([post.lock_version, post.ol_comments_count, post.approved_count]).to eq([0, 0, 0])
+        expect(post).not_to be_changed
+        expect { post.update!(title: "edited") }.not_to raise_error
+      end
+
+      it "a child whose later after_create raises leaves the parent in sync" do
+        post = OlPost.create!(title: "t")
+
+        expect { post.ol_comments.create!(body: "boom") }.to raise_error(RuntimeError, "boom")
+
+        expect(in_sync?(post)).to be(true)
+        expect { post.update!(title: "edited") }.not_to raise_error
+      end
+
+      it "a rolled-back savepoint undoes only its own adjustment" do
+        post = OlPost.create!(title: "t")
+
+        ActiveRecord::Base.transaction do
+          post.ol_comments.create!(body: "kept")
+          ActiveRecord::Base.transaction(requires_new: true) do
+            post.ol_comments.create!(body: "dropped")
+            raise ActiveRecord::Rollback
+          end
+        end
+
+        expect(OlPost.find(post.id).ol_comments_count).to eq(1)
+        expect(in_sync?(post)).to be(true)
+        expect { post.update!(title: "edited") }.not_to raise_error
+      end
+
+      it "the same child saved in an outer transaction and a rolled-back savepoint keeps the outer adjustment" do
+        post = OlPost.create!(title: "t")
+        comment = nil
+
+        ActiveRecord::Base.transaction do
+          comment = post.ol_comments.create!(body: "c")
+          ActiveRecord::Base.transaction(requires_new: true) do
+            comment.update!(approved: true)
+            raise ActiveRecord::Rollback
+          end
+        end
+
+        expect(OlPost.where(id: post.id).pick(:ol_comments_count, :approved_count)).to eq([1, 0])
+        expect(in_sync?(post)).to be(true)
+      end
+
+      it "a released savepoint's adjustment is undone when the outer transaction rolls back" do
+        post = OlPost.create!(title: "t")
+
+        ActiveRecord::Base.transaction do
+          ActiveRecord::Base.transaction(requires_new: true) { post.ol_comments.create!(body: "c") }
+          raise ActiveRecord::Rollback
+        end
+
+        expect([post.lock_version, post.ol_comments_count]).to eq([0, 0])
+        expect(in_sync?(post)).to be(true)
+      end
+
+      it "a rolled-back destroy puts the parent's count and version back" do
+        post = OlPost.create!(title: "t")
+        comment = post.ol_comments.create!(body: "c")
+
+        ActiveRecord::Base.transaction do
+          comment.destroy!
+          raise ActiveRecord::Rollback
+        end
+
+        expect([post.lock_version, post.ol_comments_count]).to eq([1, 1])
+        expect(in_sync?(post)).to be(true)
+        expect { post.update!(title: "edited") }.not_to raise_error
+      end
+
+      it "a committed adjustment is never undone by a later rollback of the same child" do
+        post = OlPost.create!(title: "t")
+        comment = post.ol_comments.create!(body: "c")
+
+        ActiveRecord::Base.transaction do
+          comment.update!(body: "edited")
+          raise ActiveRecord::Rollback
+        end
+
+        expect([post.lock_version, post.ol_comments_count]).to eq([1, 1])
+        expect(in_sync?(post)).to be(true)
+      end
+
+      it "parent saved with built children (autosave) is in sync" do
+        post = OlPost.new(title: "t")
+        post.ol_comments.build(body: "a")
+        post.ol_comments.build(body: "b")
+        post.save!
+
+        expect(in_sync?(post)).to be(true)
+        expect { post.update!(title: "edited") }.not_to raise_error
+      end
+
+      it "accepts_nested_attributes_for on an existing parent is in sync" do
+        OlPost.accepts_nested_attributes_for :ol_comments
+        post = OlPost.create!(title: "t")
+
+        post.update!(title: "x", ol_comments_attributes: [{ body: "a" }, { body: "b" }])
+
+        expect(in_sync?(post)).to be(true)
+        expect { post.update!(title: "edited") }.not_to raise_error
+      end
+
       it "with touch: true still mirrors the bump" do
         define_models(touch: true)
         post = OlPost.create!(title: "t")
@@ -358,6 +476,66 @@ describe "optimistic locking across raw writes" do
         expect(post).not_to be_changed
         expect(post.reload.ol_comments_count).to eq(1)
       end
+    end
+  end
+
+  # PR #124 review (R124-01c): the gem's own veto path — a Stateable child
+  # whose after_transition vetoes with ActiveRecord::Rollback — rolls the
+  # counter UPDATE back, and must roll the parent instance back with it.
+  describe "CounterCacheable x Stateable veto" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :ol_vposts, force: true do |t|
+          t.string :title
+          t.integer :approved_count, default: 0, null: false
+          t.integer :lock_version, default: 0, null: false
+        end
+        create_table :ol_vcomments, force: true do |t|
+          t.integer :ol_vpost_id
+          t.string :status
+        end
+      end
+      stub_const("OlVpost", Class.new(TestModel) do
+        self.table_name = "ol_vposts"
+        has_many :ol_vcomments, class_name: "OlVcomment", foreign_key: :ol_vpost_id, inverse_of: :ol_vpost
+      end)
+      stub_const("OlVcomment", Class.new(TestModel) do
+        self.table_name = "ol_vcomments"
+        include ConcernsOnRails::CounterCacheable
+        include ConcernsOnRails::Stateable
+
+        belongs_to :ol_vpost, class_name: "OlVpost", optional: true, inverse_of: :ol_vcomments
+        counter_cacheable_by :ol_vpost, count: :approved_count, if: -> { status == "approved" }
+        stateable_by :status, states: %i[pending approved], default: :pending,
+                              transitions: { approve: { from: :pending, to: :approved } }
+        attr_accessor :veto
+
+        def after_transition(*)
+          raise ActiveRecord::Rollback if veto
+        end
+      end)
+    end
+
+    it "a vetoed transition leaves the loaded parent in sync and saveable" do
+      post = OlVpost.create!(title: "t")
+      comment = post.ol_vcomments.create!
+      comment.veto = true
+
+      expect(comment.approve!).to be(false)
+
+      expect(OlVpost.where(id: post.id).pick(:lock_version, :approved_count)).to eq([0, 0])
+      expect([post.lock_version, post.approved_count]).to eq([0, 0])
+      expect { post.update!(title: "edited") }.not_to raise_error
+    end
+
+    it "an approved transition still mirrors onto the parent" do
+      post = OlVpost.create!(title: "t")
+      comment = post.ol_vcomments.create!
+
+      expect(comment.approve!).to be(true)
+
+      expect([post.lock_version, post.approved_count]).to eq(OlVpost.where(id: post.id).pick(:lock_version, :approved_count))
+      expect(post.approved_count).to eq(1)
     end
   end
 
