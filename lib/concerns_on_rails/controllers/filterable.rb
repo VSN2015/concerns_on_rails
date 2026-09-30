@@ -2,6 +2,7 @@ require "active_support/concern"
 require "active_model/type"
 require "concerns_on_rails/support/scalar_param"
 require "concerns_on_rails/support/numeric_operand"
+require "concerns_on_rails/support/time_value"
 
 module ConcernsOnRails
   module Controllers
@@ -38,8 +39,11 @@ module ConcernsOnRails
     # nothing — a decimal finer than its column's scale likewise. A value
     # beyond what the column can hold is answered per operator
     # (`?stock_lt=99999999999999999999` is every non-NULL row, `?stock_gt=`
-    # the same value is none). contains / starts_with apply to string/text
-    # (non-array) columns only and match nothing on any other column.
+    # the same value is none). Dates and times get the same answer outside
+    # the portable range 0001-01-01..9999-12-31 (Support::TimeValue::YEARS):
+    # `?happened_at_lt=300000-01-01` is every non-NULL row, never a database
+    # error, and such a value equals nothing. contains / starts_with apply to
+    # string/text (non-array) columns only and match nothing on any other column.
     #
     # Usage:
     #   class ArticlesController < ApplicationController
@@ -247,8 +251,30 @@ module ConcernsOnRails
         # casts to nil and returns none — one request answered two opposite ways.
         return relation.none if value.equal?(UNCASTABLE)
 
+        beyond = filterable_time_beyond(value)
+        return apply_filter_beyond_range(relation, field, operator, beyond) if beyond
+
         column = relation.model.arel_table[field]
         relation.where(column.public_send(COMPARISONS.fetch(operator), value))
+      end
+
+      # A date or time outside Support::TimeValue::YEARS (0001-01-01 ..
+      # 9999-12-31) is never bound. PostgreSQL raised DatetimeFieldOverflow on
+      # ?happened_at_lt=300000-01-01 (a 500), and SQLite compares the text, so
+      # year 10000 sorted before 2026 and answered `lt` / `gt` backwards.
+      # :above / :below for such a value; nil for everything else, which binds
+      # as before.
+      def filterable_time_beyond(value)
+        status = ConcernsOnRails::Support::TimeValue.range_status(value)
+        status == :within ? nil : status
+      end
+
+      # Nothing stored lies beyond an out-of-range operand. Nothing is above an
+      # over-max bound and every non-NULL row is below it; an under-min bound
+      # is the mirror image. Numbers and dates/times share this answer.
+      def apply_filter_beyond_range(relation, field, operator, side)
+        past = side == :above ? %i[gt gte] : %i[lt lte]
+        past.include?(operator) ? relation.none : relation.where.not(field => nil)
       end
 
       # A plain numeric column, read without ActiveModel's lossy casts (see
@@ -265,8 +291,7 @@ module ConcernsOnRails
       def apply_filter_numeric_comparison(relation, field, operator, operand)
         case operand.status
         when :uncastable then relation.none
-        when :above then %i[gt gte].include?(operator) ? relation.none : relation.where.not(field => nil)
-        when :below then %i[lt lte].include?(operator) ? relation.none : relation.where.not(field => nil)
+        when :above, :below then apply_filter_beyond_range(relation, field, operator, operand.status)
         when :inexact then apply_filter_inexact_comparison(relation, field, operator, operand)
         else relation.where(relation.model.arel_table[field].public_send(COMPARISONS.fetch(operator), operand.value))
         end
@@ -308,7 +333,9 @@ module ConcernsOnRails
       # list left empty matches nothing (`in`) or every non-NULL row
       # (`not_in`, exactly what `!=` / NOT IN would answer).
       def apply_filter_equality(relation, field, value, negate: false)
-        kept = filterable_numeric_equality_values(relation, field, value.is_a?(Array) ? value : [value])
+        values = value.is_a?(Array) ? value : [value]
+        kept = filterable_numeric_equality_values(relation, field, values) ||
+               filterable_time_equality_values(relation, field, values)
         return filterable_where(relation, field, value, negate) if kept.nil?
         return relation.none if kept == :uncastable
         return negate ? relation.where.not(field => nil) : relation.none if kept.empty?
@@ -332,6 +359,26 @@ module ConcernsOnRails
         return :uncastable if operands.any? { |operand| operand.status == :uncastable }
 
         operands.select { |operand| operand.status == :exact }.map(&:value)
+      end
+
+      # A date or time no stored value can equal (outside TimeValue::YEARS)
+      # drops out of the list, like an out-of-range number. On PostgreSQL it
+      # used to raise (a 500). nil when no member is out of range, so the
+      # caller keeps its unchanged path. A member that casts to no date or time
+      # stays exactly as it was.
+      def filterable_time_equality_values(relation, field, values)
+        column_type = filterable_column_type(relation, field)
+        return nil unless column_type
+
+        kept = values.reject { |member| filterable_time_beyond(filterable_equality_cast(column_type, member)) }
+        kept.size == values.size ? nil : kept
+      end
+
+      # Only to classify the member: `where` still casts the raw value itself.
+      def filterable_equality_cast(column_type, member)
+        column_type.cast(member)
+      rescue ArgumentError, TypeError, RangeError
+        nil
       end
 
       def filterable_equality_operand(member, column_type)
