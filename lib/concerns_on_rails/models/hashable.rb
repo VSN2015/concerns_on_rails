@@ -56,6 +56,10 @@ module ConcernsOnRails
                           types: hashable_unique ? "string:uniq" : :string)
           validate_hashable_options!
           before_create :assign_hashable_value
+          # Separate from the (public, skip_callback-able) assignment so a
+          # host calling assign_hashable_value itself — outside a save, in
+          # after_initialize — never runs the siblings' hooks.
+          before_create :hashable_report_generated_value
 
           # Same uniqueness handling as create-time assignment (pre-1.22 this
           # wrote one blind candidate: no `unique:` precheck, no retry when the
@@ -186,23 +190,34 @@ module ConcernsOnRails
       end
 
       # Assigns the generated value only when the field is blank,
-      # so callers can still pass an explicit value at create time. It runs in
-      # before_create, after every sibling's before_validation/before_save, so
-      # the value is reported to the ones that derive from it (Encryptable's
-      # blind index, a slug built from the code, Auditable's creation entry —
-      # Support::GeneratedValues).
+      # so callers can still pass an explicit value at create time. Remembers
+      # whether it generated, for #hashable_report_generated_value.
       def assign_hashable_value
         field = self.class.hashable_field
+        @hashable_generated = false
         return if self[field].present?
 
-        ConcernsOnRails::Support::GeneratedValues.watch(self, [field]) do
-          self[field] = if self.class.hashable_unique
-                          unique_hashable_value(field)
-                        else
-                          self.class.generate_hashable_value
-                        end
-        end
+        self[field] = if self.class.hashable_unique
+                        unique_hashable_value(field)
+                      else
+                        self.class.generate_hashable_value
+                      end
+        @hashable_generated = true
       end
+
+      # The before_create that follows assign_hashable_value: a code generated
+      # there comes after every sibling's before_validation/before_save, so it
+      # is reported to the ones that derive from it — Encryptable's blind
+      # index, a slug built from the code, Auditable's creation entry
+      # (Support::GeneratedValues). A value the caller supplied, or one
+      # assigned before the save, was already seen by them: nothing to report.
+      def hashable_report_generated_value
+        return unless @hashable_generated
+
+        @hashable_generated = false
+        ConcernsOnRails::Support::GeneratedValues.assigned(self, [self.class.hashable_field])
+      end
+      private :hashable_report_generated_value
 
       # Best-effort uniqueness: retry on an in-Ruby collision before insert. Pair
       # with a unique DB index for the real guarantee (mirrors Tokenizable).

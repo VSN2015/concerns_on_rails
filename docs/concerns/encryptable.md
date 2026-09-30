@@ -193,6 +193,20 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - The envelope is versioned (`ver`/`alg`/`key_id`): `key_id` drives [key rotation](#key-rotation); `alg 0x11` (deterministic encryption) is still reserved, so it can be added later without a data migration.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need deterministic search, KMS-backed or per-record keys, or Rails-managed key infrastructure.
 
+## Upgrading: blind indexes of generated values
+
+Before this fix, a blind-indexed value that a sibling generates in `before_create` — a [Tokenizable](tokenizable.md) token, a [Hashable](hashable.md) code, a [Sequenceable](sequenceable.md) number — was stored with a **NULL** fingerprint (the refresh ran in `before_save`, before the value existed). New rows are fingerprinted now, but rows created before the upgrade stay unfindable by `find_by_<field>` / `where_<field>` (and Tokenizable's `authenticate_by_<field>` / `consume_<field>`) until they are backfilled.
+
+`reencrypt_all!` does **not** reach them: it only rewrites rows whose ciphertext is under an older key, and these are under the current one. Fingerprint exactly the affected rows instead — no callbacks, no re-encryption, any key (per-field `key:` included):
+
+```ruby
+User.unscoped.where(api_token_bidx: nil).where.not(api_token: nil).find_each do |user|
+  user.update_columns(api_token_bidx: User.api_token_fingerprint(user.api_token))
+end
+```
+
+Repeat per field (`<field>_bidx` / `<field>_fingerprint`, or your `column:`). `unscoped` includes rows a `default_scope` hides. Calling `reencrypt!` on every row (`User.unscoped.find_each(&:reencrypt!)`) works too for gem-keyed fields, but it rewrites every row's ciphertext; per-field `key:` fields are outside rotation and are skipped by it.
+
 ## Upgrading: slugs built from an encrypted field
 
 Earlier releases let an encrypted field be a slug source (`sluggable_by :ssn`, a

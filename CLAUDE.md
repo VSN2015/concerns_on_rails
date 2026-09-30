@@ -360,7 +360,8 @@ Auditable `actor:`; deliberately NOT Throttleable `if:`'s dispatch),
 `SlugSources` (what a friendly_id slug is built from — Sluggable's field/`candidates:` or a bare
 friendly_id base, `alias_attribute` resolved — for the Encryptable/Sluggable guards and
 Anonymizable's `slug: :auto`), `GeneratedValues` (producers that assign in `before_create` —
-Tokenizable, Hashable, Sequenceable — `watch` the write and report the changed columns; the
+Tokenizable, Hashable, Sequenceable — report the columns they changed from their create path ONLY
+(Hashable from its own callback after `assign_hashable_value`, never from the public method); the
 consumers' hooks run in a FIXED order — Sluggable's slug, Encryptable's blind index, Auditable's
 creation entry — so none depends on include order), `EncryptedLookup` (equality on a maybe-
 `encryptable` column: the blind index, or nil when there is none — Tokenizable's finders raise on

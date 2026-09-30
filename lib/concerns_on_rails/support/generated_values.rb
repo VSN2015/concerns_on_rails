@@ -11,18 +11,22 @@ module ConcernsOnRails
     # Encryptable fingerprinted a nil blind index, friendly_id built no slug,
     # Auditable's creation entry left the column out.
     #
-    # A producer wraps its create-time assignment in `GeneratedValues.watch`,
-    # which reports the columns the block actually changed, and each consumer
-    # the model includes re-derives from the record's current state. The
+    # A producer reports from its before_create path only — never from a
+    # public method a host may call outside a save (Hashable reports from a
+    # callback of its own, next to assign_hashable_value). It wraps the write
+    # in `GeneratedValues.watch`, which reports the columns the block actually
+    # changed, or calls `assigned` directly; each consumer the model includes
+    # re-derives from the record's current state. The
     # consumers run in a FIXED order, not include order, because they build on
     # each other: the slug first (it may be built from the generated value),
     # then blind indexes (a slug is never encrypted, but the generated value
     # may be), then the audit entry last (it may track the generated column
     # AND the slug).
     #
-    # Every hook is idempotent — it re-derives, it never appends — so a report
-    # made outside a save (Hashable's public assign_hashable_value) is harmless:
-    # the save's own callbacks recompute the same state.
+    # Every hook is idempotent — it re-derives, it never appends — so two
+    # producers reporting in one create (a token and a number) are safe. The
+    # hooks are NOT free outside a save (friendly_id's slug-availability
+    # query, an audit entry on an unsaved record), hence the rule above.
     module GeneratedValues
       # Private instance methods a consumer defines; each receives the Symbol
       # names of the columns just generated.

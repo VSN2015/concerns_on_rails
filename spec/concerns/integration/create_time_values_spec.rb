@@ -51,12 +51,25 @@ describe "values generated in before_create reach sibling concerns" do
     end
   end
 
+  # Every SQL statement run inside the block, transaction control excluded.
+  def queries_during(&block)
+    queries = []
+    subscriber = lambda do |*, payload|
+      next if payload[:name] == "SCHEMA" || payload[:sql] =~ /\A\s*(BEGIN|COMMIT|SAVEPOINT|RELEASE|ROLLBACK)/i
+
+      queries << payload[:sql]
+    end
+    ActiveSupport::Notifications.subscribed(subscriber, "sql.active_record", &block)
+    queries
+  end
+
   let(:tokenizable) { ConcernsOnRails::Models::Tokenizable }
   let(:hashable) { ConcernsOnRails::Models::Hashable }
   let(:sequenceable) { ConcernsOnRails::Models::Sequenceable }
   let(:encryptable) { ConcernsOnRails::Models::Encryptable }
   let(:sluggable) { ConcernsOnRails::Models::Sluggable }
   let(:auditable) { ConcernsOnRails::Models::Auditable }
+  let(:normalizable) { ConcernsOnRails::Models::Normalizable }
 
   describe "Encryptable blind index (XC-01)" do
     [
@@ -141,6 +154,51 @@ describe "values generated in before_create reach sibling concerns" do
 
         expect(account.code).to be_present
         expect(klass.find_by_code(account.code)&.id).to eq(account.id)
+      end
+    end
+
+    # Rows created before this fix were stored with a NULL blind index. The
+    # docs' upgrade recipe fingerprints exactly those rows; reencrypt_all!
+    # does not reach them (they are already on the current key).
+    describe "upgrading: rows stored with a NULL fingerprint before the fix" do
+      let(:klass) do
+        account_model(tokenizable, encryptable) do
+          tokenizable_by :api_token
+          encryptable :api_token, blind_index: true
+        end
+      end
+
+      let!(:legacy) do
+        klass.create!(name: "legacy").tap { |record| klass.where(id: record.id).update_all(api_token_bidx: nil) }
+      end
+
+      it "is unfindable until backfilled" do
+        expect(klass.find_by_api_token(legacy.api_token)).to be_nil
+        expect(klass.authenticate_by_api_token(legacy.api_token)).to be_nil
+      end
+
+      it "is not reached by reencrypt_all!, which only rewrites rows under an older key" do
+        expect(klass.reencrypt_all!).to eq(0)
+        expect(klass.find_by_api_token(legacy.api_token)).to be_nil
+      end
+
+      it "is backfilled by the documented recipe (fingerprint the NULL rows with update_columns)" do
+        fresh = klass.create!(name: "fresh")
+
+        klass.unscoped.where(api_token_bidx: nil).where.not(api_token: nil).find_each do |record|
+          record.update_columns(api_token_bidx: klass.api_token_fingerprint(record.api_token))
+        end
+
+        expect(klass.find_by_api_token(legacy.api_token)&.id).to eq(legacy.id)
+        expect(klass.authenticate_by_api_token(legacy.api_token)&.id).to eq(legacy.id)
+        expect(klass.find_by_api_token(fresh.api_token)&.id).to eq(fresh.id)
+        expect(klass.find(legacy.id).api_token).to eq(legacy.api_token)
+      end
+
+      it "is also backfilled by reencrypt! on each row (gem-keyed fields only)" do
+        klass.unscoped.find_each(&:reencrypt!)
+
+        expect(klass.find_by_api_token(legacy.api_token)&.id).to eq(legacy.id)
       end
     end
   end
@@ -241,6 +299,36 @@ describe "values generated in before_create reach sibling concerns" do
       expect(klass.find(record.id).slug).to start_with("new-")
     end
 
+    # Built in before_create, the late slug comes after every sibling's
+    # before_validation/before_save, so the slug column's own write-time
+    # transforms are applied to it explicitly (review R123-03).
+    it "gives a late-built slug the slug column's own Normalizable rule, and keeps it on the next save" do
+      klass = account_model(sluggable, sequenceable, normalizable) do
+        sluggable_by :number
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+        normalizable :slug, with: ->(value) { value&.tr("-", "_") }
+      end
+      invoice = klass.create!(name: "a")
+
+      expect(klass.find(invoice.id).slug).to eq("inv_1")
+
+      invoice.update!(name: "b")
+
+      expect(klass.find(invoice.id).slug).to eq("inv_1")
+    end
+
+    it "gives a late-built slug the slug column's own write-mode Sanitizable rule" do
+      klass = account_model(sluggable, sequenceable, ConcernsOnRails::Models::Sanitizable) do
+        sluggable_by :number
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+        sanitizable :slug, with: ->(value) { "s-#{value}" }, on: :write
+      end
+
+      invoice = klass.create!(name: "a")
+
+      expect(klass.find(invoice.id).slug).to eq("s-inv-1")
+    end
+
     it "does not touch the slug when the generated column is not its source" do
       klass = account_model(sluggable, tokenizable) do
         sluggable_by :name
@@ -307,6 +395,59 @@ describe "values generated in before_create reach sibling concerns" do
       record = klass.create!(name: "a")
 
       expect(klass.find(record.id).audit_trail.map { |entry| entry["field"] }).to eq(["name"])
+    end
+  end
+
+  # Hashable's before_create callback is still the public
+  # assign_hashable_value (skip_callback keeps working), so the report to the
+  # siblings is a separate callback: calling the method yourself outside a
+  # save runs no sibling hook (review R123-02).
+  describe "Hashable's public assign_hashable_value outside a save" do
+    it "generates the value and nothing else: no query, no slug, no audit entry" do
+      klass = account_model(sluggable, hashable, auditable) do
+        sluggable_by :title
+        hashable_by :code
+        auditable_by :code, :title, into: :audit_log
+      end
+      record = klass.new(title: "Hello")
+
+      queries = queries_during { record.assign_hashable_value }
+
+      expect(queries).to eq([])
+      expect(record.code).to be_present
+      expect(record.slug).to be_nil
+      expect(record.audit_log).to be_nil
+    end
+
+    it "costs no query on Model.new when a host calls it from after_initialize" do
+      klass = account_model(sluggable, hashable, auditable, encryptable) do
+        sluggable_by :title
+        hashable_by :code
+        encryptable :code, blind_index: true
+        auditable_by :name, into: :audit_log
+        after_initialize { assign_hashable_value if new_record? }
+      end
+
+      record = nil
+      expect(queries_during { record = klass.new(name: "a", title: "Hello") }).to eq([])
+      record.save!
+
+      expect(klass.find(record.id).slug).to eq("hello")
+      expect(klass.find_by_code(record.code)&.id).to eq(record.id)
+      expect(klass.find(record.id).audit_trail.map { |entry| entry["field"] }).to eq(["name"])
+    end
+
+    it "keeps skip_callback :assign_hashable_value working" do
+      klass = account_model(sluggable, hashable) do
+        sluggable_by :code
+        hashable_by :code
+        skip_callback :create, :before, :assign_hashable_value
+      end
+
+      record = klass.create!(name: "a")
+
+      expect(record.code).to be_nil
+      expect(record.slug).to be_nil
     end
   end
 
@@ -408,6 +549,45 @@ describe "Sluggable after a sibling's write-time transform (XC-06)" do
 
       expect(post.reload.slug).to eq("second-post")
     end
+  end
+
+  # The memo of the slug friendly_id built is scoped to one save: on the
+  # SAME instance, a later explicit slug that happens to equal an old built
+  # one is still explicit (review R123-01).
+  it "keeps an explicitly re-assigned slug on a later save of the same instance" do
+    klass = post_model(sluggable) { sluggable_by :title }
+    post = klass.create!(title: "Hello")
+    post.update!(slug: "custom")
+
+    post.update!(title: "World", slug: "hello")
+
+    expect(post.reload.slug).to eq("hello")
+  end
+
+  it "still rebuilds a slug left pending by a failed save once the source changes" do
+    klass = post_model(sluggable) do
+      sluggable_by :title
+      validates :title, length: { maximum: 5 }
+    end
+    post = klass.new(title: "Too long")
+    expect(post.save).to be(false)
+
+    post.title = "Short"
+    post.save!
+
+    expect(post.reload.slug).to eq("short")
+  end
+
+  it "rebuilds a stale slug that the slug column's own normalizer already rewrote" do
+    klass = post_model(sluggable, sanitizable, normalizable) do
+      sluggable_by :title
+      sanitizable :title, with: :strip, on: :write
+      normalizable :slug, with: ->(value) { value&.tr("-", "_") }
+    end
+
+    post = klass.create!(title: "<b>Hello</b> World")
+
+    expect(post.reload.slug).to eq("hello_world")
   end
 
   it "never overwrites an explicitly assigned slug" do
