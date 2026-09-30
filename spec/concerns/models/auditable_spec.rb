@@ -192,6 +192,19 @@ describe ConcernsOnRails::Auditable do
       expect(by_field["shipped_at"]).to eq("2026-01-02T03:04:05Z")
       expect(by_field["cost"]).to eq("19.99")
     end
+
+    # Time#utc converts its receiver IN PLACE, and the tracked value IS the
+    # record's attribute (the caller's own Time). It was rewritten to UTC, and
+    # a frozen one raised FrozenError out of before_save.
+    it "records a frozen non-UTC Time and never touches the value it was handed" do
+      frozen = Time.new(2026, 1, 2, 10, 4, 5, "+07:00").freeze
+      s = AuditShipment.create!(shipped_at: frozen)
+      expect(s.audit_trail.first["to"]).to eq("2026-01-02T03:04:05Z")
+
+      local = Time.new(2026, 1, 2, 10, 4, 5, "+07:00")
+      AuditShipment.create!(shipped_at: local)
+      expect(local.utc_offset).to eq(7 * 3600)
+    end
   end
 
   describe "actor" do

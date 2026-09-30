@@ -8,6 +8,7 @@ require "bigdecimal"
 require "time"
 require "concerns_on_rails/encryption"
 require "concerns_on_rails/support/encryptor"
+require "concerns_on_rails/support/time_value"
 
 module ConcernsOnRails
   module Models
@@ -214,7 +215,9 @@ module ConcernsOnRails
           case @type
           when :decimal  then typed.to_s("F")
           when :date     then typed.iso8601
-          when :datetime then typed.utc.iso8601(6)
+          # A UTC copy: Time#utc converts in place, so it rewrote the caller's
+          # Time, and a frozen one raised here and saved the field as NULL.
+          when :datetime then ConcernsOnRails::Support::TimeValue.utc(typed).iso8601(6)
           else typed.to_s
           end
         end

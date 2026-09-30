@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
 require "concerns_on_rails/support/scalar_param"
+require "concerns_on_rails/support/time_value"
 require "json"
 require "concerns_on_rails/support/link_header"
 require "openssl"
@@ -555,9 +556,11 @@ module ConcernsOnRails
       # Explicit is_a? checks (NOT acts_like?, which needs an un-required
       # core_ext; NOT case/when, whose Module#=== misses TimeWithZone — its
       # redefined #is_a? returns true for Time). iso8601(6) keeps microsecond
-      # precision so boundary equality survives the round trip.
+      # precision so boundary equality survives the round trip. The UTC form is
+      # a copy: `to_time.utc` converted the boundary record's own attribute in
+      # place (TimeWithZone#to_time is memoized).
       def serialize_cursor_value(value)
-        return value.to_time.utc.iso8601(6) if value.is_a?(Time) || value.is_a?(DateTime)
+        return ConcernsOnRails::Support::TimeValue.utc(value).iso8601(6) if value.is_a?(Time) || value.is_a?(DateTime)
         return value.iso8601 if value.is_a?(Date)
         return value.to_s if value.is_a?(BigDecimal)
 

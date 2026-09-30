@@ -952,6 +952,22 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       expect(collected).to eq(Item.order(:created_at, :id).pluck(:id))
       expect(collected.size).to eq(4)
     end
+
+    # Minting the cursor ran `value.to_time.utc`. TimeWithZone#to_time is
+    # memoized and Time#utc converts IN PLACE, so the boundary record's own
+    # attribute read back in UTC afterwards (every Rails app has
+    # time_zone_aware_attributes on).
+    it "leaves the page-boundary record's time values untouched" do
+      zoned = Class.new(TestModel) do
+        self.table_name = "items"
+        self.time_zone_aware_attributes = true
+      end
+      Time.use_zone("Tokyo") do
+        boundary = make_controller(per_page: 2).cursor_paginated(zoned.all, order: { created_at: :asc }).last
+
+        expect(boundary.created_at.to_time.utc_offset).to eq(zoned.find(boundary.id).created_at.to_time.utc_offset)
+      end
+    end
   end
 
   describe "rescue_from integration" do

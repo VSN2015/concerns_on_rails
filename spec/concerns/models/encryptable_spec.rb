@@ -303,6 +303,20 @@ describe ConcernsOnRails::Models::Encryptable do
       record = klass.create!(meeting_at: t).reload
       expect(record.meeting_at.to_i).to eq(t.to_i)
     end
+
+    # Time#utc converts its receiver IN PLACE. The serializer rewrote the
+    # caller's own Time to UTC, and on a frozen one it raised FrozenError,
+    # which the type swallowed, so the field was saved as NULL.
+    it "stores a frozen non-UTC Time (:datetime) and never touches the caller's Time" do
+      klass = model_class { encryptable :meeting_at, type: :datetime }
+      frozen = Time.new(2026, 1, 2, 3, 4, 5, "+07:00").freeze
+      record = klass.create!(meeting_at: frozen)
+      expect(klass.find(record.id).meeting_at).to eq(frozen)
+
+      local = Time.new(2026, 1, 2, 3, 4, 5, "+07:00")
+      klass.create!(meeting_at: local)
+      expect(local.utc_offset).to eq(7 * 3600)
+    end
   end
 
   describe "composition" do
