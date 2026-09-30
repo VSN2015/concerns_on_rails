@@ -84,6 +84,7 @@ module ConcernsOnRails
     autoload :LinkHeader,              "concerns_on_rails/support/link_header"
     autoload :VaryHeader,              "concerns_on_rails/support/vary_header"
     autoload :NumericOperand,          "concerns_on_rails/support/numeric_operand"
+    autoload :TimeValue,               "concerns_on_rails/support/time_value"
     autoload :Callable,                "concerns_on_rails/support/callable"
     autoload :SlugSources,             "concerns_on_rails/support/slug_sources"
   end
