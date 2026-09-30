@@ -297,6 +297,20 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       end
     end
 
+    # A timestamp the type casts fine but the database cannot hold went
+    # straight into the WHERE. PostgreSQL raised DatetimeFieldOverflow (a 500),
+    # and SQLite compared the text and served a wrong page. The gem never
+    # mints one (Support::TimeValue::YEARS), so it is tampering.
+    it "rejects a boundary timestamp outside years 0001..9999" do
+      %w[300000-01-01T00:00:00.000000Z 10000-01-01T00:00:00.000000Z 0000-06-01T00:00:00.000000Z].each do |stamp|
+        token = encode("t" => "items", "o" => ["created_at:asc", "id:asc"], "v" => [stamp, 1])
+
+        expect do
+          make_controller(cursor: token).cursor_paginated(Item.all, order: { created_at: :asc })
+        end.to raise_error(described_class::InvalidCursor, /Invalid pagination cursor/), "accepted: #{stamp}"
+      end
+    end
+
     it "rejects a value list whose length does not match the column set" do
       token = encode("t" => "items", "o" => ["created_at:asc", "id:asc"], "v" => [5])
 

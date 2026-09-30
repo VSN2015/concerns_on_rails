@@ -593,8 +593,11 @@ module ConcernsOnRails
       # range casts fine but cannot be bound. The first two reached the WHERE
       # as `(score, id) > (NULL, 1)` — never true, so an empty 200 silently
       # ended the walk; the third was the same empty page on Rails 6.1+ (Arel
-      # drops unboundable values to 1=0) and a RangeError 500 on 6.0. We never
-      # mint any of them, so each is tampering and gets the InvalidCursor 400.
+      # drops unboundable values to 1=0) and a RangeError 500 on 6.0. A
+      # timestamp outside years 0001..9999 casts fine too, then raised
+      # DatetimeFieldOverflow on PostgreSQL (a 500) and compared as text on
+      # SQLite. We never mint any of them, so each is tampering and gets the
+      # InvalidCursor 400.
       def cast_cursor_value!(model, col, raw)
         return nil if raw.nil? # a NULL boundary; valid_cursor_values? only admits it on a nullable column
 
@@ -612,6 +615,7 @@ module ConcernsOnRails
       def cursor_bindable?(type, value)
         return false if value.nil?
         return false if (value.is_a?(Float) || value.is_a?(BigDecimal)) && !value.finite?
+        return false unless ConcernsOnRails::Support::TimeValue.representable?(value)
         return type.serializable?(value) if type.respond_to?(:serializable?)
 
         type.serialize(value)
