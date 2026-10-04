@@ -113,11 +113,14 @@ Lookups also try the digest of the argument's own `to_s`, which is what the inde
 
 ```ruby
 Meeting.unscoped.where.not(starts_at: nil).find_each do |meeting|
-  meeting.update_columns(starts_at_bidx: Meeting.starts_at_fingerprint(meeting.starts_at))
+  starts_at = meeting.starts_at
+  next if starts_at.nil? # undecryptable (raise_on_decrypt_error off): keep the digest it has
+
+  meeting.update_columns(starts_at_bidx: Meeting.starts_at_fingerprint(starts_at))
 end
 ```
 
-`update_columns` writes only the digest column: no callbacks, and the ciphertext is untouched.
+`update_columns` writes only the digest column: no callbacks, and the ciphertext is untouched. A row whose ciphertext no current or previous key can decrypt reads as `nil` (or raises, with `raise_on_decrypt_error` on). The `next` keeps its old digest instead of erasing it.
 
 ### Gem-level configuration — `ConcernsOnRails.encryption`
 
@@ -202,7 +205,7 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 ## Notes & gotchas
 
 - `nil` stays `nil` (the column is left NULL) — a blank value is never encrypted.
-- **`type: :datetime` follows the model's time-zone settings, like a datetime column.** With `time_zone_aware_attributes` on (every Rails app), a zone-less String such as a `datetime-local` form value (`"2026-10-01T09:00"`) is wall-clock time in `Time.zone`, a `Date` is midnight in `Time.zone`, and the field reads back as an `ActiveSupport::TimeWithZone` in the current `Time.zone`. Without it, both follow `ActiveRecord.default_timezone` (UTC by default). A `datetime_select` (multiparameter) value is wall-clock time in `Time.zone` too. `skip_time_zone_conversion_for_attributes` is honored per field, and so is a subclass's own setting (each subclass owns its copy of the field's type). A stored plaintext without `Z` or an offset is read in `default_timezone`, never the server's zone. The plaintext is always UTC ISO8601 with microseconds, so rows written before this change read back as the same instant. Before, a zone-less String was parsed in the server's system zone (or UTC) and reads were plain UTC `Time`s. A frozen or non-UTC `Time` is stored correctly and never modified (it used to be converted in place, and a frozen one was saved as `NULL`).
+- **`type: :datetime` follows the model's time-zone settings, like a datetime column.** With `time_zone_aware_attributes` on (every Rails app), a zone-less String such as a `datetime-local` form value (`"2026-10-01T09:00"`) is wall-clock time in `Time.zone`, a `Date` is midnight in `Time.zone`, and the field reads back as an `ActiveSupport::TimeWithZone` in the current `Time.zone`. Without it, both follow `ActiveRecord.default_timezone` (UTC by default). A `datetime_select` (multiparameter) value is wall-clock time in `Time.zone` too. It is exactly the handling Rails gives an `attribute :name, :datetime` declaration: `skip_time_zone_conversion_for_attributes` is honored per field, a subclass's own setting applies on Rails 6.0–7.1 (from 7.2 Rails decides on the declaring class, for every declared attribute), and `normalizes` on the field is inherited by subclasses. Lookups (`find_by_<field>`) read a zone-less String the same way the class's assignments do. A stored plaintext without `Z` or an offset is read in `default_timezone`, never the server's zone. The plaintext is always UTC ISO8601 with microseconds, so rows written before this change read back as the same instant. Before, a zone-less String was parsed in the server's system zone (or UTC) and reads were plain UTC `Time`s. A frozen or non-UTC `Time` is stored correctly and never modified (it used to be converted in place, and a frozen one was saved as `NULL`).
 - Dirty tracking works on the decrypted plaintext: reassigning the same value is **not** dirty, and an unchanged field is not re-encrypted on save, despite the random IV.
 - The envelope is versioned (`ver`/`alg`/`key_id`): `key_id` drives [key rotation](#key-rotation); `alg 0x11` (deterministic encryption) is still reserved, so it can be added later without a data migration.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need deterministic search, KMS-backed or per-record keys, or Rails-managed key infrastructure.

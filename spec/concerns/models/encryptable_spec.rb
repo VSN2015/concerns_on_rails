@@ -402,15 +402,49 @@ describe ConcernsOnRails::Models::Encryptable do
         expect(klass.find(record.id).meeting_at.time_zone.name).to eq("America/New_York")
       end
 
-      # The type pinned the DECLARING class, so a subclass's own override was
-      # ignored, although real columns and Storable keys honour it.
-      it "honours a subclass's skip_time_zone_conversion_for_attributes, like a column does" do
-        child = Class.new(klass) { self.skip_time_zone_conversion_for_attributes = %i[meeting_at meeting_column_at] }
-        record = child.new(meeting_at: "2026-10-01T09:00", meeting_column_at: "2026-10-01T09:00")
+      # Rails itself decides whether a declared datetime attribute converts:
+      # per class up to 7.1 (a subclass's skip list applies), on the
+      # declaring class from 7.2. The field follows that rule exactly.
+      it "follows Rails' own rule for a declared datetime attribute when a subclass skips the field" do
+        parent = model_class do
+          self.time_zone_aware_attributes = true
+          encryptable :meeting_at, type: :datetime
+          attribute :declared_at, :datetime
+        end
+        child = Class.new(parent) { self.skip_time_zone_conversion_for_attributes = %i[meeting_at declared_at] }
+        record = child.new(meeting_at: "2026-10-01T09:00", declared_at: "2026-10-01T09:00")
 
-        expect(record.meeting_column_at).to eq(Time.utc(2026, 10, 1, 9)) # the column skips conversion
-        expect(record.meeting_at).to eq(record.meeting_column_at)
-        expect(klass.new(meeting_at: "2026-10-01T09:00").meeting_at.getutc).to eq(Time.utc(2026, 10, 1, 13))
+        expect(record.meeting_at).to eq(record.declared_at)
+        expect(record.meeting_at.class).to eq(record.declared_at.class)
+        expect(parent.new(meeting_at: "2026-10-01T09:00").meeting_at.getutc).to eq(Time.utc(2026, 10, 1, 13))
+      end
+
+      # PR #125 review round 2 (R2-02): re-declaring the field on every
+      # subclass replaced the type, dropping the parent's `normalizes`.
+      it "keeps the parent's normalizes in an STI subclass", min_rails: "7.1" do
+        parent = model_class do
+          self.time_zone_aware_attributes = true
+          encryptable :meeting_at, type: :datetime
+          normalizes :meeting_at, :meeting_column_at, with: ->(time) { time.change(sec: 0) }
+        end
+        record = Class.new(parent).new(meeting_at: "2026-10-01T09:00:30", meeting_column_at: "2026-10-01T09:00:30")
+
+        expect(record.meeting_column_at.sec).to eq(0)
+        expect(record.meeting_at.sec).to eq(0)
+      end
+
+      # R2-03: a subclass defined before the parent re-declared the field
+      # kept the old key, so the parent could not read what it wrote.
+      it "a subclass picks up the parent's later re-declaration of the field (its key)" do
+        parent = model_class do
+          self.time_zone_aware_attributes = true
+          encryptable :meeting_at, type: :datetime
+        end
+        child = Class.new(parent)
+        parent.encryptable :meeting_at, type: :datetime, key: "concerns-on-rails-rotated-field-key"
+        record = child.create!(meeting_at: Time.utc(2026, 10, 1, 13))
+
+        expect(parent.find(record.id).meeting_at).to eq(Time.utc(2026, 10, 1, 13))
       end
 
       # datetime_select posts a multiparameter Hash. It was cast as UTC
@@ -942,13 +976,53 @@ describe ConcernsOnRails::Models::Encryptable do
       # ...but only the canonical digest knows every other rendering.
       expect(klass.find_by_meeting_at("2026-10-01T13:00:00Z")).to be_nil
 
-      # The reindex recipe in docs/concerns/encryptable.md:
-      klass.unscoped.where.not(meeting_at: nil).find_each do |row|
-        row.update_columns(meeting_at_bidx: klass.meeting_at_fingerprint(row.meeting_at))
-      end
+      reindex(klass)
 
       expect(klass.find_by_meeting_at("2026-10-01T13:00:00Z")).to eq(record)
       expect(klass.find(record.id).meeting_at_bidx).to eq(klass.meeting_at_fingerprint(instant))
+    end
+
+    # The reindex recipe in docs/concerns/encryptable.md, verbatim apart from names.
+    def reindex(model)
+      model.unscoped.where.not(meeting_at: nil).find_each do |meeting|
+        meeting_at = meeting.meeting_at
+        next if meeting_at.nil? # undecryptable (raise_on_decrypt_error off): keep the digest it has
+
+        meeting.update_columns(meeting_at_bidx: model.meeting_at_fingerprint(meeting_at))
+      end
+    end
+
+    # PR #125 review round 2 (R2-05): the recipe wrote the fingerprint of the
+    # nil an undecryptable row reads as, erasing its digest.
+    it "the documented reindex keeps the digest of a row it cannot decrypt" do
+      record = klass.create!(meeting_at: instant)
+      digest = klass.find(record.id).meeting_at_bidx
+      ConcernsOnRails.encryption.key = "concerns-on-rails-a-key-whose-previous-was-lost"
+      ConcernsOnRails.encryption.raise_on_decrypt_error = false
+
+      reindex(klass)
+
+      expect(klass.unscoped.where(id: record.id).pick(:meeting_at_bidx)).to eq(digest)
+    end
+
+    # R2-01: "abc" casts to 0, but a numeric column's where(age: "abc") finds
+    # nothing (Integer#serialize refuses a non-numeric String).
+    it "finds nothing for a non-numeric String on a numeric field, as a numeric column's where does" do
+      klass.create!(age: 0, amount: BigDecimal("0"))
+
+      expect(klass.find_by_age("abc")).to be_nil
+      expect(klass.where_age("abc", "none").to_a).to eq([])
+      expect(klass.find_by_amount("abc")).to be_nil
+      expect(klass.find_by_age("0")).not_to be_nil
+    end
+
+    it "a lookup on a subclass reads a zone-less String as that subclass's assignment does" do
+      child = Class.new(klass) { self.skip_time_zone_conversion_for_attributes = %i[meeting_at] }
+      Time.use_zone("America/New_York") do
+        record = child.create!(meeting_at: "2026-10-01T09:00")
+
+        expect(child.find_by_meeting_at("2026-10-01T09:00")).to eq(record)
+      end
     end
   end
 

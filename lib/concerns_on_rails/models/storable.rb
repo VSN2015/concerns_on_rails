@@ -217,11 +217,19 @@ module ConcernsOnRails
         # SQLite json_valid is false for every row, so a value matches nothing
         # and `nil` matches EVERYTHING (fail open); PostgreSQL/MySQL abort the
         # query. Detected from Encryptable's rules and, as a backstop, from the
-        # attribute type itself.
+        # attribute type itself, looking through the delegating decorations
+        # ActiveRecord wraps types in (time-zone conversion, `normalizes`).
         def storable_encrypted_column?(column)
           return true if respond_to?(:encryptable_rules) && encryptable_rules.key?(column.to_sym)
 
-          type_for_attribute(column.to_s).class.name.to_s == "ConcernsOnRails::Models::Encryptable::EncryptedType"
+          type = type_for_attribute(column.to_s)
+          8.times do
+            return true if type.class.name.to_s == "ConcernsOnRails::Models::Encryptable::EncryptedType"
+            return false unless type.respond_to?(:__getobj__)
+
+            type = type.__getobj__
+          end
+          false
         end
 
         def storable_json_coder?(coder)

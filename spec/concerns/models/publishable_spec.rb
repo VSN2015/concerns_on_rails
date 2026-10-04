@@ -194,7 +194,7 @@ describe ConcernsOnRails::Publishable do
         article = zoned.create!(title: "t")
 
         Time.use_zone("America/New_York") do
-          %w[junk maybe decimal marching Monday 10:30].each do |garbage|
+          (%w[junk maybe decimal marching Monday 10:30 99999] + ["junk 2026"]).each do |garbage|
             expect { article.publish_at!(garbage) }.to raise_error(ArgumentError, /cannot be parsed as a time/), garbage
           end
           expect(article.publish_at!("Oct 1 2026")).to be(true)
