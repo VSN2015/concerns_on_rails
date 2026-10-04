@@ -504,18 +504,39 @@ describe "optimistic locking across raw writes" do
 
       # Up to 7.0 Rails itself keeps every record saved in an open
       # transaction alive (the release base without any mirror does too).
+      # The batch runs in a Fiber, whose stack is gone afterwards: on Ruby
+      # 3.3+ a stale slot on this stack can keep the batch Array alive under
+      # conservative stack scanning, and with it every post and its child.
       it "a batch over many parents in one transaction keeps neither the parents nor their new children alive", min_rails: "7.1" do
         count = 600
         count.times { |i| OlPost.create!(title: "p#{i}") }
         live = nil
 
         ActiveRecord::Base.transaction do
-          OlPost.find_each { |post| post.ol_comments.create!(body: "c") }
+          Fiber.new { OlPost.find_each { |post| post.ol_comments.create!(body: "c") } }.resume
           GC.start(full_mark: true, immediate_sweep: true)
           live = ObjectSpace.each_object(OlComment).count
         end
 
         expect(live).to be < count / 2
+      end
+
+      # The same property without the GC: an undo references no record but
+      # its parent, and that one only through a WeakRef.
+      it "an undo holds no record strongly" do
+        post = OlPost.create!(title: "t")
+
+        ActiveRecord::Base.transaction do
+          post.ol_comments.create!(body: "c")
+          undos = ActiveRecord::Base.connection.current_transaction.records.to_a
+                                    .grep(ConcernsOnRails::Models::CounterCacheable::MirrorUndo)
+          held = undos.flat_map { |undo| undo.instance_variables.map { |name| undo.instance_variable_get(name) } }
+
+          expect(undos.size).to eq(1)
+          expect(held.grep(ActiveRecord::Base)).to be_empty
+          expect(held.grep(WeakRef).map(&:__getobj__)).to eq([post])
+          raise ActiveRecord::Rollback
+        end
       end
 
       it "keeps one undo per parent however many children a transaction creates" do
