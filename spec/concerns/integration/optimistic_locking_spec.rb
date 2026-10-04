@@ -430,6 +430,71 @@ describe "optimistic locking across raw writes" do
         expect(in_sync?(post)).to be(true)
       end
 
+      # PR #124 review round 2 (R124-08): a savepoint released into a
+      # joinable: false transaction is committed at once, but its UPDATE is
+      # still rolled back with that transaction.
+      it "a joinable: false transaction rolled back undoes the mirror made in its savepoint" do
+        post = OlPost.create!(title: "t")
+
+        ActiveRecord::Base.transaction(joinable: false) do
+          post.ol_comments.create!(body: "c")
+          raise ActiveRecord::Rollback
+        end
+
+        expect([post.lock_version, post.ol_comments_count]).to eq([0, 0])
+        expect(in_sync?(post)).to be(true)
+        expect { post.update!(title: "edited") }.not_to raise_error
+      end
+
+      # R124-09: the undo holds the parent, never the child — Rails keeps a
+      # callback-less child only weakly while its transaction is open.
+      it "does not keep every child created in a long transaction alive until it ends" do
+        post = OlPost.create!(title: "t")
+        count = 1000
+        live = nil
+
+        ActiveRecord::Base.transaction do
+          count.times { |i| OlComment.create!(ol_post: post, body: "c#{i}") }
+          GC.start(full_mark: true, immediate_sweep: true)
+          live = ObjectSpace.each_object(OlComment).count
+        end
+
+        expect(live).to be < count / 2
+        expect(in_sync?(post)).to be(true)
+      end
+
+      # R124-11: Rails restores a parent with after_commit callbacks before
+      # the undo runs, which turns the mirrored count into an unsaved change.
+      it "a parent with after_commit, created in a rolled-back transaction, saves the true count on retry" do
+        OlPost.after_commit { nil }
+        post = OlPost.new(title: "t")
+
+        ActiveRecord::Base.transaction do
+          post.save!
+          post.ol_comments.create!(body: "c")
+          raise ActiveRecord::Rollback
+        end
+
+        expect([post.lock_version, post.ol_comments_count]).to eq([0, 0])
+        post.save! # autosave re-inserts the restored comment
+        expect(OlPost.where(id: post.id).pick(:ol_comments_count)).to eq(OlComment.where(ol_post_id: post.id).count)
+        expect(in_sync?(post)).to be(true)
+      end
+
+      it "a rollback leaves a counter the caller assigned after the mirror alone" do
+        post = OlPost.create!(title: "t")
+
+        ActiveRecord::Base.transaction do
+          post.ol_comments.create!(body: "c")
+          post.ol_comments_count = 42
+          raise ActiveRecord::Rollback
+        end
+
+        expect(post.ol_comments_count).to eq(42)
+        expect(post.ol_comments_count_changed?).to be(true)
+        expect(post.lock_version).to eq(OlPost.where(id: post.id).pick(:lock_version))
+      end
+
       it "parent saved with built children (autosave) is in sync" do
         post = OlPost.new(title: "t")
         post.ol_comments.build(body: "a")
