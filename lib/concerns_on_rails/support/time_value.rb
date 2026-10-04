@@ -32,17 +32,21 @@ module ConcernsOnRails
       YEARS = (1..9999)
       # A zone designator ending a String: Z, or an offset (+09:00, -0400, +09).
       ZONED = /(?:Z|[+-]\d{2}(?::?\d{2})?)\z/i
-      # The words a date String may hold: month and day names (full, or the
-      # abbreviations Date._parse reads), ordinal suffixes, AM/PM, ISO 8601's
-      # T and Z, and UTC/GMT. Date._parse reads "jun" out of "junk".
+      # The words a date String may hold besides a time zone's name: month
+      # and day names (full, or the abbreviations Date._parse reads), ordinal
+      # suffixes, AM/PM, ISO 8601's T and Z, and the "at" / "of" of everyday
+      # formats. Date._parse reads "jun" out of "junk".
       DATE_WORDS = (
         (::Date::MONTHNAMES + ::Date::ABBR_MONTHNAMES + ::Date::DAYNAMES + ::Date::ABBR_DAYNAMES).compact.map(&:downcase) +
-        %w[sept tues thur thurs st nd rd th am pm a p m t z utc gmt ut]
+        %w[sept tues thur thurs st nd rd th am pm a p m t z at of]
       ).uniq.freeze
       # The ranges a real date or time's parts fall in. Date._parse reads
       # "99999" as day 999 of 1999.
-      PART_RANGES = { mon: 1..12, mday: 1..31, yday: 1..366, wday: 0..6, cweek: 1..53, cwday: 1..7,
-                      hour: 0..24, min: 0..59, sec: 0..60 }.freeze
+      PART_RANGES = { mon: 1..12, mday: 1..31, wday: 0..6, hour: 0..24, min: 0..59, sec: 0..60 }.freeze
+      # Trailing comments and annotations: RFC 2822's "(Newfoundland Time)",
+      # JavaScript Date#toString's "(Eastern Daylight Time)", RFC 9557's
+      # "[America/New_York]".
+      TRAILING_COMMENTS = /(?:\s*(?:\([^()]*\)|\[[^\[\]]*\]))+\s*\z/
 
       module_function
 
@@ -79,34 +83,50 @@ module ConcernsOnRails
               "#{label}: #{value.inspect} cannot be parsed as a time for '#{field}' — pass #{accepts}"
       end
 
-      # A String argument must read as a date: it names a year, every part
-      # Date._parse found is in range, and every word in it is a date word
-      # (DATE_WORDS) or a time zone Date._parse knows. Under time-zone
-      # awareness the column's cast is Time.zone.parse, which finds a date in
-      # almost anything: "junk" is June 1st ("jun"), "maybe" May 1st, "Monday"
-      # and "10:30" today, "junk 2026" June 1st 2026, "99999" January 1st
-      # 1999. ISO 8601, RFC 2822, HTTP dates, "Oct 1 2026" and
-      # "2026-10-01 10:30 EST" all pass. Anything that is not a String is
-      # judged by its cast alone. Only the verbs check this: assigning to the
-      # column still casts exactly as ActiveRecord does.
+      # A String argument must read as a date, the way Time.zone.parse (the
+      # zone-aware column cast) will read it:
+      #   * it names a four-digit year: "Oct 1 26" is year 26 to
+      #     Time.zone.parse, so a two-digit year is refused;
+      #   * no ordinal day ("2026-032"): Time.zone.parse ignores it;
+      #   * every part is in range ("99999" is day 999 of 1999);
+      #   * every word is a date word (DATE_WORDS) or a time zone Date._parse
+      #     resolves ("EDT", "CEST", "Eastern"), with trailing comments set
+      #     aside, and only when setting them aside changes nothing.
+      # Time.zone.parse finds a date in almost anything: "junk" is June 1st
+      # ("jun"), "maybe" May 1st, "Monday" and "10:30" today, "junk 2026"
+      # June 1st 2026. ISO 8601, RFC 2822 (comments included), HTTP dates,
+      # JavaScript's Date#toString, "Oct 1 2026" and "2026-10-01 10:30 EST"
+      # all pass. Anything that is not a String is judged by its cast alone.
+      # Only the verbs check this: assigning to the column still casts
+      # exactly as ActiveRecord does.
       def names_year?(value)
         return true unless value.is_a?(::String)
 
-        parts = ::Date._parse(value)
-        parts.key?(:year) && parts_in_range?(parts) && date_words_only?(value, parts)
+        bare = value.sub(TRAILING_COMMENTS, "")
+        parts = ::Date._parse(bare, false)
+        readable_parts?(parts, bare) && parts == ::Date._parse(value, false) && date_words_only?(bare)
       rescue ArgumentError # Date._parse refuses a String longer than 128 characters
         false
+      end
+
+      # A four-digit year (Date._parse's two-digit completion changes
+      # nothing), no ordinal day, and every part in range.
+      def readable_parts?(parts, string)
+        parts.key?(:year) && !parts.key?(:yday) && parts_in_range?(parts) && parts[:year] == ::Date._parse(string)[:year]
       end
 
       def parts_in_range?(parts)
         PART_RANGES.all? { |part, range| !parts.key?(part) || range.cover?(parts[part]) }
       end
 
-      # A word after a time is taken as a zone even when it is not one
-      # ("10:00 junk"); only a zone Date._parse resolved to an offset counts.
-      def date_words_only?(string, parts)
-        zone_words = parts[:offset] ? parts[:zone].to_s.downcase.scan(/[a-z]+/) : []
-        string.downcase.scan(/[a-z]+/).all? { |word| DATE_WORDS.include?(word) || zone_words.include?(word) }
+      def date_words_only?(string)
+        string.downcase.scan(/[a-z]+/).all? { |word| DATE_WORDS.include?(word) || zone_word?(word) }
+      end
+
+      # A time zone name or abbreviation: Date._parse resolves it to an
+      # offset. An unknown word ("junk") resolves to none.
+      def zone_word?(word)
+        !::Date._parse("00:00 #{word}")[:offset].nil?
       end
 
       # ---- virtual datetimes (Storable keys, Encryptable fields) ---------

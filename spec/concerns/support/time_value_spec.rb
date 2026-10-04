@@ -72,8 +72,17 @@ RSpec.describe ConcernsOnRails::Support::TimeValue do
 
       it "refuses a String without a year, however leniently Time.zone.parse would read it" do
         (%w[junk maybe decimal marching Monday 10:30 tomorrow 2026 99999] +
-         ["1 Oct", "x" * 200, "junk 2026", "2026-10-01 10:00 junk", "99999-01-01"]).each do |word|
+         ["1 Oct", "x" * 200, "junk 2026", "2026-10-01 10:00 junk", "99999-01-01", "2026 (junk)",
+          "2026-10-01 (junk)", "(junk) 2026"]).each do |word|
           expect { cast!(word) }.to raise_error(ArgumentError, /cannot be parsed as a time for 'happened_at'/), word
+        end
+      end
+
+      # Time.zone.parse keeps a two-digit year as written (year 26 AD) and
+      # ignores an ordinal day, so neither may reach it.
+      it "refuses a two-digit year and an ordinal date, which Time.zone.parse would misread" do
+        ["10/1/26", "Oct 1 26", "01-Oct-26", "Thursday, 01-Oct-26 10:30:00 GMT", "2026-032"].each do |string|
+          expect { cast!(string) }.to raise_error(ArgumentError, /cannot be parsed as a time/), string
         end
       end
 
@@ -84,6 +93,21 @@ RSpec.describe ConcernsOnRails::Support::TimeValue do
           expect(cast!(ok)).to be_a(ActiveSupport::TimeWithZone), ok
         end
         expect(cast!("2026-10-01 10:30").hour).to eq(10)
+      end
+
+      # PR #125 review round 3 (R3-01): a zone name after an offset, and the
+      # trailing comments of RFC 2822 and JavaScript, are not garbage.
+      it "accepts zone names and trailing comments, at the instant they name" do
+        {
+          "Thu, 13 Feb 1969 23:32 -0330 (Newfoundland Time)" => Time.utc(1969, 2, 14, 3, 2), # RFC 2822 A.5
+          "Thu, 1 Oct 2026 10:30:00 -0700 (PDT)" => Time.utc(2026, 10, 1, 17, 30),
+          "Thu Oct 01 2026 10:30:00 GMT-0400 (Eastern Daylight Time)" => Time.utc(2026, 10, 1, 14, 30), # Date#toString
+          "2026-10-01 10:30:00 -0400 EDT" => Time.utc(2026, 10, 1, 14, 30), # Go
+          "2026-10-01T10:30:00-04:00[America/New_York]" => Time.utc(2026, 10, 1, 14, 30), # RFC 9557
+          "October 1, 2026 at 10:30:00 AM EDT" => Time.utc(2026, 10, 1, 14, 30) # ICU
+        }.each do |string, instant|
+          expect(cast!(string)).to eq(instant), string
+        end
       end
     end
   end

@@ -403,20 +403,59 @@ describe ConcernsOnRails::Models::Encryptable do
       end
 
       # Rails itself decides whether a declared datetime attribute converts:
-      # per class up to 7.1 (a subclass's skip list applies), on the
-      # declaring class from 7.2. The field follows that rule exactly.
-      it "follows Rails' own rule for a declared datetime attribute when a subclass skips the field" do
-        parent = model_class do
-          self.time_zone_aware_attributes = true
-          encryptable :meeting_at, type: :datetime
-          attribute :declared_at, :datetime
+      # per class at schema load up to 7.1, on the declaring class when it is
+      # declared from 7.2. Up to 7.1 the field follows a subclass's (or a
+      # later) skip list exactly as a declared attribute does. From 7.2 that
+      # skip list cannot reach it, and saying so beats converting silently.
+      describe "a skip list set on a subclass, or after the encryptable line" do
+        let(:declaration_time) { ConcernsOnRails::Models::Encryptable.declaration_time_zone_conversion? }
+        let(:parent) do
+          model_class do
+            self.time_zone_aware_attributes = true
+            encryptable :meeting_at, type: :datetime
+            attribute :declared_at, :datetime
+          end
         end
-        child = Class.new(parent) { self.skip_time_zone_conversion_for_attributes = %i[meeting_at declared_at] }
-        record = child.new(meeting_at: "2026-10-01T09:00", declared_at: "2026-10-01T09:00")
 
-        expect(record.meeting_at).to eq(record.declared_at)
-        expect(record.meeting_at.class).to eq(record.declared_at.class)
-        expect(parent.new(meeting_at: "2026-10-01T09:00").meeting_at.getutc).to eq(Time.utc(2026, 10, 1, 13))
+        it "on a subclass: honoured like a declared attribute up to Rails 7.1, refused from 7.2" do
+          skip_both = -> { Class.new(parent) { self.skip_time_zone_conversion_for_attributes = %i[meeting_at declared_at] } }
+          if declaration_time
+            expect(&skip_both).to raise_error(ArgumentError, /set the skip list before the `encryptable` line/)
+          else
+            record = skip_both.call.new(meeting_at: "2026-10-01T09:00", declared_at: "2026-10-01T09:00")
+            expect(record.meeting_at).to eq(record.declared_at)
+            expect(record.meeting_at).to eq(Time.utc(2026, 10, 1, 9))
+          end
+          expect(parent.new(meeting_at: "2026-10-01T09:00").meeting_at.getutc).to eq(Time.utc(2026, 10, 1, 13))
+        end
+
+        it "after the encryptable line in the same class: honoured up to Rails 7.1, refused from 7.2" do
+          late = lambda do
+            model_class do
+              self.time_zone_aware_attributes = true
+              encryptable :meeting_at, type: :datetime
+              self.skip_time_zone_conversion_for_attributes = %i[meeting_at meeting_column_at]
+            end
+          end
+          if declaration_time
+            expect(&late).to raise_error(ArgumentError, /skip_time_zone_conversion_for_attributes names :meeting_at/)
+          else
+            record = late.call.new(meeting_at: "2026-10-01T09:00", meeting_column_at: "2026-10-01T09:00")
+            expect(record.meeting_at).to eq(record.meeting_column_at)
+          end
+        end
+
+        it "before the encryptable line: honoured on every Rails line, like the column" do
+          early = model_class do
+            self.time_zone_aware_attributes = true
+            self.skip_time_zone_conversion_for_attributes = %i[meeting_at meeting_column_at]
+            encryptable :meeting_at, type: :datetime
+          end
+          record = early.new(meeting_at: "2026-10-01T09:00", meeting_column_at: "2026-10-01T09:00")
+
+          expect(record.meeting_column_at).to eq(Time.utc(2026, 10, 1, 9))
+          expect(record.meeting_at).to eq(record.meeting_column_at)
+        end
       end
 
       # PR #125 review round 2 (R2-02): re-declaring the field on every
@@ -1005,9 +1044,9 @@ describe ConcernsOnRails::Models::Encryptable do
       expect(klass.unscoped.where(id: record.id).pick(:meeting_at_bidx)).to eq(digest)
     end
 
-    # R2-01: "abc" casts to 0, but a numeric column's where(age: "abc") finds
-    # nothing (Integer#serialize refuses a non-numeric String).
-    it "finds nothing for a non-numeric String on a numeric field, as a numeric column's where does" do
+    # R2-01: "abc" casts to 0, but an integer column's where(age: "abc")
+    # finds nothing (Integer#serialize refuses a non-numeric String).
+    it "finds nothing for a non-numeric String on an :integer field, as an integer column's where does" do
       klass.create!(age: 0, amount: BigDecimal("0"))
 
       expect(klass.find_by_age("abc")).to be_nil
@@ -1016,12 +1055,33 @@ describe ConcernsOnRails::Models::Encryptable do
       expect(klass.find_by_age("0")).not_to be_nil
     end
 
+    # R3-04: a decimal column reads ".5" as 0.5, in `where` as on assignment.
+    it "finds a :decimal row by a leading-dot String, as a decimal column's where does" do
+      record = klass.create!(amount: "-.5")
+
+      expect(klass.find(record.id).amount).to eq(BigDecimal("-0.5"))
+      expect(klass.find_by_amount("-.5")).to eq(record)
+      expect(klass.where_amount("-0.50").to_a).to eq([record])
+    end
+
+    # R3-05: from Rails 7.0 the time-zone converter hands Infinity through
+    # uncast. It is stored as NULL, so no digest may be written beside it.
+    it "writes no digest for a value that does not cast" do
+      record = klass.create!(meeting_at: Float::INFINITY)
+
+      expect(klass.unscoped.where(id: record.id).pick(:meeting_at, :meeting_at_bidx)).to eq([nil, nil])
+      expect(klass.find_by_meeting_at(Float::INFINITY)).to be_nil
+    end
+
+    # Whichever class decides the conversion (see the skip-list specs), a
+    # lookup reads a zone-less String exactly as an assignment on that class.
     it "a lookup on a subclass reads a zone-less String as that subclass's assignment does" do
-      child = Class.new(klass) { self.skip_time_zone_conversion_for_attributes = %i[meeting_at] }
+      child = Class.new(klass) { self.time_zone_aware_attributes = false }
       Time.use_zone("America/New_York") do
         record = child.create!(meeting_at: "2026-10-01T09:00")
 
         expect(child.find_by_meeting_at("2026-10-01T09:00")).to eq(record)
+        expect(child.find_by_meeting_at(child.find(record.id).meeting_at)).to eq(record)
       end
     end
   end
