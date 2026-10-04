@@ -1,9 +1,9 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/time_value"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
-require "concerns_on_rails/support/time_value"
 
 module ConcernsOnRails
   module Models
