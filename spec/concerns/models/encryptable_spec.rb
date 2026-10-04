@@ -483,6 +483,18 @@ describe ConcernsOnRails::Models::Encryptable do
           expect(record.meeting_at).to eq(record.meeting_column_at)
         end
 
+        # PR #125 review round 6 (R6-01): every *_by macro's column check
+        # loads the schema mid-body, and 7.2+ builds the attribute set there.
+        it "allows a column-checking macro between a late skip list and the re-declaration" do
+          child = Class.new(parent) do
+            self.skip_time_zone_conversion_for_attributes = %i[meeting_at]
+            column_names # what every *_by macro's ColumnGuard does
+            encryptable :meeting_at, type: :datetime
+          end
+
+          expect(child.new(meeting_at: "2026-10-01T09:00").meeting_at).to eq(Time.utc(2026, 10, 1, 9))
+        end
+
         it "is also refused on a query that builds no record, from Rails 7.2" do
           late = model_class do
             self.time_zone_aware_attributes = true

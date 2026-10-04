@@ -39,7 +39,7 @@ module ConcernsOnRails
       # Date._parse drops the day from "15th of October 2026".)
       DATE_WORDS = (
         (::Date::MONTHNAMES + ::Date::ABBR_MONTHNAMES + ::Date::DAYNAMES + ::Date::ABBR_DAYNAMES).compact.map(&:downcase) +
-        %w[sept tues thur thurs st nd rd th am pm a p m t z at]
+        %w[sept tues thur thurs st nd rd th am pm t z at]
       ).uniq.freeze
       # The ranges a real date or time's parts fall in. Date._parse reads
       # "99999" as day 999 of 1999.
@@ -116,9 +116,12 @@ module ConcernsOnRails
       end
 
       # A four-digit year (Date._parse's two-digit completion changes
-      # nothing), no ordinal day, and every part in range.
+      # nothing), no ordinal day, every part in range, and no one-letter
+      # military zone but Z: Date._parse reads "7:30p" as 07:30 in zone P
+      # (UTC-3), 13 hours from the 19:30 meant.
       def readable_parts?(parts, string)
-        parts.key?(:year) && !parts.key?(:yday) && parts_in_range?(parts) && parts[:year] == ::Date._parse(string)[:year]
+        parts.key?(:year) && !parts.key?(:yday) && parts_in_range?(parts) &&
+          !parts[:zone].to_s.match?(/\A[a-y]\z/i) && parts[:year] == ::Date._parse(string)[:year]
       end
 
       def parts_in_range?(parts)
@@ -129,7 +132,9 @@ module ConcernsOnRails
         # Several letters: a one-letter military zone ("10:30 b") shifts the
         # time by hours, and is never what a person or a program wrote.
         zone_words = parts[:offset].nil? ? [] : parts[:zone].to_s.downcase.scan(/[a-z]{2,}/)
-        string.downcase.scan(/[a-z]+/).all? do |word|
+        # "a.m." / "p.m." read as am / pm; a lone a, p or m is not a word
+        # ("7p" is dropped by Date._parse, "7:30p" is military zone P).
+        string.downcase.gsub(/\b([ap])\.\s?m\b\.?/) { "#{Regexp.last_match(1)}m" }.scan(/[a-z]+/).all? do |word|
           DATE_WORDS.include?(word) || zone_words.include?(word) || redundant_zone?(string, word, parts)
         end
       end

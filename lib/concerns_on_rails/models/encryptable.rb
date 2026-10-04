@@ -438,18 +438,29 @@ module ConcernsOnRails
         # convert a field the developer opted out of. It is checked when
         # ActiveRecord builds the class's attribute set (first record, query
         # or type lookup), memoized on that set, so it costs one comparison
-        # per call after that. Not while `encryptable` itself runs: its column
-        # check builds the set BEFORE the field's new type is attached, and
-        # re-declaring the field after the skip list is what applies it. Up to
-        # 7.1 Rails decides per class at schema load, so the setting applies
-        # wherever it is made and nothing is checked.
+        # per call after that. Not while the schema loads (7.2+ precomputes
+        # the set there, and a macro's column check loads it mid-class-body)
+        # nor while `encryptable` itself runs (its column check builds the
+        # set BEFORE the field's new type is attached): re-declaring the field
+        # after the skip list, with other macros in between, is what applies
+        # it. Up to 7.1 Rails decides per class at schema load, so the setting
+        # applies wherever it is made and nothing is checked.
         def _default_attributes
           attributes = super
-          return attributes if @encryptable_declaring || @encryptable_skip_checked.equal?(attributes)
+          return attributes if @encryptable_declaring || @encryptable_loading_schema
+          return attributes if @encryptable_skip_checked.equal?(attributes)
 
           encryptable_refuse_late_skip!(attributes)
           attributes
         end
+
+        def load_schema!
+          @encryptable_loading_schema = true
+          super
+        ensure
+          @encryptable_loading_schema = false
+        end
+        private :load_schema!
 
         # Rows whose ciphertext for any of `fields` (default: every gem-keyed
         # field) was written under a key other than the current one — the
