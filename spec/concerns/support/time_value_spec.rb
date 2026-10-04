@@ -73,7 +73,12 @@ RSpec.describe ConcernsOnRails::Support::TimeValue do
       it "refuses a String without a year, however leniently Time.zone.parse would read it" do
         (%w[junk maybe decimal marching Monday 10:30 tomorrow 2026 99999] +
          ["1 Oct", "x" * 200, "junk 2026", "2026-10-01 10:00 junk", "99999-01-01", "2026 (junk)",
-          "2026-10-01 (junk)", "(junk) 2026"]).each do |word|
+          "2026-10-01 (junk)", "(junk) 2026",
+          # PR #125 review round 4: Date._parse drops the day from "15th of
+          # October" (Oct 1st); "mart"/"novt" are zone abbreviations holding a
+          # month name; a bracket that is not a trailing comment.
+          "15th of October 2026", "15th of October, 2026 10:30", "mart 2026", "novt 2026", "Oct 1 2026 mart",
+          "2026-10-15 10:30 (a(b)c)"]).each do |word|
           expect { cast!(word) }.to raise_error(ArgumentError, /cannot be parsed as a time for 'happened_at'/), word
         end
       end

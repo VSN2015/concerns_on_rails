@@ -417,30 +417,42 @@ describe ConcernsOnRails::Models::Encryptable do
           end
         end
 
-        it "on a subclass: honoured like a declared attribute up to Rails 7.1, refused from 7.2" do
-          skip_both = -> { Class.new(parent) { self.skip_time_zone_conversion_for_attributes = %i[meeting_at declared_at] } }
+        # The refusal comes when ActiveRecord first builds the class's
+        # attributes, never while the class body runs (no schema access).
+        it "on a subclass: honoured like a declared attribute up to Rails 7.1, refused at first use from 7.2" do
+          child = Class.new(parent) { self.skip_time_zone_conversion_for_attributes = %i[meeting_at declared_at] }
+          build = -> { child.new(meeting_at: "2026-10-01T09:00", declared_at: "2026-10-01T09:00") }
           if declaration_time
-            expect(&skip_both).to raise_error(ArgumentError, /set the skip list before the `encryptable` line/)
+            expect(&build).to raise_error(ArgumentError, /set the skip list before the `encryptable` line, or re-declare/)
           else
-            record = skip_both.call.new(meeting_at: "2026-10-01T09:00", declared_at: "2026-10-01T09:00")
+            record = build.call
             expect(record.meeting_at).to eq(record.declared_at)
             expect(record.meeting_at).to eq(Time.utc(2026, 10, 1, 9))
           end
           expect(parent.new(meeting_at: "2026-10-01T09:00").meeting_at.getutc).to eq(Time.utc(2026, 10, 1, 13))
         end
 
-        it "after the encryptable line in the same class: honoured up to Rails 7.1, refused from 7.2" do
-          late = lambda do
-            model_class do
-              self.time_zone_aware_attributes = true
-              encryptable :meeting_at, type: :datetime
-              self.skip_time_zone_conversion_for_attributes = %i[meeting_at meeting_column_at]
-            end
+        it "on a subclass that re-declares the field after its skip list: honoured on every Rails line" do
+          child = Class.new(parent) do
+            self.skip_time_zone_conversion_for_attributes = %i[meeting_at]
+            encryptable :meeting_at, type: :datetime
           end
+
+          expect(child.new(meeting_at: "2026-10-01T09:00").meeting_at).to eq(Time.utc(2026, 10, 1, 9))
+          expect(parent.new(meeting_at: "2026-10-01T09:00").meeting_at.getutc).to eq(Time.utc(2026, 10, 1, 13))
+        end
+
+        it "after the encryptable line in the same class: honoured up to Rails 7.1, refused at first use from 7.2" do
+          late = model_class do
+            self.time_zone_aware_attributes = true
+            encryptable :meeting_at, type: :datetime
+            self.skip_time_zone_conversion_for_attributes = %i[meeting_at meeting_column_at]
+          end
+          build = -> { late.new(meeting_at: "2026-10-01T09:00", meeting_column_at: "2026-10-01T09:00") }
           if declaration_time
-            expect(&late).to raise_error(ArgumentError, /skip_time_zone_conversion_for_attributes names :meeting_at/)
+            expect(&build).to raise_error(ArgumentError, /skip_time_zone_conversion_for_attributes names :meeting_at/)
           else
-            record = late.call.new(meeting_at: "2026-10-01T09:00", meeting_column_at: "2026-10-01T09:00")
+            record = build.call
             expect(record.meeting_at).to eq(record.meeting_column_at)
           end
         end
@@ -1069,8 +1081,16 @@ describe ConcernsOnRails::Models::Encryptable do
     it "writes no digest for a value that does not cast" do
       record = klass.create!(meeting_at: Float::INFINITY)
 
+      expect(record.meeting_at).to be_nil
       expect(klass.unscoped.where(id: record.id).pick(:meeting_at, :meeting_at_bidx)).to eq([nil, nil])
       expect(klass.find_by_meeting_at(Float::INFINITY)).to be_nil
+    end
+
+    # R4-04: the guard belongs to the :datetime declaration, not the name.
+    it "a field re-declared with another type keeps an infinite value" do
+      child = Class.new(klass) { encryptable :meeting_at, type: :float }
+
+      expect(child.new(meeting_at: Float::INFINITY).meeting_at).to eq(Float::INFINITY)
     end
 
     # Whichever class decides the conversion (see the skip-list specs), a

@@ -34,11 +34,12 @@ module ConcernsOnRails
       ZONED = /(?:Z|[+-]\d{2}(?::?\d{2})?)\z/i
       # The words a date String may hold besides a time zone's name: month
       # and day names (full, or the abbreviations Date._parse reads), ordinal
-      # suffixes, AM/PM, ISO 8601's T and Z, and the "at" / "of" of everyday
-      # formats. Date._parse reads "jun" out of "junk".
+      # suffixes, AM/PM, ISO 8601's T and Z, and the "at" of ICU's long
+      # format. Date._parse reads "jun" out of "junk". ("of" is not one:
+      # Date._parse drops the day from "15th of October 2026".)
       DATE_WORDS = (
         (::Date::MONTHNAMES + ::Date::ABBR_MONTHNAMES + ::Date::DAYNAMES + ::Date::ABBR_DAYNAMES).compact.map(&:downcase) +
-        %w[sept tues thur thurs st nd rd th am pm a p m t z at of]
+        %w[sept tues thur thurs st nd rd th am pm a p m t z at]
       ).uniq.freeze
       # The ranges a real date or time's parts fall in. Date._parse reads
       # "99999" as day 999 of 1999.
@@ -89,22 +90,27 @@ module ConcernsOnRails
       #     Time.zone.parse, so a two-digit year is refused;
       #   * no ordinal day ("2026-032"): Time.zone.parse ignores it;
       #   * every part is in range ("99999" is day 999 of 1999);
-      #   * every word is a date word (DATE_WORDS) or a time zone Date._parse
-      #     resolves ("EDT", "CEST", "Eastern"), with trailing comments set
-      #     aside, and only when setting them aside changes nothing.
+      #   * every word is a date word (DATE_WORDS), part of the zone
+      #     Date._parse read ("EDT", "GMT-0400"), or a zone name that only
+      #     repeats the offset already given (Go's "-0400 EDT"). Trailing
+      #     comments are set aside, only when that changes nothing; any other
+      #     bracket refuses the String.
       # Time.zone.parse finds a date in almost anything: "junk" is June 1st
       # ("jun"), "maybe" May 1st, "Monday" and "10:30" today, "junk 2026"
-      # June 1st 2026. ISO 8601, RFC 2822 (comments included), HTTP dates,
-      # JavaScript's Date#toString, "Oct 1 2026" and "2026-10-01 10:30 EST"
-      # all pass. Anything that is not a String is judged by its cast alone.
-      # Only the verbs check this: assigning to the column still casts
-      # exactly as ActiveRecord does.
+      # June 1st 2026, "mart 2026" (a Marquesas zone abbreviation) March 1st.
+      # ISO 8601, RFC 2822 (comments included), HTTP dates, JavaScript's
+      # Date#toString, "Oct 1 2026" and "2026-10-01 10:30 EST" all pass.
+      # Anything that is not a String is judged by its cast alone. Only the
+      # verbs check this: assigning to the column still casts exactly as
+      # ActiveRecord does.
       def names_year?(value)
         return true unless value.is_a?(::String)
 
         bare = value.sub(TRAILING_COMMENTS, "")
+        return false if bare.match?(/[()\[\]]/)
+
         parts = ::Date._parse(bare, false)
-        readable_parts?(parts, bare) && parts == ::Date._parse(value, false) && date_words_only?(bare)
+        readable_parts?(parts, bare) && parts == ::Date._parse(value, false) && date_words_only?(bare, parts)
       rescue ArgumentError # Date._parse refuses a String longer than 128 characters
         false
       end
@@ -119,14 +125,20 @@ module ConcernsOnRails
         PART_RANGES.all? { |part, range| !parts.key?(part) || range.cover?(parts[part]) }
       end
 
-      def date_words_only?(string)
-        string.downcase.scan(/[a-z]+/).all? { |word| DATE_WORDS.include?(word) || zone_word?(word) }
+      def date_words_only?(string, parts)
+        zone_words = parts[:offset].nil? ? [] : parts[:zone].to_s.downcase.scan(/[a-z]+/)
+        string.downcase.scan(/[a-z]+/).all? do |word|
+          DATE_WORDS.include?(word) || zone_words.include?(word) || redundant_zone?(string, word, parts)
+        end
       end
 
-      # A time zone name or abbreviation: Date._parse resolves it to an
-      # offset. An unknown word ("junk") resolves to none.
-      def zone_word?(word)
-        !::Date._parse("00:00 #{word}")[:offset].nil?
+      # A zone name repeating an offset the String already gave ("-0400
+      # EDT"): a zone Date._parse knows (several letters, so no military
+      # one-letter zone) whose removal changes nothing it read.
+      def redundant_zone?(string, word, parts)
+        return false if parts[:offset].nil? || word.length < 2 || ::Date._parse("00:00 #{word}")[:offset].nil?
+
+        ::Date._parse(string.sub(/\b#{Regexp.escape(word)}\b/i, " "), false) == parts
       end
 
       # ---- virtual datetimes (Storable keys, Encryptable fields) ---------
