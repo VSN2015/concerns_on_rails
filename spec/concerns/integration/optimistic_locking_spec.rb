@@ -586,6 +586,21 @@ describe "optimistic locking across raw writes" do
         ActiveRecord.raise_on_assign_to_attr_readonly = previous
       end
 
+      # PR #124 review round 4: the undo list on the parent references the
+      # connection; a cache write of the parent (Marshal) must still work.
+      it "leaves the parent Marshal-dumpable, after the transaction and inside it" do
+        post = OlPost.create!(title: "t")
+        post.ol_comments.create!(body: "a")
+        expect(Marshal.load(Marshal.dump(post)).ol_comments_count).to eq(1)
+
+        ActiveRecord::Base.transaction do
+          post.ol_comments.create!(body: "b")
+          expect(Marshal.load(Marshal.dump(post)).ol_comments_count).to eq(2)
+          raise ActiveRecord::Rollback
+        end
+        expect(in_sync?(post)).to be(true)
+      end
+
       it "parent saved with built children (autosave) is in sync" do
         post = OlPost.new(title: "t")
         post.ol_comments.build(body: "a")

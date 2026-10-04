@@ -146,11 +146,45 @@ module ConcernsOnRails
           undo.enroll(transaction, target)
         end
 
-        # The undo open in `transaction` for `target`. The parent keeps a short
-        # list (one per transaction level holding a mirror), replaced, never
-        # mutated, since a dup of the parent shares the ivar.
+        # The parent's list of open undos (one per transaction level holding a
+        # mirror), replaced, never mutated, since a dup of the parent shares
+        # the ivar. Marshal — a Rails.cache write of the parent under the
+        # pre-7.1 marshalling format — dumps it as empty: an undo references
+        # the connection and its transaction, which cannot be dumped and mean
+        # nothing in another process.
+        class OpenList
+          attr_reader :undos
+
+          def initialize(undos)
+            @undos = undos.freeze
+          end
+
+          def marshal_dump
+            []
+          end
+
+          def marshal_load(_data)
+            @undos = [].freeze
+          end
+        end
+
+        def self.undos_on(target)
+          target.instance_variable_get(OPEN)&.undos || []
+        end
+
+        # The undo open in `transaction` for `target`.
         def self.open_for(target, transaction)
-          (target.instance_variable_get(OPEN) || []).find { |undo| undo.open_in?(transaction, target) }
+          undos_on(target).find { |undo| undo.open_in?(transaction, target) }
+        end
+
+        # Keep only the undos still worth finding; drop the ivar when none is,
+        # so a parent outside any transaction carries nothing.
+        def self.keep_open(target, undos)
+          if undos.empty?
+            target.remove_instance_variable(OPEN) if target.instance_variable_defined?(OPEN)
+          else
+            target.instance_variable_set(OPEN, OpenList.new(undos))
+          end
         end
 
         # The value each just-mirrored column now holds. The Hash is
@@ -192,8 +226,13 @@ module ConcernsOnRails
         def enroll(transaction, target)
           @transaction = transaction
           @connection.add_transaction_record(self)
-          open = (target.instance_variable_get(OPEN) || []).select { |undo| !undo.equal?(self) && undo.findable? }
-          target.instance_variable_set(OPEN, open + [self])
+          open = self.class.undos_on(target).select { |undo| !undo.equal?(self) && undo.findable? }
+          self.class.keep_open(target, open + [self])
+        end
+
+        # Never forwarded to the (weakly held, maybe collected) parent.
+        def inspect
+          "#<#{self.class.name} settled=#{@settled} counters=#{@counters.to_h} bumps=#{@bumps}>"
         end
 
         # The transaction-record protocol. No callbacks of its own.
@@ -245,11 +284,12 @@ module ConcernsOnRails
           end
         end
 
-        # Done: drop the transaction too, so a settled undo the parent's list
-        # still names keeps nothing alive.
+        # Done: drop the transaction, and leave the parent's list.
         def settle!
           @settled = true
           @transaction = nil
+          parent = alive_target
+          self.class.keep_open(parent, self.class.undos_on(parent).select(&:findable?)) if parent
         end
 
         def undo!
