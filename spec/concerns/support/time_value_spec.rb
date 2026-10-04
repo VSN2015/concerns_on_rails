@@ -95,7 +95,8 @@ RSpec.describe ConcernsOnRails::Support::TimeValue do
       it "still accepts ISO 8601, RFC 2822, HTTP dates and the everyday spellings" do
         ["2026-10-01T10:30:00Z", "2026-10-01T10:30:00.5+09:00", "Thu, 01 Oct 2026 10:30:00 +0000",
          "Thu, 01 Oct 2026 10:30:00 GMT", "Oct 1 2026", "2026-10-01 10:30", "2026-10-01",
-         "2026-10-01 10:30 EST", "October 1st, 2026 10:30 p.m.", "Thursday, Oct. 1 2026", "20261001"].each do |ok|
+         "2026-10-01 10:30 EST", "October 1st, 2026 10:30 p.m.",
+         "Oct 1 2026 10:30a.m.", "Oct 1 2026 10:30 A.M.", "Thursday, Oct. 1 2026", "20261001"].each do |ok|
           expect(cast!(ok)).to be_a(ActiveSupport::TimeWithZone), ok
         end
         expect(cast!("2026-10-01 10:30").hour).to eq(10)

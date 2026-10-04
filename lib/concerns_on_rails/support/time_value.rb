@@ -132,9 +132,10 @@ module ConcernsOnRails
         # Several letters: a one-letter military zone ("10:30 b") shifts the
         # time by hours, and is never what a person or a program wrote.
         zone_words = parts[:offset].nil? ? [] : parts[:zone].to_s.downcase.scan(/[a-z]{2,}/)
-        # "a.m." / "p.m." read as am / pm; a lone a, p or m is not a word
-        # ("7p" is dropped by Date._parse, "7:30p" is military zone P).
-        string.downcase.gsub(/\b([ap])\.\s?m\b\.?/) { "#{Regexp.last_match(1)}m" }.scan(/[a-z]+/).all? do |word|
+        # "a.m." / "p.m." read as am / pm, also right after the digits
+        # ("10:30a.m."); a lone a, p or m is not a word ("7p" is dropped by
+        # Date._parse, "7:30p" is military zone P).
+        string.downcase.gsub(/(?<![a-z])([ap])\.\s?m\b\.?/) { "#{Regexp.last_match(1)}m" }.scan(/[a-z]+/).all? do |word|
           DATE_WORDS.include?(word) || zone_words.include?(word) || redundant_zone?(string, word, parts)
         end
       end
