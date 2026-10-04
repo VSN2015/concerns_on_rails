@@ -409,6 +409,7 @@ module ConcernsOnRails
 
         # Declare one or more encrypted fields. Repeatable; per-field options.
         def encryptable(*fields, type: :string, key: nil, blind_index: nil)
+          @encryptable_declaring = true # see _default_attributes
           type = type.to_sym
           encryptable_validate!(fields, type, blind_index)
           ensure_columns!(LABEL, *fields, types: :text)
@@ -422,13 +423,32 @@ module ConcernsOnRails
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
             attribute field, EncryptedType.new(type: type, key: key)
             encryptable_define_helpers(field)
-            if type == :datetime
-              encryptable_guard_infinite_time(field)
-              encryptable_check_skip_list_on_use
-            end
             encryptable_define_blind_index(field, bi) if bi
             encryptable_register_filter_parameter(field)
           end
+        ensure
+          @encryptable_declaring = false
+        end
+
+        # From Rails 7.2, ActiveRecord fixes a declared attribute's time-zone
+        # conversion when the attribute is declared, on the declaring class
+        # (hook_attribute_type). A skip list naming an encrypted :datetime
+        # field that is set after its `encryptable` line, or on a subclass,
+        # can then no longer reach it. Refuse that, rather than silently
+        # convert a field the developer opted out of. It is checked when
+        # ActiveRecord builds the class's attribute set (first record, query
+        # or type lookup), memoized on that set, so it costs one comparison
+        # per call after that. Not while `encryptable` itself runs: its column
+        # check builds the set BEFORE the field's new type is attached, and
+        # re-declaring the field after the skip list is what applies it. Up to
+        # 7.1 Rails decides per class at schema load, so the setting applies
+        # wherever it is made and nothing is checked.
+        def _default_attributes
+          attributes = super
+          return attributes if @encryptable_declaring || @encryptable_skip_checked.equal?(attributes)
+
+          encryptable_refuse_late_skip!(attributes)
+          attributes
         end
 
         # Rows whose ciphertext for any of `fields` (default: every gem-keyed
@@ -542,22 +562,6 @@ module ConcernsOnRails
           { column: (option[:column] || "#{field}_bidx").to_sym, expression: expression }
         end
 
-        # From Rails 7.0 the time-zone converter hands an infinite value
-        # (Float::INFINITY) through without casting it. A datetime column may
-        # store infinity; an encrypted field cannot, and serialize writes
-        # NULL. So the writer turns it into nil, as the cast always did,
-        # rather than hold an Infinity that passes `presence` and saves as
-        # NULL. Defined in an included module: a writer the model defines
-        # itself still wins, and reaches this one through `super`.
-        def encryptable_guard_infinite_time(field)
-          guards = @encryptable_writer_guards ||= Module.new.tap { |mod| include mod }
-          guards.send(:define_method, "#{field}=") do |value|
-            infinite = value.respond_to?(:infinite?) && value.infinite? &&
-                       self.class.encryptable_rules.dig(field, :type) == :datetime # not once re-declared as another type
-            super(infinite ? nil : value)
-          end
-        end
-
         def encryptable_define_helpers(field)
           # The value AT REST — the column's stored content, before the type
           # deserializes it. Useful for migrations, debugging, and asserting no
@@ -597,30 +601,8 @@ module ConcernsOnRails
           end
         end
 
-        # From Rails 7.2, ActiveRecord fixes a declared attribute's time-zone
-        # conversion when the attribute is declared, on the declaring class
-        # (hook_attribute_type). A skip list naming an encrypted :datetime
-        # field that is set after its `encryptable` line, or on a subclass,
-        # can then no longer reach it. Refuse that, rather than silently
-        # convert a field the developer opted out of. The check runs once per
-        # class when its first record is built or loaded: after the class
-        # body, so re-declaring the field after the skip list (which applies
-        # it) is fine, and without touching the schema while the class loads
-        # (other macros build the attribute set mid-body). Up to 7.1 Rails
-        # decides per class at schema load, so the setting applies wherever
-        # it is made, and no check is registered.
-        def encryptable_check_skip_list_on_use
-          return unless ConcernsOnRails::Models::Encryptable.declaration_time_zone_conversion?
-          return if @encryptable_skip_list_hooked
-
-          @encryptable_skip_list_hooked = true
-          after_initialize :encryptable_refuse_late_skip_list
-        end
-
         def encryptable_refuse_late_skip!(attributes)
-          return if @encryptable_skip_checked.equal?(attributes)
-
-          late = encryptable_late_skipped_fields(attributes)
+          late = ConcernsOnRails::Models::Encryptable.declaration_time_zone_conversion? ? encryptable_late_skipped_fields(attributes) : []
           unless late.empty?
             raise ArgumentError,
                   "#{LABEL}: skip_time_zone_conversion_for_attributes names #{late.map(&:inspect).join(', ')}, " \
@@ -632,11 +614,12 @@ module ConcernsOnRails
         end
 
         # Encrypted :datetime fields the skip list names but whose type
-        # ActiveRecord converted anyway.
+        # ActiveRecord converted anyway. Symbols only, as ActiveRecord reads
+        # the list (`include?(name.to_sym)`): a String entry skips nothing.
         def encryptable_late_skipped_fields(attributes)
-          skipped = skip_time_zone_conversion_for_attributes.map(&:to_s)
+          skipped = skip_time_zone_conversion_for_attributes
           encryptable_rules.select do |field, rule|
-            rule[:type] == :datetime && skipped.include?(field.to_s) &&
+            rule[:type] == :datetime && skipped.include?(field) &&
               ConcernsOnRails::Models::Encryptable.time_zone_converted_type?(attributes[field.to_s].type)
           end.keys
         end
@@ -796,11 +779,6 @@ module ConcernsOnRails
         sql = self.class.unscoped.where(self.class.primary_key => id_in_database).select(*names).to_sql
         row = self.class.connection.select_rows(sql).first
         names.each_with_index { |name, index| @attributes.write_from_database(name, row[index]) } if row
-      end
-
-      # after_initialize (Rails 7.2+, see encryptable_check_skip_list_on_use).
-      def encryptable_refuse_late_skip_list
-        self.class.send(:encryptable_refuse_late_skip!, self.class._default_attributes)
       end
 
       def encryptable_stored_ciphertext_syncable?

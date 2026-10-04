@@ -468,6 +468,51 @@ describe ConcernsOnRails::Models::Encryptable do
           expect(record.meeting_column_at).to eq(Time.utc(2026, 10, 1, 9))
           expect(record.meeting_at).to eq(record.meeting_column_at)
         end
+
+        # ActiveRecord reads the list with include?(name.to_sym), so a String
+        # entry skips nothing, for the column and the field alike.
+        it "a String entry skips nothing, like for the column, and is not refused" do
+          strings = model_class do
+            self.time_zone_aware_attributes = true
+            self.skip_time_zone_conversion_for_attributes = %w[meeting_at meeting_column_at]
+            encryptable :meeting_at, type: :datetime
+          end
+          record = strings.new(meeting_at: "2026-10-01T09:00", meeting_column_at: "2026-10-01T09:00")
+
+          expect(record.meeting_column_at.getutc).to eq(Time.utc(2026, 10, 1, 13))
+          expect(record.meeting_at).to eq(record.meeting_column_at)
+        end
+
+        it "is also refused on a query that builds no record, from Rails 7.2" do
+          late = model_class do
+            self.time_zone_aware_attributes = true
+            encryptable :meeting_at, type: :datetime
+            self.skip_time_zone_conversion_for_attributes = %i[meeting_at]
+          end
+          query = -> { late.pluck(:meeting_at) }
+          if declaration_time
+            expect(&query).to raise_error(ArgumentError, /skip_time_zone_conversion_for_attributes names :meeting_at/)
+          else
+            expect(query.call).to eq([])
+          end
+        end
+      end
+
+      # PR #125 review round 5 (R5-04): the Infinity writer guard (since
+      # removed) defined `<field>=` above an abstract class, so ActiveRecord
+      # never generated the concrete subclass's writer.
+      it "an abstract base class may declare the field" do
+        base = Class.new(TestModel) do
+          self.abstract_class = true
+          include ConcernsOnRails::Models::Encryptable
+
+          self.time_zone_aware_attributes = true
+          encryptable :meeting_at, type: :datetime
+        end
+        concrete = Class.new(base) { self.table_name = "encryptable_records" }
+
+        record = concrete.create!(meeting_at: "2026-10-01T09:00")
+        expect(concrete.find(record.id).meeting_at.getutc).to eq(Time.utc(2026, 10, 1, 13))
       end
 
       # PR #125 review round 2 (R2-02): re-declaring the field on every
@@ -1081,16 +1126,8 @@ describe ConcernsOnRails::Models::Encryptable do
     it "writes no digest for a value that does not cast" do
       record = klass.create!(meeting_at: Float::INFINITY)
 
-      expect(record.meeting_at).to be_nil
       expect(klass.unscoped.where(id: record.id).pick(:meeting_at, :meeting_at_bidx)).to eq([nil, nil])
       expect(klass.find_by_meeting_at(Float::INFINITY)).to be_nil
-    end
-
-    # R4-04: the guard belongs to the :datetime declaration, not the name.
-    it "a field re-declared with another type keeps an infinite value" do
-      child = Class.new(klass) { encryptable :meeting_at, type: :float }
-
-      expect(child.new(meeting_at: Float::INFINITY).meeting_at).to eq(Float::INFINITY)
     end
 
     # Whichever class decides the conversion (see the skip-list specs), a

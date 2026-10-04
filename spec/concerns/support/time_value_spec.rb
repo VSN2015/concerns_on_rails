@@ -78,7 +78,7 @@ RSpec.describe ConcernsOnRails::Support::TimeValue do
           # October" (Oct 1st); "mart"/"novt" are zone abbreviations holding a
           # month name; a bracket that is not a trailing comment.
           "15th of October 2026", "15th of October, 2026 10:30", "mart 2026", "novt 2026", "Oct 1 2026 mart",
-          "2026-10-15 10:30 (a(b)c)"]).each do |word|
+          "2026-10-15 10:30 (a(b)c)", "2026-10-01 10:30 b"]).each do |word|
           expect { cast!(word) }.to raise_error(ArgumentError, /cannot be parsed as a time for 'happened_at'/), word
         end
       end

@@ -126,7 +126,9 @@ module ConcernsOnRails
       end
 
       def date_words_only?(string, parts)
-        zone_words = parts[:offset].nil? ? [] : parts[:zone].to_s.downcase.scan(/[a-z]+/)
+        # Several letters: a one-letter military zone ("10:30 b") shifts the
+        # time by hours, and is never what a person or a program wrote.
+        zone_words = parts[:offset].nil? ? [] : parts[:zone].to_s.downcase.scan(/[a-z]{2,}/)
         string.downcase.scan(/[a-z]+/).all? do |word|
           DATE_WORDS.include?(word) || zone_words.include?(word) || redundant_zone?(string, word, parts)
         end
