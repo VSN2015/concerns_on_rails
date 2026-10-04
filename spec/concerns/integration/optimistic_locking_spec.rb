@@ -502,9 +502,9 @@ describe "optimistic locking across raw writes" do
         connection.current_transaction.records.to_a.count { |r| r.is_a?(ConcernsOnRails::Models::CounterCacheable::MirrorUndo) }
       end
 
-      # Rails 6.0 itself keeps every record saved in an open transaction
-      # alive (the release base without any mirror does too).
-      it "a batch over many parents in one transaction keeps neither the parents nor their new children alive", min_rails: "6.1" do
+      # Up to 7.0 Rails itself keeps every record saved in an open
+      # transaction alive (the release base without any mirror does too).
+      it "a batch over many parents in one transaction keeps neither the parents nor their new children alive", min_rails: "7.1" do
         count = 600
         count.times { |i| OlPost.create!(title: "p#{i}") }
         live = nil
