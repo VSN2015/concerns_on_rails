@@ -495,6 +495,97 @@ describe "optimistic locking across raw writes" do
         expect(post.lock_version).to eq(OlPost.where(id: post.id).pick(:lock_version))
       end
 
+      # PR #124 review round 3. The undo holds its parent weakly and there is
+      # one per (transaction, parent), so neither a batch over many parents
+      # nor the outer transaction transactional tests open holds O(n).
+      def undo_records(connection = ActiveRecord::Base.connection)
+        connection.current_transaction.records.to_a.count { |r| r.is_a?(ConcernsOnRails::Models::CounterCacheable::MirrorUndo) }
+      end
+
+      # Rails 6.0 itself keeps every record saved in an open transaction
+      # alive (the release base without any mirror does too).
+      it "a batch over many parents in one transaction keeps neither the parents nor their new children alive", min_rails: "6.1" do
+        count = 600
+        count.times { |i| OlPost.create!(title: "p#{i}") }
+        live = nil
+
+        ActiveRecord::Base.transaction do
+          OlPost.find_each { |post| post.ol_comments.create!(body: "c") }
+          GC.start(full_mark: true, immediate_sweep: true)
+          live = ObjectSpace.each_object(OlComment).count
+        end
+
+        expect(live).to be < count / 2
+      end
+
+      it "keeps one undo per parent however many children a transaction creates" do
+        post = OlPost.create!(title: "t")
+
+        ActiveRecord::Base.transaction do
+          300.times { post.ol_comments.create!(body: "c", approved: true) }
+          expect(undo_records).to eq(1)
+          raise ActiveRecord::Rollback
+        end
+
+        expect([post.lock_version, post.ol_comments_count, post.approved_count]).to eq([0, 0, 0])
+        expect(in_sync?(post)).to be(true)
+      end
+
+      it "merges released savepoints' undos inside an outer joinable: false transaction (transactional tests)" do
+        post = OlPost.create!(title: "t")
+        connection = ActiveRecord::Base.connection
+        connection.begin_transaction(joinable: false)
+        begin
+          300.times { |i| OlComment.create!(ol_post: post, body: "c#{i}") }
+          expect(undo_records(connection)).to eq(1)
+        ensure
+          connection.rollback_transaction
+        end
+
+        expect([post.lock_version, post.ol_comments_count]).to eq([0, 0])
+        expect(in_sync?(post)).to be(true)
+      end
+
+      it "undoes mirrors made through a becomes copy that shares the parent's attributes" do
+        post = OlPost.create!(title: "t")
+        view = post.becomes(OlPost)
+
+        ActiveRecord::Base.transaction do
+          post.ol_comments.create!(body: "a")
+          view.ol_comments.create!(body: "b")
+          raise ActiveRecord::Rollback
+        end
+
+        expect(in_sync?(post)).to be(true)
+        expect { post.update!(title: "edited") }.not_to raise_error
+      end
+
+      it "a rollback leaves a lock_version the caller assigned after the mirror alone, like a counter" do
+        post = OlPost.create!(title: "t")
+
+        ActiveRecord::Base.transaction do
+          post.ol_comments.create!(body: "c")
+          post.lock_version = 0 # a form's hidden field
+          raise ActiveRecord::Rollback
+        end
+
+        expect(post.lock_version).to eq(0)
+        expect { post.update!(title: "edited") }.not_to raise_error
+      end
+
+      it "leaves an attr_readonly counter unmirrored instead of raising", min_rails: "7.1" do
+        previous = ActiveRecord.raise_on_assign_to_attr_readonly
+        ActiveRecord.raise_on_assign_to_attr_readonly = true
+        OlPost.attr_readonly :ol_comments_count
+        post = OlPost.create!(title: "t")
+
+        expect { post.ol_comments.create!(body: "c") }.not_to raise_error
+        expect(OlPost.where(id: post.id).pick(:ol_comments_count)).to eq(1)
+        expect(post.lock_version).to eq(OlPost.where(id: post.id).pick(:lock_version))
+      ensure
+        ActiveRecord.raise_on_assign_to_attr_readonly = previous
+      end
+
       it "parent saved with built children (autosave) is in sync" do
         post = OlPost.new(title: "t")
         post.ol_comments.build(body: "a")

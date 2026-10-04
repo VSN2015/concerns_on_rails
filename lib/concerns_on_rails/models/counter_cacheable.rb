@@ -1,3 +1,4 @@
+require "weakref"
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/callable"
@@ -104,40 +105,95 @@ module ConcernsOnRails
       # UPDATE into such a parent instead, and forgets it only once no
       # transaction is left open.
       #
+      # Memory: the undo holds the parent only WEAKLY (a parent nobody holds
+      # any more needs no undo), never the child, and there is one undo per
+      # (transaction, parent): every further mirror onto that parent in that
+      # transaction adds to it, and a savepoint's undo that follows its
+      # UPDATE into a still-open transaction merges into the one open there.
+      # A batch inside a long transaction — or inside the transaction that
+      # transactional tests, `console --sandbox` and DatabaseCleaner wrap
+      # everything in — therefore keeps neither its parents nor its children
+      # alive, and holds one small object per parent.
+      #
       # Order-independence: Rails rolls records back oldest first, and it may
       # already have restored the parent itself (a parent with after_commit
       # callbacks, saved in the same transaction, is restored before the undo
       # runs, and that restore turns the mirrored counter into an "unsaved
-      # change"). So each counter is moved back only while it still holds the
-      # value the mirrors last left it at — tracked on the parent instance — and
-      # a value the caller assigned since is left alone.
+      # change"). So each column (the counters, and lock_version) is moved
+      # back only while it is still the mirrors' value: unchanged since (also
+      # true for a `becomes` copy sharing the attributes), or holding exactly
+      # the value they left it at — tracked on the parent instance. A value
+      # the caller assigned since is left alone.
       class MirrorUndo
         LEDGER = :@concerns_on_rails_counter_mirror
+        OPEN = :@concerns_on_rails_counter_undo
 
+        # Note one mirror onto `target` (an UPDATE through `klass` moved
+        # `counters` by their deltas, and bumped lock_version when `bumped`).
         # Nothing to undo outside a transaction: the UPDATE committed on its own.
-        def self.enroll(connection, target, klass, counters, bumped)
+        def self.record(connection, target, klass, counters, bumped)
           return unless connection.transaction_open?
           return if counters.empty? && !bumped
 
-          connection.add_transaction_record(new(connection, target, klass, counters, bumped))
+          remember(target, klass, counters, bumped)
+          transaction = connection.current_transaction
+          bumps = bumped ? 1 : 0
+          open = open_for(target, transaction)
+          return open.add(counters, bumps) if open
+
+          undo = new(connection, target, klass)
+          undo.add(counters, bumps)
+          undo.enroll(transaction, target)
         end
 
-        # Record the value each just-mirrored counter now holds. The Hash is
+        # The undo open in `transaction` for `target`. The parent keeps a short
+        # list (one per transaction level holding a mirror), replaced, never
+        # mutated, since a dup of the parent shares the ivar.
+        def self.open_for(target, transaction)
+          (target.instance_variable_get(OPEN) || []).find { |undo| undo.open_in?(transaction, target) }
+        end
+
+        # The value each just-mirrored column now holds. The Hash is
         # replaced, never mutated: a dup of the parent shares the ivar.
-        def self.remember_values(target, counters)
-          return if counters.empty?
-
+        def self.remember(target, klass, counters, bumped)
+          names = counters.keys
+          names += [klass.locking_column] if bumped
           ledger = target.instance_variable_get(LEDGER) || {}
-          target.instance_variable_set(LEDGER, ledger.merge(counters.keys.to_h { |name| [name, target[name]] }))
+          target.instance_variable_set(LEDGER, ledger.merge(names.to_h { |name| [name, target[name]] }))
         end
 
-        def initialize(connection, target, klass, counters, bumped)
+        def initialize(connection, target, klass)
           @connection = connection
-          @target = target
+          @transaction = nil
+          @target = WeakRef.new(target)
           @klass = klass
-          @counters = counters
-          @bumped = bumped
+          @counters = Hash.new(0)
+          @bumps = 0
           @settled = false
+        end
+
+        def add(counters, bumps)
+          counters.each { |name, delta| @counters[name] += delta }
+          @bumps += bumps
+        end
+
+        def open_in?(transaction, target)
+          findable? && @transaction.equal?(transaction) && target.equal?(alive_target)
+        end
+
+        # Still worth finding: not settled, and its transaction not finished.
+        # A savepoint's released (finalized) transaction handed this undo to
+        # its parent, where Rails still settles it, but where no lookup can
+        # tell it apart from a newer savepoint's undo.
+        def findable?
+          !@settled && !@transaction.nil? && !@transaction.state.finalized?
+        end
+
+        def enroll(transaction, target)
+          @transaction = transaction
+          @connection.add_transaction_record(self)
+          open = (target.instance_variable_get(OPEN) || []).select { |undo| !undo.equal?(self) && undo.findable? }
+          target.instance_variable_set(OPEN, open + [self])
         end
 
         # The transaction-record protocol. No callbacks of its own.
@@ -152,37 +208,76 @@ module ConcernsOnRails
         def committed!(**)
           return if @settled
 
-          if @connection.transaction_open?
-            @connection.add_transaction_record(self)
-          else
-            @settled = true
-          end
+          @connection.transaction_open? ? follow(@connection.current_transaction) : settle!
         end
 
         def rolledback!(**)
           return if @settled
 
-          @settled = true
+          settle!
           undo!
+        end
+
+        protected
+
+        attr_reader :counters, :bumps
+
+        def alive_target
+          @target.weakref_alive? ? @target.__getobj__ : nil
+        rescue WeakRef::RefError
+          nil
         end
 
         private
 
-        def undo!
-          target = @target
-          return if target.frozen?
+        # Follow the UPDATE into the transaction the savepoint was released
+        # into, merged into the undo already open there for this parent.
+        def follow(transaction)
+          parent = alive_target
+          return settle! if parent.nil?
 
-          ledger = target.instance_variable_get(LEDGER) || {}
-          @counters.each do |name, delta|
-            next unless ledger.key?(name) && target[name] == ledger[name]
-
-            value = target[name] - delta
-            target[name] = value
-            target.send(:clear_attribute_change, name)
-            ledger = ledger.merge(name => value)
+          open = self.class.open_for(parent, transaction)
+          if open
+            open.add(counters, bumps)
+            settle!
+          else
+            enroll(transaction, parent)
           end
-          target.instance_variable_set(LEDGER, ledger)
-          ConcernsOnRails::Support::Locking.mirror_bump!(target, @klass, by: -1) if @bumped
+        end
+
+        # Done: drop the transaction too, so a settled undo the parent's list
+        # still names keeps nothing alive.
+        def settle!
+          @settled = true
+          @transaction = nil
+        end
+
+        def undo!
+          parent = alive_target
+          return if parent.nil? || parent.frozen?
+
+          ledger = parent.instance_variable_get(LEDGER) || {}
+          moves(parent).each { |name, delta| ledger = move_back(parent, ledger, name, delta) }
+          parent.instance_variable_set(LEDGER, ledger)
+        end
+
+        # { column => delta } to take back: the counters, then lock_version.
+        def moves(parent)
+          moves = @counters.reject { |_name, delta| delta.zero? }
+          lock_loaded = @klass.locking_enabled? && parent.has_attribute?(@klass.locking_column)
+          @bumps.positive? && lock_loaded ? moves.merge(@klass.locking_column => @bumps) : moves
+        end
+
+        # Move `name` back by `delta` while it is still the mirrors' value.
+        def move_back(parent, ledger, name, delta)
+          current = parent[name]
+          mirrors_value = !parent.will_save_change_to_attribute?(name) || (ledger.key?(name) && current == ledger[name])
+          return ledger unless mirrors_value
+
+          value = current.to_i - delta
+          parent[name] = value
+          parent.send(:clear_attribute_change, name)
+          ledger.merge(name => value)
         end
       end
 
@@ -617,22 +712,23 @@ module ConcernsOnRails
       def counter_cacheable_sync_target(target, klass, counters)
         applied = counter_cacheable_apply_counters(target, counters)
         bumped = ConcernsOnRails::Support::Locking.mirror_bump!(target, klass)
-        MirrorUndo.enroll(klass.connection, target, klass, applied, bumped)
+        MirrorUndo.record(klass.connection, target, klass, applied, bumped)
       end
 
       # Move each (clean, loaded) counter up by its delta; the columns moved.
       def counter_cacheable_apply_counters(target, counters)
-        applied = counters.filter_map do |column, delta|
+        counters.filter_map do |column, delta|
           name = column.to_s
           next unless target.has_attribute?(name)
           next if target.will_save_change_to_attribute?(name)
+          # attr_readonly: never written on update, and assigning it raises
+          # under raise_on_assign_to_attr_readonly (7.1+). Left as loaded.
+          next if target.class.readonly_attributes.include?(name)
 
           target[name] = target[name].to_i + delta
           target.send(:clear_attribute_change, name)
           [name, delta]
         end.to_h
-        MirrorUndo.remember_values(target, applied)
-        applied
       end
 
       # Sum per column, dropping zero-sum entries (nothing to write).
