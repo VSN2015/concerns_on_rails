@@ -425,6 +425,22 @@ describe ConcernsOnRails::Controllers::Filterable do
         expect(weighted_names(weight_lt: "1e3")).to eq(stocked)
       end
 
+      # "1e-400".to_f underflows to 0.0, and binding that as exact answered
+      # the filter for a DIFFERENT number: `weight = 1e-400` matched every
+      # 0.0 row and `weight < 1e-400` missed them.
+      it "never binds a nonzero literal that underflows as an exact 0.0" do
+        Product.where(name: "Chair").update_all(weight: 0.0)
+        others = stocked - ["Chair"]
+
+        expect(weighted_names(weight: "1e-400")).to eq([])
+        expect(weighted_names(weight_lt: "1e-400")).to eq(["Chair"])
+        expect(weighted_names(weight_lte: "1e-400")).to eq(["Chair"])
+        expect(weighted_names(weight_gt: "1e-400")).to eq(others)
+        expect(weighted_names(weight_gte: "-1e-400")).to eq(stocked)
+        expect(weighted_names(weight_lt: "-1e-400")).to eq([])
+        expect(weighted_names(weight: "0")).to eq(["Chair"])
+      end
+
       it "answers a JSON-body Float infinity like the string 1e400" do
         expect(names(stock_lt: Float::INFINITY)).to eq(stocked)
         expect(names(stock_lt: "1e400")).to eq(stocked)

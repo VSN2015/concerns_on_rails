@@ -1,5 +1,182 @@
 <!-- CHANGELOG.md -->
 
+## 1.31.0 (2026-09-28)
+
+The fixes from the 2026-09-25 audit of 1.30.0 (#116–#120), each put through three adversarial
+review rounds before release, plus a dependency refresh (#121). It is a minor release because
+Sequenceable gains an option and a reader, and several fixes change observable behaviour or
+raise where the gem used to silently misbehave. Read **Changed** before upgrading. No new
+concerns and no migrations. Every fix ships with a regression spec that fails on 1.30.0. 2483
+examples, 0 failures (2457 on Rails 6.0), green on PostgreSQL and MySQL.
+
+### Changed
+- **Sequenceable: `reset:` periods are cut in one fixed zone**, not the per-request
+  `Time.zone`. The `MAX` range and the period token both use the new `time_zone:` (default:
+  `config.time_zone`, resolved at use time, else UTC). Before, two requests in different zones
+  (Timezoneable, `Time.use_zone`) could issue the **same number**, and `formatted_<field>`
+  without `into:` rendered a different date for readers in different zones. Apps that keep
+  `Time.zone == config.time_zone` see no change. With `into:` and `reset:` (no `template:`) the
+  next number also accounts for rows whose stored value already carries the period's `prefix +
+  token + separator`, so a number stamped under a request zone before the upgrade is continued,
+  never reissued; without `into:`, add a unique index before upgrading. (#116)
+- **Sequenceable: re-declaration.** A call passing **only `assign:` and/or `time_zone:`** keeps
+  the rest of the field's current config, so `sequenceable_by :sequence, assign: :manual` on a
+  `Draft` subclass keeps the parent's `into:`/`prefix:`/`reset:`/`template:`. Every other
+  re-declaration, a bare one included, restates the format from the defaults as before. A
+  re-declaration whose full format tuple is identical to an inherited owner's now shares that
+  owner's counter, instead of numbering a subclass-only series that could reissue its numbers
+  (Procs compare by identity, so a draft subclass should re-declare only `assign:`).
+  **Upgrading:** a subclass declared the `assign:`-only way used to number its own
+  default-format series; its rows without an `into:` value now render in the parent's format,
+  so backfill `into:` first. (#116)
+- **Sequenceable: classes sharing a counter under `reset:` must cut the same periods.** Both
+  `time_zone:` omitted, or both explicit and the same zone (compared by canonical TZInfo
+  identifier, then by UTC offsets 1970–2100, so `"Kolkata"`/`"Asia/Calcutta"` match), else
+  `ArgumentError` at class load. Declare `time_zone:` on the class that first declares a
+  format, and declare an owner fully before its subclasses. (#116)
+- **CursorPaginatable: nullable ordering columns paginate, NULLs last** in both directions on
+  every adapter (PostgreSQL `NULLS LAST`, a `CASE` sort key elsewhere; the keyset WHERE uses
+  the OR-expansion). NULL-ordered rows used to be silently dropped, and NULLs sorted first
+  under PostgreSQL DESC and SQLite/MySQL ASC. NOT NULL columns keep the same SQL. An ordering
+  column the relation did not select raises `ActiveModel::MissingAttributeError`, a stored
+  non-NULL value that casts to nil raises `ArgumentError`, and ordering columns must be
+  selected unaliased. (#117)
+- **CursorPaginatable**: re-declaring `cursor_paginate_by` (e.g. in a subclass) changes only
+  the options passed and inherits the rest, so a subclass setting only `order:` no longer
+  silently disables the parent's `signed:`. (#117)
+- **Paginatable**: a `DISTINCT` relation with its own `SELECT` list
+  (`select(:group_id).distinct`) is counted as a subquery of the relation's own SQL, so
+  `X-Total-Count` / `X-Total-Pages` count the distinct rows returned, not every underlying row.
+  Only MySQL, which rejects repeated output names in a derived table (error 1060, recognised by
+  driver code), retries with the select list re-aliased, and falls back to the previous
+  over-count if that fails too. (#117)
+- **Stateable: name collisions raise.** `stateable_by` raises `ArgumentError` when a generated
+  `<state>?`/`<state>!`/`<event>!`/`may_<event>?` method or `.<state>` scope would override a
+  method the class already has from ActiveRecord or another concern — an event `lock`
+  overriding AR's `lock!` (which broke `with_lock` and `lock: true`), an event `restore` next
+  to SoftDeletable, a state `active` next to Activatable. Use `prefix:`/`suffix:`. The reverse
+  order raises too. One exemption: a state may take a scope that is still SoftDeletable's,
+  Publishable's or Schedulable's untouched include-time default on the same class, so that
+  concern's own macro can rename it — include that concern before `stateable_by`; only its
+  affixing macro may come after. An unrenamed collision raises when the shared scope is called.
+  (#120)
+- **Stateable**: a re-declaration retires the methods and scopes the earlier declaration
+  generated and the new one no longer lists (a subclass with `states: %i[open closed]` no
+  longer answers its parent's `archive!` or `.draft`). Only methods Stateable itself defined
+  are retired; a user's own method under such a name is left alone. The attribute default no
+  longer forces a `:string` type onto the state column (a PG enum/citext or host-declared
+  `attribute` type is kept, per declaring class), and a re-declaration without `default:` keeps
+  the earlier default only while it is still a declared state. (#120)
+- **Publishable**: `default_scope:` is a flag read by one lazily registered default scope,
+  added only the first time a class passes `default_scope: true`, so a model that never asks
+  for it keeps Rails' statement cache. An explicit `default_scope: false` on a later call or an
+  STI subclass turns it off; omitting the option keeps the inherited setting. (#120)
+- **Encryptable**: an encrypted field used as a friendly_id slug source raises `ArgumentError`
+  — the `sluggable_by` field, a `candidates:` entry, an `alias_attribute` of the field (chains
+  followed) or a bare friendly_id base — at declaration where it can, otherwise at save, before
+  the row is written. The slug used to store the field's plaintext. **Upgrading:** regenerate
+  those slugs from a safe field and delete the stale `friendly_id_slugs` rows (see the
+  Encryptable docs). (#118)
+- **SoftDeletable `cascade:` / Duplicable** now reach children hidden by Publishable's
+  `default_scope: true` (drafts). Only the gem's own hiding predicates on the child's own table
+  are removed; every other default-scope predicate still applies, as for Rails' `dependent:` —
+  a tenant scope, a discriminator on a shared table, a joined table's same-named column. A
+  `has_one` cascades to / copies the child its reader returns. Duplicable never copies a
+  SoftDeletable child's soft-deleted rows into a `has_many`/`has_one` copy, whatever its
+  `default_scope:` (with it off, the copy used to get them back as live rows). (#119)
+- **Normalizable**: saves that skip validation (`update_attribute`, `save(validate: false)`)
+  are normalized by a prepended `before_save` backstop, so Encryptable's blind index, Auditable
+  and Addressable see the normalized value whatever the include order. (#120)
+- **CounterCacheable**: re-declaring the same association + `count:` column replaces the
+  earlier rule (it double-counted); an STI subclass can narrow an inherited counter with `if:`;
+  on an STI table `recount_counter_caches!` tallies every class's rows under its own rule,
+  resolving each stored type without building a record (an unknown type counts under the base
+  rule instead of raising). (#120)
+
+### Added
+- **Sequenceable**: `time_zone:` (a zone name as a String or Symbol, or an
+  `ActiveSupport::TimeZone`; an unknown zone raises at class load) and
+  `sequenceable_period_time(field)`, the fixed-zone period instant for `template:` lambdas that
+  render a date. (#116)
+
+### Fixed
+- **Sequenceable**: re-declaring a field with `assign: :manual`, on the same class or an STI
+  subclass, really stops numbering at create. Each call used to add its own `before_create`
+  lambda, and the earlier `:create` one kept firing. Each field now has one symbol callback,
+  registered at its first `assign: :create` declaration, honouring the receiving class's
+  current declaration. (#116)
+- **Paginatable**: `paginated(Model)` / `pagination_meta(Model)` with a bare model class no
+  longer raises. A non-finite JSON-body `page`/`per_page` (`1e400`, NaN) falls back to the
+  default instead of a 500 (Paginatable and CursorPaginatable). (#117)
+- **CursorPaginatable**: boundary values are read from the stored column, so an overridden
+  attribute reader no longer makes the walk repeat pages forever, and a value changed in memory
+  (an `after_initialize` default) no longer keys the cursor on a value the row's sort position
+  does not have. (#117)
+- **Callable options**: Throttleable `by:`, WebhookVerifiable `secret:`, Deprecatable
+  `notify:`, CounterCacheable `if:` and Auditable `actor:` accept every callable the macro
+  validates. A lambda with no required parameter or a block is `instance_exec`'d as before; a
+  lambda with a required parameter or a symbol proc is called with the controller (the record
+  for `if:`/`actor:`); any other callable object gets it only when its `#call` requires an
+  argument, and is otherwise called bare. These used to raise `TypeError`/`ArgumentError` (for
+  `actor:`, on every save). Throttleable's `if:`/`unless:` keep their own dispatch. (#117)
+- **Anonymizable**: a callable-object `with:` strategy no longer raises `NoMethodError`
+  (`#arity`). (#117) A rewritten slug counts as an erased field for `clear_audit_trail:`,
+  `slug: :auto` sees a slug built from an `alias_attribute` of an erased column, erasing an
+  Addressable-mapped column clears its `fingerprint:` in the same UPDATE, and
+  `prefix:`/`suffix:` passed on a later call are honoured (old scope names retired safely).
+  (#118)
+- **Idempotentable**: a replay carries the original's exact `Content-Type`, so
+  `application/problem+json` is no longer replayed with `; charset=utf-8`. (#117)
+- **Monetizable**: underscore-grouped amounts (`"5_5"`, `"1_000"`) are rejected (nil) like
+  other mis-grouped input. (#117)
+- **Filterable**: a nonzero float operand that underflows to 0.0 (`"1e-400"`) is treated as
+  inexact, so `=` matches nothing and `<`/`>` compare correctly. (#117)
+- **Maskable**: presets stringify non-String values before masking instead of returning them
+  raw (integer SSN/phone columns were shown unmasked); integral BigDecimal/Float values render
+  without `.0`. (#118)
+- **Lockable**: `lock_access!` is a conditional UPDATE — a concurrent stale instance adopts the
+  existing lock instead of re-minting the mailed unlock token and re-firing `after_lock`;
+  `before_lock` runs after the row is claimed. `register_failed_attempt!` clears a lapsed lock
+  the same way: a stale instance used to wipe a lock another request had just taken (a second
+  token and `after_lock`, or, below `max_attempts`, an account left unlocked). (#118)
+- **Loader**: every concern file works when required directly (`gem "concerns_on_rails",
+  require: false`). The gem-level singletons live in `concerns_on_rails/core`, and a directly
+  required file now also wires its sensitive fields into Rails' `filter_parameters` and
+  ActiveRecord's `filter_attributes` whether required before, during (eager load,
+  `config/initializers`) or after boot — unlock tokens used to be logged in clear and
+  `#inspect` showed decrypted values. Deprecatable/Timezoneable require the ActiveSupport time
+  extensions they use. (#118)
+- **Sluggable**: a re-declaration refused by the column check no longer leaves its field
+  assigned. **Duplicable**: sibling-concern detection no longer autoloads Sluggable/friendly_id
+  (or raises without the loader). (#118)
+- **Batch verbs** (`*_all`, `anonymize_all!`, `reencrypt_all!`, `recount_counter_caches!`, the
+  cascade) on their per-record path act on exactly the rows an ordered or limited relation
+  selects (`order(id: :desc).limit(2).publish_all` touched the two lowest ids), no longer raise
+  under `error_on_ignored_order`, and visit each record once over a `has_many` join (hooks ran
+  once per joined row); a limited joined slice instantiates one record per row. (#119)
+- **Duplicable**: identity columns (token, slug, sequence number, audit trail, lock state) are
+  reset on copies of children that do not include Duplicable; they used to share the original's
+  token or raise `RecordNotUnique`. (#119)
+- **Hooked writes** (`publish!`, a Stateable event, `soft_delete!`, `expire!`, `activate!`,
+  `anonymize!`): a veto or failure restores every in-memory attribute, including a nested
+  in-place edit of an already-read json value, never decrypting anything. (#119)
+- **Auditable**: works on a native `json`/`jsonb` trail column (declare it without a default —
+  MySQL rejects a literal JSON `DEFAULT`); earlier double-encoded trails still read, and
+  `audit_trail` entries are detached from the column value. (#119)
+- **Searchable**: `mode: :any` strips surrounding whitespace from the query. **Storable**:
+  every non-Proc `default:` is deep-duped per read. (#120)
+
+### Internal
+- New support modules: `Support::Callable`, `Support::SlugSources`,
+  `Support::AssociationScope`; gem-level singletons moved to `lib/concerns_on_rails/core.rb`. A
+  real-Rails-app subprocess spec covers filter wiring for direct requires.
+- Dev dependencies: Rails 8.1.4, permittable 0.9.0; the permittable compatibility suite accepts
+  both the pre-0.9 and 0.9 validation messages (the gemspec still allows `~> 0.1`). (#121)
+- Documented limits: see `docs/concerns/sequenceable.md` (zones across STI leaves under an
+  abstract declarer; re-declaring an owner after its subclasses) and
+  `docs/concerns/stateable.md` (a subclass stub outlives a later parent re-declaration).
+  `unlock_access!`'s unconditional write is left for a follow-up.
+
 ## 1.30.0 (2026-09-27)
 
 The fixes from the 2026-09-23 whole-gem audit of 1.29.0: 37 bugs (8 HIGH) across six PRs

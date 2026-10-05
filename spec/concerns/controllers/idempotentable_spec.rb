@@ -629,4 +629,54 @@ describe ConcernsOnRails::Controllers::Idempotentable do
       expect(JSON.parse(result.body).dig("error", "code")).to eq("idempotency_store_unavailable")
     end
   end
+
+  # The record kept only the media type, and render(content_type:) re-appends
+  # Rails' "; charset=utf-8" — so an RFC 9457 problem document (which
+  # Respondable renders WITHOUT a charset: the registration defines no
+  # parameters) was replayed as "application/problem+json; charset=utf-8",
+  # a different header than the original response carried.
+  describe "replayed Content-Type (through real ActionController dispatch)" do
+    def replay_pair(controller)
+      Array.new(2) do
+        IntegrationHarness.dispatch(controller, :create, method: "POST", headers: { "Idempotency-Key" => "k1" })
+      end
+    end
+
+    it "replays an application/problem+json document with the exact original header" do
+      memory = store
+      controller = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Respondable
+        include ConcernsOnRails::Controllers::Idempotentable
+
+        self.idempotency_store = memory
+        respondable_by error_format: :problem_details
+        idempotent_actions :create
+
+        def create = render_error(message: "nope", status: 422, code: "declined")
+      end
+
+      first, replay = replay_pair(controller)
+      expect(first.header("Content-Type")).to eq("application/problem+json")
+      expect(replay.header("X-Idempotency-Replayed")).to eq("true")
+      expect(replay.header("Content-Type")).to eq("application/problem+json")
+      expect(replay.body).to eq(first.body)
+    end
+
+    it "keeps an ordinary JSON response's charset on replay" do
+      memory = store
+      controller = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Idempotentable
+
+        self.idempotency_store = memory
+        idempotent_actions :create
+
+        def create = render(json: { ok: true }, status: :created)
+      end
+
+      first, replay = replay_pair(controller)
+      expect(replay.header("X-Idempotency-Replayed")).to eq("true")
+      expect(replay.header("Content-Type")).to eq(first.header("Content-Type"))
+      expect(replay.header("Content-Type")).to eq("application/json; charset=utf-8")
+    end
+  end
 end

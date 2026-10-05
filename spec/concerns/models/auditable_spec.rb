@@ -226,6 +226,34 @@ describe ConcernsOnRails::Auditable do
       p = AuditProduct.create!(price: 1)
       expect(p.audit_trail.first).not_to have_key("by")
     end
+
+    # The macro validates actor: with respond_to?(:call), but every Proc was
+    # instance_exec'd — so a `->(record)` lambda raised ArgumentError on
+    # every save. It is called with the record (Support::Callable).
+    it "calls a ->(record) actor lambda with the record" do
+      klass = Class.new(TestModel) do
+        self.table_name = "audit_products"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :price, actor: ->(record) { "editor-#{record.price}" }
+      end
+      rec = klass.create!(price: 1)
+      rec.update!(price: 2)
+
+      expect(rec.audit_trail.map { |entry| entry["by"] }).to eq(%w[editor-1 editor-2])
+    end
+
+    it "passes the record to a callable object whose #call takes it" do
+      actor = Class.new { def call(record) = "svc-#{record.name}" }.new
+      klass = Class.new(TestModel) do
+        self.table_name = "audit_products"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :price, actor: actor
+      end
+
+      expect(klass.create!(name: "bob", price: 1).audit_trail.first["by"]).to eq("svc-bob")
+    end
   end
 
   describe "#audit_trail" do
@@ -403,6 +431,114 @@ describe ConcernsOnRails::Auditable do
     end
   end
 
+  # JSON.parse on a native json column's value — already an Array, e.g. from
+  # `default: []` — raised TypeError, so every tracked save failed.
+  describe "a native json trail column" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :audit_docs, force: true do |t|
+          t.string :title
+          t.string :note
+          # MySQL rejects a literal DEFAULT on a JSON column.
+          if TestDatabase.mysql?
+            t.json :audit_log
+          else
+            t.json :audit_log, default: []
+          end
+        end
+      end
+    end
+
+    let(:klass) do
+      Class.new(TestModel) do
+        self.table_name = "audit_docs"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :title
+      end
+    end
+
+    def stored_trail(record)
+      raw = ActiveRecord::Base.connection.select_value(
+        "SELECT #{TestDatabase.quoted_column('audit_log')} FROM #{TestDatabase.quoted_table('audit_docs')} " \
+        "WHERE #{TestDatabase.quoted_column('id')} = #{record.id}"
+      )
+      raw.is_a?(String) ? JSON.parse(raw) : raw
+    end
+
+    it "records creates and updates on a column that already holds an Array" do
+      doc = klass.new(title: "a")
+      doc.audit_log = [] # what `default: []` hands a new record
+      doc.save!
+      doc.update!(title: "b")
+
+      expect(doc.reload.audit_trail.map { |entry| entry["to"] }).to eq(%w[a b])
+    end
+
+    # Assigning the JSON String to a json attribute stored a JSON *string*
+    # scalar holding the encoded trail, not the array itself.
+    it "stores the trail as a JSON array, not a double-encoded string" do
+      doc = klass.create!(title: "a")
+
+      expect(stored_trail(doc)).to match([hash_including("field" => "title", "to" => "a")])
+    end
+
+    # On a json column the decoded entries were the attribute value's own
+    # Hashes (a text column's come from JSON.parse, detached), so editing a
+    # returned entry was an in-place change the next save persisted.
+    it "does not let an edit of a returned entry rewrite the stored history" do
+      doc = klass.find(klass.create!(title: "a").id)
+
+      doc.audit_trail.first["to"] = "forged"
+      doc.last_change_for(:title)["from"] = "forged"
+      doc.update!(note: "untracked save")
+
+      stored = klass.find(doc.id).audit_trail.first
+      expect(stored.values_at("from", "to")).to eq([nil, "a"])
+    end
+
+    it "still reads (and extends) a trail stored double-encoded by an earlier version" do
+      doc = klass.create!(title: "a")
+      legacy = JSON.generate([{ "field" => "title", "from" => nil, "to" => "a", "at" => Time.now.utc.iso8601(6) }])
+      doc.update_column(:audit_log, legacy) # a String into a json column: stored as a JSON string scalar
+      doc = klass.find(doc.id)
+      expect(doc.audit_trail.map { |entry| entry["to"] }).to eq(%w[a])
+
+      doc.update!(title: "b")
+      upgraded = klass.find(doc.id)
+      expect(upgraded.audit_trail.map { |entry| entry["to"] }).to eq(%w[a b])
+      expect(upgraded.audit_log).to be_a(Array) # rewritten as a real array
+    end
+  end
+
+  # A host-`serialize`d text column is handed the Array (its coder encodes
+  # it), and a plain JSON string written there earlier still reads.
+  describe "a serialized (YAML) trail column" do
+    let(:klass) do
+      Class.new(TestModel) do
+        self.table_name = "audit_products"
+        if ActiveRecord.version >= Gem::Version.new("7.1")
+          serialize :audit_log, coder: YAML
+        else
+          serialize :audit_log
+        end
+        include ConcernsOnRails::Auditable
+
+        auditable_by :name
+      end
+    end
+
+    it "round-trips the trail and keeps reading a legacy JSON string row" do
+      record = klass.create!(name: "a")
+      record.update!(name: "b")
+      expect(record.reload.audit_trail.map { |entry| entry["to"] }).to eq(%w[a b])
+
+      record.update_column(:audit_log, JSON.generate([{ "field" => "name", "to" => "legacy" }]))
+      record.reload.update!(name: "c")
+      expect(record.reload.audit_trail.map { |entry| entry["to"] }).to eq(%w[legacy c])
+    end
+  end
+
   context "with non-finite float values" do
     before do
       ActiveRecord::Schema.define do
@@ -555,6 +691,58 @@ describe ConcernsOnRails::Auditable do
       expect { ConcernsOnRails.setup { |c| c.audit_actor = "nope" } }
         .to raise_error(ArgumentError, /audit_actor must be callable/)
       expect(ConcernsOnRails.config.audit_actor).to be_nil
+    end
+  end
+
+  describe "non-Proc actors with an optional/forwarding #call (called bare, as before Support::Callable)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :forwarding_actor_audits, force: true do |t|
+          t.integer :price
+          t.text :audit_log
+        end
+      end
+    end
+
+    after do
+      ConcernsOnRails.config.audit_actor = nil
+      ActiveRecord::Base.connection.drop_table(:forwarding_actor_audits)
+    end
+
+    # delegate generates `def user_id(...)`: Method#arity -1. Handing it the
+    # record raised ArgumentError on every audited save, app-wide.
+    it "calls a delegate-generated Method bare (gem-wide audit_actor)" do
+      holder = Module.new do
+        class << self
+          def user = Struct.new(:id).new(7)
+          delegate :id, to: :user, prefix: true
+        end
+      end
+      ConcernsOnRails.setup { |c| c.audit_actor = holder.method(:user_id) }
+      klass = Class.new(TestModel) do
+        self.table_name = "forwarding_actor_audits"
+        include ConcernsOnRails::Models::Auditable
+
+        auditable_by :price
+      end
+
+      record = klass.create!(price: 1)
+      expect(record.audit_trail.first["by"]).to eq(7)
+    end
+
+    it "calls a variadic callable object bare (model-level actor:)" do
+      forwarding = Class.new do
+        def call(...) = actor_id(...)
+        def actor_id = "svc"
+      end.new
+      klass = Class.new(TestModel) do
+        self.table_name = "forwarding_actor_audits"
+        include ConcernsOnRails::Models::Auditable
+
+        auditable_by :price, actor: forwarding
+      end
+
+      expect(klass.create!(price: 1).audit_trail.first["by"]).to eq("svc")
     end
   end
 end

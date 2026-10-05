@@ -111,6 +111,41 @@ describe ConcernsOnRails::Models::CounterCacheable do
     end
   end
 
+  # The macro accepts anything with #call, but `if:` was instance_exec'd —
+  # a TypeError on every save for a callable object, an ArgumentError for a
+  # `->(comment)` lambda. Support::Callable dispatches on arity instead.
+  describe "if: callables other than a zero-arity lambda" do
+    def counted_with(condition)
+      stub_const("CallableComment", Class.new(TestModel) do
+        self.table_name = "comments"
+        include ConcernsOnRails::CounterCacheable
+
+        belongs_to :post, optional: true
+        counter_cacheable_by :post, count: :approved_comments_count, if: condition
+      end)
+    end
+
+    {
+      "a callable object" => Class.new { def call(record) = record.approved? }.new,
+      "a one-arg lambda" => ->(record) { record.approved? }, # rubocop:disable Style/SymbolProc -- the lambda form is the point
+      "a symbol proc" => :approved?.to_proc
+    }.each do |label, condition|
+      it "counts, flips and recounts with #{label}" do
+        klass = counted_with(condition)
+        comment = klass.create!(post_id: post.id, approved: true)
+        klass.create!(post_id: post.id, approved: false)
+        expect(post.reload.approved_comments_count).to eq(1)
+
+        comment.update!(approved: false)
+        expect(post.reload.approved_comments_count).to eq(0)
+
+        Post.where(id: post.id).update_all(approved_comments_count: 7)
+        klass.recount_counter_caches!
+        expect(post.reload.approved_comments_count).to eq(0)
+      end
+    end
+  end
+
   describe "update — foreign-key reparent" do
     it "moves the counter from the old parent to the new parent" do
       comment = Comment.create!(post: post, approved: true)
@@ -286,6 +321,180 @@ describe ConcernsOnRails::Models::CounterCacheable do
           counter_cacheable_by :post, bogus: 1
         end
       end.to raise_error(ArgumentError, /unknown option/)
+    end
+  end
+
+  # A rule is keyed by (association, count column): re-declaring the same
+  # counter replaces it rather than appending a second rule that double-counts.
+  describe "re-declaring the same counter" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :replies, force: true do |t|
+          t.string :type
+          t.integer :post_id
+          t.boolean :approved, default: false
+        end
+      end
+    end
+
+    let(:reply_class) do
+      Class.new(TestModel) do
+        self.table_name = "replies"
+        include ConcernsOnRails::CounterCacheable
+
+        belongs_to :post, optional: true
+        counter_cacheable_by :post, count: :comments_count
+      end
+    end
+
+    it "lets an STI subclass narrow an inherited counter without double-counting" do
+      stub_const("Reply", reply_class)
+      stub_const("ModeratedReply", Class.new(reply_class) do
+        counter_cacheable_by :post, count: :comments_count, if: -> { approved? }
+      end)
+
+      ModeratedReply.create!(post: post, approved: true)
+      ModeratedReply.create!(post: post, approved: false)
+      Reply.create!(post: post)
+
+      expect(post.reload.comments_count).to eq(2)
+      expect(ModeratedReply.counter_cacheable_rules.size).to eq(1)
+      expect(Reply.counter_cacheable_rules.first[:condition]).to be_nil # parent untouched
+    end
+
+    context "when recounting an STI-narrowed counter" do
+      before do
+        stub_const("Reply", reply_class)
+        stub_const("ModeratedReply", Class.new(reply_class) do
+          counter_cacheable_by :post, count: :comments_count, if: -> { approved? }
+        end)
+      end
+
+      it "agrees with the live count when called on the parent class" do
+        Reply.create!(post: post)
+        ModeratedReply.create!(post: post, approved: false) # not counted by its own rule
+        expect(post.reload.comments_count).to eq(1)
+
+        Reply.recount_counter_caches!
+        expect(post.reload.comments_count).to eq(1)
+      end
+
+      it "keeps the parent class's rows when called on the subclass" do
+        Reply.create!(post: post)
+        ModeratedReply.create!(post: post, approved: true)
+        expect(post.reload.comments_count).to eq(2)
+
+        ModeratedReply.recount_counter_caches!
+        expect(post.reload.comments_count).to eq(2)
+      end
+
+      it "repairs drift the same way, with parents:, from either class" do
+        Reply.create!(post: post)
+        ModeratedReply.create!(post: post, approved: true)
+        ModeratedReply.create!(post: post, approved: false)
+        Post.where(id: post.id).update_all(comments_count: 99)
+
+        expect(ModeratedReply.recount_counter_caches!(parents: [post])).to eq(comments_count: 1)
+        expect(post.reload.comments_count).to eq(2)
+        Post.where(id: post.id).update_all(comments_count: 0)
+        Reply.recount_counter_caches!(parents: [post])
+        expect(post.reload.comments_count).to eq(2)
+      end
+    end
+
+    # The per-type tally resolves each stored type to its class WITHOUT
+    # building a record: `instantiate(type => ...)` ran after_find /
+    # after_initialize on a fabricated type-only row, and raised
+    # SubclassNotFound for a type that no longer resolves — where the
+    # unconditional tally had always been pure SQL.
+    context "when resolving each stored type during a recount" do
+      it "never runs after_initialize on a fabricated row (an unguarded hook raised MissingAttributeError)" do
+        stub_const("Reply", reply_class)
+        Reply.after_initialize { self.approved = false if approved.nil? }
+        stub_const("ThreadReply", Class.new(reply_class))
+        Reply.create!(post: post)
+        ThreadReply.create!(post: post)
+        Post.where(id: post.id).update_all(comments_count: 0)
+
+        expect { Reply.recount_counter_caches! }.not_to raise_error
+        expect(post.reload.comments_count).to eq(2)
+      end
+
+      it "fires no after_find for an unconditional counter (a grouped count, as before)" do
+        found = []
+        stub_const("Reply", reply_class)
+        Reply.after_find { found << id }
+        Reply.create!(post: post)
+
+        Reply.recount_counter_caches!
+        expect(found).to eq([])
+      end
+
+      it "counts a row whose stored type no longer resolves under the base class's rule" do
+        stub_const("Reply", reply_class)
+        Reply.create!(post: post)
+        Reply.connection.execute(
+          "INSERT INTO replies (#{TestDatabase.quoted_column(:type)}, #{TestDatabase.quoted_column(:post_id)}) " \
+          "VALUES ('RemovedLegacyReply', #{post.id})"
+        )
+
+        expect { Reply.recount_counter_caches! }.not_to raise_error
+        expect(post.reload.comments_count).to eq(2)
+      end
+
+      it "resolves short, namespaced types (store_full_sti_class = false)" do
+        stub_const("Forum", Module.new)
+        stub_const("Forum::Reply", Class.new(TestModel) do
+          self.table_name = "replies"
+          self.store_full_sti_class = false
+          include ConcernsOnRails::CounterCacheable
+
+          belongs_to :post, optional: true, class_name: "Post"
+          counter_cacheable_by :post, count: :comments_count
+        end)
+        stub_const("Forum::ModeratedReply", Class.new(Forum::Reply) do
+          counter_cacheable_by :post, count: :comments_count, if: -> { approved? }
+        end)
+        Forum::Reply.create!(post: post)
+        Forum::ModeratedReply.create!(post: post, approved: false)
+        expect(Forum::Reply.unscoped.distinct.pluck(:type)).to contain_exactly(nil, "ModeratedReply")
+        Post.where(id: post.id).update_all(comments_count: 0)
+
+        Forum::Reply.recount_counter_caches!
+        expect(post.reload.comments_count).to eq(1)
+      end
+
+      it "scans such rows as the base class when the base rule is conditional" do
+        stub_const("Reply", Class.new(TestModel) do
+          self.table_name = "replies"
+          include ConcernsOnRails::CounterCacheable
+
+          belongs_to :post, optional: true
+          counter_cacheable_by :post, count: :comments_count, if: -> { approved? }
+        end)
+        Reply.create!(post: post, approved: true)
+        Reply.connection.execute(
+          "INSERT INTO replies (#{TestDatabase.quoted_column(:type)}, #{TestDatabase.quoted_column(:post_id)}, " \
+          "#{TestDatabase.quoted_column(:approved)}) VALUES ('RemovedLegacyReply', #{post.id}, " \
+          "#{Reply.connection.quoted_true}), ('RemovedLegacyReply', #{post.id}, #{Reply.connection.quoted_false})"
+        )
+
+        expect { Reply.recount_counter_caches! }.not_to raise_error
+        expect(post.reload.comments_count).to eq(2)
+      end
+    end
+
+    it "replaces the earlier rule, in place, when the same class re-declares it" do
+      stub_const("Reply", reply_class) # the `type` column needs a named class
+      reply_class.counter_cacheable_by :post, count: :approved_comments_count, if: -> { approved? }
+      reply_class.counter_cacheable_by :post, count: :comments_count, touch: true
+
+      rules = reply_class.counter_cacheable_rules
+      expect(rules.map { |rule| rule[:count_column] }).to eq(%i[comments_count approved_comments_count])
+      expect(rules.first[:touch]).to be(true)
+
+      reply_class.create!(post: post)
+      expect(reload_counts(post)).to eq([1, 0])
     end
   end
 

@@ -41,7 +41,7 @@ describe ConcernsOnRails::Support::HookedWrite do
   end
 
   def run(item, **options, &write)
-    described_class.run(item, before: :before_write, after: :after_write, restore: [:state], **options, &write)
+    described_class.run(item, before: :before_write, after: :after_write, **options, &write)
   end
 
   let(:item) { HookedItem.create!(state: "old") }
@@ -77,6 +77,45 @@ describe ConcernsOnRails::Support::HookedWrite do
       end
 
       expect(HookedItem.pluck(:state, :note)).to eq([%w[old edited]])
+    end
+
+    # When the caller's transaction then rolls back, the record it created
+    # must be new again (its row is gone), so a later save INSERTs it.
+    it "is a new record again once the caller's transaction rolls back" do
+      if ActiveRecord.gem_version < Gem::Version.new("6.1")
+        # Known and pre-existing on Rails 6.0 only, deliberately not fixed:
+        # 6.0's savepoint rollback consumes the record's remembered
+        # transaction state (and HookedWrite then puts the persisted identity
+        # back), so the outer rollback has no state left to reset from and
+        # new_record? stays false — the next save UPDATEs a row that is gone.
+        pending "Rails 6.0: an outer rollback after a vetoed write leaves new_record? false"
+      end
+      HookedItem.after_action = :rollback
+      fresh = nil
+      ActiveRecord::Base.transaction do
+        fresh = HookedItem.create!(state: "old")
+        expect(run(fresh) { fresh.update(state: "new") }).to be(false)
+        raise ActiveRecord::Rollback
+      end
+
+      expect(HookedItem.count).to eq(0)
+      expect(fresh.new_record?).to be(true)
+      fresh.save!
+      expect(HookedItem.count).to eq(1)
+    end
+
+    it "keeps a persisted record's rolled-back edit dirty after the caller's rollback" do
+      record = HookedItem.create!(state: "old")
+      HookedItem.after_action = :rollback
+      ActiveRecord::Base.transaction do
+        record.update!(note: "inside")
+        expect(run(record) { record.update(state: "new") }).to be(false)
+        raise ActiveRecord::Rollback
+      end
+
+      expect(HookedItem.find(record.id).note).to be_nil
+      record.save!
+      expect(HookedItem.find(record.id).attributes.slice("state", "note")).to eq("state" => "old", "note" => "inside")
     end
   end
 
@@ -136,7 +175,174 @@ describe ConcernsOnRails::Support::HookedWrite do
     expect(item.state_changed?).to be(true)
   end
 
-  # The restore: snapshot used to read every attribute through its type, which
+  # Only the verb's own column used to be put back: anything else the write
+  # changed in memory (a before_save callback's column, a hook's assignment)
+  # stayed behind — marked saved, since `update` applied the changes — so the
+  # record reported state the database never held.
+  it "restores every attribute the write changed, and the last save's changes" do
+    HookedItem.after_action = :rollback
+    record = HookedItem.find(item.id)
+
+    expect(run(record) { record.update(state: "new", note: "side effect") }).to be(false)
+
+    expect(record.attributes.slice("state", "note")).to eq("state" => "old", "note" => nil)
+    expect(record.changed?).to be(false)
+    expect(record.saved_changes).to be_empty
+  end
+
+  it "keeps an unrelated unsaved edit dirty across the abort" do
+    HookedItem.after_action = :rollback
+    item.note = "draft note"
+
+    run(item) { item.update(state: "new") }
+
+    expect(item.note).to eq("draft note")
+    expect(item.changed).to eq(%w[note])
+    expect(item.reload.note).to be_nil
+  end
+
+  # Forced changes live in the dirty tracker, not the attribute set, so
+  # rebuilding the tracker after the restore dropped them.
+  it "keeps a forced change (attribute_will_change!) across the abort" do
+    HookedItem.after_action = :rollback
+    item.note_will_change!
+
+    run(item) { item.update_column(:state, "new") }
+
+    expect(item.changed).to include("note")
+  end
+
+  describe "hooks that touch more than columns" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :hooked_posts, force: true do |t|
+          t.string :title
+          t.json :settings
+          t.integer :hooked_item_id
+        end
+      end
+      stub_const("HookedPost", Class.new(TestModel) do
+        self.table_name = "hooked_posts"
+        belongs_to :hooked_item, optional: true
+
+        attr_accessor :hook
+
+        def before_write
+          hook&.call(self)
+          raise ActiveRecord::Rollback
+        end
+      end)
+    end
+
+    it "undoes a vetoed hook's nested in-place mutation of a json value" do
+      post = HookedPost.create!(title: "t", settings: { "a" => { "b" => "orig" } })
+      post.hook = ->(record) { record.settings["a"]["b"] = "vetoed" }
+
+      expect(described_class.run(post, before: :before_write) { true }).to be(false)
+      expect(post.settings["a"]["b"]).to eq("orig")
+    end
+
+    # deep_dup copies an already-read value only one level deep: a json Hash
+    # read BEFORE the write shared its nested Hashes with the snapshot, so the
+    # vetoed mutation survived the restore and the next save persisted it.
+    it "undoes a nested mutation of a json value read before the write" do
+      post = HookedPost.find(HookedPost.create!(title: "t", settings: { "a" => { "b" => "orig" } }).id)
+      expect(post.settings["a"]["b"]).to eq("orig")
+      post.hook = ->(record) { record.settings["a"]["b"] = "vetoed" }
+
+      expect(described_class.run(post, before: :before_write) { true }).to be(false)
+
+      expect(post.settings["a"]["b"]).to eq("orig")
+      expect(post.changed?).to be(false)
+      post.update!(title: "unrelated")
+      expect(HookedPost.find(post.id).settings["a"]["b"]).to eq("orig")
+    end
+
+    it "keeps an unsaved nested edit made before the write" do
+      post = HookedPost.find(HookedPost.create!(title: "t", settings: { "a" => { "b" => "orig" } }).id)
+      post.settings["a"]["b"] = "edited"
+      post.hook = ->(record) { record.settings["a"]["b"] = "vetoed" }
+
+      described_class.run(post, before: :before_write) { true }
+
+      expect(post.settings["a"]["b"]).to eq("edited")
+      expect(post.changed).to eq(%w[settings])
+    end
+
+    it "puts the foreign key back when a vetoed hook reassigns a belongs_to" do
+      first = HookedItem.create!(state: "a")
+      post = HookedPost.create!(title: "t", hooked_item: first)
+      post.hook = ->(record) { record.hooked_item = HookedItem.create!(state: "b") }
+
+      described_class.run(post, before: :before_write) { true }
+
+      expect([post.hooked_item_id, post.hooked_item.id]).to eq([first.id, first.id])
+    end
+  end
+
+  # Encryptable + Storable + Auditable on the model whose Publishable write is
+  # vetoed: Auditable's before_save appends to the trail during the aborted
+  # `update`. (Rails' own savepoint rollback reads the record's attributes —
+  # so the snapshot's never-decrypt guarantee is pinned by the update_columns
+  # examples below, not here.)
+  describe "a vetoed publish on a model with Encryptable, Storable and Auditable" do
+    before do
+      ConcernsOnRails.encryption.key = "hooked-write-combined-key"
+      ActiveRecord::Schema.define do
+        create_table :layered_items, force: true do |t|
+          t.string :title
+          t.text :ssn
+          t.text :settings
+          t.text :audit_log
+          t.datetime :published_at
+        end
+      end
+      stub_const("LayeredItem", Class.new(TestModel) do
+        self.table_name = "layered_items"
+        include ConcernsOnRails::Models::Encryptable
+        include ConcernsOnRails::Models::Storable
+        include ConcernsOnRails::Models::Auditable
+        include ConcernsOnRails::Models::Publishable
+
+        encryptable :ssn
+        storable_by :settings, theme: { type: :string, default: "light" }
+        auditable_by :published_at, :title, into: :audit_log
+        publishable_by :published_at
+
+        cattr_accessor :veto
+
+        def after_publish
+          raise ActiveRecord::Rollback if self.class.veto
+        end
+      end)
+    end
+
+    after { ConcernsOnRails.encryption.key = nil }
+
+    it "puts every layer back, and a later save persists no phantom entry" do
+      id = LayeredItem.create!(title: "a", ssn: "123-45-6789").id
+      record = LayeredItem.find(id)
+      trail = record.read_attribute_before_type_cast(:audit_log)
+      record.theme = "dark" # an unsaved Storable edit
+      LayeredItem.veto = true
+
+      expect(record.publish!).to be(false)
+
+      expect(record.published_at).to be_nil
+      expect(record.read_attribute_before_type_cast(:audit_log)).to eq(trail)
+      expect(record.theme).to eq("dark")
+      expect(record.changed).to eq(%w[settings])
+
+      LayeredItem.veto = false
+      record.save!
+      fresh = LayeredItem.find(id)
+      expect(fresh.audit_trail.map { |entry| entry["field"] }).to eq(%w[title])
+      expect(fresh.theme).to eq("dark")
+      expect(fresh.ssn).to eq("123-45-6789")
+    end
+  end
+
+  # The snapshot used to read every attribute through its type, which
   # decrypts an Encryptable field — so a row whose ciphertext no longer
   # decrypts (rotated-away key) could not be written at all, not even erased
   # by Anonymizable. The snapshot must never abort the write.
@@ -185,7 +391,7 @@ describe ConcernsOnRails::Support::HookedWrite do
       record = unread_record
       expect(ConcernsOnRails::Support::Encryptor).not_to receive(:decrypt)
 
-      result = described_class.run(record, after: :after_write, restore: [:ssn]) do
+      result = described_class.run(record, after: :after_write) do
         record.update_columns(ssn: nil, note: "erased")
       end
 
@@ -198,7 +404,7 @@ describe ConcernsOnRails::Support::HookedWrite do
       SealedItem.veto = true
       expect(ConcernsOnRails::Support::Encryptor).not_to receive(:decrypt)
 
-      result = described_class.run(record, after: :after_write, restore: [:ssn]) do
+      result = described_class.run(record, after: :after_write) do
         record.update_columns(ssn: nil, note: "erased")
       end
 
@@ -212,7 +418,7 @@ describe ConcernsOnRails::Support::HookedWrite do
       expect(record.ssn).to eq("123-45-6789")
       SealedItem.veto = true
 
-      described_class.run(record, after: :after_write, restore: [:ssn]) do
+      described_class.run(record, after: :after_write) do
         record.update_columns(ssn: nil, note: "erased")
       end
 
@@ -224,7 +430,7 @@ describe ConcernsOnRails::Support::HookedWrite do
     it "does not raise when the write succeeds" do
       record = undecryptable_record
 
-      result = described_class.run(record, after: :after_write, restore: [:ssn]) do
+      result = described_class.run(record, after: :after_write) do
         record.update_columns(ssn: nil, note: "erased")
       end
 
@@ -237,7 +443,7 @@ describe ConcernsOnRails::Support::HookedWrite do
       raw = record.read_attribute_before_type_cast(:ssn)
       SealedItem.veto = true
 
-      result = described_class.run(record, after: :after_write, restore: [:ssn]) do
+      result = described_class.run(record, after: :after_write) do
         record.update_columns(ssn: nil, note: "erased")
       end
 
@@ -250,7 +456,7 @@ describe ConcernsOnRails::Support::HookedWrite do
   end
 
   it "skips a hook passed as nil" do
-    expect(described_class.run(item, restore: [:state]) { item.update(state: "new") }).to be(true)
+    expect(described_class.run(item) { item.update(state: "new") }).to be(true)
     expect(item.log).to be_nil
   end
 end
