@@ -191,6 +191,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   Storable casters; keys from `ConcernsOnRails.configure_encryption` / per-field
   `key:` (PBKDF2, lazy Proc), missing key raises at first use. `<field>_ciphertext`
   / `<field>_encrypted?` readers; wrong-key/tamper/malformed → `DecryptionError`.
+  A `:datetime` field reports `type :datetime`, so ActiveRecord's own TimeZoneConverter wraps it
+  exactly as `attribute :x, :datetime` (never re-declare per subclass: that drops `normalizes`);
+  Rails 7.2+ decides that at declaration, so a late/subclass skip list raises when
+  `_default_attributes` is built (skipped during `load_schema!` and `encryptable`).
   Normalizes-before-encrypt and masks-decrypted for free; RAISES if a field is
   also `auditable_by` (either declaration order), or a friendly_id slug source — the
   `sluggable_by` field, a `candidates:` entry, an `alias_attribute` of one (chains followed),
@@ -223,7 +227,11 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `recount_counter_caches!` drift repair (transactional, one UPDATE per
   distinct tally value). Destroy decrements only when the DELETE removed a row, reads the
   persisted FK/`if:` values, honours `belongs_to primary_key:`, and (like Rails) skips the
-  decrement when a `has_many … dependent: :destroy` is removing the child.
+  decrement when a `has_many … dependent: :destroy` is removing the child. With `lock_version`
+  on the parent, the loaded parent gets the delta + bump mirrored in memory; a rollback takes it
+  back via `MirrorUndo`, its OWN transaction record (WeakRef to the parent, one per
+  (transaction, parent), follows a savepoint released into a `joinable: false` parent; a column
+  moves back while clean OR equal to the mirrors' ledger value; Marshal-safe `OpenList` holder).
 - **`Anonymizable`** — declarative right-to-erasure ("GDPR-lite").
   `anonymizable *fields, with:` (presets :nullify/:redact/:hash/:email/
   :random_hex or callable; repeatable, rules merge; `stamp:` default
@@ -371,7 +379,10 @@ Tokenizable, Hashable, Sequenceable — report the columns they changed from the
 consumers' hooks run in a FIXED order — Sluggable's slug, Encryptable's blind index, Auditable's
 creation entry — so none depends on include order), `EncryptedLookup` (equality on a maybe-
 `encryptable` column: the blind index, or nil when there is none — Tokenizable's finders raise on
-nil, the uniqueness prechecks skip), `SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
+nil, the uniqueness prechecks skip), `TimeValue` (verb time arguments via `cast_argument!` — a
+String must read as Time.zone.parse will: 4-digit year, no yday, date words or a resolved zone —
+plus virtual-datetime cast/read, a non-mutating `utc`, and the portable 0001..9999 range for
+Filterable/CursorPaginatable), `SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
 allow-list trees + the includes/paths/as_json shapes for Includable), `Affix` (affixed
 scope/accessor-name computation + `prefix: true` normalization, shared by Activatable,
 Expirable, Lockable, Anonymizable, Stateable, Storable, Publishable, SoftDeletable and

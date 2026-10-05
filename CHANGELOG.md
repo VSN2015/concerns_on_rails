@@ -1,13 +1,16 @@
 <!-- CHANGELOG.md -->
 
-## 1.31.0 (2026-09-28)
+## 1.31.0 (2026-10-05)
 
-The fixes from the 2026-09-25 audit of 1.30.0 (#116–#120), each put through three adversarial
-review rounds before release, plus a dependency refresh (#121). It is a minor release because
-Sequenceable gains an option and a reader, and several fixes change observable behaviour or
-raise where the gem used to silently misbehave. Read **Changed** before upgrading. No new
-concerns and no migrations. Every fix ships with a regression spec that fails on 1.30.0. 2483
-examples, 0 failures (2457 on Rails 6.0), green on PostgreSQL and MySQL.
+The fixes from two audits, each fix put through adversarial review rounds until a reviewer
+signed it off: the 2026-09-25 audit of 1.30.0 (#116–#120) and the 2026-09-30 audit of this
+release's own candidate (#123–#125: values generated in `before_create`, optimistic locking
+around the gem's raw writes, and time values), plus dependency refreshes (#121, #126). It is a
+minor release because Sequenceable gains an option and a reader, and several fixes change
+observable behaviour or raise where the gem used to silently misbehave. Read **Changed** before
+upgrading: blind indexes of generated encrypted values, and of `:datetime` fields, want a
+one-off backfill. No new concerns and no migrations. Every fix ships with a regression spec.
+2723 examples, 0 failures (2694 on Rails 6.0), green on PostgreSQL and MySQL.
 
 ### Changed
 - **Sequenceable: `reset:` periods are cut in one fixed zone**, not the per-request
@@ -93,6 +96,84 @@ examples, 0 failures (2457 on Rails 6.0), green on PostgreSQL and MySQL.
   resolving each stored type without building a record (an unknown type counts under the base
   rule instead of raising). (#120)
 
+- **Upgrading (Encryptable + Tokenizable/Hashable/Sequenceable):** rows created before this
+  release with a generated, blind-indexed encrypted value (a token, code or number) were stored
+  with a **NULL** blind index. They stay unfindable by `find_by_<field>` / `where_<field>` /
+  `authenticate_by_<field>` / `consume_<field>` until backfilled. `reencrypt_all!` does not
+  reach them, because they are already under the current key. Run once per field:
+  `Model.unscoped.where(<field>_bidx: nil).where.not(<field>: nil).find_each { |r|
+  r.update_columns(<field>_bidx: Model.<field>_fingerprint(r.<field>)) }` (no callbacks, any
+  key). See `docs/concerns/encryptable.md#upgrading-blind-indexes-of-generated-values`. (#123)
+- **Searchable:** `searchable_by` over an `encryptable` column (or `encryptable` over a searched
+  one) raises `ArgumentError` at declaration. Before, `search` ran `LIKE` against ciphertext and
+  silently returned nothing. (#123)
+- **Taggable:** `taggable_by` over an `encryptable` column (or `encryptable` over the tag
+  column) raises `ArgumentError` at declaration. A model that includes Taggable without
+  `taggable_by` and encrypts its default `:tags` is refused when `tagged_with` is called. New
+  `taggable_declared` class attribute. (#123)
+- **Tokenizable:** on an `encryptable :<field>, blind_index: true` token,
+  `authenticate_by_<field>` / `consume_<field>` look the token up through the blind index (still
+  `secure_compare`d), and `consume_<field>` clears the index along with the token. Encrypted
+  without a blind index, they raise `ArgumentError` when called; before, they returned `nil` for
+  every token. Generating, storing and rotating an encrypted token work as before. (#123)
+- **Anonymizable:** with `lock_version`, `anonymize!` / `anonymize_all!` write their single
+  UPDATE through `update_all`, bumping `lock_version` in SQL (the row's value + 1). An edit form
+  loaded before the erasure now raises `StaleObjectError` instead of writing the personal data
+  back. A stale anonymizing instance now erases; on Rails 7.0+ its constrained `update_columns`
+  used to erase nothing while returning `true`. `update_columns`' refusals (destroyed,
+  `readonly!`, `attr_readonly`) are kept. (#124)
+- **Expirable:** `extend_expiry!` extends the **stored** expiry, read under a row lock, so
+  concurrent extensions compound (two `+30.days` renewals give +60, not +30). An expiry assigned
+  but not yet saved, and a new record, still extend from the instance's value. With optimistic
+  locking, a stale instance raises `StaleObjectError` rather than losing a renewal. (#124)
+- **Encryptable:** `type: :datetime` behaves like a datetime column on the same model. Under
+  `time_zone_aware_attributes`, a zone-less String (a `datetime-local` form value) and a
+  `datetime_select` value are wall-clock time in `Time.zone`, a `Date` is midnight there, and
+  the field reads back as an `ActiveSupport::TimeWithZone`. Otherwise it follows
+  `ActiveRecord.default_timezone`. It is exactly the handling Rails gives `attribute :name,
+  :datetime` (ActiveRecord wraps the type in its own `TimeZoneConverter`), so `normalizes` and a
+  parent's re-declaration are inherited by subclasses.
+  `skip_time_zone_conversion_for_attributes` (Symbols) is honored when set before the
+  `encryptable` line; on Rails 6.0–7.1 wherever it is set. From Rails 7.2, where Rails decides
+  at declaration, a skip list set later or on a subclass raises `ArgumentError` when the model
+  is first used, unless the field is re-declared right after it. The plaintext stays UTC
+  ISO8601, so existing rows read as the same instant. A stored plaintext without `Z` or an
+  offset is read in `default_timezone`, never the server's zone. (#125)
+- **Encryptable:** a blind index fingerprints the field's canonical plaintext (the value cast
+  through its `type:`, a `:datetime` as UTC ISO8601) on write and on lookup. `find_by_<field>` /
+  `where_<field>` on a `:datetime` field find the record by any rendering of the instant,
+  whatever `Time.zone` the writer, the reader or `reencrypt!` ran in, and a String finds a typed
+  field (`find_by_age("042")`). `expression:` receives the cast value (a `:datetime` as a UTC
+  `Time`). Lookups also try the digest the index used before, so existing rows stay findable by
+  the lookup that found them. `:datetime` fields should be reindexed once (recipe in
+  `docs/concerns/encryptable.md#blind-index-of-a-typed-field`, which skips rows it cannot
+  decrypt); every other type's digest is unchanged. A non-numeric String on an `:integer` field
+  finds nothing, as an integer column's `where`, and a value that does not cast
+  (`Float::INFINITY`) is stored as `NULL` with no digest. (#125)
+- **Storable:** `:datetime` keys behave like a datetime column on the same model, with the same
+  `Time.zone` / `default_timezone` rules as Encryptable. The reader returns an
+  `ActiveSupport::TimeWithZone` under `time_zone_aware_attributes`, `where_<key>` parses its
+  argument the same way as the writer, a `datetime_select` value is wall-clock time in
+  `Time.zone`, and a `default:` (a String, a `Time` or a Proc) reads back as the same value
+  stored would. List the accessor in `skip_time_zone_conversion_for_attributes` to opt a key
+  out. The stored UTC ISO8601 form is unchanged. (#125)
+- **Publishable / SoftDeletable / Schedulable / Expirable:** `publish_at!`, `soft_delete!(at:)`,
+  `start!`, `finish!`, `reschedule!`, `expire!` and `expire_all` raise `ArgumentError` before
+  any hook runs when given a value that is not a time: a String must read as a date the way
+  `Time.zone.parse` will read it: a four-digit year, no ordinal day, every part in range, years
+  0001–9999, and only date words or a time zone (ISO 8601, RFC 2822 with its comments, HTTP
+  dates, JavaScript `Date#toString`, Go and RFC 9557 forms, `"Oct 1 2026"`, `"2026-10-01 10:30
+  EST"` and `"10:30 p.m."` all pass; `"junk"`, `"Monday"`, `"10:30"`, `"junk 2026"`, `"Oct 1
+  26"`, `"15th of October 2026"` and `"7:30p"` do not, although `Time.zone.parse` reads them as
+  June 1st, today, year 26 AD, October 1st or military zone P), and `42` or `1.hour` never cast.
+  The first five used to write `NULL` and still return `true`; Expirable accepted the yearless
+  words in time-zone-aware apps. Column assignment is unchanged. The check is the shared
+  `Support::TimeValue.cast_argument!`. (#125)
+- **SoftDeletable:** `soft_delete!(at: nil)` or a blank `at:` means now, as for `expire!`.
+  `soft_delete!(at: params[:at])` with the param absent used to write `NULL`, fire the hooks and
+  return `true` with nothing deleted. `publish_at!(nil)` (and blank) still writes `NULL` and
+  fires the publish hooks. (#125)
+
 ### Added
 - **Sequenceable**: `time_zone:` (a zone name as a String or Symbol, or an
   `ActiveSupport::TimeZone`; an unknown zone raises at class load) and
@@ -166,16 +247,110 @@ examples, 0 failures (2457 on Rails 6.0), green on PostgreSQL and MySQL.
 - **Searchable**: `mode: :any` strips surrounding whitespace from the query. **Storable**:
   every non-Proc `default:` is deep-duped per read. (#120)
 
+- **Encryptable:** a blind-indexed value that Tokenizable, Hashable or Sequenceable generates in
+  `before_create` is now fingerprinted when it is generated. Before, the row was stored with a
+  NULL blind index, so `find_by_<field>` never found a freshly created record. Works in either
+  include or declaration order. (#123)
+- **Sluggable:** a slug whose source is filled in `before_create` (Sequenceable's `into:`
+  number, a Hashable code) is now built in the same `INSERT`, not left `nil` until a later save.
+  friendly_id's rules still apply: an explicit slug is kept, a conflict gets the uuid suffix,
+  and `candidates:` are honored. The late slug is built after every
+  `before_validation`/`before_save`, so it gets what those would have done: a reserved word gets
+  the uuid suffix, and the slug column's own write-mode Sanitizable and Normalizable rules are
+  applied (`normalizable :slug, with: ->(v) { v.tr("-", "_") }` → `"inv_1"`). (#123)
+- **Sluggable:** a slug built earlier in the same save from a source that a later
+  `before_validation` then transformed (Sanitizable `on: :write`, Normalizable, your own
+  callback, included after Sluggable) is rebuilt from the final value at the start of
+  validation. Before, `"<b>Hello</b>"` got the slug `"b-hello-b"`. The rebuild runs before every
+  validator (`reserved_words:` included) and every sibling `before_save`, and never touches an
+  explicitly assigned slug. (#123)
+- **Auditable:** the creation entry now includes a tracked column generated in `before_create`
+  (a Sequenceable number, a Tokenizable/Hashable value, or a slug built from one), whatever the
+  include order. (#123)
+- **Hashable:** the report of a generated code to its siblings is a separate `before_create
+  :hashable_report_generated_value`, right after the unchanged `before_create
+  :assign_hashable_value`. Calling `assign_hashable_value` yourself, outside a save, only
+  assigns the value. (#123)
+- **Tokenizable / Hashable:** the uniqueness precheck on an encrypted field goes through the
+  blind index. It used to compare against ciphertext and could never detect a collision. (#123)
+- **Lockable:** with optimistic locking (`lock_version`), the raw writes —
+  `register_failed_attempt!`'s increment, the `lock_access!` claim, the quiet lapsed-lock reset,
+  and `unlock_by_token`'s token claim — bump `lock_version` in SQL, and the bump is now mirrored
+  into the instance exactly as Rails' `increment!` does. The same instance, and the record
+  `unlock_by_token` returns, save afterwards instead of raising `StaleObjectError`. On Rails
+  7.0+ this also fixes `unlock_by_token` leaving the account locked: the stale instance's
+  `update_columns` matched no row while the call reported success. A hook that aborts takes the
+  in-memory bump back. (#124)
+- **CounterCacheable:** with `lock_version` on the parent, the parent instance the child's
+  association holds (`post.comments.create!`'s `post`, the one passed as `post:`, the old parent
+  a foreign-key reassignment left loaded, the parent on destroy) gets the counter delta and the
+  `lock_version` bump mirrored in memory — the in-memory half of native `counter_cache`'s
+  `increment!`. `post.comments.create!(...); post.update!(...)` no longer raises
+  `StaleObjectError`. A counter you assigned and haven't saved is left exactly as assigned,
+  still pending (native `increment!` would add the delta to it), while `lock_version` is still
+  bumped. When the child's save is rolled back — your `ActiveRecord::Rollback`, a later callback
+  raising, a Stateable/HookedWrite hook vetoing, a rolled-back savepoint, a rolled-back
+  `transaction(joinable: false)` — the mirror is taken back off the parent instance, so it stays
+  saveable (native `counter_cache` leaves it stale). Only the adjustments that were actually
+  rolled back are undone, and a counter or `lock_version` you assigned after the mirror is left
+  as you assigned it. The undo holds the parent only weakly, once per parent and transaction, so
+  long batches keep nothing in memory, and the parent stays `Marshal`-dumpable. An
+  `attr_readonly` counter is not mirrored. Known limit: a parent destroyed later in the same
+  rolled-back transaction keeps its mirror (reload it). Without `lock_version`, nothing changes.
+  (#124)
+- **Encryptable:** `reencrypt!` / `reencrypt_all!` no longer bump `lock_version`, since the
+  column is pinned to itself in the rotation UPDATE. A key rotation changes no value, so records
+  open in edit forms during the sweep no longer turn into `StaleObjectError`s. The ciphertext
+  guard is unchanged. (#124)
+- **Stateable:** `lock: true` works on records with unsaved changes (`ticket.note = "fixed";
+  ticket.resolve!` saves the note with the state, as `lock: false` does); `with_lock`'s reload
+  used to raise "Locking a record with unpersisted changes is not supported". For such a record
+  only the state column is read (`SELECT <state> ... FOR UPDATE`) and adopted, and the guard
+  decides from it (a disallowed event raises `InvalidTransition`). On a model with optimistic
+  locking, a record with unsaved changes whose row has changed since it was loaded raises
+  `StaleObjectError`: its changes were made against a stale copy. A deleted row raises
+  `RecordNotFound`. A record without unsaved changes is still reloaded under the lock, exactly
+  as before. (#124)
+- **Activatable:** `toggle_active!` works on records with unsaved changes. It used `with_lock`
+  too, and raised the same "unpersisted changes" error. Such a record now has only its flag read
+  under the lock; it flips the row's value, and its changes save with the flip. A record without
+  unsaved changes is still reloaded under the lock. (#124)
+- **Encryptable:** `type: :datetime` stores a frozen or non-UTC `Time` correctly and never
+  modifies it. `Time#utc` converted the caller's value in place, and a frozen `Time` was
+  silently saved as `NULL`. (#125)
+- **Auditable:** recording a tracked datetime no longer converts the record's (the caller's)
+  `Time` to UTC in place, and a frozen `Time` no longer makes the save raise `FrozenError`.
+  (#125)
+- **CursorPaginatable:** minting a cursor no longer converts the page-boundary record's
+  timestamp to UTC in place. (#125)
+- **CursorPaginatable:** a cursor carrying a timestamp outside years 0001..9999 is an
+  `InvalidCursor` (400). It used to reach the WHERE clause and raise `DatetimeFieldOverflow` on
+  PostgreSQL (a 500), and SQLite compared it as text. (#125)
+- **Filterable:** date/time comparison operands outside `0001-01-01`..`9999-12-31` (the portable
+  SQL range) never reach the database. They are answered per operator, like out-of-range
+  numbers: `?happened_at_lt=300000-01-01` is every non-NULL row, `_gt` none, and in equality /
+  `in` / `not` / `not_in` such a value equals nothing. They used to raise
+  `DatetimeFieldOverflow` on PostgreSQL (a 500), and SQLite answered year-10000 comparisons
+  backwards. (#125)
+
 ### Internal
 - New support modules: `Support::Callable`, `Support::SlugSources`,
   `Support::AssociationScope`; gem-level singletons moved to `lib/concerns_on_rails/core.rb`. A
   real-Rails-app subprocess spec covers filter wiring for direct requires.
-- Dev dependencies: Rails 8.1.4, permittable 0.9.0; the permittable compatibility suite accepts
-  both the pre-0.9 and 0.9 validation messages (the gemspec still allows `~> 0.1`). (#121)
+- Dev dependencies: Rails 8.1.4, permittable 0.10.0; the permittable compatibility suite accepts
+  both the pre-0.9 and 0.9+ validation messages (the gemspec still allows `~> 0.1`). (#121, #126)
+- New support modules: `Support::Locking` (lock_version mirroring, row-locked reads),
+  `Support::TimeValue` (verb time arguments, virtual datetimes, the portable year range),
+  `Support::GeneratedValues` and `Support::EncryptedLookup` (values generated in
+  `before_create`, equality lookups over encrypted columns). (#123–#125)
 - Documented limits: see `docs/concerns/sequenceable.md` (zones across STI leaves under an
   abstract declarer; re-declaring an owner after its subclasses) and
   `docs/concerns/stateable.md` (a subclass stub outlives a later parent re-declaration).
-  `unlock_access!`'s unconditional write is left for a follow-up.
+  `unlock_access!`'s unconditional write is left for a follow-up. Also documented: a
+  CounterCacheable parent destroyed later in the same rolled-back transaction keeps its
+  in-memory mirror (reload it); Encryptable `find_by_<field>` does not apply the field's Rails
+  `normalizes`; on Rails 7.2+ an Encryptable `:datetime` skip list must precede the `encryptable`
+  line or be followed by a re-declaration (`docs/concerns/encryptable.md`).
 
 ## 1.30.0 (2026-09-27)
 
