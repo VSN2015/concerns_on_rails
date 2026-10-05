@@ -57,6 +57,15 @@ RSpec.configure do |config|
     ActiveSupport::Dependencies::Reference.clear! if defined?(ActiveSupport::Dependencies::Reference)
   end
 
+  # Rails 6.0/6.1 declare time_zone_aware_attributes with mattr_accessor, so
+  # ONE model that sets it (`self.time_zone_aware_attributes = true`, as every
+  # real app has it) turns it on for every model for the rest of the run, and
+  # later files silently run time-zone-aware. 7.0+ made it a class_attribute.
+  # Every example starts from the harness default (off).
+  config.after do
+    ActiveRecord::Base.time_zone_aware_attributes = false
+  end
+
   # Version gate for examples whose FEATURE is gated in lib/ — not a licence to
   # hide a bug. Tag an example, context or describe with `min_rails: "6.1"` and
   # it is skipped on older lines. Sortable's `nulls:` is the reason it exists:

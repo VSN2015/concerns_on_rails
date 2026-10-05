@@ -9,6 +9,7 @@ require "bigdecimal"
 require "time"
 require "concerns_on_rails/encryption"
 require "concerns_on_rails/support/encryptor"
+require "concerns_on_rails/support/time_value"
 
 module ConcernsOnRails
   module Models
@@ -38,6 +39,9 @@ module ConcernsOnRails
     #
     # `type:` casts the decrypted value (reuses the Storable caster set:
     # :string default, :integer, :float, :decimal, :boolean, :date, :datetime).
+    # A :datetime field behaves like a datetime column on the same model: under
+    # time_zone_aware_attributes, zone-less input is read in Time.zone and the
+    # value is a TimeWithZone. The plaintext is always UTC ISO8601.
     # `key:` overrides the gem-level key per field (a String or a Proc).
     #
     # BLIND INDEX (`blind_index: true` or a Hash): because encryption is
@@ -113,29 +117,100 @@ module ConcernsOnRails
 
       # Deterministic blind-index fingerprint for a field's value under the
       # CURRENT key, applying the field's normalization `expression:` — what
-      # the before_save refresh (and reencrypt!) writes. nil for a nil value.
-      def self.blind_fingerprint(rule, value)
-        blind_fingerprints(rule, value).first
+      # the before_save refresh (and reencrypt!) writes: the digest of the
+      # canonical plaintext (see blind_index_inputs). nil for a nil value.
+      # `zone_aware:` is how the class doing the lookup reads a zone-less
+      # String for a :datetime field, as its datetime column would
+      # (Encryptable.zone_converted?). A Time is the same instant either way.
+      # Only the canonical digest is ever written: a value that does not cast
+      # (Infinity, garbage) is stored as NULL, so its fingerprint is nil too.
+      def self.blind_fingerprint(rule, value, zone_aware: false)
+        blind_fingerprints(rule, value, zone_aware: zone_aware, legacy: false).first
       end
 
       # The fingerprints under every key that can currently decrypt — current
       # first, then `previous_keys` — so lookups keep finding rows whose index
       # was written before a rotation and not yet re-encrypted. A per-field
-      # `key:` has exactly one. Empty for a nil value.
-      def self.blind_fingerprints(rule, value)
-        bi = rule[:blind_index]
-        return [] if bi.nil? || value.nil?
+      # `key:` has exactly one. Each key digests every blind_index_inputs
+      # entry, the canonical one first. Empty for a nil value.
+      def self.blind_fingerprints(rule, value, zone_aware: false, legacy: true)
+        return [] if rule[:blind_index].nil? || value.nil?
 
-        normalized = bi[:expression] ? bi[:expression].call(value) : value
-        return [] if normalized.nil?
+        inputs = blind_index_inputs(rule, value, zone_aware, legacy: legacy)
+        return [] if inputs.empty?
 
         config = ConcernsOnRails.encryption
         material = config.resolve_material(rule[:key])
-        return [normalized.to_s] if material == ConcernsOnRails::Encryption::PASSTHROUGH
+        return inputs if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
-        blind_index_materials(rule, config, material).map do |key|
-          ConcernsOnRails::Support::Encryptor.blind_index(normalized, key: key, salt: config.key_derivation_salt)
+        keys = blind_index_materials(rule, config, material)
+        inputs.flat_map do |input|
+          keys.map { |key| ConcernsOnRails::Support::Encryptor.blind_index(input, key: key, salt: config.key_derivation_salt) }
         end.uniq
+      end
+
+      # What a digest is taken of, the written one first:
+      #   1. the CANONICAL plaintext: the value cast through the field's type,
+      #      in the form the cipher gets (a :datetime as UTC ISO8601), or
+      #      `expression:` applied to that cast value (a :datetime handed over
+      #      as a UTC Time). No request zone reaches it, and a String finds a
+      #      typed field.
+      #   2. the value's own `to_s` (after `expression:`), which is what the
+      #      index hashed before, so a row indexed then is still found by the
+      #      same lookup. For every type but :datetime the two are the same.
+      def self.blind_index_inputs(rule, value, zone_aware, legacy: true)
+        type = EncryptedType.new(type: rule[:type], key: rule[:key])
+        expression = rule[:blind_index][:expression]
+        canonical = blind_index_canonical(type, expression, value, zone_aware)
+        [canonical, (blind_index_legacy(expression, value) if legacy)].compact.uniq
+      end
+
+      def self.blind_index_canonical(type, expression, value, zone_aware)
+        typed = type.blind_index_value(value, zone_aware: zone_aware)
+        return nil if typed.nil?
+
+        expression ? expression.call(typed)&.to_s : type.plaintext_of(typed)
+      end
+
+      def self.blind_index_legacy(expression, value)
+        (expression ? expression.call(value) : value)&.to_s
+      rescue StandardError
+        nil # an expression that only accepts the typed value
+      end
+
+      # Whether `klass` reads a zone-less String for `field` in Time.zone:
+      # whether ActiveRecord wrapped the field's type in its TimeZoneConverter
+      # for that class (see EncryptedType), looking through the decorations
+      # around it (`normalizes`). Lookups then read a String exactly as an
+      # assignment on that class does, on every Rails line: Rails decides
+      # per class up to 7.1, and on the declaring class from 7.2.
+      def self.zone_converted?(klass, field)
+        time_zone_converted_type?(klass.type_for_attribute(field.to_s))
+      end
+
+      # Whether a (possibly decorated) attribute type contains ActiveRecord's
+      # TimeZoneConverter.
+      def self.time_zone_converted_type?(type)
+        return false unless defined?(::ActiveRecord::AttributeMethods::TimeZoneConversion::TimeZoneConverter)
+
+        8.times do
+          return true if type.is_a?(::ActiveRecord::AttributeMethods::TimeZoneConversion::TimeZoneConverter)
+          return false unless type.respond_to?(:__getobj__)
+
+          type = type.__getobj__
+        end
+        false
+      end
+
+      # Rails 7.2+ applies time-zone conversion to a declared attribute when
+      # it is declared (TimeZoneConversion#hook_attribute_type); up to 7.1,
+      # per class at schema load.
+      def self.declaration_time_zone_conversion?
+        return @declaration_time_zone_conversion if defined?(@declaration_time_zone_conversion)
+
+        @declaration_time_zone_conversion =
+          defined?(::ActiveRecord::AttributeMethods::TimeZoneConversion::ClassMethods) &&
+          ::ActiveRecord::AttributeMethods::TimeZoneConversion::ClassMethods.private_method_defined?(:hook_attribute_type)
       end
 
       # A per-field key is one key; gem-keyed fields fingerprint under the
@@ -156,11 +231,40 @@ module ConcernsOnRails
       # deserialize decrypts on the read-from-DB path. An immutable value type,
       # so dirty tracking compares the cast plaintext — a re-save of unchanged
       # data is not dirtied by GCM's random IV.
+      #
+      # A :datetime field reports the :datetime type, so ActiveRecord gives it
+      # the time-zone handling it gives any `attribute :name, :datetime`: under
+      # time_zone_aware_attributes it wraps this type in its TimeZoneConverter
+      # (zone-less input read in Time.zone, reads as TimeWithZones), minus
+      # skip_time_zone_conversion_for_attributes. Where Rails decides that is
+      # Rails' own business: per class up to 7.1 (a subclass's own setting
+      # applies), on the declaring class from 7.2. Being a wrapper, it keeps
+      # `normalizes` and a re-declared key inherited as usual. This
+      # type itself therefore casts and reads without a zone, as the column's
+      # own type does (ActiveRecord.default_timezone). The plaintext is always
+      # UTC ISO8601, so none of this changes what is stored.
       class EncryptedType < ActiveModel::Type::Value
+        # ActiveModel's own test (Type::Helpers::Numeric#non_numeric_string?).
+        # Only an integer column's `where` refuses such a String: a float or
+        # decimal column casts it (".5" is 0.5), so those fields do too.
+        NUMERIC_STRING = /\A\s*[+-]?\d/
+
         def initialize(type: :string, key: nil)
           @type = type
           @key = key
           super()
+        end
+
+        # Only :datetime is reported: it is what enables the time-zone
+        # conversion above. Other types keep the generic value type.
+        def type
+          @type == :datetime ? :datetime : super
+        end
+
+        # Called by ActiveRecord's TimeZoneConverter on the type it wraps, as on
+        # its own datetime types: zone-less user input becomes Time.zone time.
+        def user_input_in_time_zone(value)
+          value.in_time_zone
         end
 
         # user assignment -> typed plaintext (no crypto)
@@ -175,7 +279,28 @@ module ConcernsOnRails
           plaintext = read_plaintext(value)
           return nil if plaintext.nil?
 
-          cast_typed(plaintext)
+          @type == :datetime ? read_time(plaintext) : cast_typed(plaintext)
+        end
+
+        # The typed value a blind index is computed from: the cast value, a
+        # :datetime as a UTC Time so no request zone reaches the digest. A
+        # zone-less String is read as the looking-up class's column reads it
+        # (`zone_aware:`). nil when the value does not cast, and for a
+        # non-numeric String on an :integer field: "abc" casts to 0, but an
+        # integer column's `where(age: "abc")` finds nothing, so this does too.
+        def blind_index_value(value, zone_aware: false)
+          return nil if non_numeric_string?(value)
+          return cast_typed(value) unless @type == :datetime
+
+          typed = ConcernsOnRails::Support::TimeValue.cast(value, zone_aware: zone_aware)
+          typed && ConcernsOnRails::Support::TimeValue.utc(typed)
+        rescue StandardError
+          nil
+        end
+
+        # The canonical plaintext of a typed value: what the cipher encrypts.
+        def plaintext_of(typed)
+          stringify(typed)
         end
 
         # typed plaintext -> DB ciphertext
@@ -193,11 +318,26 @@ module ConcernsOnRails
         def cast_typed(value)
           case @type
           when :decimal  then to_big_decimal(value)
-          when :datetime then to_time(value)
+          when :datetime then ConcernsOnRails::Support::TimeValue.cast(value, zone_aware: false)
           else CASTERS[@type].cast(value)
           end
         rescue StandardError
           nil
+        end
+
+        # The stored plaintext is the UTC ISO8601 String `stringify` writes.
+        # Any other form (a plain column adopted under on_missing_key:
+        # :passthrough) is a DATABASE value: TimeValue.read reads it in
+        # default_timezone, as ActiveRecord reads a datetime column. Showing
+        # it in Time.zone is the TimeZoneConverter's job (see the class note).
+        def read_time(plaintext)
+          ConcernsOnRails::Support::TimeValue.read(plaintext, zone_aware: false)
+        rescue StandardError
+          nil
+        end
+
+        def non_numeric_string?(value)
+          @type == :integer && value.is_a?(::String) && !NUMERIC_STRING.match?(value)
         end
 
         # Canonical, reversible String form fed to the cipher: cast to the typed
@@ -215,7 +355,9 @@ module ConcernsOnRails
           case @type
           when :decimal  then typed.to_s("F")
           when :date     then typed.iso8601
-          when :datetime then typed.utc.iso8601(6)
+          # A UTC copy: Time#utc converts in place, so it rewrote the caller's
+          # Time, and a frozen one raised here and saved the field as NULL.
+          when :datetime then ConcernsOnRails::Support::TimeValue.utc(typed).iso8601(6)
           else typed.to_s
           end
         end
@@ -224,22 +366,6 @@ module ConcernsOnRails
           return nil if value.nil?
 
           value.is_a?(BigDecimal) ? value : BigDecimal(value.to_s)
-        end
-
-        def to_time(value)
-          case value
-          when nil then nil
-          when ActiveSupport::TimeWithZone, Time then value
-          when DateTime then value.to_time
-          when Date then Time.utc(value.year, value.month, value.day)
-          when String
-            begin
-              Time.iso8601(value)
-            rescue ArgumentError
-              CASTERS[:datetime].cast(value)
-            end
-          else CASTERS[:datetime].cast(value)
-          end
         end
 
         # Gem-keyed fields stamp the configured key_id so rotation can tell old
@@ -284,6 +410,7 @@ module ConcernsOnRails
 
         # Declare one or more encrypted fields. Repeatable; per-field options.
         def encryptable(*fields, type: :string, key: nil, blind_index: nil)
+          @encryptable_declaring = true # see _default_attributes
           type = type.to_sym
           encryptable_validate!(fields, type, blind_index)
           ensure_columns!(LABEL, *fields, types: :text)
@@ -301,7 +428,41 @@ module ConcernsOnRails
             encryptable_define_blind_index(field, bi) if bi
             encryptable_register_filter_parameter(field)
           end
+        ensure
+          @encryptable_declaring = false
         end
+
+        # From Rails 7.2, ActiveRecord fixes a declared attribute's time-zone
+        # conversion when the attribute is declared, on the declaring class
+        # (hook_attribute_type). A skip list naming an encrypted :datetime
+        # field that is set after its `encryptable` line, or on a subclass,
+        # can then no longer reach it. Refuse that, rather than silently
+        # convert a field the developer opted out of. It is checked when
+        # ActiveRecord builds the class's attribute set (first record, query
+        # or type lookup), memoized on that set, so it costs one comparison
+        # per call after that. Not while the schema loads (7.2+ precomputes
+        # the set there, and a macro's column check loads it mid-class-body)
+        # nor while `encryptable` itself runs (its column check builds the
+        # set BEFORE the field's new type is attached): re-declaring the field
+        # after the skip list, with other macros in between, is what applies
+        # it. Up to 7.1 Rails decides per class at schema load, so the setting
+        # applies wherever it is made and nothing is checked.
+        def _default_attributes
+          attributes = super
+          return attributes if @encryptable_declaring || @encryptable_loading_schema
+          return attributes if @encryptable_skip_checked.equal?(attributes)
+
+          encryptable_refuse_late_skip!(attributes)
+          attributes
+        end
+
+        def load_schema!
+          @encryptable_loading_schema = true
+          super
+        ensure
+          @encryptable_loading_schema = false
+        end
+        private :load_schema!
 
         # Rows whose ciphertext for any of `fields` (default: every gem-keyed
         # field) was written under a key other than the current one — the
@@ -453,13 +614,38 @@ module ConcernsOnRails
           end
         end
 
+        def encryptable_refuse_late_skip!(attributes)
+          late = ConcernsOnRails::Models::Encryptable.declaration_time_zone_conversion? ? encryptable_late_skipped_fields(attributes) : []
+          unless late.empty?
+            raise ArgumentError,
+                  "#{LABEL}: skip_time_zone_conversion_for_attributes names #{late.map(&:inspect).join(', ')}, " \
+                  "declared with time-zone conversion by `encryptable ... type: :datetime`. From Rails 7.2 " \
+                  "ActiveRecord fixes a declared attribute's conversion where it is declared: set the skip list " \
+                  "before the `encryptable` line, or re-declare the field after it"
+          end
+          @encryptable_skip_checked = attributes
+        end
+
+        # Encrypted :datetime fields the skip list names but whose type
+        # ActiveRecord converted anyway. Symbols only, as ActiveRecord reads
+        # the list (`include?(name.to_sym)`): a String entry skips nothing.
+        def encryptable_late_skipped_fields(attributes)
+          skipped = skip_time_zone_conversion_for_attributes
+          encryptable_rules.select do |field, rule|
+            rule[:type] == :datetime && skipped.include?(field) &&
+              ConcernsOnRails::Models::Encryptable.time_zone_converted_type?(attributes[field.to_s].type)
+          end.keys
+        end
+
         # find_by_<field> / where_<field> / <field>_fingerprint for equality
         # lookups through the deterministic blind-index column.
         def encryptable_define_blind_index(field, blind_index)
           column = blind_index[:column]
 
           define_singleton_method("#{field}_fingerprint") do |value|
-            ConcernsOnRails::Models::Encryptable.blind_fingerprint(encryptable_rules.fetch(field), value)
+            ConcernsOnRails::Models::Encryptable.blind_fingerprint(
+              encryptable_rules.fetch(field), value, zone_aware: ConcernsOnRails::Models::Encryptable.zone_converted?(self, field)
+            )
           end
           # Accepts one value, several, or an array — multiple values become an
           # IN query on the fingerprint column. Returns a Relation, so it chains
@@ -468,7 +654,10 @@ module ConcernsOnRails
           # key, so rows not yet re-encrypted after a rotation are still found.
           define_singleton_method("where_#{field}") do |*values|
             rule = encryptable_rules.fetch(field)
-            fingerprints = values.flatten.flat_map { |v| ConcernsOnRails::Models::Encryptable.blind_fingerprints(rule, v) }
+            zone_aware = ConcernsOnRails::Models::Encryptable.zone_converted?(self, field)
+            fingerprints = values.flatten.flat_map do |v|
+              ConcernsOnRails::Models::Encryptable.blind_fingerprints(rule, v, zone_aware: zone_aware)
+            end
             # A nil value has no fingerprint; passing it through would build
             # `WHERE bidx IS NULL` and match every unfingerprinted row instead
             # of "value is nil".
@@ -477,7 +666,9 @@ module ConcernsOnRails
             where(column => ConcernsOnRails::Models::Encryptable.blind_index_predicate(fingerprints))
           end
           define_singleton_method("find_by_#{field}") do |value|
-            fingerprints = ConcernsOnRails::Models::Encryptable.blind_fingerprints(encryptable_rules.fetch(field), value)
+            fingerprints = ConcernsOnRails::Models::Encryptable.blind_fingerprints(
+              encryptable_rules.fetch(field), value, zone_aware: ConcernsOnRails::Models::Encryptable.zone_converted?(self, field)
+            )
             return nil if fingerprints.empty?
 
             find_by(column => ConcernsOnRails::Models::Encryptable.blind_index_predicate(fingerprints))

@@ -558,6 +558,21 @@ describe ConcernsOnRails::Expirable do
       end
     end
 
+    # Time.zone.parse (the column's cast under time-zone awareness) read
+    # "Monday" as today and "junk" as June 1st. A String must name a year.
+    it "refuses a String without a year in a time-zone-aware app" do
+      zoned = Class.new(hooked) { self.time_zone_aware_attributes = true }
+      token = zoned.create!(value: "t")
+
+      Time.use_zone("America/New_York") do
+        %w[junk Monday 10:30].each do |word|
+          expect { token.expire!(word) }.to raise_error(ArgumentError, /cannot be parsed as a time/), word
+        end
+      end
+      expect(token.log).to be_nil
+      expect(token.reload.expires_at).to be_nil
+    end
+
     it "still accepts a parseable String" do
       token = hooked.create!(value: "t")
 

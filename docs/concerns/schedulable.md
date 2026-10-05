@@ -106,9 +106,9 @@ Promotion.expired
 | `overlaps?(from, to = nil) → Boolean` | Instance-side mirror of `.overlapping`: does this record's window intersect `[from, to)`? Same boundary, `nil`-side and `Range` rules. |
 | `upcoming? → Boolean` | Returns `true` when the start column value is strictly after `Time.zone.now`. Returns `false` if the start field is not configured or the value is `nil`. |
 | `expired? → Boolean` | Returns `true` when the end column value is on or before `Time.zone.now`. Returns `false` if the end field is not configured or the value is `nil`. |
-| `start!(time = Time.zone.now)` | Writes `time` to the configured start column and persists with `update`. Raises a plain `RuntimeError` if no start field is configured. |
-| `finish!(time = Time.zone.now)` | Writes `time` to the configured end column and persists with `update`. Raises a plain `RuntimeError` if no end field is configured. |
-| `reschedule!(starts_at:, ends_at:)` | Updates the window in a single `update` call. Since 1.22 both keywords are optional — pass either or both (`nil` clears a side), and passing a value for a column that isn't configured raises `ArgumentError` instead of silently dropping it. |
+| `start!(time = Time.zone.now)` | Writes `time` to the configured start column and persists with `update`. Raises a plain `RuntimeError` if no start field is configured, and `ArgumentError` (nothing written) when `time` cannot be parsed as a time. |
+| `finish!(time = Time.zone.now)` | Writes `time` to the configured end column and persists with `update`. Raises a plain `RuntimeError` if no end field is configured, and `ArgumentError` (nothing written) when `time` cannot be parsed as a time. |
+| `reschedule!(starts_at:, ends_at:)` | Updates the window in a single `update` call. Since 1.22 both keywords are optional — pass either or both (`nil` clears a side), and passing a value for a column that isn't configured raises `ArgumentError` instead of silently dropping it. A value that cannot be parsed as a time raises `ArgumentError` too, and neither side is written. |
 
 ### Class methods
 
@@ -191,6 +191,7 @@ Coupon.upcoming # => []
 - **`upcoming?` and `.upcoming` return false / `none` when `starts_at` is not configured.** There is no concept of "not yet started" when there is no start field. Similarly, `expired?` and `.expired` return false / `none` when `ends_at` is not configured.
 - **`start!` and `finish!` raise a plain `RuntimeError` (not `ArgumentError`) when the respective field is not configured.** Guard against calling these methods on models where the field has been deliberately omitted.
 - **`reschedule!` validates its keywords (since 1.22).** Passing a value for a column that isn't configured raises `ArgumentError`; single-column models simply omit the other keyword.
+- **Unparseable times raise.** `start!`, `finish!` and `reschedule!` cast each time through its column's type first. A value that is not a time raises `ArgumentError` and nothing is written: a String must name a year (ISO 8601, RFC 2822, `"Oct 1 2026"` and `"2026-10-01 10:30"` all do; `"junk"`, `"Monday"` and `"10:30"` do not, although `Time.zone.parse` reads them as June 1st and today), and `42` or `1.hour` never cast. It used to cast to `nil` and silently clear the column. `nil` still clears a side.
 - **`schedulable_by` can be called multiple times.** The class attributes are reassigned on each call, which is useful in test setups or when a subclass needs a different column mapping than its parent.
 - **Scopes use Arel rather than string interpolation**, making them safe against SQL injection and compatible with Rails' query interface for chaining (e.g. `Promotion.current.where(active: true)`).
 - **`Time.zone.now` is used throughout.** All time comparisons respect the Rails timezone setting. Ensure `config.time_zone` is correctly set in your application to avoid off-by-one-hour bugs in time boundary checks.

@@ -150,6 +150,65 @@ describe ConcernsOnRails::Publishable do
       expect(article.reload.scheduled?).to be true
       expect(article.published?).to be false
     end
+
+    it "#publish_at! accepts a parseable String, cast like an assignment" do
+      article = Article.create!(title: "t")
+      expect(article.publish_at!("2020-01-01 00:00:00")).to be(true)
+      expect(article.reload.published_at).to eq(Time.utc(2020, 1, 1))
+    end
+
+    # "junk" cast to nil, so the verb wrote NULL, fired the publish hooks and
+    # returned true. Expirable already refused such a time.
+    context "with a time that cannot be parsed" do
+      let(:hooked) do
+        Class.new(TestModel) do
+          self.table_name = "articles"
+          include ConcernsOnRails::Publishable
+
+          publishable_by :published_at
+
+          attr_reader :log
+
+          def before_publish
+            (@log ||= []) << :before_publish
+          end
+        end
+      end
+
+      ["junk", "2026-13-45 99:99", 42, 1.hour].each do |bad|
+        it "#publish_at!(#{bad.inspect}) raises ArgumentError before any hook runs, and writes nothing" do
+          article = hooked.create!(title: "t", published_at: 1.day.from_now)
+
+          expect { article.publish_at!(bad) }
+            .to raise_error(ArgumentError, /cannot be parsed as a time for 'published_at'/)
+          expect(article.log).to be_nil
+          expect(article.reload).to be_scheduled
+        end
+      end
+
+      # Under time-zone awareness the column's cast is Time.zone.parse:
+      # "junk" is June 1st, "maybe" May 1st, "Monday" today. A String must
+      # name a year.
+      it "refuses words Time.zone.parse would read as a date, in a time-zone-aware app" do
+        zoned = Class.new(hooked) { self.time_zone_aware_attributes = true }
+        article = zoned.create!(title: "t")
+
+        Time.use_zone("America/New_York") do
+          (%w[junk maybe decimal marching Monday 10:30 99999] + ["junk 2026"]).each do |garbage|
+            expect { article.publish_at!(garbage) }.to raise_error(ArgumentError, /cannot be parsed as a time/), garbage
+          end
+          expect(article.publish_at!("Oct 1 2026")).to be(true)
+        end
+        expect(article.reload.published_at).to eq(Time.utc(2026, 10, 1, 4)) # midnight New York
+        expect(article.log).to eq(%i[before_publish])
+      end
+
+      it "keeps publish_at!(nil) writing NULL, as before" do
+        article = hooked.create!(title: "t", published_at: 1.day.from_now)
+        expect(article.publish_at!(nil)).to be(true)
+        expect(article.reload).to be_draft
+      end
+    end
   end
 
   describe "default_scope: true" do

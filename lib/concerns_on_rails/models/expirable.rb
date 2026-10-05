@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/time_value"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
@@ -61,16 +62,16 @@ module ConcernsOnRails
         # else is cast through the column's attribute type, and a value that
         # casts to nothing raises BEFORE any hook runs: the write used to go
         # ahead, AR stored nil, and the record "expired" to never-expires.
+        # The same check guards every verb that takes a time
+        # (Support::TimeValue.cast_argument!).
         # (Internal: public only so the instance verbs can reach it.)
         def expirable_cast_time(time)
           return Time.zone.now if time.blank?
 
-          cast = type_for_attribute(expirable_field.to_s).cast(time)
-          return cast if cast.acts_like?(:time) || cast.acts_like?(:date)
-
-          raise ArgumentError,
-                "ConcernsOnRails::Models::Expirable: #{time.inspect} cannot be parsed as a time for " \
-                "'#{expirable_field}' — pass a Time, a parseable String, or nil for now"
+          ConcernsOnRails::Support::TimeValue.cast_argument!(
+            self, expirable_field, time,
+            label: "ConcernsOnRails::Models::Expirable", accepts: "a Time, a parseable String, or nil for now"
+          )
         end
 
         private

@@ -3,6 +3,7 @@ require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/time_value"
 
 module ConcernsOnRails
   module Models
@@ -305,6 +306,9 @@ module ConcernsOnRails
       # they no longer silently skip). Raises on a boolean publishable column:
       # the Time would cast to `true` and silently publish NOW instead of
       # scheduling — a boolean column cannot represent a future publish.
+      # A time that cannot be parsed ("junk") raises ArgumentError before any
+      # hook runs: it used to cast to nil, write NULL and still return true.
+      # nil (or blank) keeps writing NULL, as it always has.
       # Example:
       #   record.publish_at!(1.day.from_now)
       def publish_at!(time)
@@ -315,6 +319,9 @@ module ConcernsOnRails
                 "publish immediately. Use publish!/unpublish!, or a datetime column to schedule."
         end
 
+        time = ConcernsOnRails::Support::TimeValue.cast_argument!(
+          self.class, self.class.publishable_field, time, label: "ConcernsOnRails::Models::Publishable"
+        )
         publishable_write_with_hooks(time, :publish)
       end
 

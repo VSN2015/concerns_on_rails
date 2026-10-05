@@ -297,6 +297,20 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       end
     end
 
+    # A timestamp the type casts fine but the database cannot hold went
+    # straight into the WHERE. PostgreSQL raised DatetimeFieldOverflow (a 500),
+    # and SQLite compared the text and served a wrong page. The gem never
+    # mints one (Support::TimeValue::YEARS), so it is tampering.
+    it "rejects a boundary timestamp outside years 0001..9999" do
+      %w[300000-01-01T00:00:00.000000Z 10000-01-01T00:00:00.000000Z 0000-06-01T00:00:00.000000Z].each do |stamp|
+        token = encode("t" => "items", "o" => ["created_at:asc", "id:asc"], "v" => [stamp, 1])
+
+        expect do
+          make_controller(cursor: token).cursor_paginated(Item.all, order: { created_at: :asc })
+        end.to raise_error(described_class::InvalidCursor, /Invalid pagination cursor/), "accepted: #{stamp}"
+      end
+    end
+
     it "rejects a value list whose length does not match the column set" do
       token = encode("t" => "items", "o" => ["created_at:asc", "id:asc"], "v" => [5])
 
@@ -951,6 +965,22 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
 
       expect(collected).to eq(Item.order(:created_at, :id).pluck(:id))
       expect(collected.size).to eq(4)
+    end
+
+    # Minting the cursor ran `value.to_time.utc`. TimeWithZone#to_time is
+    # memoized and Time#utc converts IN PLACE, so the boundary record's own
+    # attribute read back in UTC afterwards (every Rails app has
+    # time_zone_aware_attributes on).
+    it "leaves the page-boundary record's time values untouched" do
+      zoned = Class.new(TestModel) do
+        self.table_name = "items"
+        self.time_zone_aware_attributes = true
+      end
+      Time.use_zone("Tokyo") do
+        boundary = make_controller(per_page: 2).cursor_paginated(zoned.all, order: { created_at: :asc }).last
+
+        expect(boundary.created_at.to_time.utc_offset).to eq(zoned.find(boundary.id).created_at.to_time.utc_offset)
+      end
     end
   end
 

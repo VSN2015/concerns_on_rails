@@ -105,6 +105,40 @@ describe ConcernsOnRails::SoftDeletable do
       travel(1.second) { record.soft_delete! }
       expect(record.reload.updated_at).to eq t
     end
+
+    # soft_delete!(at: params[:at]) with the param absent or empty wrote NULL,
+    # fired the hooks and returned true with nothing deleted.
+    [nil, '', '   '].each do |blank|
+      it "soft_delete!(at: #{blank.inspect}) means now, like expire!" do
+        record.callback_log = []
+        freeze_time do
+          expect(record.soft_delete!(at: blank)).to be(true)
+          expect(record.reload.deleted_at).to eq(Time.zone.now)
+        end
+        expect(record.callback_log).to eq(%i[before_soft_delete after_soft_delete])
+      end
+    end
+
+    it 'accepts a parseable String for at:, cast like an assignment' do
+      expect(record.soft_delete!(at: '2020-01-01 00:00:00')).to be(true)
+      expect(record.reload.deleted_at).to eq(Time.utc(2020, 1, 1))
+    end
+
+    # "junk" cast to nil, so the verb wrote NULL (nothing deleted), fired the
+    # hooks and returned true. Expirable already refused such a time.
+    [true, false].each do |touch|
+      ['junk', '2026-13-45 99:99', 42, 1.hour].each do |bad|
+        it "soft_delete!(at: #{bad.inspect}) raises ArgumentError before any hook runs (touch: #{touch})" do
+          dummy_class.soft_deletable_by :deleted_at, touch: touch
+          record.callback_log = []
+
+          expect { record.soft_delete!(at: bad) }
+            .to raise_error(ArgumentError, /cannot be parsed as a time for 'deleted_at'/)
+          expect(record.callback_log).to eq([])
+          expect(record.reload).not_to be_deleted
+        end
+      end
+    end
   end
 
   describe '#restore!' do
@@ -1038,6 +1072,13 @@ describe ConcernsOnRails::SoftDeletable do
       post.soft_delete!(at: Time.utc(2020, 1, 1))
       expect(deleted_at(CascPost, post)).to eq(Time.utc(2020, 1, 1))
       expect(deleted_at(CascComment, comment)).to eq(Time.utc(2020, 1, 1))
+    end
+
+    it "soft_delete!(at:) refuses an unparseable time before the parent or any dependent is touched" do
+      expect { post.soft_delete!(at: "junk") }.to raise_error(ArgumentError, /cannot be parsed as a time/)
+      expect(deleted_at(CascPost, post)).to be_nil
+      expect(deleted_at(CascComment, comment)).to be_nil
+      expect(CascComment.hook_log).to eq([])
     end
 
     it "shares the parent's transaction — a failing dependent rolls everything back" do

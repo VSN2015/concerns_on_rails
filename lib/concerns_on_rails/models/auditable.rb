@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/callable"
+require "concerns_on_rails/support/time_value"
 require "bigdecimal"
 require "json"
 
@@ -331,7 +332,10 @@ module ConcernsOnRails
         when nil, true, false, Integer, String then value
         when Float then auditable_float_value(value)
         when BigDecimal then value.to_s("F")
-        when Time, DateTime then value.to_time.utc.iso8601
+        # A UTC copy. The value is the record's own attribute (often the
+        # caller's Time), and Time#utc would convert it in place and raise
+        # FrozenError on a frozen one.
+        when Time, DateTime then ConcernsOnRails::Support::TimeValue.utc(value).iso8601
         when Date then value.iso8601
         when Symbol then value.to_s
         else value.as_json

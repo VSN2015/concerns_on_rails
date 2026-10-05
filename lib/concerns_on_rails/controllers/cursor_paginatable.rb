@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
 require "concerns_on_rails/support/scalar_param"
+require "concerns_on_rails/support/time_value"
 require "json"
 require "concerns_on_rails/support/link_header"
 require "openssl"
@@ -555,9 +556,11 @@ module ConcernsOnRails
       # Explicit is_a? checks (NOT acts_like?, which needs an un-required
       # core_ext; NOT case/when, whose Module#=== misses TimeWithZone — its
       # redefined #is_a? returns true for Time). iso8601(6) keeps microsecond
-      # precision so boundary equality survives the round trip.
+      # precision so boundary equality survives the round trip. The UTC form is
+      # a copy: `to_time.utc` converted the boundary record's own attribute in
+      # place (TimeWithZone#to_time is memoized).
       def serialize_cursor_value(value)
-        return value.to_time.utc.iso8601(6) if value.is_a?(Time) || value.is_a?(DateTime)
+        return ConcernsOnRails::Support::TimeValue.utc(value).iso8601(6) if value.is_a?(Time) || value.is_a?(DateTime)
         return value.iso8601 if value.is_a?(Date)
         return value.to_s if value.is_a?(BigDecimal)
 
@@ -590,8 +593,11 @@ module ConcernsOnRails
       # range casts fine but cannot be bound. The first two reached the WHERE
       # as `(score, id) > (NULL, 1)` — never true, so an empty 200 silently
       # ended the walk; the third was the same empty page on Rails 6.1+ (Arel
-      # drops unboundable values to 1=0) and a RangeError 500 on 6.0. We never
-      # mint any of them, so each is tampering and gets the InvalidCursor 400.
+      # drops unboundable values to 1=0) and a RangeError 500 on 6.0. A
+      # timestamp outside years 0001..9999 casts fine too, then raised
+      # DatetimeFieldOverflow on PostgreSQL (a 500) and compared as text on
+      # SQLite. We never mint any of them, so each is tampering and gets the
+      # InvalidCursor 400.
       def cast_cursor_value!(model, col, raw)
         return nil if raw.nil? # a NULL boundary; valid_cursor_values? only admits it on a nullable column
 
@@ -607,14 +613,21 @@ module ConcernsOnRails
       # non-finite Float/BigDecimal is refused outright: it is never minted
       # and adapters disagree on how (or whether) to quote it.
       def cursor_bindable?(type, value)
-        return false if value.nil?
-        return false if (value.is_a?(Float) || value.is_a?(BigDecimal)) && !value.finite?
+        return false if cursor_never_minted?(value)
         return type.serializable?(value) if type.respond_to?(:serializable?)
 
         type.serialize(value)
         true
       rescue ::RangeError
         false
+      end
+
+      # nil, a non-finite Float/BigDecimal, or a date/time outside
+      # Support::TimeValue::YEARS: none of them is ever minted.
+      def cursor_never_minted?(value)
+        value.nil? ||
+          ((value.is_a?(Float) || value.is_a?(BigDecimal)) && !value.finite?) ||
+          !ConcernsOnRails::Support::TimeValue.representable?(value)
       end
 
       # Pre-bidirectional cursors carry no "d" — they are forward cursors and
