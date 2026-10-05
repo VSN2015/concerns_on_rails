@@ -165,7 +165,7 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 
 - `blind_index: true` uses a `<field>_bidx` column and no normalization; pass a Hash to set `column:` and/or `expression:`.
 - The fingerprint's HMAC key is **domain-separated** from the encryption key (derived via a labeled HMAC), so the two are independent even though both come from your configured key.
-- The index is recomputed automatically in `before_save`, but only when the field actually changes; a `nil` value yields a `nil` fingerprint.
+- The index is recomputed automatically in `before_save`, but only when the field actually changes; a `nil` value yields a `nil` fingerprint. A value a sibling generates later in the create — a [Tokenizable](tokenizable.md) token, a [Hashable](hashable.md) code, a [Sequenceable](sequenceable.md) number, all assigned in `before_create` — is fingerprinted when it is generated (`Support::GeneratedValues`), so a freshly created record is findable by `find_by_<field>` in either declaration order (it used to be stored with a NULL fingerprint).
 - **Only exact match** is possible — no `LIKE`, ranges, or `ORDER BY` on the value. A deterministic index **leaks equality** (identical values share a digest), so use it for lookup keys, not low-entropy fields.
 - Backfilling existing rows: re-save them (`User.find_each(&:save!)`) so the index populates.
 
@@ -175,7 +175,8 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - **Maskable** — `masked_<field>` masks the *decrypted* value; the column stays ciphertext. Order-independent.
 - **Auditable** — auditing an encrypted field would persist its plaintext into the audit column, so declaring a field with **both** `encryptable` and `auditable_by` **raises**. Audit a non-sensitive companion column instead.
 - **Sluggable** — a friendly_id slug is plaintext of its source (`"123-45-6789"`), so an encrypted field named as the `sluggable_by` field or in its `candidates:` (nested arrays included) — or as a bare `friendly_id :field, use: :slugged` base — **raises** at declaration. Shapes a declaration cannot see (Sluggable included without `sluggable_by`, which slugs the implicit `:name`; friendly_id declared after `encryptable`) are refused at save time, before the row is written, with the same `ArgumentError`. A method or Proc candidate that reads an encrypted field under another name cannot be detected — keep encrypted values out of those yourself.
-- **Searchable / Filterable** — encrypted columns are **not** searchable: non-deterministic ciphertext (random IV) means the same plaintext never produces the same bytes, so `where(:ssn)`, `LIKE`, and prefix matching cannot work. For exact-match lookups, add a [blind index](#querying-encrypted-fields-blind-index) and query the `<field>_bidx` column (via `find_by_<field>` / `where_<field>`).
+- **Searchable / Taggable / Filterable** — encrypted columns are **not** searchable: non-deterministic ciphertext (random IV) means the same plaintext never produces the same bytes, so `where(:ssn)`, `LIKE`, and prefix matching cannot work. For exact-match lookups, add a [blind index](#querying-encrypted-fields-blind-index) and query the `<field>_bidx` column (via `find_by_<field>` / `where_<field>`). Declaring an encrypted field in `searchable_by`, or as the `taggable_by` column, **raises** `ArgumentError` at declaration in either order — `search` / `tagged_with` used to return nothing silently. (A model that includes Taggable without `taggable_by` and encrypts its default `:tags` column is refused when `tagged_with` is called.)
+- **Tokenizable** — `authenticate_by_<field>` / `consume_<field>` on an encrypted token look it up through its blind index (the decrypted value is still compared in constant time) and `consume_` clears the index with the token. Without a blind index they raise `ArgumentError` when called; generating, storing and rotating an encrypted token still works. Hashable's `unique:` precheck also goes through the blind index.
 
 ## Security notes
 
@@ -191,6 +192,20 @@ Order.joins(:user).where(users: { email_bidx: User.email_fingerprint("alice@exam
 - Dirty tracking works on the decrypted plaintext: reassigning the same value is **not** dirty, and an unchanged field is not re-encrypted on save, despite the random IV.
 - The envelope is versioned (`ver`/`alg`/`key_id`): `key_id` drives [key rotation](#key-rotation); `alg 0x11` (deterministic encryption) is still reserved, so it can be added later without a data migration.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7.1+ native [`encrypts`](https://guides.rubyonrails.org/active_record_encryption.html) when you need deterministic search, KMS-backed or per-record keys, or Rails-managed key infrastructure.
+
+## Upgrading: blind indexes of generated values
+
+Before this fix, a blind-indexed value that a sibling generates in `before_create` — a [Tokenizable](tokenizable.md) token, a [Hashable](hashable.md) code, a [Sequenceable](sequenceable.md) number — was stored with a **NULL** fingerprint (the refresh ran in `before_save`, before the value existed). New rows are fingerprinted now, but rows created before the upgrade stay unfindable by `find_by_<field>` / `where_<field>` (and Tokenizable's `authenticate_by_<field>` / `consume_<field>`) until they are backfilled.
+
+`reencrypt_all!` does **not** reach them: it only rewrites rows whose ciphertext is under an older key, and these are under the current one. Fingerprint exactly the affected rows instead — no callbacks, no re-encryption, any key (per-field `key:` included):
+
+```ruby
+User.unscoped.where(api_token_bidx: nil).where.not(api_token: nil).find_each do |user|
+  user.update_columns(api_token_bidx: User.api_token_fingerprint(user.api_token))
+end
+```
+
+Repeat per field (`<field>_bidx` / `<field>_fingerprint`, or your `column:`). `unscoped` includes rows a `default_scope` hides. Calling `reencrypt!` on every row (`User.unscoped.find_each(&:reencrypt!)`) works too for gem-keyed fields, but it rewrites every row's ciphertext; per-field `key:` fields are outside rotation and are skipped by it.
 
 ## Upgrading: slugs built from an encrypted field
 

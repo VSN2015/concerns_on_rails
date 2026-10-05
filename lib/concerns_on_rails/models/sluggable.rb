@@ -55,10 +55,12 @@ module ConcernsOnRails
           slug_column = self.class.friendly_id_config.slug_column
 
           # An explicitly-assigned slug wins — don't overwrite it with a generated
-          # one when the slug column itself is being changed in this save.
+          # one when the slug column itself is being changed in this save. The
+          # exception is a slug friendly_id BUILT earlier in this save whose
+          # source has changed since (see #sluggable_built_slug_stale?).
           changing_slug = respond_to?("will_save_change_to_#{slug_column}?") &&
                           send("will_save_change_to_#{slug_column}?")
-          return false if changing_slug
+          return sluggable_built_slug_stale? if changing_slug
 
           source_changed = respond_to?("will_save_change_to_#{field}?") &&
                            send("will_save_change_to_#{field}?")
@@ -83,6 +85,39 @@ module ConcernsOnRails
 
           normalized.truncate(limit, omission: "", separator: friendly_id_config.sequence_separator)
         end
+
+        # friendly_id's (private) set_slug, wrapped to remember the slug it
+        # built and the candidates it built it from. That is what lets a later
+        # phase tell "our slug, built before its source settled" apart from a
+        # slug the caller assigned — both are a pending change to the column.
+        # A slug handed in pre-normalized (friendly_id's own set_friendly_id)
+        # is not ours to rebuild.
+        define_method :set_slug do |normalized_slug = nil|
+          column = friendly_id_config.slug_column
+          before = send(column)
+          result = super(normalized_slug)
+          built = send(column)
+          @sluggable_built = { slug: built, from: sluggable_candidate_key } if normalized_slug.nil? && built != before
+          result
+        end
+        private :set_slug
+
+        # friendly_id builds the slug in a before_validation registered HERE,
+        # at include time, so a sibling included later — Sanitizable's
+        # `on: :write`, Normalizable, the host's own before_validation — used
+        # to transform the source only after the slug was built from the raw
+        # value. Every before_validation has run by the time validations do,
+        # so a stale slug is rebuilt here: order-independent, and before any
+        # sibling's before_save reads it. PREPENDED so every validator sees
+        # the final slug — friendly_id's reserved-words exclusion is
+        # registered at `extend FriendlyId` above (its default `use :reserved`).
+        validate :sluggable_rebuild_stale_slug, prepend: true
+
+        # The memo describes ONE save. Once it is written, a later explicit
+        # slug that happens to equal an old built one must read as explicit.
+        # A failed save never gets here, so a slug it left pending can still
+        # be rebuilt when the source changes before the retry.
+        after_save :sluggable_forget_built_slug
       end
 
       # class methods
@@ -232,6 +267,85 @@ module ConcernsOnRails
         save!
       ensure
         @sluggable_force_regenerate = false
+      end
+
+      private
+
+      # True when the pending slug is the one set_slug built (not reassigned
+      # since) and its candidates no longer normalize to what they were then.
+      # A transform that leaves the normalized candidates unchanged ("Hello
+      # World" squished) costs no rebuild and no query.
+      #
+      # "The one set_slug built" includes that slug as the slug column's own
+      # write-time transforms left it (a Normalizable rule on :slug runs in
+      # before_validation too, possibly right after friendly_id).
+      def sluggable_built_slug_stale?
+        built = @sluggable_built
+        return false unless built
+
+        current = send(friendly_id_config.slug_column)
+        return false unless current == built[:slug] || current == sluggable_transform_slug(built[:slug])
+
+        sluggable_candidate_key != built[:from]
+      end
+
+      def sluggable_forget_built_slug
+        @sluggable_built = nil
+      end
+
+      # The slug column's own write-time transforms — a write-mode Sanitizable
+      # rule, then a Normalizable rule — as their before_validation callbacks
+      # would apply them. A slug built in before_create comes after both.
+      def sluggable_transform_slug(slug)
+        return slug if slug.nil?
+
+        column = friendly_id_config.slug_column.to_sym
+        klass = self.class
+        rule = klass.respond_to?(:sanitizable_rules) ? klass.sanitizable_rules[column] : nil
+        slug = rule[:writer].call(slug) if rule && rule[:on] == :write
+        return slug unless klass.respond_to?(:normalizable_rules) && klass.normalizable_rules.key?(column)
+
+        klass.normalize(column, slug)
+      end
+
+      # The normalized candidate strings the slug is built from — friendly_id's
+      # own Candidates, so reserved-word filtering and max_length: apply. No
+      # query: availability is only checked when a slug is actually built.
+      def sluggable_candidate_key
+        FriendlyId::Candidates.new(self, send(friendly_id_config.base)).to_a
+      end
+
+      def sluggable_rebuild_stale_slug
+        set_slug if sluggable_built_slug_stale?
+      end
+
+      # Support::GeneratedValues consumer. A column generated in before_create
+      # (a Sequenceable number, a Hashable code) — after friendly_id's
+      # before_validation built the slug, or found nothing to build it from —
+      # may be the slug's source. set_slug's usual rules decide: a missing or
+      # stale slug is built, an explicitly assigned one is kept, a conflict
+      # gets friendly_id's uuid suffix.
+      #
+      # Every before_validation/before_save has already run, so what they
+      # would have done to a new slug is done here: the reserved_words:
+      # validator never sees it (a reserved slug is resolved the way
+      # friendly_id resolves a taken one), and the slug column's own
+      # Sanitizable/Normalizable rules are applied.
+      def sluggable_generated_values_assigned(_columns)
+        column = friendly_id_config.slug_column
+        before = send(column)
+        set_slug
+        slug = send(column)
+        return if slug == before
+
+        slug = resolve_friendly_id_conflict([slug]) if sluggable_reserved_slug?(slug)
+        transformed = sluggable_transform_slug(slug)
+        send("#{column}=", transformed) unless transformed == send(column)
+      end
+
+      def sluggable_reserved_slug?(slug)
+        config = friendly_id_config
+        config.uses?(:reserved) && Array(config.reserved_words).include?(slug)
       end
     end
   end

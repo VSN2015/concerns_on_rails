@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/generated_values"
 require "concerns_on_rails/support/sequence_calculator"
 
 module ConcernsOnRails
@@ -294,8 +295,15 @@ module ConcernsOnRails
 
       # A field's before_create: numbers it only while its CURRENT declaration
       # on this class is assign: :create. :manual fields wait for assign_<field>!.
+      # The columns it wrote are reported to the siblings that already ran —
+      # a slug built from the number, Auditable's creation entry, a blind
+      # index (Support::GeneratedValues).
       def sequenceable_assign_on_create(field)
-        assign_sequenceable_value(field) if self.class.sequenceable_config.dig(field, :assign) == :create
+        return unless self.class.sequenceable_config.dig(field, :assign) == :create
+
+        ConcernsOnRails::Support::GeneratedValues.watch(self, sequenceable_written_columns(field)) do
+          assign_sequenceable_value(field)
+        end
       end
       private :sequenceable_assign_on_create
 

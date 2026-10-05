@@ -189,20 +189,42 @@ module ConcernsOnRails
       private
 
       # before_save hook — appends one entry per changed tracked field so the
-      # audit column rides the same INSERT/UPDATE statement.
+      # audit column rides the same INSERT/UPDATE statement. Remembers what it
+      # captured, so a column generated later in the same create can be folded
+      # in (see #auditable_generated_values_assigned).
       def auditable_capture_changes
+        @_auditable_captured = nil
         fields = self.class.auditable_fields
         return if fields.blank?
         return unless auditable_any_tracked_change?(fields)
 
-        pending = respond_to?(:changes_to_save) ? changes_to_save : changes
-        tracked = pending.slice(*fields.map(&:to_s))
+        tracked = auditable_tracked_changes(fields)
         return if tracked.empty?
 
+        @_auditable_captured = tracked
         entries = auditable_persisted_trail + auditable_build_entries(tracked)
         max = self.class.auditable_max_entries
         entries = entries.last(max) if max
         self[self.class.auditable_into] = auditable_encode(entries)
+      end
+
+      # Support::GeneratedValues consumer. A tracked column generated in
+      # before_create (a Sequenceable number, a Tokenizable/Hashable value, a
+      # slug built from one) did not exist yet when the before_save capture
+      # ran, so the creation entry left it out. Re-capture when the tracked
+      # changes now differ: the trail is rebuilt from the PERSISTED column, so
+      # this replaces the entries of this save instead of duplicating them.
+      def auditable_generated_values_assigned(_columns)
+        fields = self.class.auditable_fields
+        return if fields.blank?
+        return if auditable_tracked_changes(fields) == (@_auditable_captured || {})
+
+        auditable_capture_changes
+      end
+
+      def auditable_tracked_changes(fields)
+        pending = respond_to?(:changes_to_save) ? changes_to_save : changes
+        pending.slice(*fields.map(&:to_s))
       end
 
       def auditable_encode(entries)
