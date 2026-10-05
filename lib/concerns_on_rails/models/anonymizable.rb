@@ -5,6 +5,7 @@ require "concerns_on_rails/support/callable"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/locking"
 require "concerns_on_rails/support/slug_sources"
 require "concerns_on_rails/support/unique_retry"
 require "digest"
@@ -39,6 +40,14 @@ module ConcernsOnRails
     # `encryptable` stores a fresh ciphertext envelope of the anonymized
     # value, never plaintext. The record is reloaded afterwards so in-memory
     # readers see the anonymized values through the types.
+    #
+    # Under optimistic locking (a `lock_version` column) the same single
+    # UPDATE goes through update_all instead, which bumps lock_version IN SQL
+    # (the row's value + 1): every instance loaded before the erasure — an
+    # admin edit form — then raises StaleObjectError instead of writing the
+    # personal data back, and an anonymizing instance that is itself stale
+    # still erases (update_columns is constrained on the instance's
+    # lock_version from Rails 7.0, which silently erased nothing).
     #
     # Strategy presets (`with:`):
     #   :nullify    — nil
@@ -364,19 +373,59 @@ module ConcernsOnRails
       # SAVEPOINT so the surrounding transaction (anonymize_all!'s batch
       # included) survives the rejected write on PostgreSQL.
       def anonymizable_write!(payload, generated_slug_column)
-        return update_columns(payload) unless generated_slug_column
+        return anonymizable_update_columns(payload) unless generated_slug_column
 
         attempt = 0
         ConcernsOnRails::Support::UniqueRetry.with_retries(limit: SLUG_WRITE_ATTEMPTS, savepoint: self.class) do
           payload[generated_slug_column] = self.class.anonymizable_random_slug if (attempt += 1) > 1
-          update_columns(payload)
+          anonymizable_update_columns(payload)
+        end
+      end
+
+      # update_columns — except on a model with optimistic locking, where the
+      # erasure has to invalidate every instance loaded before it (see HOW IT
+      # WRITES). There it is ONE update_all keyed on the primary key alone,
+      # which adds `lock_version = COALESCE(lock_version, 0) + 1`: the ROW's
+      # version moves on, whatever this instance holds. update_columns' own
+      # preconditions are kept (destroyed, readonly record, attr_readonly
+      # column), and so is its in-memory half — cast values written, changes
+      # cleared — plus increment!'s mirrored bump. anonymize! reloads after.
+      def anonymizable_update_columns(payload)
+        klass = self.class
+        return update_columns(payload) unless klass.locking_enabled?
+
+        raise ActiveRecord::ActiveRecordError, "cannot update a destroyed record" if destroyed?
+        raise ActiveRecord::ReadOnlyRecord, "#{klass} is marked as readonly" if readonly?
+
+        columns = anonymizable_column_payload(payload)
+        # A copy: update_all adds its lock_version increment to the Hash it is given.
+        written = klass.unscoped.where(klass.primary_key => id_in_database).update_all(columns.dup) == 1
+        columns.each do |name, value|
+          @attributes.write_cast_value(name, value)
+          clear_attribute_change(name)
+        end
+        ConcernsOnRails::Support::Locking.mirror_bump!(self) if written
+        written
+      end
+
+      # The payload keyed by column name, as update_columns resolves it (an
+      # alias_attribute name to its column), refusing an attr_readonly column.
+      def anonymizable_column_payload(payload)
+        klass = self.class
+        payload.to_h do |key, value|
+          name = key.to_s
+          name = klass.attribute_aliases[name] || name unless @attributes.key?(name)
+          raise ActiveRecord::ActiveRecordError, "#{name} is marked as readonly" if klass.readonly_attributes.include?(name)
+
+          [name, value]
         end
       end
 
       # { column => value }: strategy output cast through the attribute's type,
       # plus the stamp and — when an anonymized field is also audited — the
-      # cleared audit column. update_columns serializes each value through the
-      # model's attribute types (verified: Encryptable's custom type included),
+      # cleared audit column. update_columns (and update_all, the optimistic-
+      # locking path) serializes each value through the model's attribute
+      # types (verified: Encryptable's custom type included),
       # so an encrypted field stores a fresh ciphertext envelope — passing a
       # pre-serialized value here would double-encrypt.
       def anonymizable_payload

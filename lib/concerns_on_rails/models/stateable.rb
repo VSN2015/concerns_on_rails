@@ -3,6 +3,7 @@ require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/locking"
 
 module ConcernsOnRails
   module Models
@@ -67,10 +68,14 @@ module ConcernsOnRails
     #     the column's DB default applies).
     #   * Guarded transitions check the in-memory state: two processes firing the
     #     same <event>! concurrently can both pass the guard (check-then-write).
-    #     `lock: true` closes that race — each <event>! takes a row lock
-    #     (SELECT ... FOR UPDATE) and re-checks the guard against the fresh row
-    #     first. Requires a clean record (with_lock reloads; AR refuses to
-    #     reload unsaved changes) and costs a SELECT per transition.
+    #     `lock: true` closes that race — each <event>! locks the row and
+    #     re-checks the guard against the row's state first. A record without
+    #     unsaved changes is reloaded under the lock (with_lock). One WITH
+    #     unsaved changes can't be reloaded, so only its state column is read
+    #     (SELECT <state> ... FOR UPDATE) and adopted, and the changes save
+    #     with the transition, as with `lock: false` — under optimistic
+    #     locking a stale one raises StaleObjectError. One SELECT per
+    #     transition.
     module Stateable
       extend ActiveSupport::Concern
 
@@ -296,9 +301,9 @@ module ConcernsOnRails
         # Refuse a generated method that would silently override one this class
         # already has from ActiveRecord or another concern: an event named
         # `lock` defined `lock!` over AR's pessimistic lock! (breaking
-        # with_lock, and with it this concern's own `lock: true`), and
-        # `restore` beside SoftDeletable replaced its restore!. Names an
-        # earlier stateable_by generated are ours to redefine, so re-declaring
+        # with_lock), and `restore` beside SoftDeletable replaced its
+        # restore!. Names an earlier stateable_by generated are ours to
+        # redefine, so re-declaring
         # on the same class or a subclass still works. Checked before anything
         # is defined, so a refused declaration leaves the class untouched.
         # (Lazily generated column accessors are not considered: whether they
@@ -562,13 +567,17 @@ module ConcernsOnRails
       private
 
       # Instance-level guarded transition body, shared by every `<event>!`.
-      # With `lock: true` the guard is re-checked under a row lock (with_lock
-      # reloads, so the state read is the committed one) — closing the
-      # check-then-write race between two concurrent transitions.
+      # With `lock: true` the guard is re-checked under a row lock against the
+      # row's committed state — closing the check-then-write race between two
+      # concurrent transitions. Support::Locking.with_locked_column: a record
+      # without unsaved changes is reloaded under the lock (with_lock, as
+      # always); one WITH unsaved changes — which with_lock refused ("Locking
+      # a record with unpersisted changes is not supported") — has only its
+      # state column read and adopted, and its changes save with the state.
       def stateable_perform_transition!(field, to, from, event, name)
-        if self.class.stateable_lock && persisted?
-          with_lock { stateable_execute_transition!(field, to, from, event, name) }
-        else
+        return stateable_execute_transition!(field, to, from, event, name) unless self.class.stateable_lock && persisted?
+
+        ConcernsOnRails::Support::Locking.with_locked_column(self, field) do
           stateable_execute_transition!(field, to, from, event, name)
         end
       end

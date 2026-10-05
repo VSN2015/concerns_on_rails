@@ -3,6 +3,7 @@ require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/locking"
 
 module ConcernsOnRails
   module Models
@@ -197,11 +198,17 @@ module ConcernsOnRails
 
       def toggle_active!
         # Lock the row for the read-modify-write so concurrent toggles don't lose
-        # an update (with_lock wraps a transaction + SELECT ... FOR UPDATE).
+        # an update (SELECT ... FOR UPDATE). Support::Locking.with_locked_column:
+        # with_lock (reload under the lock) for a record without unsaved
+        # changes, as always; for one WITH unsaved changes — which with_lock
+        # refused — only the flag is read and adopted, and the changes save
+        # with the flip.
         # activatable_on?, not active?: with Expirable included later the
         # plain predicate answers "not expired" and the toggle flipped the
         # wrong way.
-        with_lock { activatable_on? ? deactivate! : activate! }
+        ConcernsOnRails::Support::Locking.with_locked_column(self, self.class.activatable_field) do
+          activatable_on? ? deactivate! : activate!
+        end
       end
 
       # Hooks and the write share one savepoint (Support::HookedWrite): a

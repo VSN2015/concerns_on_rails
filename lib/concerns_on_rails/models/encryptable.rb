@@ -3,6 +3,7 @@ require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/slug_sources"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/locking"
 require "active_model/type"
 require "bigdecimal"
 require "time"
@@ -574,8 +575,10 @@ module ConcernsOnRails
       # the current key, refreshing their blind indexes — ONE UPDATE, no
       # validations/callbacks: the values don't change, only their ciphertext,
       # and a callback (an Auditable capture, a webhook) must not fire for a key
-      # rotation. Returns true when something was rewritten, then reloads so the
-      # record's ciphertext readers describe what is now at rest.
+      # rotation — nor does lock_version move, so no open instance goes stale
+      # (see encryptable_rotate_row!). Returns true when something was
+      # rewritten, then reloads so the record's ciphertext readers describe
+      # what is now at rest.
       #
       # The UPDATE is GUARDED on the exact ciphertext each field was read with.
       # A rotation runs for hours against a live table, and an unguarded
@@ -671,6 +674,12 @@ module ConcernsOnRails
       # The guarded single-statement rewrite behind reencrypt!. `unscoped` so a
       # row hidden by a default_scope (SoftDeletable) is still rotatable once
       # the caller holds it, matching update_columns.
+      #
+      # Under optimistic locking the lock_version column is pinned to itself:
+      # update_all would otherwise bump it, and a rotation — which changes no
+      # value — turned every record open in an edit form during the sweep
+      # into a StaleObjectError. (A write the app makes meanwhile still bumps
+      # it as usual; the ciphertext guard is what keeps the two apart.)
       def encryptable_rotate_row!(updates, guards, binds)
         primary_key = self.class.primary_key
         # id_in_database is Rails 5.2+; for a persisted row whose primary key
@@ -679,7 +688,7 @@ module ConcernsOnRails
         self.class.unscoped
             .where(primary_key => pk_value)
             .where(guards.join(" AND "), *binds)
-            .update_all(updates)
+            .update_all(updates.merge(ConcernsOnRails::Support::Locking.pinned(self.class)))
       end
 
       # Recompute each blind-index column from the (changed) plaintext just

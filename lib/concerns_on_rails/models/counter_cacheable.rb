@@ -1,7 +1,9 @@
+require "weakref"
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/callable"
 require "concerns_on_rails/support/batch_ops"
+require "concerns_on_rails/support/locking"
 
 module ConcernsOnRails
   module Models
@@ -42,6 +44,15 @@ module ConcernsOnRails
     #   * Adjustments use `update_counters` — a single SQL `COALESCE(col,0) ± 1`,
     #     atomic under concurrency — and run inside the record's own save
     #     transaction, so a rolled-back save rolls back the counter too.
+    #   * Optimistic locking on the parent: each adjustment's UPDATE bumps the
+    #     parent's `lock_version` in SQL, and the parent instance the child's
+    #     association holds (the one `post.comments.create!` was called on, or
+    #     the one passed as `post:`) gets the bump — and the counter delta —
+    #     mirrored in memory (increment!'s in-memory half; a counter the
+    #     caller assigned and has not saved is left pending), so it saves
+    #     afterwards without StaleObjectError. A rolled-back save of the child
+    #     takes the mirror back off it. Other loaded copies of the parent go
+    #     stale, as they would natively.
     #   * A `belongs_to ..., primary_key: :code` is honoured everywhere: the
     #     parent row is addressed by the association key (not its `id`), both by
     #     the live adjustments and by `recount_counter_caches!`.
@@ -73,6 +84,242 @@ module ConcernsOnRails
       # explicit nil, which would otherwise silently widen a scoped repair into
       # a full-table zero-and-rewrite.
       UNSET = Object.new
+
+      # Takes one in-memory mirror (#counter_cacheable_sync_target) back off
+      # the parent instance when the UPDATE it mirrors is rolled back — a
+      # caller's Rollback, a later callback raising, a Stateable/HookedWrite
+      # veto. Without it the parent was left one version (and one count)
+      # ahead of its row, and its next save raised StaleObjectError.
+      #
+      # The undo is its own transaction record, enrolled in the transaction
+      # the UPDATE ran in, so Rails tells it exactly when that UPDATE is
+      # undone: a savepoint's rollback reaches the records enrolled in it, a
+      # released savepoint hands its records to the parent, and the outermost
+      # rollback reaches everything left (6.0–8.1 drive the same four-method
+      # protocol). Enrolling the CHILD instead — the record that was saved —
+      # held every child created in a long transaction until it ended (Rails
+      # holds a callback-less record only weakly), and it missed one case
+      # entirely: a savepoint released into a `joinable: false` transaction
+      # is COMMITTED at once (that is where after_commit runs there), so the
+      # child never heard of the outer rollback. The undo follows its
+      # UPDATE into such a parent instead, and forgets it only once no
+      # transaction is left open.
+      #
+      # Memory: the undo holds the parent only WEAKLY (a parent nobody holds
+      # any more needs no undo), never the child, and there is one undo per
+      # (transaction, parent): every further mirror onto that parent in that
+      # transaction adds to it, and a savepoint's undo that follows its
+      # UPDATE into a still-open transaction merges into the one open there.
+      # A batch inside a long transaction — or inside the transaction that
+      # transactional tests, `console --sandbox` and DatabaseCleaner wrap
+      # everything in — therefore keeps neither its parents nor its children
+      # alive, and holds one small object per parent.
+      #
+      # Order-independence: Rails rolls records back oldest first, and it may
+      # already have restored the parent itself (a parent with after_commit
+      # callbacks, saved in the same transaction, is restored before the undo
+      # runs, and that restore turns the mirrored counter into an "unsaved
+      # change"). So each column (the counters, and lock_version) is moved
+      # back only while it is still the mirrors' value: unchanged since (also
+      # true for a `becomes` copy sharing the attributes), or holding exactly
+      # the value they left it at — tracked on the parent instance. A value
+      # the caller assigned since is left alone.
+      class MirrorUndo
+        LEDGER = :@concerns_on_rails_counter_mirror
+        OPEN = :@concerns_on_rails_counter_undo
+
+        # Note one mirror onto `target` (an UPDATE through `klass` moved
+        # `counters` by their deltas, and bumped lock_version when `bumped`).
+        # Nothing to undo outside a transaction: the UPDATE committed on its own.
+        def self.record(connection, target, klass, counters, bumped)
+          return unless connection.transaction_open?
+          return if counters.empty? && !bumped
+
+          remember(target, klass, counters, bumped)
+          transaction = connection.current_transaction
+          bumps = bumped ? 1 : 0
+          open = open_for(target, transaction)
+          return open.add(counters, bumps) if open
+
+          undo = new(connection, target, klass)
+          undo.add(counters, bumps)
+          undo.enroll(transaction, target)
+        end
+
+        # The parent's list of open undos (one per transaction level holding a
+        # mirror), replaced, never mutated, since a dup of the parent shares
+        # the ivar. Marshal — a Rails.cache write of the parent under the
+        # pre-7.1 marshalling format — dumps it as empty: an undo references
+        # the connection and its transaction, which cannot be dumped and mean
+        # nothing in another process.
+        class OpenList
+          attr_reader :undos
+
+          def initialize(undos)
+            @undos = undos.freeze
+          end
+
+          def marshal_dump
+            []
+          end
+
+          def marshal_load(_data)
+            @undos = [].freeze
+          end
+        end
+
+        def self.undos_on(target)
+          target.instance_variable_get(OPEN)&.undos || []
+        end
+
+        # The undo open in `transaction` for `target`.
+        def self.open_for(target, transaction)
+          undos_on(target).find { |undo| undo.open_in?(transaction, target) }
+        end
+
+        # Keep only the undos still worth finding; drop the ivar when none is,
+        # so a parent outside any transaction carries nothing.
+        def self.keep_open(target, undos)
+          if undos.empty?
+            target.remove_instance_variable(OPEN) if target.instance_variable_defined?(OPEN)
+          else
+            target.instance_variable_set(OPEN, OpenList.new(undos))
+          end
+        end
+
+        # The value each just-mirrored column now holds. The Hash is
+        # replaced, never mutated: a dup of the parent shares the ivar.
+        def self.remember(target, klass, counters, bumped)
+          names = counters.keys
+          names += [klass.locking_column] if bumped
+          ledger = target.instance_variable_get(LEDGER) || {}
+          target.instance_variable_set(LEDGER, ledger.merge(names.to_h { |name| [name, target[name]] }))
+        end
+
+        def initialize(connection, target, klass)
+          @connection = connection
+          @transaction = nil
+          @target = WeakRef.new(target)
+          @klass = klass
+          @counters = Hash.new(0)
+          @bumps = 0
+          @settled = false
+        end
+
+        def add(counters, bumps)
+          counters.each { |name, delta| @counters[name] += delta }
+          @bumps += bumps
+        end
+
+        def open_in?(transaction, target)
+          findable? && @transaction.equal?(transaction) && target.equal?(alive_target)
+        end
+
+        # Still worth finding: not settled, and its transaction not finished.
+        # A savepoint's released (finalized) transaction handed this undo to
+        # its parent, where Rails still settles it, but where no lookup can
+        # tell it apart from a newer savepoint's undo.
+        def findable?
+          !@settled && !@transaction.nil? && !@transaction.state.finalized?
+        end
+
+        def enroll(transaction, target)
+          @transaction = transaction
+          @connection.add_transaction_record(self)
+          open = self.class.undos_on(target).select { |undo| !undo.equal?(self) && undo.findable? }
+          self.class.keep_open(target, open + [self])
+        end
+
+        # Never forwarded to the (weakly held, maybe collected) parent.
+        def inspect
+          "#<#{self.class.name} settled=#{@settled} counters=#{@counters.to_h} bumps=#{@bumps}>"
+        end
+
+        # The transaction-record protocol. No callbacks of its own.
+        def trigger_transactional_callbacks?
+          false
+        end
+
+        def before_committed!; end
+
+        # A savepoint released into a non-joinable transaction, or the end of
+        # the outermost one. Only the latter makes the UPDATE durable.
+        def committed!(**)
+          return if @settled
+
+          @connection.transaction_open? ? follow(@connection.current_transaction) : settle!
+        end
+
+        def rolledback!(**)
+          return if @settled
+
+          settle!
+          undo!
+        end
+
+        protected
+
+        attr_reader :counters, :bumps
+
+        def alive_target
+          @target.weakref_alive? ? @target.__getobj__ : nil
+        rescue WeakRef::RefError
+          nil
+        end
+
+        private
+
+        # Follow the UPDATE into the transaction the savepoint was released
+        # into, merged into the undo already open there for this parent.
+        def follow(transaction)
+          parent = alive_target
+          return settle! if parent.nil?
+
+          open = self.class.open_for(parent, transaction)
+          if open
+            open.add(counters, bumps)
+            settle!
+          else
+            enroll(transaction, parent)
+          end
+        end
+
+        # Done: drop the transaction, and leave the parent's list.
+        def settle!
+          @settled = true
+          @transaction = nil
+          parent = alive_target
+          self.class.keep_open(parent, self.class.undos_on(parent).select(&:findable?)) if parent
+        end
+
+        def undo!
+          parent = alive_target
+          return if parent.nil? || parent.frozen?
+
+          ledger = parent.instance_variable_get(LEDGER) || {}
+          moves(parent).each { |name, delta| ledger = move_back(parent, ledger, name, delta) }
+          parent.instance_variable_set(LEDGER, ledger)
+        end
+
+        # { column => delta } to take back: the counters, then lock_version.
+        def moves(parent)
+          moves = @counters.reject { |_name, delta| delta.zero? }
+          lock_loaded = @klass.locking_enabled? && parent.has_attribute?(@klass.locking_column)
+          @bumps.positive? && lock_loaded ? moves.merge(@klass.locking_column => @bumps) : moves
+        end
+
+        # Move `name` back by `delta` while it is still the mirrors' value.
+        def move_back(parent, ledger, name, delta)
+          current = parent[name]
+          mirrors_value = !parent.will_save_change_to_attribute?(name) || (ledger.key?(name) && current == ledger[name])
+          return ledger unless mirrors_value
+
+          value = current.to_i - delta
+          parent[name] = value
+          parent.send(:clear_attribute_change, name)
+          ledger.merge(name => value)
+        end
+      end
 
       included do
         class_attribute :counter_cacheable_rules, instance_accessor: false, default: []
@@ -448,7 +695,7 @@ module ConcernsOnRails
 
         reflection = counter_cacheable_reflection(rule)
         { klass: reflection.klass, key_column: reflection.association_primary_key.to_s, parent_key: parent_key,
-          column: rule[:count_column], delta: delta, touch: rule[:touch] }
+          column: rule[:count_column], delta: delta, touch: rule[:touch], association: rule[:association] }
       end
 
       # One update_counters per distinct (parent class, key column, key value):
@@ -462,9 +709,66 @@ module ConcernsOnRails
           counters = counter_cacheable_merged_counters(group)
           next if counters.empty?
 
-          counters[:touch] = true if group.any? { |adj| adj[:touch] }
-          klass.unscoped.where(key_column => parent_key).update_counters(counters)
+          touch = group.any? { |adj| adj[:touch] }
+          affected = klass.unscoped.where(key_column => parent_key).update_counters(touch ? counters.merge(touch: true) : counters)
+          counter_cacheable_sync_targets(klass, key_column, parent_key, group, counters) if affected.positive?
         end
+      end
+
+      # The UPDATE above bumped the parent row's lock_version (update_counters
+      # goes through update_all), but no parent instance. Rails' native counter
+      # cache adjusts the loaded belongs_to target with increment!, which
+      # mirrors the counter AND the lock_version bump in memory; without that
+      # the very parent `post.comments.create!` was called on raised
+      # StaleObjectError on its next save. Same here, for every instance this
+      # record's associations hold for that row — once per instance, however
+      # many rules (associations) share the UPDATE. Only under optimistic
+      # locking: elsewhere the loaded parent is left exactly as before
+      # (documented: reload it to read the counter).
+      def counter_cacheable_sync_targets(klass, key_column, parent_key, group, counters)
+        return unless klass.locking_enabled?
+
+        targets = group.map { |adj| adj[:association] }.uniq.filter_map do |name|
+          target = association(name).target
+          target if counter_cacheable_target_row?(target, key_column, parent_key)
+        end
+        targets.uniq(&:object_id).each { |target| counter_cacheable_sync_target(target, klass, counters) }
+      end
+
+      # The instance is a live copy of the adjusted row — matched by its key,
+      # so a reparent syncs the new parent the writer assigned or the OLD one
+      # a foreign-key reassignment left loaded, whichever the UPDATE touched.
+      def counter_cacheable_target_row?(target, key_column, parent_key)
+        target.is_a?(ActiveRecord::Base) && target.persisted? && !target.frozen? &&
+          target.has_attribute?(key_column) && target[key_column].to_s == parent_key.to_s
+      end
+
+      # increment!'s in-memory half: each counter moves by its delta (COALESCE
+      # to 0, like the SQL) and stays clean — a counter the caller assigned
+      # and has not saved is theirs to write, so it is left pending — then the
+      # lock_version bump. Mirroring the counter is what keeps the lock sync
+      # safe: a current lock_version over a stale count would let a full-row
+      # save (partial updates off) write the old count back.
+      def counter_cacheable_sync_target(target, klass, counters)
+        applied = counter_cacheable_apply_counters(target, counters)
+        bumped = ConcernsOnRails::Support::Locking.mirror_bump!(target, klass)
+        MirrorUndo.record(klass.connection, target, klass, applied, bumped)
+      end
+
+      # Move each (clean, loaded) counter up by its delta; the columns moved.
+      def counter_cacheable_apply_counters(target, counters)
+        counters.filter_map do |column, delta|
+          name = column.to_s
+          next unless target.has_attribute?(name)
+          next if target.will_save_change_to_attribute?(name)
+          # attr_readonly: never written on update, and assigning it raises
+          # under raise_on_assign_to_attr_readonly (7.1+). Left as loaded.
+          next if target.class.readonly_attributes.include?(name)
+
+          target[name] = target[name].to_i + delta
+          target.send(:clear_attribute_change, name)
+          [name, delta]
+        end.to_h
       end
 
       # Sum per column, dropping zero-sum entries (nothing to write).
