@@ -51,7 +51,7 @@ ConcernsOnRails is a Ruby gem (`gem "concerns_on_rails"`; Ruby >= 3.2, Rails 6.0
 - [WebhookVerifiable](https://vsn2015.github.io/concerns_on_rails/concerns/webhook-verifiable.md): HMAC verification for inbound webhooks
 - [Deprecatable](https://vsn2015.github.io/concerns_on_rails/concerns/deprecatable.md): RFC Deprecation/Sunset headers + 410 enforcement
 - [Cacheable](https://vsn2015.github.io/concerns_on_rails/concerns/cacheable.md): HTTP conditional GET (ETag / 304) + Cache-Control
-- [Permittable](https://vsn2015.github.io/concerns_on_rails/concerns/permittable.md): Typed, validated params contracts + schema-drift guard
+- [Permittable](https://vsn2015.github.io/concerns_on_rails/concerns/permittable.md): Typed, validated params contracts, schema-drift guard, OpenAPI export
 
 ## Optional
 

@@ -1,5 +1,19 @@
 <!-- CHANGELOG.md -->
 
+## Unreleased
+
+### Changed
+- **`permittable` dependency floor raised from `~> 0.1` to `>= 0.8, < 1`.** The Permittable
+  documentation (README section and docs page) was rewritten against permittable 0.10 — monitor
+  mode, `:json` fields, `nullable:`, `message:`/I18n copy, `format:` presets, field groups,
+  RFC 9457 output, the type-checking drift guard, the `permittable:generate`/`:audit`/`:openapi`
+  tasks, RSpec matchers and standalone contracts — and the old pin let a host resolve a 0.x that
+  had none of it. 0.8 is the floor because it is the newest line that still supports Rails 6.0
+  (0.9+ requires ActiveSupport >= 6.1), so the 6.0 CI line keeps resolving; the docs carry a
+  heads-up listing what a 0.8 host lacks and how Respondable's `:problem_details` and the gem's
+  own `Permittable.error_format = :problem` interact. No code change; the gem README stays the
+  canonical Permittable reference.
+
 ## 1.31.0 (2026-10-05)
 
 The fixes from two audits, each fix put through adversarial review rounds until a reviewer

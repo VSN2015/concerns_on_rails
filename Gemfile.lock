@@ -7,7 +7,7 @@ PATH
       activesupport (>= 6.0, < 9)
       acts_as_list (>= 0.7.5, < 2)
       friendly_id (~> 5.4)
-      permittable (~> 0.1)
+      permittable (>= 0.8, < 1)
 
 GEM
   remote: https://rubygems.org/

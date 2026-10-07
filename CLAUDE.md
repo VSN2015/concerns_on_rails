@@ -333,16 +333,22 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   freshness is emitted only for GET/HEAD with status 200/203/204/206/304 (never on
   rescued errors); `vary:` merges through `Support::VaryHeader`.
 - **`Permittable`** — typed, validated params contracts + schema-drift guard.
-  Lives in the STANDALONE `permittable` gem (runtime dependency, published on
+  Lives in the STANDALONE `permittable` gem (runtime dependency `>= 0.8, < 1`, published on
   rubygems.org; developed in the sibling repo `../permittable`,
-  github.com/VSN2015/permittable).
-  `ConcernsOnRails::Controllers::Permittable` is an alias for `::Permittable`
+  github.com/VSN2015/permittable; 0.9+ needs Rails >= 6.1, so the Rails 6.0 line
+  resolves 0.8). `ConcernsOnRails::Controllers::Permittable` is an alias for `::Permittable`
   (bridge file also pools `sensitive:` registrations into the shared
   filter_parameters registry); this repo's permittable_spec doubles as the
   compatibility suite. `permit_params *actions, root:, model:, unknown:,
-  enforce:` + `required`/`optional`/`array`/nested DSL, strict coercion,
-  `transform:`/`finalize`/`violate!` output reshaping, `permitted_params`
-  helper; instruments `invalid_parameters.permittable`.
+  enforce:, mode:, desc:` + `required`/`optional`/`array`/nested DSL (`:json` free-form
+  hashes, `nullable:`, `message:`, `format:` presets, `Permittable.fields` + `use` groups),
+  strict coercion, `transform:`/`finalize`/`violate!` output reshaping, `permitted_params`
+  / `permittable_violations` helpers; instruments `invalid_parameters.permittable`.
+  Errors render through `Respondable#render_error` when included (so Respondable's
+  `:problem_details` applies); the gem's own `Permittable.error_format = :problem`
+  bypasses that delegation. Beyond the request: `mode: :monitor` rollout,
+  `permittable:generate`/`:audit`/`:openapi` rake tasks, RSpec matchers
+  (`permittable/rspec`), standalone `Permittable::Contract`, `check_column_types`.
 
 ### Support modules (`lib/concerns_on_rails/support/`)
 
@@ -441,7 +447,7 @@ FEATURE is version gated (Sortable's `nulls:`, Aliasable's query side) — not t
   `create_table` breaks on Ruby 3 kwargs), so that claim was unreachable.
 - `acts_as_list >= 0.7.5, < 2` (lazy-loaded with Sortable)
 - `friendly_id ~> 5.4` (lazy-loaded with Sluggable)
-- `permittable ~> 0.1` (the extracted Permittable concern, resolved from rubygems.org)
+- `permittable >= 0.8, < 1` (the extracted Permittable concern, resolved from rubygems.org; 0.8 is the floor so every host has monitor mode, `:json`, `nullable:`, field groups, the matchers, the generator and the OpenAPI export — 0.9+ needs Rails >= 6.1, so the Rails 6.0 line stays on 0.8)
 - Ruby `>= 3.2.0`
 
 ### Release process

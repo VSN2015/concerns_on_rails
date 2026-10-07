@@ -40,7 +40,7 @@ Gem::Specification.new do |spec|
   spec.add_runtime_dependency 'friendly_id', '~> 5.4'
   # Controllers::Permittable was extracted into its own gem; the constant here
   # is an alias (see lib/concerns_on_rails/controllers/permittable.rb).
-  spec.add_runtime_dependency 'permittable', '~> 0.1'
+  spec.add_runtime_dependency 'permittable', '>= 0.8', '< 1'
 
   # Merge (not reassign) so the "license" key set above is preserved.
   spec.metadata.merge!(
