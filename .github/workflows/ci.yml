@@ -45,21 +45,25 @@ jobs:
   test:
     name: RSpec (Rails ${{ matrix.rails }}, Ruby ${{ matrix.ruby }})
     runs-on: ubuntu-latest
+    # ruby-head is an early warning for the NEXT Ruby, not a supported target:
+    # a red head job is reported but never fails the run or blocks `publish`.
+    continue-on-error: ${{ matrix.ruby == 'head' }}
     strategy:
       fail-fast: false
       matrix:
-        ruby: ['3.2']
+        # required_ruby_version is ">= 3.2.0" with no ceiling, so every released
+        # Ruby from the floor up is claimed as supported. Quoted on purpose:
+        # unquoted, YAML reads 4.0 as the number 4.
+        ruby: ['3.2', '3.3', '3.4', '4.0']
         rails: ['6.0', '6.1', '7.0', '7.1', '7.2', '8.0', '8.1']
+        # The FULL cross product: the gemspec admits every Rails line on every
+        # Ruby, so every pairing is tested. 7.0 runs on 3.4/4.0 because its last
+        # patch (7.0.10, which the "~> 7.0.8" pin resolves) declares base64,
+        # bigdecimal, mutex_m, drb, logger and benchmark itself, so their move
+        # out of the default gems doesn't break it. 6.0/6.1 declare none of
+        # them, so their gemfiles add them on Ruby 3.4+ (see rails_6.x.gemfile).
         include:
-          # Newer Rubies against the current Rails lines. required_ruby_version
-          # is ">= 3.2.0" with no ceiling, so these are claimed as supported.
-          # The old lines stay on 3.2 on purpose: 6.0/6.1 predate 3.3 and are
-          # not claimed to work there.
-          - ruby: '3.3'
-            rails: '8.0'
-          - ruby: '3.4'
-            rails: '8.0'
-          - ruby: '3.4'
+          - ruby: head
             rails: '8.1'
     env:
       BUNDLE_GEMFILE: gemfiles/rails_${{ matrix.rails }}.gemfile
