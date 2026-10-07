@@ -58,7 +58,10 @@ jobs:
         rails: ['6.0', '6.1', '7.0', '7.1', '7.2', '8.0', '8.1']
         # A cross product, so a new Rails line runs on every Ruby by default.
         # The old lines stay on 3.2 on purpose: 6.0/6.1 predate 3.3 and are
-        # not claimed to work there.
+        # not claimed to work there. 7.0 does run on 3.4/4.0: its last patch
+        # (7.0.10, which the "~> 7.0.8" pin resolves) declares base64,
+        # bigdecimal, mutex_m, drb, logger and benchmark itself, so their move
+        # out of the default gems doesn't break it.
         exclude:
           - { ruby: '3.3', rails: '6.0' }
           - { ruby: '3.3', rails: '6.1' }

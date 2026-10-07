@@ -203,8 +203,9 @@ still wins over the gem-wide fallback.
 - **Rails**: 6.0 through 8.1
 
 Every one of those lines runs the full suite on every push — Rails 6.0, 6.1, 7.0, 7.1, 7.2,
-8.0 and 8.1 on SQLite, plus PostgreSQL and MySQL, and Ruby 3.3/3.4 against the current
-lines. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+8.0 and 8.1 on SQLite, plus PostgreSQL and MySQL. Ruby 3.2, 3.3, 3.4 and 4.0 each run
+against Rails 7.0 through 8.1 (6.0/6.1 run on 3.2 only), and a non-blocking ruby-head job
+gives early warning of the next Ruby. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 **Rails 5.x is not supported**, despite what older versions of this gem declared. Rails 5
 cannot run on any Ruby this gem supports: Ruby 3 separated keyword arguments, which breaks
