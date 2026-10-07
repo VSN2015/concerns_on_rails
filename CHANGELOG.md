@@ -1,6 +1,12 @@
 <!-- CHANGELOG.md -->
 
-## Unreleased
+## 1.32.0 (2026-10-07)
+
+A dependency release (#127): the `permittable` floor rises to `>= 0.8`, and the Permittable docs
+are rewritten against permittable 0.10. It is a minor release because hosts still on permittable
+0.1–0.7 must upgrade it (the same rule as the Rails floor raise in 1.29.0). No code change, no
+new concerns and no migrations. 2723 examples, 0 failures, green on PostgreSQL, MySQL and every
+Rails line from 6.0 to 8.1.
 
 ### Changed
 - **`permittable` dependency floor raised from `~> 0.1` to `>= 0.8, < 1`.** The Permittable
