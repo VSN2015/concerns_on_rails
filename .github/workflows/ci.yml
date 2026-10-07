@@ -60,7 +60,8 @@ jobs:
         # Ruby, so every pairing is tested. 7.0 runs on 3.4/4.0 because its last
         # patch (7.0.10, which the "~> 7.0.8" pin resolves) declares base64,
         # bigdecimal, mutex_m, drb, logger and benchmark itself, so their move
-        # out of the default gems doesn't break it.
+        # out of the default gems doesn't break it. 6.0/6.1 declare none of
+        # them, so their gemfiles add them on Ruby 3.4+ (see rails_6.x.gemfile).
         include:
           - ruby: head
             rails: '8.1'

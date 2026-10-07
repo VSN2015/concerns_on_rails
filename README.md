@@ -204,8 +204,21 @@ still wins over the gem-wide fallback.
 
 Every one of those lines runs the full suite on every push — Rails 6.0, 6.1, 7.0, 7.1, 7.2,
 8.0 and 8.1 on SQLite, plus PostgreSQL and MySQL. Ruby 3.2, 3.3, 3.4 and 4.0 each run
-against Rails 7.0 through 8.1 (6.0/6.1 run on 3.2 only), and a non-blocking ruby-head job
-gives early warning of the next Ruby. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+against every one of those Rails lines, and a non-blocking ruby-head job gives early
+warning of the next Ruby. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+**Rails 6.0/6.1 on Ruby 3.4+** needs a few Gemfile lines that Rails 6.x itself never
+declared. Ruby 3.4 and 4.0 moved these libraries out of the default gems, and without them
+`require "active_record"` fails with `LoadError: cannot load such file -- mutex_m`:
+
+```ruby
+gem "base64"
+gem "bigdecimal"
+gem "drb"
+gem "mutex_m"
+gem "benchmark" # Ruby 4.0+
+gem "logger"    # Ruby 4.0+
+```
 
 **Rails 5.x is not supported**, despite what older versions of this gem declared. Rails 5
 cannot run on any Ruby this gem supports: Ruby 3 separated keyword arguments, which breaks
