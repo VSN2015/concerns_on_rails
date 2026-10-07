@@ -1,5 +1,4 @@
 require "spec_helper"
-require "benchmark"
 
 describe ConcernsOnRails::Controllers::Filterable do
   before do
@@ -598,14 +597,15 @@ describe ConcernsOnRails::Controllers::Filterable do
       end
 
       it "rejects an absurd exponent or length quickly instead of expanding it" do
-        elapsed = Benchmark.realtime do
-          expect(amount_names(amount_gt: "1e99999999")).to eq([])
-          expect(amount_names(amount: { lt: "-1e999999999" })).to eq([])
-          expect(amount_names(amount_gte: "1e-99999999")).to eq([])
-          expect(amount_names(amount: "1#{'0' * 200}")).to eq([])
-          expect(amount_names(amount_lt: 10**5000)).to eq(["Lamp 100% cotton shade"]) # a JSON-body integer beyond any numeric
-        end
-        expect(elapsed).to be < 0.5
+        # Process.clock_gettime, not Benchmark.realtime: benchmark is a bundled
+        # (not default) gem from Ruby 4.0, and nothing in the bundle depends on it.
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        expect(amount_names(amount_gt: "1e99999999")).to eq([])
+        expect(amount_names(amount: { lt: "-1e999999999" })).to eq([])
+        expect(amount_names(amount_gte: "1e-99999999")).to eq([])
+        expect(amount_names(amount: "1#{'0' * 200}")).to eq([])
+        expect(amount_names(amount_lt: 10**5000)).to eq(["Lamp 100% cotton shade"]) # a JSON-body integer beyond any numeric
+        expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 0.5
       end
 
       it "still reads a large but sane operand exactly" do
