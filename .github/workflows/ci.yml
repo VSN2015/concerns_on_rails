@@ -56,19 +56,11 @@ jobs:
         # unquoted, YAML reads 4.0 as the number 4.
         ruby: ['3.2', '3.3', '3.4', '4.0']
         rails: ['6.0', '6.1', '7.0', '7.1', '7.2', '8.0', '8.1']
-        # A cross product, so a new Rails line runs on every Ruby by default.
-        # The old lines stay on 3.2 on purpose: 6.0/6.1 predate 3.3 and are
-        # not claimed to work there. 7.0 does run on 3.4/4.0: its last patch
-        # (7.0.10, which the "~> 7.0.8" pin resolves) declares base64,
+        # The FULL cross product: the gemspec admits every Rails line on every
+        # Ruby, so every pairing is tested. 7.0 runs on 3.4/4.0 because its last
+        # patch (7.0.10, which the "~> 7.0.8" pin resolves) declares base64,
         # bigdecimal, mutex_m, drb, logger and benchmark itself, so their move
         # out of the default gems doesn't break it.
-        exclude:
-          - { ruby: '3.3', rails: '6.0' }
-          - { ruby: '3.3', rails: '6.1' }
-          - { ruby: '3.4', rails: '6.0' }
-          - { ruby: '3.4', rails: '6.1' }
-          - { ruby: '4.0', rails: '6.0' }
-          - { ruby: '4.0', rails: '6.1' }
         include:
           - ruby: head
             rails: '8.1'
