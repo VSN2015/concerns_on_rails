@@ -706,13 +706,20 @@ module ConcernsOnRails
             "the decrypted plaintext in the slug column. Slug from a non-sensitive field instead."
         end
 
-        # Macro-time guard for the order Searchable/Taggable-first: `search` and
-        # `tagged_with` are LIKE queries on the column, which holds ciphertext
-        # under a random IV, so they would silently match nothing. Searchable
-        # and Taggable mirror this for the reverse order. An undeclared
-        # Taggable (its :tags default, a taggable_by may still follow) is left
-        # to tagged_with's call-time check.
+        # Macro-time guard for the order Searchable/Taggable/Monetizable-first:
+        # `search` and `tagged_with` are LIKE queries on the column, which
+        # holds ciphertext under a random IV, so they would silently match
+        # nothing; Monetizable's aggregates would SUM/AVG that ciphertext.
+        # Searchable, Taggable and Monetizable mirror this for the reverse
+        # order. An undeclared Taggable (its :tags default, a taggable_by may
+        # still follow) is left to tagged_with's call-time check.
         def encryptable_guard_queryable!(field)
+          if encryptable_monetized_field?(field)
+            raise ArgumentError,
+                  "#{LABEL}: ':#{field}' is also declared with Monetizable, whose sum_/average_/minimum_/maximum_ " \
+                  "aggregates would run SQL over the ciphertext. Keep the money column unencrypted."
+          end
+
           concern = if encryptable_searched_field?(field)
                       "Searchable (search)"
                     elsif encryptable_tagged_field?(field)
@@ -732,6 +739,10 @@ module ConcernsOnRails
 
         def encryptable_tagged_field?(field)
           respond_to?(:taggable_declared) && taggable_declared && taggable_field.to_sym == field
+        end
+
+        def encryptable_monetized_field?(field)
+          respond_to?(:monetizable_rules) && monetizable_rules.key?(field)
         end
 
         # Redact encrypted fields from Rails parameter logging. The gem-level

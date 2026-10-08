@@ -124,6 +124,55 @@ describe ConcernsOnRails::Taggable do
       expect(a.reload[:tags]).to eq("ruby,rails")
       expect(a.tag_list).to eq(%w[ruby rails])
     end
+
+    # String#strip is ASCII-only: a tag pasted with a no-break space was
+    # stored as a distinct "ruby\u00A0" that tagged_with("ruby") never found.
+    it "strips Unicode whitespace from each tag" do
+      a = TagArticle.create!(title: "t", tag_list: "ruby\u00A0, \u3000rails, ruby")
+      expect(a.reload[:tags]).to eq("ruby,rails")
+      expect(TagArticle.tagged_with("ruby", "rails")).to eq([a])
+      expect(TagArticle.tagged_with("\u00A0rails\u00A0")).to eq([a])
+    end
+
+    # The hook ran in before_validation only, so update_attribute /
+    # save(validate: false) stored "ruby, rails" — a form tagged_with's
+    # boundary-safe LIKE cannot match. A prepended before_save backstop
+    # (Normalizable's) covers them.
+    context "when validation is skipped" do
+      it "still normalizes on update_attribute" do
+        a = TagArticle.create!(title: "t", tags: "go")
+        a.update_attribute(:tags, "ruby, rails")
+        expect(a.reload[:tags]).to eq("ruby,rails")
+        expect(TagArticle.tagged_with("rails")).to eq([a])
+      end
+
+      it "still normalizes on save(validate: false), for a new record too" do
+        a = TagArticle.new(title: "t", tags: " ruby , rails, ruby ")
+        a.save(validate: false)
+        expect(a.reload[:tags]).to eq("ruby,rails")
+      end
+
+      it "normalizes a value changed after a (failed) validation" do
+        a = TagArticle.new(title: "t", tags: "go")
+        a.valid?
+        a.tags = "ruby, rails"
+        a.save(validate: false)
+        expect(a.reload[:tags]).to eq("ruby,rails")
+      end
+
+      it "skips a column a partial select did not load" do
+        a = TagArticle.create!(title: "t", tags: "go")
+        partial = TagArticle.select(:id, :title).find(a.id)
+        expect { partial.update_attribute(:title, "u") }.not_to raise_error
+        expect(a.reload[:tags]).to eq("go")
+      end
+
+      it "registers the backstop once, however often the macro is re-declared" do
+        TagArticle.taggable_by :tags
+        filters = TagArticle._save_callbacks.map(&:filter)
+        expect(filters.count(:taggable_normalize_unvalidated)).to eq(1)
+      end
+    end
   end
 
   describe "#add_tags / #remove_tags" do

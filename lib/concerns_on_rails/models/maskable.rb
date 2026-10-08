@@ -136,10 +136,19 @@ module ConcernsOnRails
         end
       end
 
+      # Recurses into the child's own `include:` rather than leaving the deeper
+      # levels to the child's override: a middle model that is not Maskable
+      # (a join model with no secrets) hands its include: to Rails as is,
+      # which serialized the grandchild unmasked. An explicit falsy `masked:`
+      # opts the child out, and everything under it with it.
       def maskable_masked_child(nested)
         return { masked: true } unless nested.is_a?(Hash)
+        return nested if nested.key?(:masked) && !nested[:masked]
 
-        nested.key?(:masked) ? nested : nested.merge(masked: true)
+        child = nested.key?(:masked) ? nested : nested.merge(masked: true)
+        return child if nested[:include].blank?
+
+        child.merge(include: maskable_masked_includes(nested[:include]))
       end
 
       def maskable_fields_for(masked)

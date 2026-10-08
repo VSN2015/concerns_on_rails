@@ -61,6 +61,11 @@ module ConcernsOnRails
         # `validate :validate_address` is registered by `addressable_by` (not here) so it can
         # carry the optional if:/unless: condition. Normalization always runs.
         before_validation :normalize_address
+        # Backstop for the saves that skip validation — update_attribute,
+        # save(validate: false) — which otherwise stored the raw parts.
+        # PREPENDED (Normalizable's rule), so it runs ahead of the
+        # fingerprint stamp below and any sibling's earlier before_save.
+        before_save :addressable_normalize_unvalidated, prepend: true
         # Stamping is its OWN callback, not a tail call inside normalize_address:
         # a sibling concern's later before_validation (Normalizable, say) can
         # still rewrite a mapped column, and a fingerprint computed before that
@@ -269,17 +274,14 @@ module ConcernsOnRails
       # --- Normalization (before_validation) ------------------------------------
 
       def normalize_address
-        country = resolved_country
-        self.class.addressable_fields.each do |part, column|
-          value = self[column]
-          next unless value.is_a?(String)
-          # Persisted records: untouched columns were already normalized when
-          # they were written — skip the rewrite.
-          next if persisted? && respond_to?(:will_save_change_to_attribute?) &&
-                  !will_save_change_to_attribute?(column)
-
+        # column => the value this pass left it holding, so the before_save
+        # backstop can tell "already normalized" from "changed since".
+        @addressable_normalized = {}
+        addressable_each_pending_part do |part, column, value, country|
           normalized = normalize_part(part, country, value)
           self[column] = normalized unless normalized == value
+          # A copy: an in-place mutation after validation must not look normalized.
+          @addressable_normalized[column] = self[column].dup
         end
       end
 
@@ -360,6 +362,49 @@ module ConcernsOnRails
       end
 
       private
+
+      # Normalize only what before_validation did not: a column it already
+      # handled, still holding the value it produced, is skipped, so a
+      # validated save stores exactly what was validated. A column assigned
+      # after that validation (or never validated at all) is normalized
+      # here. The record is cleared for the next save.
+      def addressable_normalize_unvalidated
+        normalized = @addressable_normalized || {}
+        @addressable_normalized = nil
+        addressable_each_pending_part do |part, column, value, country|
+          next if normalized.key?(column) && normalized[column] == value
+
+          result = normalize_part(part, country, value)
+          self[column] = result unless result == value
+        end
+      end
+
+      # Yields each mapped String column this save should normalize, with the
+      # country driving postal formatting (resolved once, from the value as
+      # it stood before any part was rewritten). Persisted records: untouched
+      # columns were already normalized when they were written — skipped.
+      def addressable_each_pending_part
+        country = addressable_normalization_country
+        self.class.addressable_fields.each do |part, column|
+          # A partial `select` load lacks the column: reading it would raise
+          # MissingAttributeError, and there is nothing to normalize.
+          next unless has_attribute?(column)
+
+          value = self[column]
+          next unless value.is_a?(String)
+          next if persisted? && respond_to?(:will_save_change_to_attribute?) &&
+                  !will_save_change_to_attribute?(column)
+
+          yield part, column, value, country
+        end
+      end
+
+      # resolved_country, or nil ("unknown": permissive postal formatting)
+      # when a partial `select` left the mapped country column unloaded.
+      def addressable_normalization_country
+        column = self.class.addressable_fields[:country]
+        column && !has_attribute?(column) ? nil : resolved_country
+      end
 
       # Rails' conditional-validation semantics: every if: condition must hold
       # and no unless: condition may hold; each accepts a Symbol, Proc or Array.

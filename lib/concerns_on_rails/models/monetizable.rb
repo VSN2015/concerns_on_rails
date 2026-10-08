@@ -65,6 +65,7 @@ module ConcernsOnRails
           ConcernsOnRails::Support::Money.validate_unit!(config, LABEL)
 
           ensure_columns!("ConcernsOnRails::Models::Monetizable", fields, types: :integer)
+          monetizable_guard_encryptable!(fields)
           fields.each do |cents_field|
             name = money_name(cents_field.to_sym, as)
             define_money_accessors(cents_field.to_sym, name, config)
@@ -75,6 +76,27 @@ module ConcernsOnRails
 
       class_methods do # rubocop:disable Metrics/BlockLength
         private
+
+        # An `encryptable` cents column holds ciphertext, so the sum_ /
+        # average_ / minimum_ / maximum_ aggregates ran SQL over it: the
+        # result came back through the encrypted type and raised
+        # DecryptionError, and PostgreSQL rejects SUM(text) outright. The
+        # instance accessors worked, which hid it until the first report.
+        # Mirror of Encryptable's macro-time guard, covering the
+        # reverse order (monetizable declared AFTER encryptable). Checked
+        # before anything is defined, so a refused declaration leaves the
+        # class as it was.
+        def monetizable_guard_encryptable!(fields)
+          return unless respond_to?(:encryptable_rules)
+
+          overlap = fields.map(&:to_sym) & encryptable_rules.keys
+          return if overlap.empty?
+
+          raise ArgumentError,
+                "#{LABEL}: #{overlap.map { |f| ":#{f}" }.join(', ')} declared with both Encryptable and " \
+                "Monetizable; its sum_/average_/minimum_/maximum_ aggregates would run SQL over the ciphertext. " \
+                "Keep the money column unencrypted."
+        end
 
         def define_money_accessors(cents_field, name, config)
           subunit = config[:subunit_to_unit]

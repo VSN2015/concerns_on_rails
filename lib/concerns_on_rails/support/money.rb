@@ -92,6 +92,10 @@ module ConcernsOnRails
       # Ruby-literal underscores, so "5_5" read as 55 while the equally
       # mis-grouped "1,5" was garbage.
       CANONICAL_AMOUNT = /\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z/
+      # Significant digits a Rational is expanded to: every accepted
+      # magnitude (< 10**MAX_EXPONENT) to MAX_EXPONENT decimal places — far
+      # finer than any subunit the result is rounded to.
+      RATIONAL_DIGITS = MAX_EXPONENT * 2
 
       # Parse a writer's input into a finite BigDecimal amount (major units),
       # or nil. A String has its unit removed (only at the start or the end),
@@ -100,10 +104,18 @@ module ConcernsOnRails
       # output reads back: "$1,234.50" / "€1.234,50" / "-$5.00". Non-finite,
       # oversized and garbage input is nil, never raised.
       def parse(amount, options = {})
-        decimal = amount.is_a?(String) ? parse_string(amount, options) : BigDecimal(amount.to_s)
+        decimal = amount.is_a?(String) ? parse_string(amount, options) : numeric_decimal(amount)
         decimal&.finite? && decimal.exponent <= MAX_EXPONENT ? decimal : nil
       rescue ArgumentError, TypeError, FloatDomainError
         nil
+      end
+
+      # A non-String amount as a BigDecimal. Through #to_s for the rest — a
+      # Float reads as it prints (19.99, not its binary expansion) — but a
+      # Rational's #to_s is "1999/100", which BigDecimal() rejects, so the
+      # writer stored nil for an exact amount; it is expanded directly.
+      def numeric_decimal(amount)
+        amount.is_a?(Rational) ? BigDecimal(amount, RATIONAL_DIGITS) : BigDecimal(amount.to_s)
       end
 
       # Major units to whole subunits (half-up), nil if that cannot be done.

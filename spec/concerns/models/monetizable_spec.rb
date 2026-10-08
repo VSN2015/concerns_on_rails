@@ -187,6 +187,17 @@ describe ConcernsOnRails::Models::Monetizable do
       expect(cents_for(klass, "1,000.50")).to eq(100_050)
       expect(cents_for(klass, ".5")).to eq(50)
     end
+
+    # A Rational went through #to_s ("1999/100"), which BigDecimal() rejects,
+    # so the writer silently stored nil for an exact amount.
+    it "accepts a Rational amount" do
+      klass = product_class { monetizable :price_cents }
+
+      expect(cents_for(klass, Rational(1999, 100))).to eq(1999)
+      expect(cents_for(klass, Rational(-1, 3))).to eq(-33)
+      expect(cents_for(klass, Rational(1, 200))).to eq(1) # rounds half-up, like the other inputs
+      expect(cents_for(klass, Rational(10**30, 1))).to be_nil # oversized, like any other input
+    end
   end
 
   describe "options" do
@@ -254,6 +265,47 @@ describe ConcernsOnRails::Models::Monetizable do
       expect(product.price_cents).to eq(1999)
       expect(product.price).to eq(BigDecimal("19.99"))
       expect(product.formatted_price).to eq("$19.99")
+    end
+
+    # An encrypted cents column holds ciphertext, so the sum_/average_/
+    # minimum_/maximum_ aggregates ran SQL over it — a DecryptionError on
+    # SQLite, SUM(text) on PostgreSQL — while the instance accessors worked.
+    # Refused at declaration in either order, like Searchable/Taggable.
+    {
+      true => /Monetizable: :price_cents declared with both Encryptable and Monetizable/,
+      false => /Encryptable: ':price_cents' is also declared with Monetizable/
+    }.each do |encryptable_first, message|
+      order = encryptable_first ? "encryptable first" : "monetizable first"
+
+      it "refuses a cents column that is also encryptable (#{order})" do
+        expect do
+          product_class do
+            include ConcernsOnRails::Models::Encryptable
+
+            if encryptable_first
+              encryptable :price_cents, type: :integer
+              monetizable :price_cents
+            else
+              monetizable :price_cents
+              encryptable :price_cents, type: :integer
+            end
+          end
+        end.to raise_error(ArgumentError, message)
+      end
+    end
+
+    it "defines nothing for a refused declaration and still monetizes the plaintext columns" do
+      klass = product_class do
+        include ConcernsOnRails::Models::Encryptable
+
+        encryptable :price_cents, type: :integer
+      end
+
+      expect { klass.monetizable :shipping_cents, :price_cents }.to raise_error(ArgumentError, /Encryptable/)
+      expect(klass).not_to respond_to(:sum_shipping)
+
+      klass.monetizable :shipping_cents
+      expect(klass.new(shipping: "4.50").shipping_cents).to eq(450)
     end
   end
 

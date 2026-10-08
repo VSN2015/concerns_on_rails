@@ -63,6 +63,19 @@ describe ConcernsOnRails::Searchable do
       expect(Post.search("rails ").to_sql).not_to include("rails %")
     end
 
+    # String#strip is ASCII-only: a no-break or an IME's ideographic space
+    # became part of the LIKE pattern, and a query of nothing else matched
+    # no row instead of being the documented no-op.
+    it "treats Unicode whitespace as whitespace when trimming the query" do
+      hit = Post.create!(title: "hello world", body: "")
+      Post.create!(title: "other", body: "")
+
+      expect(Post.search("\u00A0").count).to eq(2)
+      expect(Post.search("\u3000 \u00A0").count).to eq(2)
+      expect(Post.search("hello\u00A0").to_a).to eq([hit])
+      expect(Post.search("\u3000hello\u3000").to_a).to eq([hit])
+    end
+
     it "keeps interior whitespace in the query (mode: :any)" do
       hit = Post.create!(title: "Ruby on Rails", body: "")
       Post.create!(title: "Rails on Ruby", body: "")
@@ -203,6 +216,14 @@ describe ConcernsOnRails::Searchable do
 
       expect(Book.search("ruby framework").pluck(:title)).to eq(["Ruby on Rails"])
       expect(Book.search("ruby language").pluck(:title)).to eq(["Ruby"])
+    end
+
+    it "splits on Unicode whitespace too" do
+      Book.create!(title: "Ruby on Rails", body: "web framework")
+      Book.create!(title: "Ruby",          body: "language")
+
+      expect(Book.search("ruby\u3000framework").pluck(:title)).to eq(["Ruby on Rails"])
+      expect(Book.search("\u00A0ruby\u00A0\u00A0language\u00A0").pluck(:title)).to eq(["Ruby"])
     end
   end
 
