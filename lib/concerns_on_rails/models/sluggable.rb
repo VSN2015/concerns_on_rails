@@ -48,7 +48,7 @@ module ConcernsOnRails
 
         # we must override should_generate_new_friendly_id? to support update slug
         # if we don't override this method, friendly_id will not generate the new slug when update
-        define_method :should_generate_new_friendly_id? do
+        define_method :should_generate_new_friendly_id? do # rubocop:disable Metrics/CyclomaticComplexity
           return true if @sluggable_force_regenerate # regenerate_slug!
 
           field = self.class.sluggable_field
@@ -68,7 +68,7 @@ module ConcernsOnRails
           # legacy/imported rows with a NULL slug still self-heal.
           slug_missing = send(slug_column).blank? && slug_source.present?
 
-          source_changed || slug_missing
+          source_changed || slug_missing || sluggable_scope_changed?
         end
 
         # Defined on the class (like the method above) so it sits ABOVE
@@ -291,6 +291,21 @@ module ConcernsOnRails
 
       def sluggable_forget_built_slug
         @sluggable_built = nil
+      end
+
+      # friendly_id's own :scoped rule, which the should_generate_new_friendly_id?
+      # override above replaced without ever consulting: a record moved to
+      # another scope (`scope: :account_id` changed) rebuilds its slug from
+      # the source against the NEW scope — friendly_id's uuid suffix when the
+      # plain slug is taken there — instead of keeping one the new scope may
+      # already hold. A slug assigned in the same save still wins (the guard
+      # above). Persisted records only: a new record's slug follows the source
+      # rules (no slug from a blank source just because the scope was set).
+      def sluggable_scope_changed?
+        config = friendly_id_config
+        return false unless persisted? && config.uses?(:scoped)
+
+        config.scope_columns.any? { |column| will_save_change_to_attribute?(column) }
       end
 
       # The slug column's own write-time transforms — a write-mode Sanitizable

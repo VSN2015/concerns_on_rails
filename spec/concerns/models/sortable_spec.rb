@@ -307,6 +307,60 @@ describe ConcernsOnRails::Sortable do
     end
   end
 
+  # acts_as_list assigns the position in its own before_create, after every
+  # sibling's before_save: Auditable's creation entry used to leave it out.
+  describe "the acts_as_list position on create (Support::GeneratedValues)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :audited_tasks, force: true do |t|
+          t.string  :name
+          t.integer :position
+          t.integer :list_id
+          t.text    :audit_log
+        end
+      end
+
+      # Named before sortable_by runs: acts_as_list builds code from the class
+      # name, which an anonymous class does not have on Rails 6.0.
+      klass = Class.new(TestModel)
+      stub_const("AuditedTask", klass)
+      klass.class_eval do
+        self.table_name = "audited_tasks"
+        include ConcernsOnRails::Sortable
+        include ConcernsOnRails::Auditable
+
+        sortable_by :position, scope: :list_id
+        auditable_by :position
+      end
+    end
+
+    it "is reported to Auditable's creation entry" do
+      AuditedTask.create!(name: "first", list_id: 1)
+      task = AuditedTask.create!(name: "second", list_id: 1)
+
+      expect(task.position).to eq(2)
+      expect(task.last_change_for(:position)).to include("from" => nil, "to" => 2)
+      expect(task.reload.audit_trail.size).to eq(1)
+    end
+
+    it "leaves a caller-supplied position to the before_save capture" do
+      AuditedTask.create!(name: "first", list_id: 1)
+      task = AuditedTask.create!(name: "second", list_id: 1, position: 1)
+
+      expect(task.last_change_for(:position)).to include("from" => nil, "to" => 1)
+      expect(task.reload.audit_trail.size).to eq(1)
+    end
+
+    it "still moves a record to another list on update" do
+      AuditedTask.create!(name: "other", list_id: 2)
+      task = AuditedTask.create!(name: "mover", list_id: 1)
+
+      task.update!(list_id: 2)
+
+      expect(task.reload.position).to eq(2)
+    end
+  end
+
   describe ".reposition! (bulk reorder from an id list)" do
     let!(:a) { Task.create!(name: "A") }
     let!(:b) { Task.create!(name: "B") }
