@@ -159,7 +159,9 @@ Order.paid.formatted_sum_total(unit: "EUR ")   # => "EUR 3.500,50"
 
 - **Rounding is half-up to the nearest whole subunit.** `BigDecimal#round` (Ruby's default banker-style rounding does not apply here; `BigDecimal#round` with no mode argument uses half-up). `product.price = 19.999` stores `price_cents = 2000`.
 
-- **Writer accepts strings.** Because the setter calls `BigDecimal(amount.to_s)`, string inputs like `"5"` or `"19.99"` are valid and behave identically to their numeric equivalents.
+- **Writer accepts strings and any real number.** String inputs like `"5"` or `"19.99"` are valid and behave identically to their numeric equivalents. An Integer, Float or BigDecimal is read through `BigDecimal(amount.to_s)`, so a Float reads as it prints (`19.99`, not its binary expansion); a `Rational` — whose `#to_s` is `"1999/100"` — is expanded directly, so `product.price = Rational(1999, 100)` stores `1999` (it used to store `nil`).
+
+- **Encrypted cents columns are refused.** The aggregates run SQL over the column, so an [Encryptable](encryptable.md) cents column would `SUM` ciphertext (a `DecryptionError` on SQLite, `SUM(text)` rejected on PostgreSQL) while the instance accessors kept working. Declaring a field with both `encryptable` and `monetizable` raises `ArgumentError` at declaration, in either order.
 
 - **Negative amounts are supported.** `formatted_price` renders negative values as `"-$5.00"` — the minus sign appears before the unit symbol.
 

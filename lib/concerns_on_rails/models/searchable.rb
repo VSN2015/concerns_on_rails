@@ -45,6 +45,9 @@ module ConcernsOnRails
 
       LIKE_ESCAPE = "\\".freeze
       LIKE_SPECIAL = /[\\%_]/
+      # Leading/trailing Unicode whitespace (plus NUL, which String#strip also
+      # removed) — Normalizable::EDGE_SPACE.
+      EDGE_SPACE = /\A[[:space:]\0]+|[[:space:]\0]+\z/
       VALID_MODES = %i[any all].freeze
       VALID_MATCHES = %i[contains prefix exact].freeze
       # Which match tiers can be told apart under each match mode (best first).
@@ -114,11 +117,13 @@ module ConcernsOnRails
         # space from a search box otherwise became part of the LIKE pattern
         # (`search("rails ")` => `LIKE '%rails %'`) and missed "Rails".
         # Interior whitespace is kept: :any matches the query as one phrase.
+        # Unicode-aware (String#strip / #split are ASCII-only): a no-break or
+        # an IME's ideographic space is whitespace too.
         def search_terms(query)
-          text = query.to_s.strip
+          text = query.to_s.gsub(EDGE_SPACE, "")
           return [] if text.empty?
 
-          searchable_mode == :all ? text.split : [text]
+          searchable_mode == :all ? text.split(/[[:space:]]+/) : [text]
         end
 
         # OR the per-field LIKE predicate for a single term.

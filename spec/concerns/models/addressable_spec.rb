@@ -91,6 +91,45 @@ describe ConcernsOnRails::Models::Addressable do
       loc.valid?
       expect(loc.line1).to be_nil
     end
+
+    # normalize_address ran in before_validation only, so update_attribute /
+    # save(validate: false) stored the raw parts. A prepended before_save
+    # backstop (Normalizable's) covers them.
+    context "when validation is skipped" do
+      it "still normalizes on save(validate: false), for a new record too" do
+        define_location
+        loc = Location.new(line1: "  1 Main   St ", city: " Ottawa ", postal_code: "k1a0b1", country: "ca")
+        loc.save(validate: false)
+        expect(loc.reload.attributes.values_at("line1", "city", "postal_code", "country"))
+          .to eq(["1 Main St", "Ottawa", "K1A 0B1", "CA"])
+      end
+
+      it "still normalizes on update_attribute, leaving untouched parts alone" do
+        define_location
+        loc = Location.create!(line1: "1 Main St", city: "Ottawa", postal_code: "K1A 0B1", country: "CA")
+        loc.update_columns(city: " legacy  city ") # written around the callbacks
+        loc.update_attribute(:postal_code, "k2p1l4")
+        expect(loc.reload.postal_code).to eq("K2P 1L4")
+        expect(loc.city).to eq(" legacy  city ") # not part of this save
+      end
+
+      it "normalizes a value changed after a (failed) validation" do
+        define_location
+        loc = Location.new(line1: "1 Main St", city: "Ottawa", country: "CA")
+        loc.valid?
+        loc.city = "  Late   City "
+        loc.save(validate: false)
+        expect(loc.reload.city).to eq("Late City")
+      end
+
+      it "skips a column a partial select did not load" do
+        define_location
+        loc = Location.create!(line1: "1 Main St", city: "Ottawa", postal_code: "K1A 0B1", country: "CA")
+        partial = Location.select(:id, :postal_code).find(loc.id)
+        expect { partial.update_attribute(:postal_code, " k2p  1l4 ") }.not_to raise_error
+        expect(loc.reload.postal_code).to eq("K2P 1L4")
+      end
+    end
   end
 
   describe "validation" do
