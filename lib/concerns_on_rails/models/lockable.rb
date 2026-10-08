@@ -107,6 +107,10 @@ module ConcernsOnRails
           locked_at = locked_at.to_sym
           unlock_token = unlock_token&.to_sym
           validate_lockable!(attempts, locked_at, max_attempts: max_attempts, unlock_in: unlock_in, unlock_token: unlock_token)
+          # The other declaration order is refused by Encryptable's macro.
+          if unlock_token && respond_to?(:encryptable_rules) && encryptable_rules.key?(unlock_token)
+            raise ArgumentError, ConcernsOnRails::Models::Encryptable.lockable_token_message(unlock_token)
+          end
 
           self.lockable_attempts_field = attempts
           self.lockable_locked_at_field = locked_at

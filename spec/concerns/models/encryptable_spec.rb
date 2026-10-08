@@ -1396,4 +1396,171 @@ describe ConcernsOnRails::Models::Encryptable do
       expect(klass.find(record.id).ssn_ciphertext).to eq(before)
     end
   end
+
+  describe "plaintext encoding" do
+    let(:klass) { model_class { encryptable :name } }
+
+    it "reads non-ASCII text back as UTF-8, equal to what was written" do
+      record = klass.create!(name: "José Müller").reload
+      expect(record.name.encoding).to eq(Encoding::UTF_8)
+      expect(record.name).to eq("José Müller")
+    end
+
+    it "does not mark a non-ASCII value changed when the same text is assigned again" do
+      record = klass.create!(name: "José").reload
+      record.name = "José"
+      expect(record.name_changed?).to be(false)
+    end
+
+    it "keeps bytes that are not valid UTF-8 binary" do
+      record = klass.create!(name: "\xFF\xFE".b).reload
+      expect(record.name.encoding).to eq(Encoding::BINARY)
+      expect(record.name.bytes).to eq([0xFF, 0xFE])
+    end
+
+    it "re-fingerprints non-ASCII text identically after a key rotation" do
+      indexed = model_class { encryptable :email, blind_index: { expression: ->(v) { v.to_s.downcase } } }
+      record = indexed.create!(email: "JOSÉ@Example.com")
+
+      ConcernsOnRails.encryption.key = "#{TEST_KEY}-rotated"
+      ConcernsOnRails.encryption.key_id = 1
+      ConcernsOnRails.encryption.previous_keys = { 0 => TEST_KEY }
+      expect(indexed.reencrypt_all!).to eq(1)
+
+      ConcernsOnRails.encryption.previous_keys = {}
+      expect(indexed.find_by_email("josé@example.com")&.id).to eq(record.id)
+    end
+  end
+
+  describe "an empty-string column default" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :encryptable_defaults, force: true do |t|
+          t.text :notes, null: false, default: ""
+        end
+      end
+    end
+
+    let(:klass) do
+      Class.new(TestModel) do
+        self.table_name = "encryptable_defaults"
+        include ConcernsOnRails::Models::Encryptable
+
+        encryptable :notes
+      end
+    end
+
+    it "reads the default as the plaintext \"\" instead of raising DecryptionError" do
+      expect(klass.new.notes).to eq("")
+      expect(klass.create!.reload.notes).to eq("")
+      expect(klass.create!(notes: "x").reload.notes).to eq("x")
+    end
+  end
+
+  describe "blind index refresh timing" do
+    it "fingerprints the value a later before_save rewrote, not the assigned one" do
+      klass = model_class do
+        encryptable :email, blind_index: true
+        before_save { self.email = email.downcase if email }
+      end
+      record = klass.create!(email: "Alice@Example.com")
+      expect(klass.find_by_email("alice@example.com")).to eq(record)
+
+      record.update!(email: "Bob@Example.com")
+      expect(klass.find_by_email("bob@example.com")).to eq(record)
+      expect(klass.find_by_email("alice@example.com")).to be_nil
+    end
+
+    it "never lets a new row carry a digest its own value does not have" do
+      klass = model_class { encryptable :email, blind_index: true }
+      original = klass.create!(email: "a@b.com")
+
+      copy = klass.create!(email_bidx: original.reload.email_bidx)
+      expect(copy.reload.email_bidx).to be_nil
+      expect(klass.where_email("a@b.com").pluck(:id)).to eq([original.id])
+    end
+
+    it "clears the digest of a field Duplicable resets on the copy" do
+      klass = model_class do
+        include ConcernsOnRails::Models::Duplicable
+
+        encryptable :email, blind_index: true
+        duplicable_by reset: %i[email]
+      end
+      original = klass.create!(email: "a@b.com")
+      copy = original.duplicate!
+
+      expect(copy.reload.email_bidx).to be_nil
+      expect(klass.where_email("a@b.com").pluck(:id)).to eq([original.id])
+    end
+  end
+
+  describe "lookups through a native `normalizes`", min_rails: "7.1" do
+    it "normalizes the lookup value as Rails' own finders do" do
+      klass = model_class do
+        encryptable :email, blind_index: true
+        normalizes :email, with: ->(email) { email.strip.downcase }
+      end
+      record = klass.create!(email: "  Alice@Example.COM ")
+
+      expect(klass.find_by_email("Alice@Example.COM")).to eq(record)
+      expect(klass.where_email(" ALICE@example.com").to_a).to eq([record])
+      expect(klass.email_fingerprint("ALICE@EXAMPLE.COM")).to eq(record.reload.email_bidx)
+      expect(klass.find_by_email(nil)).to be_nil
+    end
+
+    it "still refuses a non-numeric String on a normalized :integer field" do
+      klass = model_class do
+        encryptable :age, type: :integer, blind_index: { column: :email_bidx }
+        normalizes :age, with: ->(age) { age.to_i.abs }
+      end
+      klass.create!(age: 0)
+      negative = klass.create!(age: -5)
+
+      expect(klass.find_by_age(-5)).to eq(negative)
+      expect(klass.find_by_age("abc")).to be_nil
+      expect(klass.where_age("abc")).to be_empty
+    end
+  end
+
+  describe "Lockable's unlock_token" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :encryptable_lockables, force: true do |t|
+          t.integer :failed_attempts, default: 0, null: false
+          t.datetime :locked_at
+          t.text :unlock_token
+          t.string :unlock_token_bidx
+        end
+      end
+    end
+
+    def lockable_model(&declaration)
+      klass = Class.new(TestModel) do
+        self.table_name = "encryptable_lockables"
+        include ConcernsOnRails::Models::Encryptable
+        include ConcernsOnRails::Models::Lockable
+      end
+      klass.class_eval(&declaration)
+      klass
+    end
+
+    it "refuses an encrypted unlock_token declared after lockable_by" do
+      expect do
+        lockable_model do
+          lockable_by unlock_token: :unlock_token
+          encryptable :unlock_token, blind_index: true
+        end
+      end.to raise_error(ArgumentError, /unlock_token.*never found/)
+    end
+
+    it "refuses an encrypted unlock_token declared before lockable_by" do
+      expect do
+        lockable_model do
+          encryptable :unlock_token, blind_index: true
+          lockable_by unlock_token: :unlock_token
+        end
+      end.to raise_error(ArgumentError, /unlock_token.*never found/)
+    end
+  end
 end

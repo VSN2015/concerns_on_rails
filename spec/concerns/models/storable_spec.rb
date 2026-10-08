@@ -83,6 +83,17 @@ describe ConcernsOnRails::Storable do
       expect(record.ratio).to eq(1.5)
     end
 
+    it "casts a non-finite float (JSON has none) to nil instead of raising" do
+      record = klass.new
+      %w[Infinity -Infinity NaN].each do |input|
+        record.ratio = input
+        expect(record.ratio).to be_nil
+      end
+      record.ratio = Float::INFINITY
+      expect(record.ratio).to be_nil
+      expect { record.save! }.not_to raise_error
+    end
+
     it "casts the truthy boolean param spellings" do
       record = klass.new
       %w[1 true t].each do |raw|

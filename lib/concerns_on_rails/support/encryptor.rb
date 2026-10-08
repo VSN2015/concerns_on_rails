@@ -74,10 +74,20 @@ module ConcernsOnRails
         cipher.iv = iv
         cipher.auth_tag = tag
         cipher.auth_data = header
-        cipher.update(ciphertext) + cipher.final
+        utf8_or_binary(cipher.update(ciphertext) + cipher.final)
       rescue OpenSSL::Cipher::CipherError
         raise ConcernsOnRails::Encryption::DecryptionError,
               "could not decrypt value (wrong key or tampered ciphertext)"
+      end
+
+      # OpenSSL hands back binary (ASCII-8BIT) bytes. Plaintext that was text
+      # goes back to UTF-8 — as binary, "José" read back unequal to the String
+      # it was written from, so every save saw a change and a blind-index
+      # `expression:` (downcase) fingerprinted different bytes. Anything that
+      # is not valid UTF-8 stays binary.
+      def utf8_or_binary(bytes)
+        bytes.force_encoding(Encoding::UTF_8)
+        bytes.valid_encoding? ? bytes : bytes.force_encoding(Encoding::BINARY)
       end
 
       # The key id an envelope was written with (header byte 3). A malformed

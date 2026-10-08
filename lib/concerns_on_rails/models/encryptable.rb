@@ -96,7 +96,15 @@ module ConcernsOnRails
         # (The audited-plaintext overlap is guarded at macro time from BOTH
         # declaration orders — here and in Auditable#auditable_by — so no
         # per-save backstop is needed.)
-        before_save :encryptable_refresh_blind_indexes
+        #
+        # Blind indexes are refreshed in before_create/before_update, which run
+        # after EVERY before_save — the app's own `before_save { self.email =
+        # email.downcase }` included, whatever its declaration order — so the
+        # digest is taken from the value actually written. A new row refreshes
+        # every indexed field, changed or not: a copy (dup, Duplicable's reset)
+        # arrives carrying its original's digest for a field it no longer has.
+        before_create :encryptable_refresh_all_blind_indexes
+        before_update :encryptable_refresh_blind_indexes
         # The slug guard DOES need one: a slug is plaintext of its source, and
         # the macro-time checks cannot see every shape — Sluggable included
         # without sluggable_by (it slugs the implicit :name), or friendly_id
@@ -126,6 +134,30 @@ module ConcernsOnRails
       # (Infinity, garbage) is stored as NULL, so its fingerprint is nil too.
       def self.blind_fingerprint(rule, value, zone_aware: false)
         blind_fingerprints(rule, value, zone_aware: zone_aware, legacy: false).first
+      end
+
+      # Shared by both declaration orders of the Lockable unlock-token guard.
+      def self.lockable_token_message(field)
+        "#{LABEL}: ':#{field}' is Lockable's unlock_token. The token is written and looked up by " \
+          "callback-skipping SQL, so an encrypted one is never found and unlock links never work. " \
+          "Keep it a plain column: it is random, single-use and cleared with the lock."
+      end
+
+      # A lookup value as the record would have stored it: through the
+      # field's Rails 7.1+ `normalizes`, as Rails' own `find_by(email:)`
+      # normalizes its argument — the index was taken of the normalized
+      # value, so a raw "Alice@Example.COM" found nothing. nil stays nil (a nil
+      # lookup finds nothing), and so does a value an :integer field refuses
+      # outright: the cast would turn "abc" into 0 and match that row.
+      def self.lookup_value(klass, field, value)
+        return value if value.nil?
+        return value unless klass.respond_to?(:normalized_attributes) &&
+                            klass.normalized_attributes.include?(field.to_sym)
+
+        rule = klass.encryptable_rules.fetch(field.to_sym)
+        return value if rule[:type] == :integer && value.is_a?(::String) && !EncryptedType::NUMERIC_STRING.match?(value)
+
+        klass.normalize_value_for(field, value)
       end
 
       # The fingerprints under every key that can currently decrypt — current
@@ -272,11 +304,14 @@ module ConcernsOnRails
           cast_typed(value)
         end
 
-        # DB ciphertext -> typed plaintext
+        # DB ciphertext -> typed plaintext. An empty String is never an
+        # envelope (encrypting "" still yields header + IV + tag): it is a
+        # column default (`text null: false, default: ""`) — read as the
+        # plaintext "", not a DecryptionError on every new record.
         def deserialize(value)
           return nil if value.nil?
 
-          plaintext = read_plaintext(value)
+          plaintext = value == "" ? "" : read_plaintext(value)
           return nil if plaintext.nil?
 
           @type == :datetime ? read_time(plaintext) : cast_typed(plaintext)
@@ -420,6 +455,7 @@ module ConcernsOnRails
             encryptable_guard_auditable!(field)
             encryptable_guard_sluggable!(field)
             encryptable_guard_queryable!(field)
+            encryptable_guard_lockable_token!(field)
             bi = encryptable_normalize_blind_index(field, blind_index)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
@@ -642,9 +678,12 @@ module ConcernsOnRails
         def encryptable_define_blind_index(field, blind_index)
           column = blind_index[:column]
 
+          # Every lookup value goes through the field's `normalizes` first
+          # (Encryptable.lookup_value), as Rails' own finders do.
           define_singleton_method("#{field}_fingerprint") do |value|
             ConcernsOnRails::Models::Encryptable.blind_fingerprint(
-              encryptable_rules.fetch(field), value, zone_aware: ConcernsOnRails::Models::Encryptable.zone_converted?(self, field)
+              encryptable_rules.fetch(field), ConcernsOnRails::Models::Encryptable.lookup_value(self, field, value),
+              zone_aware: ConcernsOnRails::Models::Encryptable.zone_converted?(self, field)
             )
           end
           # Accepts one value, several, or an array — multiple values become an
@@ -656,7 +695,9 @@ module ConcernsOnRails
             rule = encryptable_rules.fetch(field)
             zone_aware = ConcernsOnRails::Models::Encryptable.zone_converted?(self, field)
             fingerprints = values.flatten.flat_map do |v|
-              ConcernsOnRails::Models::Encryptable.blind_fingerprints(rule, v, zone_aware: zone_aware)
+              ConcernsOnRails::Models::Encryptable.blind_fingerprints(
+                rule, ConcernsOnRails::Models::Encryptable.lookup_value(self, field, v), zone_aware: zone_aware
+              )
             end
             # A nil value has no fingerprint; passing it through would build
             # `WHERE bidx IS NULL` and match every unfingerprinted row instead
@@ -667,7 +708,8 @@ module ConcernsOnRails
           end
           define_singleton_method("find_by_#{field}") do |value|
             fingerprints = ConcernsOnRails::Models::Encryptable.blind_fingerprints(
-              encryptable_rules.fetch(field), value, zone_aware: ConcernsOnRails::Models::Encryptable.zone_converted?(self, field)
+              encryptable_rules.fetch(field), ConcernsOnRails::Models::Encryptable.lookup_value(self, field, value),
+              zone_aware: ConcernsOnRails::Models::Encryptable.zone_converted?(self, field)
             )
             return nil if fingerprints.empty?
 
@@ -699,6 +741,17 @@ module ConcernsOnRails
           return unless ConcernsOnRails::Support::SlugSources.names(self).include?(field.to_sym)
 
           raise ArgumentError, encryptable_slug_source_message(field)
+        end
+
+        # Lockable's unlock token is minted, claimed and retired by
+        # callback-skipping SQL writes keyed on the column's value — no blind
+        # index is ever computed, and ciphertext never equals the mailed
+        # token, so an encrypted one made every unlock link dead. Refused from
+        # both declaration orders (Lockable#lockable_by checks the other one).
+        def encryptable_guard_lockable_token!(field)
+          return unless respond_to?(:lockable_unlock_token_field) && lockable_unlock_token_field == field
+
+          raise ArgumentError, ConcernsOnRails::Models::Encryptable.lockable_token_message(field)
         end
 
         def encryptable_slug_source_message(field)
@@ -888,6 +941,10 @@ module ConcernsOnRails
         encryptable_refresh_blind_indexes_for(self.class.encryptable_rules.keys)
       end
 
+      def encryptable_refresh_all_blind_indexes
+        encryptable_refresh_blind_indexes_for(self.class.encryptable_rules.keys, all: true)
+      end
+
       # Support::GeneratedValues consumer. A token / code / number generated in
       # before_create arrives AFTER the before_save refresh above, so without
       # this the row was INSERTed with a NULL fingerprint and find_by_<field>
@@ -896,13 +953,13 @@ module ConcernsOnRails
         encryptable_refresh_blind_indexes_for(columns)
       end
 
-      def encryptable_refresh_blind_indexes_for(fields)
+      def encryptable_refresh_blind_indexes_for(fields, all: false)
         rules = self.class.encryptable_rules
         fields.each do |field|
           rule = rules[field.to_sym]
           bi = rule && rule[:blind_index]
           next unless bi
-          next unless public_send("#{field}_changed?")
+          next unless all || public_send("#{field}_changed?")
 
           self[bi[:column]] = ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, public_send(field))
         end
