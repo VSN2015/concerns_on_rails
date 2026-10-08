@@ -194,9 +194,12 @@ module ConcernsOnRails
 
       # What the type answers for any other String it cannot read: nil — also
       # for the one Rails 6.0–7.0 raised on (filterable_type_cast).
+      # A date/time `type:` hands over nil, too, for an operand that is no
+      # date or time (a JSON body's Integer, which the date cast returns as
+      # is): the lambda would bind it raw, exactly the comparison bug.
       def filterable_lambda_cast(type, value)
         cast = filterable_type_cast(type, value)
-        cast.equal?(UNCASTABLE) ? nil : cast
+        filterable_uncastable?(type, value, cast) ? nil : cast
       end
 
       # ?price[gte]=10&price[lte]=50 — unknown keys are ignored.
@@ -340,7 +343,7 @@ module ConcernsOnRails
       # list left empty matches nothing (`in`) or every non-NULL row
       # (`not_in`, exactly what `!=` / NOT IN would answer).
       def apply_filter_equality(relation, field, value, negate: false)
-        kept = filterable_equality_values(relation, field, value.is_a?(Array) ? value : [value])
+        kept = filterable_equality_values(relation, field, value.is_a?(Array) ? value : [value], negate: negate)
         return filterable_where(relation, field, value, negate) if kept.nil?
         return relation.none if kept == :uncastable
         return negate ? relation.where.not(field => nil) : relation.none if kept.empty?
@@ -368,26 +371,44 @@ module ConcernsOnRails
 
       # The members to keep on a numeric or date/time column, or nil to keep
       # the raw value unchanged.
-      def filterable_equality_values(relation, field, values)
+      def filterable_equality_values(relation, field, values, negate: false)
         filterable_numeric_equality_values(relation, field, values) ||
-          filterable_time_equality_values(relation, field, values)
+          filterable_time_equality_values(relation, field, values, negate)
       end
 
       # A date or time no stored value can equal drops out of the list, like
       # an out-of-range number: one outside TimeValue::YEARS (on PostgreSQL it
-      # used to raise, a 500), and a String Rails 6.0–7.0 cannot parse
-      # (filterable_type_cast), on which `where`'s own cast raised the same
-      # 500. nil when no member drops, so the caller keeps its unchanged path.
-      # Any other member that casts to no date or time stays exactly as it was.
-      def filterable_time_equality_values(relation, field, values)
+      # used to raise, a 500). A value the cast hands back unchanged — no
+      # date or time at all (a JSON body's Integer: a 500 on PostgreSQL, a
+      # coerced date on MySQL) — fails the whole filter closed (:uncastable),
+      # as an uncastable number does. A String Rails 6.0–7.0 cannot parse
+      # (filterable_type_cast; `where`'s own cast raised a 500) is answered as
+      # 7.1+ answers it, casting it to nil: it equals nothing (dropped from
+      # `=`/`in`), and `!=`/NOT IN against NULL matches nothing (`not`/`not_in`
+      # fail closed). nil when no member drops, so the caller keeps its
+      # unchanged path. A String that casts to nil stays as it was.
+      def filterable_time_equality_values(relation, field, values, negate)
         column_type = filterable_column_type(relation, field)
         return nil unless column_type
 
-        kept = values.reject do |member|
-          cast = filterable_equality_cast(column_type, member)
-          cast.equal?(UNCASTABLE) || filterable_time_beyond(cast)
-        end
+        casts = values.map { |member| [member, filterable_equality_cast(column_type, member)] }
+        return :uncastable if filterable_any_time_uncastable?(column_type, casts, negate)
+
+        kept = casts.reject { |_member, cast| filterable_time_never_equal?(cast) }.map(&:first)
         kept.size == values.size ? nil : kept
+      end
+
+      def filterable_time_never_equal?(cast)
+        cast.equal?(UNCASTABLE) || filterable_time_beyond(cast)
+      end
+
+      def filterable_any_time_uncastable?(column_type, casts, negate)
+        casts.any? do |member, cast|
+          next negate if cast.equal?(UNCASTABLE)
+          next false if member.nil? || cast.nil?
+
+          filterable_uncastable?(column_type, member, cast)
+        end
       end
 
       # Only to classify the member: `where` still casts the raw value itself,

@@ -295,17 +295,28 @@ module ConcernsOnRails
 
       # friendly_id's own :scoped rule, which the should_generate_new_friendly_id?
       # override above replaced without ever consulting: a record moved to
-      # another scope (`scope: :account_id` changed) rebuilds its slug from
-      # the source against the NEW scope — friendly_id's uuid suffix when the
-      # plain slug is taken there — instead of keeping one the new scope may
-      # already hold. A slug assigned in the same save still wins (the guard
-      # above). Persisted records only: a new record's slug follows the source
-      # rules (no slug from a blank source just because the scope was set).
+      # another scope (`scope: :account_id` changed) whose slug the NEW scope
+      # already holds rebuilds it from the source against that scope —
+      # friendly_id's uuid suffix when the plain slug is taken there too —
+      # instead of duplicating it. A slug that is free there is kept: it may
+      # have been assigned by hand, and its URLs must survive the move. A slug
+      # assigned in the same save still wins (the guard above). Persisted
+      # records only: a new record's slug follows the source rules.
       def sluggable_scope_changed?
         config = friendly_id_config
         return false unless persisted? && config.uses?(:scoped)
+        return false unless config.scope_columns.any? { |column| will_save_change_to_attribute?(column) }
 
-        config.scope_columns.any? { |column| will_save_change_to_attribute?(column) }
+        sluggable_slug_taken_in_scope?(config)
+      end
+
+      def sluggable_slug_taken_in_scope?(config)
+        slug = send(config.slug_column)
+        return false if slug.blank?
+
+        scope = config.scope_columns.to_h { |column| [column, self[column]] }
+        self.class.base_class.unscoped.where(scope).where(config.slug_column => slug)
+            .where.not(self.class.primary_key => id).exists?
       end
 
       # The slug column's own write-time transforms — a write-mode Sanitizable

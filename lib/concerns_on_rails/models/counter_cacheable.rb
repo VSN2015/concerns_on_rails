@@ -668,7 +668,7 @@ module ConcernsOnRails
         judge = counter_cacheable_judge(counter_cacheable_type)
         counter_cacheable_rules_of(judge).filter_map do |rule|
           next if block_given? && !yield(rule, judge)
-          next unless counter_cacheable_counted_now?(rule)
+          next unless counter_cacheable_counted_now?(rule, judge)
 
           counter_cacheable_adjustment(rule, counter_cacheable_fk_value(rule, judge), delta, judge)
         end
@@ -680,8 +680,8 @@ module ConcernsOnRails
       # class keeps none, i.e. the row is not counted in that state).
       def counter_cacheable_update_adjustments((was_judge, was_rule), (now_judge, now_rule))
         old_fk, new_fk = counter_cacheable_fk_move([was_judge, was_rule], [now_judge, now_rule])
-        old_counted = counter_cacheable_counted_previously?(was_rule)
-        new_counted = counter_cacheable_counted_now?(now_rule)
+        old_counted = counter_cacheable_counted_previously?(was_rule, was_judge)
+        new_counted = counter_cacheable_counted_now?(now_rule, now_judge)
         decrement = -> { counter_cacheable_adjustment(was_rule, old_fk, -1, was_judge) }
         increment = -> { counter_cacheable_adjustment(now_rule, new_fk, 1, now_judge) }
 
@@ -856,24 +856,34 @@ module ConcernsOnRails
 
       # A nil rule: the judging class keeps no such counter, so the row is not
       # counted in that state.
-      def counter_cacheable_counted_now?(rule)
+      def counter_cacheable_counted_now?(rule, judge = self.class)
         return false unless rule
 
         condition = rule[:condition]
         return true unless condition
 
-        ConcernsOnRails::Support::Callable.invoke(self, condition) ? true : false
+        ConcernsOnRails::Support::Callable.invoke(counter_cacheable_subject(judge), condition) ? true : false
       end
 
       # Evaluate the condition against the record as it was BEFORE this save by
       # temporarily restoring the changed attributes to their previous values.
-      def counter_cacheable_counted_previously?(rule)
+      def counter_cacheable_counted_previously?(rule, judge = self.class)
         return false unless rule
 
         condition = rule[:condition]
         return true unless condition
 
-        counter_cacheable_with_attributes(counter_cacheable_changes) { ConcernsOnRails::Support::Callable.invoke(self, condition) ? true : false }
+        counter_cacheable_with_attributes(counter_cacheable_changes) do
+          ConcernsOnRails::Support::Callable.invoke(counter_cacheable_subject(judge), condition) ? true : false
+        end
+      end
+
+      # The record as the judging class sees it: itself, or — after an STI
+      # type change, judged under the other type's rule — a `becomes` copy
+      # sharing its attributes, so that rule's `if:` can call methods only
+      # that class defines (it raised NoMethodError on the receiving class).
+      def counter_cacheable_subject(judge)
+        is_a?(judge) ? self : becomes(judge)
       end
 
       # Temporarily put each changed attribute back to the FIRST value of its

@@ -144,20 +144,25 @@ module ConcernsOnRails
       end
 
       # A lookup value as the record would have stored it: through the
-      # field's Rails 7.1+ `normalizes`, as Rails' own `find_by(email:)`
-      # normalizes its argument — the index was taken of the normalized
-      # value, so a raw "Alice@Example.COM" found nothing. nil stays nil (a nil
-      # lookup finds nothing), and so does a value an :integer field refuses
-      # outright: the cast would turn "abc" into 0 and match that row.
+      # field's Normalizable rule and its Rails 7.1+ `normalizes`, as Rails'
+      # own `find_by(email:)` normalizes its argument — the index was taken of
+      # the normalized value, so a raw "Alice@Example.COM" found nothing. nil
+      # stays nil (a nil lookup finds nothing), and so does a value an
+      # :integer field refuses outright: the cast would turn "abc" into 0 and
+      # match that row.
       def self.lookup_value(klass, field, value)
-        return value if value.nil?
-        return value unless klass.respond_to?(:normalized_attributes) &&
-                            klass.normalized_attributes.include?(field.to_sym)
+        return value if value.nil? || refused_integer_lookup?(klass, field, value)
 
-        rule = klass.encryptable_rules.fetch(field.to_sym)
-        return value if rule[:type] == :integer && value.is_a?(::String) && !EncryptedType::NUMERIC_STRING.match?(value)
+        field = field.to_sym
+        value = klass.normalize(field, value) if klass.respond_to?(:normalizable_rules) && klass.normalizable_rules.key?(field)
+        return value unless klass.respond_to?(:normalized_attributes) && klass.normalized_attributes.include?(field)
 
         klass.normalize_value_for(field, value)
+      end
+
+      def self.refused_integer_lookup?(klass, field, value)
+        klass.encryptable_rules.fetch(field.to_sym)[:type] == :integer &&
+          value.is_a?(::String) && !EncryptedType::NUMERIC_STRING.match?(value)
       end
 
       # The fingerprints under every key that can currently decrypt — current
@@ -968,12 +973,21 @@ module ConcernsOnRails
         rules = self.class.encryptable_rules
         fields.each do |field|
           rule = rules[field.to_sym]
-          bi = rule && rule[:blind_index]
-          next unless bi
+          next unless rule && rule[:blind_index]
           next unless all || public_send("#{field}_changed?")
 
-          self[bi[:column]] = ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, public_send(field))
+          encryptable_write_blind_index(rule, field)
         end
+      end
+
+      # A nil field over an index column already blank (NULL, or a `""`
+      # column default a NOT NULL index column needs) is left as it is.
+      def encryptable_write_blind_index(rule, field)
+        column = rule[:blind_index][:column]
+        fingerprint = ConcernsOnRails::Models::Encryptable.blind_fingerprint(rule, public_send(field))
+        return if fingerprint.nil? && self[column].blank?
+
+        self[column] = fingerprint
       end
 
       # Save-time backstop for the macro-time slug guards: raise (nothing is

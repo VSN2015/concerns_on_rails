@@ -161,12 +161,17 @@ module ConcernsOnRails
         # purged the trash and `restore_all` restored it. Predicates on OTHER
         # columns — a host model's own `default_scope { where(tenant_id:) }`
         # included — are never touched. With `default_scope: false` (or after
-        # `with_deleted`) there is no tagged node and nothing is peeled.
+        # `with_deleted`) there is no tagged node and nothing is peeled. Only
+        # THIS table's node goes: a soft-deletable model merged in
+        # (`joins(...).merge(Comment.where(...))`) brings its own, which must
+        # keep filtering its rows.
         def soft_delete_without_default_scope
           relation = all
           peeled = relation.spawn
           peeled.where_clause = ActiveRecord::Relation::WhereClause.new(
-            ConcernsOnRails::Support::AssociationScope.predicates(relation.where_clause).grep_v(DefaultScopePredicate)
+            ConcernsOnRails::Support::AssociationScope.predicates(relation.where_clause).reject do |node|
+              node.is_a?(DefaultScopePredicate) && node.left.relation == arel_table
+            end
           )
           peeled
         end

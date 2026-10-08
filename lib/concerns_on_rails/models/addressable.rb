@@ -61,6 +61,7 @@ module ConcernsOnRails
         # `validate :validate_address` is registered by `addressable_by` (not here) so it can
         # carry the optional if:/unless: condition. Normalization always runs.
         before_validation :normalize_address
+        after_validation :addressable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
         # save(validate: false) — which otherwise stored the raw parts.
         # PREPENDED (Normalizable's rule), so it runs ahead of the
@@ -362,6 +363,15 @@ module ConcernsOnRails
       end
 
       private
+
+      # Re-recorded once validation is over: a later before_validation — a
+      # sibling's (Normalizable's :squish) or the app's own — may rewrite a
+      # column this pass handled, and what validation accepted is what the
+      # save stores. Compared against the value as it stood BEFORE that
+      # rewrite, the backstop ran a non-idempotent Proc a second time.
+      def addressable_record_validated
+        @addressable_normalized&.each_key { |column| @addressable_normalized[column] = self[column].dup }
+      end
 
       # Normalize only what before_validation did not: a column it already
       # handled, still holding the value it produced, is skipped, so a

@@ -75,6 +75,7 @@ module ConcernsOnRails
         # stored rewrite (on: :write, sanitize_all!).
         class_attribute :sanitizable_rules, instance_accessor: false, default: {}
         before_validation :apply_sanitizations
+        after_validation :sanitizable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
         # save(validate: false) — which otherwise stored the raw markup in a
         # column declared sanitized on write. PREPENDED, like Normalizable's,
@@ -287,6 +288,15 @@ module ConcernsOnRails
         end
       end
 
+      # Re-recorded once validation is over: a later before_validation — a
+      # sibling's (Normalizable's :squish) or the app's own — may rewrite a
+      # field this pass handled, and what validation accepted is what the
+      # save stores. Compared against the value as it stood BEFORE that
+      # rewrite, the backstop ran a non-idempotent Proc a second time.
+      def sanitizable_record_validated
+        @sanitizable_applied&.each_key { |field| @sanitizable_applied[field] = self[field].dup }
+      end
+
       # Sanitize only what before_validation did not: a field it already
       # handled, still holding the value it produced, is skipped, so a Proc
       # runs exactly once in a validated save. A field assigned after that
@@ -314,7 +324,7 @@ module ConcernsOnRails
           yield field, rule[:writer], value
         end
       end
-      private :sanitizable_apply_unvalidated, :sanitizable_each_write_rule
+      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_each_write_rule
 
       # { field => sanitized } for the fields whose stored value would change;
       # nil values are left alone (nothing to sanitize).

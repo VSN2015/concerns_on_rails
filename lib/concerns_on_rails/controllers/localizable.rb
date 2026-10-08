@@ -189,11 +189,15 @@ module ConcernsOnRails
       # concern's own Content-Language already writes one as the other, yet a
       # client sending that tag back fell through to `pt` or the default. The
       # app's own symbol is what comes back.
+      # An exact (case-insensitive) spelling wins, so an app offering both
+      # :pt_BR and :"pt-BR" gets the one the client named.
       def match_locale(candidate, allowed)
         return nil if candidate.blank?
 
+        exact = candidate.to_s.downcase
         wanted = locale_match_key(candidate)
-        allowed.find { |loc| locale_match_key(loc) == wanted }
+        allowed.find { |loc| loc.to_s.downcase == exact } ||
+          allowed.find { |loc| locale_match_key(loc) == wanted }
       end
 
       def locale_match_key(locale)

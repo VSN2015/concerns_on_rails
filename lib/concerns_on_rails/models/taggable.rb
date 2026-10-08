@@ -87,6 +87,7 @@ module ConcernsOnRails
           ensure_columns!(LABEL, taggable_field, types: :string)
 
           before_validation :taggable_normalize!
+          after_validation :taggable_record_validated
           # Backstop for the saves that skip validation — update_attribute,
           # save(validate: false) — which stored "ruby, rails" where
           # tagged_with only matches "ruby,rails". PREPENDED (Normalizable's
@@ -301,6 +302,15 @@ module ConcernsOnRails
       # backstop can tell "already normalized" from "changed since".
       def taggable_normalize!
         @taggable_normalized = taggable_rewrite_column
+      end
+
+      # Re-recorded once validation is over: a later before_validation — a
+      # sibling's (Normalizable's :squish) or the app's own — may rewrite a
+      # field this pass handled, and what validation accepted is what the
+      # save stores. Compared against the value as it stood BEFORE that
+      # rewrite, the backstop ran a non-idempotent Proc a second time.
+      def taggable_record_validated
+        @taggable_normalized = self[self.class.taggable_field].dup unless @taggable_normalized.nil?
       end
 
       # Normalize only when before_validation did not, or the column changed
