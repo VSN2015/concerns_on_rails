@@ -1435,8 +1435,9 @@ describe ConcernsOnRails::Models::Encryptable do
   describe "an empty-string column default" do
     before do
       ActiveRecord::Schema.define do
+        # string, not text: MySQL refuses a default on a TEXT column.
         create_table :encryptable_defaults, force: true do |t|
-          t.text :notes, null: false, default: ""
+          t.string :notes, null: false, default: ""
         end
       end
     end
