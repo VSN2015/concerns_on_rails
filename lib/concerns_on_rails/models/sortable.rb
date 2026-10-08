@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/generated_values"
 
 # Loaded here — with the concern, on first use — rather than at gem boot, so
 # apps that never include Sortable never load acts_as_list.
@@ -53,6 +54,24 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Models::Sortable".freeze
       MISSING_MODES = %i[append raise].freeze
 
+      # acts_as_list assigns a new record's position in a before_create of its
+      # own (`avoid_collision`, acts_as_list 1.0+), after every sibling's
+      # before_save has run, so Auditable's creation entry left the position
+      # out. Reported like Tokenizable's token (Support::GeneratedValues).
+      # Prepended because acts_as_list's InstanceMethods are included after
+      # this concern and would shadow an override here; create path only —
+      # acts_as_list also calls avoid_collision from its before_update when a
+      # record moves to another list.
+      module GeneratedPosition
+        private
+
+        def avoid_collision
+          return super unless new_record?
+
+          ConcernsOnRails::Support::GeneratedValues.watch(self, [self.class.sortable_field]) { super }
+        end
+      end
+
       module ClassMethods
         include ConcernsOnRails::Support::ColumnGuard
 
@@ -85,6 +104,7 @@ module ConcernsOnRails
           list_options[:scope] = scope unless scope.nil?
           list_options[:add_new_at] = add_new_at unless add_new_at.nil?
           acts_as_list(list_options)
+          prepend GeneratedPosition unless ancestors.include?(GeneratedPosition)
         end
 
         # Apply an explicit id order as positions — the "save this drag-and-drop

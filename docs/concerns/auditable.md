@@ -78,7 +78,7 @@ One entry is recorded **per changed tracked field per save**; all entries of one
 |-----------|-------------|
 | `audit_trail → Array<Hash>` | Decoded entries, oldest first. Returns `[]` for a `NULL`, blank, corrupt, or non-array column — it never raises. |
 | `last_change_for(field) → Hash \| nil` | The most recent entry for `field` (symbol or string), or `nil` when the field never changed. |
-| `audited_changes_since(time) → Array<Hash>` | Entries recorded at or after `time`, oldest first. Entries with a missing/unparseable `"at"` are excluded. |
+| `audited_changes_since(time) → Array<Hash>` | Entries recorded at or after `time`, oldest first. Entries with a missing/unparseable `"at"` are excluded. A `Date` means midnight in `Time.zone` and a zone-less String is read in `Time.zone` (never the server's system zone); a String that names no time raises `ArgumentError`. |
 | `clear_audit_trail! → true` | Wipes the column with a single `update_column` — deliberately skips validations and callbacks so clearing can never itself be captured. Raises on unpersisted records. |
 
 ### Class-level configuration readers

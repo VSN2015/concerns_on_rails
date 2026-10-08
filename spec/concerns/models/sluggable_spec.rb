@@ -170,6 +170,39 @@ describe ConcernsOnRails::Sluggable do
       expect(b.slug).to eq("hello")
     end
 
+    # The should_generate_new_friendly_id? override replaced friendly_id's
+    # :scoped rule without consulting the scope columns, so a moved record
+    # kept a slug the new scope already held.
+    describe "moving a record to another scope" do
+      it "rebuilds a slug the new scope already holds" do
+        ScopedPage.create!(title: "Hello", account_id: 2)
+        mover = ScopedPage.create!(title: "Hello", account_id: 1)
+
+        mover.update!(account_id: 2)
+
+        slugs = ScopedPage.where(account_id: 2).pluck(:slug)
+        expect(slugs.uniq.size).to eq(2)
+        expect(mover.slug).to start_with("hello-")
+      end
+
+      it "keeps the plain slug when it is free in the new scope" do
+        mover = ScopedPage.create!(title: "Hello", account_id: 1)
+
+        mover.update!(account_id: 2)
+
+        expect(mover.reload.slug).to eq("hello")
+      end
+
+      it "still lets a slug assigned in the same save win" do
+        ScopedPage.create!(title: "Hello", account_id: 2)
+        mover = ScopedPage.create!(title: "Hello", account_id: 1)
+
+        mover.update!(account_id: 2, slug: "hand-picked")
+
+        expect(mover.reload.slug).to eq("hand-picked")
+      end
+    end
+
     it "accepts an association name as the scope (1.26 — no missing-column error)" do
       ActiveRecord::Schema.define do
         create_table :slug_accounts, force: true do |t|

@@ -731,6 +731,90 @@ describe "optimistic locking across raw writes" do
     end
   end
 
+  # Stateable `lock: true` and Activatable#toggle_active! reload the child
+  # under the row lock (Support::Locking.with_locked_column), and the reload
+  # emptied its association cache: the counter UPDATE found no parent to
+  # mirror onto, so the caller's parent raised StaleObjectError on its next
+  # save (2026-10-08 audit).
+  describe "CounterCacheable x a row-locked verb" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :ol_lposts, force: true do |t|
+          t.string :title
+          t.integer :approved_count, default: 0, null: false
+          t.integer :active_count, default: 0, null: false
+          t.integer :lock_version, default: 0, null: false
+        end
+        create_table :ol_lcomments, force: true do |t|
+          t.integer :ol_lpost_id
+          t.string :status
+          t.boolean :active, default: false, null: false
+        end
+      end
+      stub_const("OlLpost", Class.new(TestModel) { self.table_name = "ol_lposts" })
+      stub_const("OlLreview", Class.new(TestModel) do
+        self.table_name = "ol_lcomments"
+        include ConcernsOnRails::CounterCacheable
+        include ConcernsOnRails::Stateable
+
+        belongs_to :ol_lpost, class_name: "OlLpost", optional: true
+        counter_cacheable_by :ol_lpost, count: :approved_count, if: -> { status == "approved" }
+        stateable_by :status, states: %i[pending approved], default: :pending, lock: true,
+                              transitions: { approve: { from: :pending, to: :approved } }
+      end)
+      stub_const("OlLmember", Class.new(TestModel) do
+        self.table_name = "ol_lcomments"
+        include ConcernsOnRails::CounterCacheable
+        include ConcernsOnRails::Activatable
+
+        belongs_to :ol_lpost, class_name: "OlLpost", optional: true
+        counter_cacheable_by :ol_lpost, count: :active_count, if: -> { active }
+      end)
+    end
+
+    def in_sync?(post)
+      [post.lock_version, post.approved_count, post.active_count] ==
+        OlLpost.where(id: post.id).pick(:lock_version, :approved_count, :active_count)
+    end
+
+    it "a lock: true event mirrors onto the parent the record was handed" do
+      post = OlLpost.create!(title: "t")
+      review = OlLreview.create!(ol_lpost: post)
+
+      expect(review.approve!).to be(true)
+
+      expect(post.approved_count).to eq(1)
+      expect(in_sync?(post)).to be(true)
+      expect(review.ol_lpost).to equal(post)
+      expect { post.update!(title: "edited") }.not_to raise_error
+    end
+
+    it "toggle_active! mirrors onto the parent the record was handed" do
+      post = OlLpost.create!(title: "t")
+      member = OlLmember.create!(ol_lpost: post)
+
+      member.toggle_active!
+
+      expect(post.active_count).to eq(1)
+      expect(in_sync?(post)).to be(true)
+      expect { post.update!(title: "edited") }.not_to raise_error
+    end
+
+    it "loads the row's parent afresh when the reload moved the foreign key" do
+      post = OlLpost.create!(title: "t")
+      other = OlLpost.create!(title: "o")
+      review = OlLreview.create!(ol_lpost: post)
+      OlLreview.where(id: review.id).update_all(ol_lpost_id: other.id) # another process reparents it
+
+      review.approve!
+
+      expect(review.ol_lpost).not_to equal(post)
+      expect(review.ol_lpost.id).to eq(other.id)
+      expect(OlLpost.where(id: [post.id, other.id]).order(:id).pluck(:approved_count)).to eq([0, 1])
+      expect(in_sync?(post)).to be(true)
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Anonymizable (RA-04)
   # ---------------------------------------------------------------------------

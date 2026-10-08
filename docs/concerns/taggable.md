@@ -44,7 +44,7 @@ end
 
 ### `taggable_by(field = :tags, delimiter:, downcase:)`
 
-Call once per model. Validates that the column exists at class-load time and registers the `before_validation` normalization hook.
+Call once per model. Validates that the column exists at class-load time and registers the `before_validation` normalization hook, plus a prepended `before_save` backstop that normalizes the saves that skip validation (`update_attribute`, `save(validate: false)`).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -109,7 +109,7 @@ Splits a raw stored column value on the configured delimiter and returns a norma
 
 #### `.taggable_clean(tag) → String`
 
-Normalizes a single tag: strips surrounding whitespace and optionally lowercases it. Used internally by all normalization paths.
+Normalizes a single tag: strips surrounding whitespace (Unicode-aware, so a no-break or ideographic space goes too) and optionally lowercases it. Used internally by all normalization paths.
 
 #### `.tag_counts(limit: nil) → Hash{String => Integer}`
 
@@ -225,7 +225,7 @@ Post.tagged_with("rails")        # => [p]
 - **Column must exist before the macro runs.** `taggable_by` calls `ensure_columns!` at class-load time and raises `ArgumentError` with a message matching `/'<field>' does not exist/` if the column is absent. This prevents silent runtime failures.
 - **Encrypted columns are refused.** An [Encryptable](encryptable.md) column holds ciphertext under a random IV, so `tagged_with`'s `LIKE` never matches (while `all_tags`, decrypted in Ruby, still listed the tags). Declaring the `taggable_by` column encryptable raises `ArgumentError` at declaration, in either order; a model that includes Taggable without calling `taggable_by` and encrypts its default `:tags` column is refused when `tagged_with` is called.
 - **`NULL` for empty.** When the tag list is set to `[]` or `""`, the column is written as `NULL`, not an empty string. Code reading the raw column should treat `nil` as "no tags."
-- **`before_validation` normalization covers direct assignment.** If you assign the raw column directly (`record.tags = "a, b"`), the `before_validation` hook strips, splits, and de-duplicates the value before saving. You do not have to go through `tag_list=` for normalization to apply.
+- **`before_validation` normalization covers direct assignment.** If you assign the raw column directly (`record.tags = "a, b"`), the `before_validation` hook strips, splits, and de-duplicates the value before saving. You do not have to go through `tag_list=` for normalization to apply. Saves that skip validation (`update_attribute`, `save(validate: false)`) are normalized by a prepended `before_save` backstop, which skips a value the validation pass already normalized. Stripping is Unicode-aware: a no-break or ideographic space around a tag is removed like an ASCII one.
 - **Boundary-safe SQL matching.** The `tagged_with` scope builds four OR-ed patterns per tag against the delimiter-joined column: the whole column (a single-tag row) plus three that pin the tag to a delimiter boundary — `tag<delim>%` (tag first), `%<delim>tag` (tag last), and `%<delim>tag<delim>%` (tag in the middle). Each carries an explicit `ESCAPE` clause, so tags containing `_` or `%` are escaped and will not behave as SQL wildcards, and a search for `"rail"` will not match `"rails"`. The predicate is built with Arel `matches` rather than a hand-written SQL string, so the adapter quotes the escape character itself — an inlined `ESCAPE '\'` is a syntax error on MySQL, where a backslash escapes its own closing quote inside a string literal.
 - **Case-insensitive on every adapter.** The same Arel predicate asks for a case-insensitive match, which becomes `ILIKE` on PostgreSQL (whose `LIKE`, unlike SQLite's and unlike MySQL's under a default `_ci` collation, is case-sensitive). Before this, `tagged_with("elixir")` found a record tagged `"Elixir"` on SQLite and MySQL but not on PostgreSQL. **PostgreSQL users upgrading from ≤ 1.28.8 get broader matches than before** — if you were relying on case-sensitive tag lookups there, store canonical tags with `downcase: true` and downcase at the call site. Exactly which non-ASCII characters fold remains the database collation's business.
 - **`tagged_with` matches the normalized column form only.** Its patterns pin each tag to the bare delimiter (`"ruby,rails"`), so a row whose raw column reads `"ruby, rails"` — written by `update_column`, `update_all`, raw SQL or an import, all of which skip the normalization hook — does not match `tagged_with("rails")`, even though `tagged_with?`, `tag_list` and `all_tags` (which split in Ruby) see the tag. The column must hold normalized values: run `Model.normalize_tags!` after such writes.

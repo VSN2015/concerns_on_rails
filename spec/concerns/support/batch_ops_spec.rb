@@ -148,6 +148,26 @@ describe ConcernsOnRails::Support::BatchOps do
       expect(BatchItem.where(state: "done").count).to eq(0)
     end
 
+    # The batch used to JOIN a caller's transaction, whose only rollback point
+    # was the caller's own: rescuing the RecordNotSaved inside it (the usual
+    # `rescue` around a batch) committed every record before the failing one.
+    it "rolls the batch back inside a caller's transaction too, keeping the caller's own writes" do
+      BatchItem.create!(state: "a")
+      BatchItem.create!(state: "b")
+
+      BatchItem.transaction do
+        BatchItem.create!(state: "caller")
+        expect do
+          described_class.run(BatchItem.where(state: %w[a b]), label: "Test") do |r|
+            r.state == "b" ? false : r.update(state: "done")
+          end
+        end.to raise_error(ActiveRecord::RecordNotSaved)
+      end
+
+      expect(BatchItem.where(state: "done").count).to eq(0)
+      expect(BatchItem.where(state: "caller").count).to eq(1)
+    end
+
     it "uses a custom message when given" do
       BatchItem.create!(state: "a")
 

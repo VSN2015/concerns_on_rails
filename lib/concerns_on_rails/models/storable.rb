@@ -653,8 +653,17 @@ module ConcernsOnRails
           when :decimal  then write_decimal(value)
           when :date     then write_date(value)
           when :datetime then write_datetime(value, zone_aware: zone_aware)
+          when :float    then write_float(value)
           else CASTERS[type].cast(value)
           end
+        end
+
+        # JSON has no Infinity/NaN — a form-submitted "Infinity" made the
+        # writer's JSON.generate raise (a 500). Non-finite casts to nil, the
+        # "garbage casts to nil" convention every other type follows.
+        def write_float(value)
+          float = CASTERS[:float].cast(value)
+          float if float&.finite?
         end
 
         # Precision-safe String (the Auditable precedent): BigDecimal#to_s("F").

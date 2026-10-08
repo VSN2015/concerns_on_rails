@@ -142,11 +142,11 @@ module ConcernsOnRails
 
       def parse_accept_language(header, allowed)
         ranked_accept_languages(header).each do |lang|
-          # Full tag first (fr-CA matches an available :"fr-CA"), then the
-          # primary subtag (fr). Pre-1.22 the region was discarded outright,
-          # so a regional locale in available: could never match its own
-          # Accept-Language tag.
-          match = match_locale(lang, allowed) || match_locale(lang.split("-").first, allowed)
+          # Full tag first (fr-CA matches an available :"fr-CA" or :fr_CA),
+          # then the primary subtag (fr). Pre-1.22 the region was discarded
+          # outright, so a regional locale in available: could never match its
+          # own Accept-Language tag.
+          match = match_locale(lang, allowed) || match_locale(lang.split(/[-_]/).first, allowed)
           return match if match
         end
         nil
@@ -184,11 +184,24 @@ module ConcernsOnRails
         QVALUE.match?(weight) ? weight.to_f : 0.0
       end
 
+      # Case-insensitive, with `_` and `-` as ONE separator: Accept-Language
+      # tags are BCP 47 (`pt-BR`) while Rails locales are often `:pt_BR`. The
+      # concern's own Content-Language already writes one as the other, yet a
+      # client sending that tag back fell through to `pt` or the default. The
+      # app's own symbol is what comes back.
+      # An exact (case-insensitive) spelling wins, so an app offering both
+      # :pt_BR and :"pt-BR" gets the one the client named.
       def match_locale(candidate, allowed)
         return nil if candidate.blank?
 
-        wanted = candidate.to_s.downcase
-        allowed.find { |loc| loc.to_s.downcase == wanted }
+        exact = candidate.to_s.downcase
+        wanted = locale_match_key(candidate)
+        allowed.find { |loc| loc.to_s.downcase == exact } ||
+          allowed.find { |loc| locale_match_key(loc) == wanted }
+      end
+
+      def locale_match_key(locale)
+        locale.to_s.downcase.tr("_", "-")
       end
     end
   end

@@ -43,11 +43,23 @@ module ConcernsOnRails
       # `links` is { rel => url }; nil urls are skipped and nothing is set when
       # none remain. Appends to an existing Link header, comma-separated.
       def append(response, links)
-        entries = links.filter_map { |rel, url| %(<#{url}>; rel="#{rel}") if url }
+        entries = links.filter_map { |rel, url| %(<#{uri_reference(url)}>; rel="#{rel}") if url }
         return if entries.empty?
 
         existing = response.headers["Link"]
         response.set_header("Link", [existing, entries.join(", ")].reject { |part| part.nil? || part.empty? }.join(", "))
+      end
+
+      # The URL percent-encoded so it cannot leave its `<…>` (RFC 8288's
+      # URI-Reference): whitespace, control characters, DEL, non-ASCII bytes
+      # and `<`, `>`, `"`. Only the query string is built here (Rack escapes
+      # it); the host and path come from the request as sent, and a route
+      # segment such as `:post_id` matches `[^/.?]+`, so
+      # `GET /posts/1>;rel="last",<x/comments` closed the bracket and put Link
+      # entries of the client's choosing ahead of the gem's. `%` is left
+      # alone, so an already-encoded URL is not encoded twice.
+      def uri_reference(url)
+        url.to_s.b.gsub(/[^\x21-\x7E]|[<>"]/n) { |byte| format("%%%02X", byte.ord) }.force_encoding(Encoding::UTF_8)
       end
     end
   end

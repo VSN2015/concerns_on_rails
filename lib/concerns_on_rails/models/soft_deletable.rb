@@ -13,6 +13,17 @@ module ConcernsOnRails
 
       SCOPE_BASES = %i[active without_deleted soft_deleted only_deleted with_deleted deleted_within].freeze
 
+      # The default scope's `deleted_at IS NULL`, as its own Equality subclass
+      # so the batch verbs can peel exactly that copy (see
+      # soft_delete_without_default_scope). Arel compares nodes by class and
+      # operands, so a plain node was indistinguishable from the CALLER's
+      # identical predicate — `without_deleted`, `.active`,
+      # `with_deleted.where(deleted_at: nil)` — and peeling the default scope
+      # peeled theirs with it: `without_deleted.really_destroy_all` purged the
+      # trash too. Being an Equality it renders, unscopes (`with_deleted`),
+      # merges and seeds new records exactly as `where(field => nil)` does.
+      class DefaultScopePredicate < Arel::Nodes::Equality; end
+
       included do
         # declare class attributes and set default values
         class_attribute :soft_delete_field, instance_accessor: false, default: :deleted_at
@@ -37,10 +48,13 @@ module ConcernsOnRails
           ConcernsOnRails::Support::Affix.capture(self, SCOPE_BASES).freeze
 
         # Hide soft-deleted rows from `.all` only when enabled (the default). The block is
-        # evaluated lazily, so toggling `soft_delete_default_scope` via the macro takes effect —
-        # and it resolves the scope through the names map, so an affixed model still filters.
+        # evaluated lazily, so toggling `soft_delete_default_scope` via the macro takes effect.
+        # It builds the `without_deleted` predicate itself, tagged (DefaultScopePredicate),
+        # rather than calling that scope — so it needs no scope name, affixed or not.
         default_scope do
-          soft_delete_default_scope ? public_send(soft_delete_scope_names.fetch(:without_deleted)) : all
+          next all unless soft_delete_default_scope
+
+          unscope(where: soft_delete_field).where(DefaultScopePredicate.new(arel_table[soft_delete_field], nil))
         end
       end
 
@@ -139,21 +153,26 @@ module ConcernsOnRails
         # The current relation with the DEFAULT SCOPE's soft-delete predicate
         # peeled off — and nothing else. `unscope(where: field)` (what the
         # scopes do) strips every predicate on the column, the caller's
-        # included; so unscope, then put back the predicates the caller added on
-        # that column. "Added by the caller" is the relation's where clause
-        # minus the default scope's own, using the same structural WhereClause
-        # arithmetic Rails' `merge`/`except` rely on. Predicates on OTHER
+        # included, so only the DefaultScopePredicate nodes are dropped. Until
+        # this fix the caller's predicates were "the where clause minus the
+        # default scope's" — structural arithmetic that also subtracted a
+        # caller's own equal `deleted_at IS NULL` (`without_deleted`,
+        # `with_deleted.where(deleted_at: nil)`), so `really_destroy_all`
+        # purged the trash and `restore_all` restored it. Predicates on OTHER
         # columns — a host model's own `default_scope { where(tenant_id:) }`
-        # included — are never touched. With `default_scope: false` there is
-        # nothing to peel.
+        # included — are never touched. With `default_scope: false` (or after
+        # `with_deleted`) there is no tagged node and nothing is peeled. Only
+        # THIS table's node goes: a soft-deletable model merged in
+        # (`joins(...).merge(Comment.where(...))`) brings its own, which must
+        # keep filtering its rows.
         def soft_delete_without_default_scope
           relation = all
-          return relation unless soft_delete_default_scope
-
-          callers = relation.where_clause - default_scoped.where_clause
-          callers_on_column = callers - callers.except(soft_delete_field.to_s)
-          peeled = relation.unscope(where: soft_delete_field)
-          peeled.where_clause += callers_on_column unless callers_on_column.empty?
+          peeled = relation.spawn
+          peeled.where_clause = ActiveRecord::Relation::WhereClause.new(
+            ConcernsOnRails::Support::AssociationScope.predicates(relation.where_clause).reject do |node|
+              node.is_a?(DefaultScopePredicate) && node.left.relation == arel_table
+            end
+          )
           peeled
         end
 

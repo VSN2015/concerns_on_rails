@@ -91,6 +91,28 @@ describe ConcernsOnRails::Models::Maskable do
       expect(MaskableUser.new(phone: "12345").masked_phone).to eq("***-2345")
     end
 
+    # :email printed everything after the FIRST "@" verbatim, so a second
+    # address (a CC list, a display-name form) came out in full.
+    it ":email fails closed unless there is exactly one @ before a plausible domain" do
+      class MaskableUser < TestModel
+        self.table_name = "maskable_users"
+        include ConcernsOnRails::Models::Maskable
+
+        maskable :email, with: :email
+      end
+
+      [
+        "alice@example.com, bob.smith@corp.example",
+        "alice@example.com bob@corp.example",
+        "Alice <alice@example.com>",
+        "a@b@corp.example",
+        "alice@"
+      ].each do |value|
+        expect(MaskableUser.new(email: value).masked_email).to eq("*" * value.length)
+      end
+      expect(MaskableUser.new(email: "a@b").masked_email).to eq("*@b")
+    end
+
     it ":last4 honors a custom mask character" do
       class MaskableUser < TestModel
         self.table_name = "maskable_users"
@@ -302,6 +324,47 @@ describe ConcernsOnRails::Models::Maskable do
       # an explicit per-child setting still wins
       raw = parent.as_json(masked: true, include: { maskable_profiles: { masked: false } })
       expect(raw["maskable_profiles"].first["email"]).to eq("secret.person@example.com")
+    end
+
+    # The flag used to go one level down only, left for the child's own
+    # override to pass on, so a middle model that is not Maskable (a join row
+    # with no secrets) handed Rails its include: as is and the grandchild was
+    # serialized unmasked.
+    it "carries masked: through a middle model that is not Maskable, in every include: form" do
+      parent = user
+      ActiveRecord::Schema.define do
+        create_table :maskable_memberships, force: true do |t|
+          t.integer :maskable_user_id
+          t.integer :maskable_profile_id
+        end
+      end
+
+      class MaskableProfile < TestModel
+        self.table_name = "maskable_profiles"
+        include ConcernsOnRails::Models::Maskable
+
+        maskable :email, with: :email
+      end
+      stub_const("MaskableMembership", Class.new(TestModel) do
+        self.table_name = "maskable_memberships"
+        belongs_to :maskable_profile, class_name: "MaskableProfile"
+      end)
+      MaskableUser.has_many :maskable_memberships, class_name: "MaskableMembership", foreign_key: :maskable_user_id
+      profile = MaskableProfile.create!(email: "secret.person@example.com")
+      MaskableMembership.create!(maskable_user_id: parent.id, maskable_profile_id: profile.id)
+
+      [
+        { maskable_memberships: { include: :maskable_profile } },
+        { maskable_memberships: { include: [:maskable_profile] } },
+        [{ maskable_memberships: { include: { maskable_profile: {} } } }]
+      ].each do |include|
+        json = parent.as_json(masked: true, include: include)
+        expect(json["maskable_memberships"].first["maskable_profile"]["email"]).to eq("s************@example.com")
+      end
+
+      # an explicit opt-out covers the child's whole subtree
+      raw = parent.as_json(masked: true, include: { maskable_memberships: { masked: false, include: :maskable_profile } })
+      expect(raw["maskable_memberships"].first["maskable_profile"]["email"]).to eq("secret.person@example.com")
     end
 
     it "masks the serialized value, not the raw column" do

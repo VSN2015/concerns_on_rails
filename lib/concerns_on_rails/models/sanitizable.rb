@@ -75,6 +75,13 @@ module ConcernsOnRails
         # stored rewrite (on: :write, sanitize_all!).
         class_attribute :sanitizable_rules, instance_accessor: false, default: {}
         before_validation :apply_sanitizations
+        after_validation :sanitizable_record_validated
+        # Backstop for the saves that skip validation — update_attribute,
+        # save(validate: false) — which otherwise stored the raw markup in a
+        # column declared sanitized on write. PREPENDED, like Normalizable's,
+        # so a sibling's earlier before_save (Encryptable's blind index,
+        # Auditable's entry) sees the value that gets stored.
+        before_save :sanitizable_apply_unvalidated, prepend: true
       end
 
       module ClassMethods
@@ -251,25 +258,73 @@ module ConcernsOnRails
         end
       end
 
+      # Recurses into the child's own `include:` rather than leaving the deeper
+      # levels to the child's override: a middle model that is not Sanitizable
+      # (a join model with nothing to clean) hands its include: to Rails as
+      # is, which serialized the grandchild raw. An explicit falsy
+      # `sanitized:` opts the child out, and everything under it with it.
       def sanitizable_sanitized_child(nested)
         return { sanitized: true } unless nested.is_a?(Hash)
+        return nested if nested.key?(:sanitized) && !nested[:sanitized]
 
-        nested.key?(:sanitized) ? nested : nested.merge(sanitized: true)
+        child = nested.key?(:sanitized) ? nested : nested.merge(sanitized: true)
+        return child if nested[:include].blank?
+
+        child.merge(include: sanitizable_sanitized_includes(nested[:include]))
       end
       private :sanitizable_sanitized_options, :sanitizable_sanitized_includes, :sanitizable_sanitized_child
 
       # Only fields declared with on: :write are mutated; on: :read fields keep
       # their raw column value and are exposed through their sanitized_ reader.
       def apply_sanitizations
+        # field => the value this pass left it holding, so the before_save
+        # backstop can tell "already sanitized" from "changed since".
+        @sanitizable_applied = {}
+        sanitizable_each_write_rule do |field, writer, value|
+          self[field] = writer.call(value) # plain String, never a SafeBuffer
+          # A copy: an in-place mutation after validation must not mutate the
+          # recorded value too and look sanitized.
+          @sanitizable_applied[field] = self[field].dup
+        end
+      end
+
+      # Re-recorded once validation is over: a later before_validation — a
+      # sibling's (Normalizable's :squish) or the app's own — may rewrite a
+      # field this pass handled, and what validation accepted is what the
+      # save stores. Compared against the value as it stood BEFORE that
+      # rewrite, the backstop ran a non-idempotent Proc a second time.
+      def sanitizable_record_validated
+        @sanitizable_applied&.each_key { |field| @sanitizable_applied[field] = self[field].dup }
+      end
+
+      # Sanitize only what before_validation did not: a field it already
+      # handled, still holding the value it produced, is skipped, so a Proc
+      # runs exactly once in a validated save. A field assigned after that
+      # validation (or never validated at all) is sanitized here. The record
+      # is cleared for the next save.
+      def sanitizable_apply_unvalidated
+        applied = @sanitizable_applied || {}
+        @sanitizable_applied = nil
+        sanitizable_each_write_rule do |field, writer, value|
+          next if applied.key?(field) && applied[field] == value
+
+          self[field] = writer.call(value)
+        end
+      end
+
+      def sanitizable_each_write_rule
         self.class.sanitizable_rules.each do |field, rule|
-          next unless rule[:on] == :write
+          # A partial `select` load lacks the column: reading it would raise
+          # MissingAttributeError, and there is nothing to sanitize.
+          next unless rule[:on] == :write && has_attribute?(field)
 
           value = self[field]
           next if value.nil?
 
-          self[field] = rule[:writer].call(value) # plain String, never a SafeBuffer
+          yield field, rule[:writer], value
         end
       end
+      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_each_write_rule
 
       # { field => sanitized } for the fields whose stored value would change;
       # nil values are left alone (nothing to sanitize).

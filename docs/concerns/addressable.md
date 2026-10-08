@@ -251,7 +251,7 @@ Location.find_each(&:save)   # backfill: existing rows keep a NULL fingerprint u
 
 - **Verifier runs only after structural validation passes.** If `validate_address` adds any errors (presence, country code, postal code, state, or lengths), `verify_with:` is never called. This prevents wasted API calls on obviously malformed addresses.
 
-- **Normalization is unconditional.** The `before_validation :normalize_address` callback registered in `included do` runs regardless of any `if:` or `unless:` condition on `addressable_by`. Only the validations are gated by those conditions.
+- **Normalization is unconditional.** The `before_validation :normalize_address` callback registered in `included do` runs regardless of any `if:` or `unless:` condition on `addressable_by`. Only the validations are gated by those conditions. Saves that skip validation (`update_attribute`, `save(validate: false)`) are normalized too, by a `before_save` backstop that is prepended (so it runs ahead of the `fingerprint:` stamp) and skips any part the validation pass already normalized. `update_columns`, `update_all` and raw SQL still bypass it.
 
 - **`validate :validate_address` is registered only once; the condition is per class.** Calling `addressable_by` again in the same class (or in a subclass) replaces the whole configuration — including `if:`/`unless:`, which is evaluated inside the validation, so the most recent call wins (a call without a condition removes it). A subclass's condition never changes its parent's.
 

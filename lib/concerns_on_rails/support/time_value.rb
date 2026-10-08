@@ -30,6 +30,9 @@ module ConcernsOnRails
       # ("10000-01-01" sorts before "2026-01-01"). Year 0 does not exist in
       # SQL, and PostgreSQL rejects it.
       YEARS = (1..9999)
+      # The attribute #type names whose values are dates or times (see
+      # temporal_type?).
+      TYPES = %i[date datetime time timestamp timestamptz].freeze
       # A zone designator ending a String: Z, or an offset (+09:00, -0400, +09).
       ZONED = /(?:Z|[+-]\d{2}(?::?\d{2})?)\z/i
       # The words a date String may hold besides a time zone's name: month
@@ -56,6 +59,17 @@ module ConcernsOnRails
       # core_ext a controller-only host may not have loaded.
       def temporal?(value)
         value.is_a?(::Time) || value.is_a?(::Date)
+      end
+
+      # Whether an attribute type holds dates or times, by its #type: the
+      # ActiveModel/ActiveRecord date, datetime and time types, PostgreSQL's
+      # timestamp / timestamptz, and the zone-aware converter (which
+      # delegates #type to the datetime type it wraps). Their casts hand back
+      # a value they cannot read UNCHANGED when it is not a String
+      # (`cast(12345)` is 12345, `cast(true)` is true), so a nil check alone
+      # cannot tell that the value is no date or time.
+      def temporal_type?(type)
+        TYPES.include?(type.type)
       end
 
       # A UTC copy of a Time, TimeWithZone or DateTime. The receiver is never

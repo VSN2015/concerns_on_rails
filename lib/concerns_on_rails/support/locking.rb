@@ -95,8 +95,21 @@ module ConcernsOnRails
       #   record raises StaleObjectError when the row has moved on since it
       #   was loaded: its changes were made against a stale copy. A row that
       #   has gone raises RecordNotFound, as the reload does.
-      def with_locked_column(record, column, &)
-        return record.with_lock(&) unless record.persisted? && record.has_changes_to_save?
+      #
+      # The reload also empties the association cache. A loaded belongs_to
+      # parent whose foreign key the reload left unchanged is put back, so it
+      # is still the caller's instance: CounterCacheable mirrors its counter
+      # UPDATE (and the lock_version bump) onto the parent the record holds,
+      # and without this the caller's parent went stale and raised
+      # StaleObjectError on its next save.
+      def with_locked_column(record, column, &block)
+        unless record.persisted? && record.has_changes_to_save?
+          parents = loaded_parents(record)
+          return record.with_lock do
+            restore_parents!(record, parents)
+            block.call
+          end
+        end
 
         with_row_lock(record, column) do |row|
           klass = record.class
@@ -109,6 +122,35 @@ module ConcernsOnRails
           adopt!(record, column, row[column.to_s])
           yield
         end
+      end
+
+      # [reflection, target, key] for each loaded, persisted belongs_to
+      # target — the key being the foreign key (and a polymorphic type) the
+      # record held for it.
+      def loaded_parents(record)
+        record.class.reflect_on_all_associations(:belongs_to).filter_map do |reflection|
+          next unless record.association_cached?(reflection.name)
+
+          association = record.association(reflection.name)
+          target = association.target
+          next unless association.loaded? && target.is_a?(ActiveRecord::Base) && target.persisted?
+
+          [reflection, target, parent_key(record, reflection)]
+        end
+      end
+
+      # After the reload: each target whose key the row still holds goes back
+      # into the (emptied) cache. One whose key moved is left to load afresh.
+      def restore_parents!(record, parents)
+        parents.each do |reflection, target, key|
+          record.association(reflection.name).target = target if parent_key(record, reflection) == key
+        end
+      end
+
+      def parent_key(record, reflection)
+        columns = Array(reflection.foreign_key)
+        columns += [reflection.foreign_type] if reflection.polymorphic?
+        columns.map { |name| record[name] }
       end
 
       # Take the row's `value` for `column` into memory, clean — as a reload

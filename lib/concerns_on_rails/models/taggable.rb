@@ -56,6 +56,9 @@ module ConcernsOnRails
       # the escape character for us, so a backslash is portable here.
       LIKE_ESCAPE = "\\".freeze
       LIKE_SPECIAL = /[\\%_]/
+      # Leading/trailing Unicode whitespace (plus NUL, which String#strip also
+      # removed) — Normalizable::EDGE_SPACE.
+      EDGE_SPACE = /\A[[:space:]\0]+|[[:space:]\0]+\z/
 
       included do
         class_attribute :taggable_field, instance_accessor: false, default: DEFAULT_FIELD
@@ -84,6 +87,13 @@ module ConcernsOnRails
           ensure_columns!(LABEL, taggable_field, types: :string)
 
           before_validation :taggable_normalize!
+          after_validation :taggable_record_validated
+          # Backstop for the saves that skip validation — update_attribute,
+          # save(validate: false) — which stored "ruby, rails" where
+          # tagged_with only matches "ruby,rails". PREPENDED (Normalizable's
+          # rule) so a sibling's earlier before_save sees the stored form.
+          # Re-declaring replaces, never stacks, a Symbol callback.
+          before_save :taggable_normalize_unvalidated, prepend: true
         end
 
         # Records carrying the given tags. `any: true` matches ANY tag (OR);
@@ -183,9 +193,12 @@ module ConcernsOnRails
           tags.empty? ? nil : tags.join(taggable_delimiter)
         end
 
-        # Normalize a single tag (strip + optional downcase).
+        # Normalize a single tag (strip + optional downcase). String#strip is
+        # ASCII-only: a tag pasted with a no-break space ("ruby\u00A0") was
+        # kept as a distinct tag that tagged_with("ruby") never found, though
+        # it looked identical in all_tags.
         def taggable_clean(tag)
-          tag = tag.to_s.strip
+          tag = tag.to_s.gsub(EDGE_SPACE, "")
           taggable_downcase ? tag.downcase : tag
         end
 
@@ -285,12 +298,45 @@ module ConcernsOnRails
 
       # before_validation hook — re-normalize whatever sits in the column, covering
       # direct `record.tags = "..."` assignment, not just the tag_list= setter.
+      # Remembers the value it left the column holding, so the before_save
+      # backstop can tell "already normalized" from "changed since".
       def taggable_normalize!
+        @taggable_normalized = taggable_rewrite_column
+      end
+
+      # Re-recorded once validation is over: a later before_validation — a
+      # sibling's (Normalizable's :squish) or the app's own — may rewrite a
+      # field this pass handled, and what validation accepted is what the
+      # save stores. Compared against the value as it stood BEFORE that
+      # rewrite, the backstop ran a non-idempotent Proc a second time.
+      def taggable_record_validated
+        @taggable_normalized = self[self.class.taggable_field].dup unless @taggable_normalized.nil?
+      end
+
+      # Normalize only when before_validation did not, or the column changed
+      # after it ran (an in-place mutation included). The record is cleared
+      # for the next save.
+      def taggable_normalize_unvalidated
+        normalized = @taggable_normalized
+        @taggable_normalized = nil
+        return if !normalized.nil? && self[self.class.taggable_field] == normalized
+
+        taggable_rewrite_column
+      end
+
+      # The normalized column value (a copy), or nil when there was nothing
+      # to normalize.
+      def taggable_rewrite_column
         field = self.class.taggable_field
+        # A partial `select` load lacks the column: reading it would raise
+        # MissingAttributeError, and there is nothing to normalize.
+        return unless has_attribute?(field)
+
         raw = self[field]
         return if raw.nil?
 
         self[field] = self.class.taggable_join(self.class.taggable_split(raw))
+        self[field].dup
       end
 
       # Funnel every input shape through taggable_split so Strings and Arrays

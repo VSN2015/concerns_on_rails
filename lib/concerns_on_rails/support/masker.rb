@@ -12,12 +12,17 @@ module ConcernsOnRails
     # the database.
     #
     # Fail closed: a String that does not have the shape a preset expects
-    # (no "@" for #email, four or fewer ASCII digits for #phone) gets the
-    # full mask (#all) — never the raw value.
+    # (not exactly one "@" before a plausible domain for #email, four or
+    # fewer ASCII digits for #phone) gets the full mask (#all) — never the
+    # raw value.
     module Masker
       module_function
 
       DEFAULT_MASK = "*".freeze
+      # An #email domain is shown verbatim, so it must be ONE domain: no
+      # whitespace, list separators, angle brackets or quotes — the marks of
+      # "a@x.com, b@y.com" or `"Name" <a@x.com>`.
+      EMAIL_DOMAIN = /\A[^[:space:],;<>"]+\z/
 
       # Replace every character with the mask character.
       def all(value, mask: DEFAULT_MASK)
@@ -39,8 +44,11 @@ module ConcernsOnRails
         value = stringify(value)
         return nil if value.nil?
 
-        local, at, domain = value.partition("@")
-        return all(value, mask: mask) if at.empty? # not email-shaped: reveal nothing
+        # Not email-shaped — no "@", or a second one (a list, a display-name
+        # form), whose address the verbatim domain would print in full:
+        # reveal nothing.
+        local, _, domain = value.partition("@")
+        return all(value, mask: mask) unless value.count("@") == 1 && domain.match?(EMAIL_DOMAIN)
 
         masked_local = local.length <= 1 ? mask : local[0] + (mask * (local.length - 1))
         "#{masked_local}@#{domain}"

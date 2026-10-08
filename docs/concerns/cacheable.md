@@ -43,7 +43,7 @@ Declares the policy emitted via `after_action`. Repeatable; rules are inherited 
 | Option | Default | Meaning |
 |---|---|---|
 | `*actions` | — | Actions the policy covers; **none = catch-all** |
-| `visibility:` | `:private` | `:public` or `:private` — the cacheability scope (downgraded to `private` when an `etag_with` source has no `Vary` — see below) |
+| `visibility:` | `:private` | `:public` or `:private` — the cacheability scope (downgraded to `private` when an `etag_with` source has no `Vary`, or the request passes per-call `extras:` — see below) |
 | `max_age:` | `nil` | Freshness lifetime; `Integer` seconds or a `Duration` |
 | `must_revalidate:` | `false` | Append `must-revalidate` |
 | `no_store:` | `false` | Emit the lone `no-store` — **overrides everything else** |
@@ -64,7 +64,7 @@ Declares request context that shapes the representation and therefore belongs in
 
 `vary:` (String/Array) replaces the implied header(s) for that call; `vary: false` suppresses them. The `Vary` header is written whenever validators are written **and** by the `after_action`, merged (de-duplicated) with the `http_cache_actions` policy — so an action that renders without calling `stale_resource?` still advertises it. `nil` values are dropped, so an absent context leaves the ETag unchanged. A Symbol that is neither a preset nor a controller method raises `ArgumentError` at request time; an empty call or a non-Symbol source raises at class load. `cacheable_etag_extras` exposes the declared entries.
 
-**A source with no `Vary` forces `Cache-Control: private`.** A controller method, a block, or a preset with `vary: false` folds a dimension into the ETag that no shared cache can key on — `Vary` has no way to express *who is asking* — so the representation is not shareable and the declared `visibility:` is downgraded rather than trusted. `:query` is exempt (the query string is already part of the cache key), and `no_store: true` still overrides everything.
+**A source with no `Vary` forces `Cache-Control: private`.** A controller method, a block, or a preset with `vary: false` folds a dimension into the ETag that no shared cache can key on — `Vary` has no way to express *who is asking* — so the representation is not shareable and the declared `visibility:` is downgraded rather than trusted. `:query` is exempt (the query string is already part of the cache key), and `no_store: true` still overrides everything. Per-call `extras:` are the same kind of dimension (`stale_resource?(@report, extras: [current_user.role])`), so a request that passes any — a non-empty list, even of `nil`s, exactly as a block source counts whatever it returns — is `private` too, its 304 included; one that passes none (`nil` or `[]`) keeps the rule's `visibility:`. Before this, per-call extras kept `public`, and a CDN keyed on the URL served one caller's representation to the next.
 
 ```ruby
 http_cache_actions :show, max_age: 30, visibility: :public
@@ -75,7 +75,7 @@ All option errors raise `ArgumentError` at declaration time (bad `:visibility`, 
 
 ## Methods
 
-- `stale_resource?(resource = nil, etag: nil, last_modified: nil, extras: nil)` — sets the validators (with the `etag_with` context and any per-call `extras:` folded into the ETag); for a safe (GET/HEAD) request whose precondition matches, sends `304 Not Modified` and returns **false**; otherwise returns **true** (render the body). Mirrors Rails' `stale?` under a non-clashing name.
+- `stale_resource?(resource = nil, etag: nil, last_modified: nil, extras: nil)` — sets the validators (with the `etag_with` context and any per-call `extras:` folded into the ETag — non-empty `extras:` also make the response `private`); for a safe (GET/HEAD) request whose precondition matches, sends `304 Not Modified` and returns **false**; otherwise returns **true** (render the body). Mirrors Rails' `stale?` under a non-clashing name.
 - `set_cache_validators(resource = nil, etag: nil, last_modified: nil, extras: nil)` — sets `ETag`/`Last-Modified` (context folded in, `Vary` merged) without short-circuiting; returns the computed `{ etag:, last_modified: }`. An explicit `etag:` is kept verbatim only when there is no context to fold in. `stale_resource?` forwards `extras:` only when it was given, so an override that kept the three-keyword signature keeps working.
 - `cache_etag_extras(extra = nil)` — the resolved `etag_with` values for this request plus `extra`, nils dropped; reuse it from a `cache_etag_for` override.
 - `request_matches_cache?(etag:, last_modified:)` — side-effect-free predicate.
@@ -114,7 +114,7 @@ end
 - **Context belongs in the ETag, not just in `Vary`.** `Vary: Accept-Language` tells caches to key on the header, but a client that switches locale and revalidates with its old ETag would still get a 304 unless the locale is part of the validator — `etag_with :locale` does both. Anything that changes the body without changing the record (fields, includes, role-based redaction) should be declared the same way.
 - The method names are deliberately distinct from `ActionController::ConditionalGet`, so this concern coexists with Rails' own `fresh_when`/`stale?`.
 - **Weak validators** signal semantic (not byte-for-byte) equivalence — the right choice for serialized representations that may differ in whitespace/ordering.
-- `no_store: true` overrides `max_age`/`visibility`; pair `:public` caching with care behind shared CDNs and proxies — and note that a user-scoped `etag_with` source (a method, a block, `vary: false`) downgrades the whole controller to `private`, because a CDN keying only on the URL would otherwise hand one caller's body to the next.
+- `no_store: true` overrides `max_age`/`visibility`; pair `:public` caching with care behind shared CDNs and proxies — and note that a user-scoped `etag_with` source (a method, a block, `vary: false`) downgrades the whole controller to `private`, and per-call `extras:` downgrade that response, because a CDN keying only on the URL would otherwise hand one caller's body to the next.
 - `Vary` is **appended**, never clobbered — through the same `Support::VaryHeader` helper Localizable and Timezoneable use: case-insensitive de-duplication, `Vary: *` left alone, and Rails' own `Vary: Accept` preserved even though `stale_resource?` writes `Vary` before `render` (Rails only adds it while the header is still blank).
 - Every `request`/`response` touch is guarded, so the concern runs on bare objects and is testable without the full Rails stack.
 - For **write-side** preconditions (`If-Match` / `If-Unmodified-Since` → `412 Precondition Failed`), reach for Rails' own conditional-GET helpers; this concern covers the read path.

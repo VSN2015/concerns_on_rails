@@ -58,7 +58,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 
 - **`Sluggable`** — wraps `friendly_id` (`:slugged`). Regenerates the slug when the source
   field changes, backfills a blank slug, and won't overwrite an explicitly-assigned slug.
-  Options: `history:`, `scope:`, `reserved_words:`, `finders:`.
+  Options: `history:`, `scope:`, `reserved_words:`, `finders:`. A saved record whose `scope:`
+  column changes keeps a slug the new scope has free and rebuilds one that scope already holds.
 - **`Sortable`** — wraps `acts_as_list`; `default_scope` orders by the configured
   field/direction. `sortable_by :position` / `position: :desc`; `scope:`, `add_new_at:`,
   `use_acts_as_list: false`.
@@ -78,7 +79,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   rows (opt out with `default_scope: false`); scopes affixable via `prefix:`/`suffix:`.
   `soft_delete!`/`restore!`, batch `soft_delete_all`/`restore_all` (atomic, routed through
   `Support::BatchOps`), `really_destroy_all`/`really_delete!` for hard deletes. Hooks:
-  `before/after_soft_delete`, `before/after_restore`.
+  `before/after_soft_delete`, `before/after_restore`. The default scope's `deleted_at IS NULL`
+  is its own Arel node (`DefaultScopePredicate`), so the batch verbs peel exactly it — never
+  a caller's identical predicate (`without_deleted.really_destroy_all` keeps the trash).
 - **`Hashable`** — one random identifier column. `type:` `:hex`/`:uuid`/`:integer`/`:custom`,
   `length:`, `alphabet:`, `unique:` (retry on collision).
 - **`Tokenizable`** — multiple security-token columns. `type:` `:urlsafe`/`:hex`/
@@ -131,21 +134,28 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all`,
   `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only).
 - **`Normalizable`** — `before_validation` normalization + a PREPENDED `before_save` backstop
-  for saves that skip validation (so an earlier sibling `before_save` — Encryptable's blind
-  index, Auditable, Addressable — sees the stored value; a field the validation pass already
-  normalized is skipped, so a Proc runs once per save). Presets (`:email`, `:phone`,
+  for saves that skip validation (so an earlier sibling `before_save` — Auditable,
+  Addressable — sees the stored value; a field the validation pass already normalized is
+  skipped, so a Proc runs once per save). Sanitizable `on: :write`, Taggable and Addressable
+  copy the same prepended backstop, but re-record the values in `after_validation`, so a later
+  `before_validation`'s rewrite is never re-processed (Normalizable itself keeps comparing to
+  what IT produced — a slug friendly_id builds afterwards must still be normalized). Presets (`:email`, `:phone`,
   `:squish`, …) or a Proc. (On Rails 7.1+, native `normalizes` is an alternative.)
 - **`Taggable`** — delimiter-joined tags in one string column (no join table). `tagged_with`,
-  `all_tags`, boundary-safe and LIKE-escaped (tag and delimiter).
+  `all_tags`, boundary-safe and LIKE-escaped (tag and delimiter); tags are stripped of
+  Unicode whitespace.
 - **`Sanitizable`** — opt-in HTML sanitization (`on: :read` reader by default, or `:write`).
   Write-mode `:strip` stores PLAIN TEXT: entities decoded except `&lt;`/`&gt;` and any `&`
   that would read back as a character reference (idempotent, never markup, linear time).
+  `as_json(sanitized: true)` (and Maskable's `masked: true`) carry the flag through EVERY
+  nested `include:` level, also past a model without the concern.
 - **`Maskable`** — non-destructive display masking (`masked_<field>` readers): `:email`,
   `:phone`, `:credit_card`, `:last4`, `:all`, or a Proc.
 - **`Monetizable`** — integer-cents money accessors via BigDecimal: `<name>`, `<name>=`,
   `formatted_<name>`; `unit:`, `precision:`, `delimiter:`, `separator:`, `subunit_to_unit:`.
   The writer reads its own formatted output back (unit at start/end only, grouped
-  delimiters, locale separator); garbage, non-finite and oversized input → nil.
+  delimiters, locale separator); garbage, non-finite and oversized input → nil (a Rational
+  converts). An `encryptable` cents column is refused at macro time, either order.
 - **`Addressable`** — postal-address normalization + format validation across columns;
   `full_address`, `address_complete?`, `verify_with:`.
 - **`Auditable`** — single-column JSON change history ("paper_trail-lite"). `auditable_by
@@ -164,7 +174,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `unlock_token:` mints a self-service unlock link — timing-safe scoped finder, race-safe
   single-use consumption (one conditional UPDATE), TTL tied to `unlock_in`, claimed in its
   own savepoint so a vetoing hook puts the token back, Duplicable-reset and
-  FilterParameterRegistry-registered.
+  FilterParameterRegistry-registered. An `encryptable` unlock_token is refused (either order).
 - **`Aliasable`** — full association aliasing: `alias_association :new, :old`
   (alias_method argument order, repeatable, declared after the source). Read/write/
   build_/create_/ids delegators + a renamed reflection copy so joins/includes/
@@ -215,14 +225,19 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `update_all` GUARDED on the ciphertext read at load (a concurrent write is
   skipped, never reverted), fields with unsaved changes are skipped, and a
   successful `reencrypt!` reloads. Fields auto-register with Rails
-  filter_parameters via `FilterParameterRegistry` + the railtie.
+  filter_parameters via `FilterParameterRegistry` + the railtie. Blind indexes refresh in
+  `before_create` (EVERY indexed field — a copy never keeps its original's digest) and
+  `before_update` (changed fields), i.e. after every `before_save`; the finders run the
+  lookup value through the field's Rails 7.1+ `normalizes` first. Decrypted text is UTF-8
+  (binary only when invalid), and a stored `""` (a column default) reads as `""`.
 - **`CounterCacheable`** — conditional denormalized counters ("counter_culture-lite"),
   declared on the CHILD. `counter_cacheable_by association, count:, if:, touch:`
   (repeatable; belongs_to must be declared first; polymorphic rejected;
   re-declaring the same association + `count:` REPLACES that rule, so an STI subclass can
   narrow it with `if:`; on an STI table the recount tallies each stored `type` under its
   class's rule — resolved via `find_sti_class`, never by instantiating, and an unresolvable
-  type falls back to the base class's rule). Atomic `update_counters` adjustments inside
+  type falls back to the base class's rule; a save that CHANGES the type judges the old
+  state under the old type's rule and the new state under the new one's). Atomic `update_counters` adjustments inside
   the save transaction covering the reparent × condition-flip matrix;
   `recount_counter_caches!` drift repair (transactional, one UPDATE per
   distinct tally value). Destroy decrements only when the DELETE removed a row, reads the
@@ -284,13 +299,18 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets.
 - **`SecureHeadable`** — security response headers + native CSP DSL passthrough.
 - **`Localizable`** — per-request `I18n.locale` from params / `Accept-Language` (strict
-  RFC 9110 q-values, stable order on ties). Like Timezoneable's zone, the locale stays
+  RFC 9110 q-values, stable order on ties; `-` and `_` match each other, case-insensitively,
+  returning the app's own symbol). Like Timezoneable's zone, the locale stays
   active for `rescue_from` handlers and is always restored afterwards.
 - **`Authorizable`** — declarative per-action authorization (`authorize_by`, `require_role`).
 - **`Throttleable`** — fixed-window rate limiting with an injectable atomic store. A rule
   without `name:` defaults to `"<DeclaringController>#rule<n>"`, so unrelated controllers
-  never share a counter (subclasses share their parent's rule).
-- **`Timezoneable`** — per-request `Time.zone` from params / header / cookie.
+  never share a counter (subclasses share their parent's rule). The first-hit seed is
+  written `raw: true` (only to a `write` taking options/`**`/`raw:` — a custom store naming just
+  its keywords would raise), the only form MemCacheStore on Rails 6.0–7.0 can `increment`.
+- **`Timezoneable`** — per-request `Time.zone` from params / header / cookie. The
+  `available:` allow-list matches by canonical tzinfo identifier (exact name first, the
+  allow-listed zone returned); a value that is not valid UTF-8 is no match.
 - **`Idempotentable`** — `Idempotency-Key` response replay with an injectable store
   (`idempotent_actions`); 409 on in-flight duplicates, 422 on payload mismatch, 503
   `idempotency_store_unavailable` when the store is down (both claims failed AND both reads
@@ -315,6 +335,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   A nullable ordering column forces the OR-expansion and sorts NULLs LAST in both
   directions (PG `NULLS LAST`, else a `CASE` key); boundaries are the stored values of
   columns selected UNALIASED (unselected → MissingAttributeError, nil-cast → ArgumentError).
+  A non-finite float boundary is minted as `"Infinity"`/`"-Infinity"`/`"NaN"` and accepted
+  back only where the adapter stores it (SQLite binds a `9e999` literal); a date/time
+  boundary that doesn't decode to a date/time is an InvalidCursor.
 - **`Deprecatable`** — standards-based endpoint deprecation. `deprecate_actions *actions,
   deprecated_at:, sunset_at:, link:, successor:, after_sunset:, header_format:, notify:`
   (repeatable; no actions = catch-all; LAST matching rule wins). Emits RFC 9745
@@ -331,7 +354,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   get neither 304 nor validators). `no_store` is also applied via
   prepend_before_action so rescue_from-rendered errors keep it; positive
   freshness is emitted only for GET/HEAD with status 200/203/204/206/304 (never on
-  rescued errors); `vary:` merges through `Support::VaryHeader`.
+  rescued errors); `vary:` merges through `Support::VaryHeader`. Per-call `extras:`
+  (any, nil included) force `private`, like a Vary-less `etag_with` source.
 - **`Permittable`** — typed, validated params contracts + schema-drift guard.
   Lives in the STANDALONE `permittable` gem (runtime dependency `>= 0.8, < 1`, published on
   rubygems.org; developed in the sibling repo `../permittable`,
@@ -398,8 +422,8 @@ class's own singleton, and still the exact method captured, so an overridden sco
 and a subclass never rips a scope out from under its parent), `BatchOps` (the hook-ownership
 fast-path predicate — every named instance method still owned by the concern, i.e.
 unoverridden — plus the transactional `find_each` batch runner shared by every `*_all` verb:
-Integer count, DB-side filtering for idempotency, rollback via `ActiveRecord::RecordNotSaved`
-on a failed record — and `each_record`, the ONLY way to `find_each` a relation: it strips the
+Integer count, DB-side filtering for idempotency, its own `requires_new` savepoint, rollback
+via `ActiveRecord::RecordNotSaved` on a failed record (inside a caller's transaction too) — and `each_record`, the ONLY way to `find_each` a relation: it strips the
 ORDER (error_on_ignored_order), resolves a LIMIT/OFFSET to plucked PKs first (bare `find_each`
 keeps the limit but pages by PK), and yields each record once even over a has_many join (a
 joined limited slice is re-plucked, then loaded unjoined — one instance per record)),

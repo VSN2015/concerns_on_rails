@@ -47,7 +47,7 @@ end
 | `?page=` | `1` | Values below 1 (including negative numbers and zero) are clamped to `1`; values above `MAX_PAGE` (1,000,000) are clamped down to it, so an absurd `?page=` returns an empty page instead of a 500. |
 | `?per_page=` | value of `paginatable_per_page` | Values below 1 fall back to the class default; values above `max_per_page` are capped, and in every case the result is held under `MAX_PER_PAGE` (1,000,000). |
 
-Both names are configurable (`page_param:` / `per_page_param:` / `style: :jsonapi`). Nested paths are read by digging through the params (`params[:page][:number]`); a non-Hash where a Hash is expected, or an Array/Hash where a scalar is expected, falls back to the default exactly like garbage in the flat form.
+Both names are configurable (`page_param:` / `per_page_param:` / `style: :jsonapi`). Nested paths are read by digging through the params (`params[:page][:number]`); a non-Hash where a Hash is expected (a JSON body's `{"page": 2}` under `style: :jsonapi` included — it used to raise `TypeError`, a 500), or an Array/Hash where a scalar is expected, falls back to the default exactly like garbage in the flat form.
 
 ## Methods
 
@@ -92,7 +92,7 @@ The four `X-*` headers set on `response`:
 | `X-Page` | The resolved current page number (always >= 1). |
 | `X-Per-Page` | The resolved per-page value after applying defaults and the cap. |
 | `X-Total-Pages` | `ceil(total / per_page)`. Returns `"0"` when the relation is empty. |
-| `Link` | RFC 8288 web links: `<…?page=1>; rel="first", <…?page=1>; rel="prev", <…?page=3>; rel="next", <…?page=5>; rel="last"`. URLs are the current request's base URL + path with the page param replaced — under the configured name, nested ones encoded by Rack (`page%5Bnumber%5D=3`) with the rest of that nested Hash (`page[size]`) preserved — and every other query param kept. `prev`/`next` appear only when such a page exists (past the end, `prev` points at the last page). Not emitted for an empty collection, when `link_header: false`, or when the controller has no request. Appended to an existing `Link` header, never replacing it. |
+| `Link` | RFC 8288 web links: `<…?page=1>; rel="first", <…?page=1>; rel="prev", <…?page=3>; rel="next", <…?page=5>; rel="last"`. URLs are the current request's base URL + path with the page param replaced — under the configured name, nested ones encoded by Rack (`page%5Bnumber%5D=3`) with the rest of that nested Hash (`page[size]`) preserved — and every other query param kept. The URL is percent-encoded wherever a byte could leave the `<…>` (whitespace, control characters, non-ASCII, `<`, `>`, `"`), so a crafted request path cannot add Link entries of its own. `prev`/`next` appear only when such a page exists (past the end, `prev` points at the last page). Not emitted for an empty collection, when `link_header: false`, or when the controller has no request. Appended to an existing `Link` header, never replacing it. |
 
 ## Examples
 

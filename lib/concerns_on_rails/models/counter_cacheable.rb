@@ -625,10 +625,11 @@ module ConcernsOnRails
 
       # The row being deleted is the PERSISTED one, so its parent and its `if:`
       # verdict are read from the database values — an unsaved reparent or
-      # condition flip in memory must not redirect the decrement.
+      # condition flip in memory must not redirect the decrement. So is the
+      # class judging it: the persisted STI type's, not an unsaved one's.
       def counter_cacheable_run_destroy
         adjustments = counter_cacheable_with_attributes(counter_cacheable_unsaved_changes) do
-          counter_cacheable_presence_adjustments(-1) { |rule| !counter_cacheable_destroyed_by_parent?(rule) }
+          counter_cacheable_presence_adjustments(-1) { |rule, judge| !counter_cacheable_destroyed_by_parent?(rule, judge) }
         end
         counter_cacheable_flush(adjustments)
       end
@@ -641,59 +642,118 @@ module ConcernsOnRails
       # Only a has_many marks the parent as going away: a has_one sets
       # destroyed_by_association when a REPLACEMENT destroys the old record,
       # and there the parent survives and must be decremented.
-      def counter_cacheable_destroyed_by_parent?(rule)
+      def counter_cacheable_destroyed_by_parent?(rule, judge)
         by = destroyed_by_association
         return false unless by && by.macro == :has_many
 
-        Array(by.foreign_key).map(&:to_s) == Array(counter_cacheable_reflection(rule).foreign_key).map(&:to_s)
+        Array(by.foreign_key).map(&:to_s) == Array(counter_cacheable_reflection(rule, judge).foreign_key).map(&:to_s)
       end
 
       def counter_cacheable_run_update
+        was, now = counter_cacheable_update_judges
+        keys = [was, now].uniq.flat_map { |judge| counter_cacheable_rules_of(judge) }
+                         .map { |rule| rule.values_at(:association, :count_column) }.uniq
         counter_cacheable_flush(
-          self.class.counter_cacheable_rules.flat_map { |rule| counter_cacheable_update_adjustments(rule) }
+          keys.flat_map do |key|
+            counter_cacheable_update_adjustments([was, counter_cacheable_rule_of(was, key)],
+                                                 [now, counter_cacheable_rule_of(now, key)])
+          end
         )
       end
 
-      # create/destroy share one shape: ±1 on the current parent when counted.
-      # An optional block filters the rules (destroy skips the parent doing the
-      # destroying).
+      # create/destroy share one shape: ±1 on the current parent when counted,
+      # under the rules of the class the row's type resolves to. An optional
+      # block filters the rules (destroy skips the parent doing the destroying).
       def counter_cacheable_presence_adjustments(delta)
-        self.class.counter_cacheable_rules.filter_map do |rule|
-          next if block_given? && !yield(rule)
-          next unless counter_cacheable_counted_now?(rule)
+        judge = counter_cacheable_judge(counter_cacheable_type)
+        counter_cacheable_rules_of(judge).filter_map do |rule|
+          next if block_given? && !yield(rule, judge)
+          next unless counter_cacheable_counted_now?(rule, judge)
 
-          counter_cacheable_adjustment(rule, counter_cacheable_fk_value(rule), delta)
+          counter_cacheable_adjustment(rule, counter_cacheable_fk_value(rule, judge), delta, judge)
         end
       end
 
-      # The create × destroy × (reparent + condition-flip) matrix.
-      def counter_cacheable_update_adjustments(rule)
-        fk = counter_cacheable_reflection(rule).foreign_key.to_s
-        changes = counter_cacheable_changes
-        new_fk = self[fk]
-        old_fk = changes.key?(fk) ? changes[fk].first : new_fk
-
-        old_counted = counter_cacheable_counted_previously?(rule)
-        new_counted = counter_cacheable_counted_now?(rule)
+      # The create × destroy × (reparent + condition-flip) matrix for one
+      # counter. `was` and `now` are [class, rule]: the class judging the row
+      # before / after the save and its rule for this counter (nil when that
+      # class keeps none, i.e. the row is not counted in that state).
+      def counter_cacheable_update_adjustments((was_judge, was_rule), (now_judge, now_rule))
+        old_fk, new_fk = counter_cacheable_fk_move([was_judge, was_rule], [now_judge, now_rule])
+        old_counted = counter_cacheable_counted_previously?(was_rule, was_judge)
+        new_counted = counter_cacheable_counted_now?(now_rule, now_judge)
+        decrement = -> { counter_cacheable_adjustment(was_rule, old_fk, -1, was_judge) }
+        increment = -> { counter_cacheable_adjustment(now_rule, new_fk, 1, now_judge) }
 
         if old_fk == new_fk
-          # Same parent — only a condition flip can change the count.
+          # Same parent — only a condition flip (or a type change) can change the count.
           return [] if old_counted == new_counted
 
-          [counter_cacheable_adjustment(rule, new_fk, new_counted ? 1 : -1)]
-        else
-          # Foreign key changed — settle the old parent and the new one independently.
-          [(counter_cacheable_adjustment(rule, old_fk, -1) if old_counted),
-           (counter_cacheable_adjustment(rule, new_fk, 1) if new_counted)]
+          return [new_counted ? increment.call : decrement.call]
         end
+
+        # Foreign key changed — settle the old parent and the new one independently.
+        [(decrement.call if old_counted), (increment.call if new_counted)]
+      end
+
+      # [old, new] foreign-key value across the save, read through the rule
+      # judging the row now (or before, when its new class keeps no such counter).
+      def counter_cacheable_fk_move(was, now)
+        judge, rule = now.last ? now : was
+        fk = counter_cacheable_reflection(rule, judge).foreign_key.to_s
+        changes = counter_cacheable_changes
+        [changes.key?(fk) ? changes[fk].first : self[fk], self[fk]]
+      end
+
+      # The class whose rules judge the row before this save and the one
+      # judging it now. They differ only when the save changed the STI type
+      # (`becomes!`, or the inheritance column assigned): the old state is
+      # then counted under the old type's class and the new state under the
+      # new one's, as recount_counter_caches! tallies each stored type —
+      # judging both under the receiving class left the counter drifted.
+      def counter_cacheable_update_judges
+        now = counter_cacheable_judge(counter_cacheable_type)
+        column = self.class.inheritance_column.to_s
+        changes = counter_cacheable_changes
+        return [now, now] unless counter_cacheable_sti_row? && changes.key?(column)
+
+        [counter_cacheable_judge(changes[column].first), now]
+      end
+
+      # The class a row stored as `type` loads as, resolved as the recount
+      # resolves it (a type that no longer resolves falls back to the base
+      # class). A row without a (loaded) inheritance column is judged by its
+      # own class.
+      def counter_cacheable_judge(type)
+        return self.class unless counter_cacheable_sti_row?
+        return self.class if type == self.class.sti_name
+
+        self.class.send(:counter_cacheable_sti_class, type) || self.class.base_class
+      end
+
+      def counter_cacheable_sti_row?
+        has_attribute?(self.class.inheritance_column.to_s)
+      end
+
+      def counter_cacheable_type
+        self[self.class.inheritance_column.to_s] if counter_cacheable_sti_row?
+      end
+
+      # A class of the tree that never included the concern keeps no counters.
+      def counter_cacheable_rules_of(judge)
+        judge.respond_to?(:counter_cacheable_rules) ? judge.counter_cacheable_rules : []
+      end
+
+      def counter_cacheable_rule_of(judge, key)
+        self.class.send(:counter_cacheable_rule_on, judge, key)
       end
 
       # `parent_key` is the foreign-key value: the parent's association key
       # (its `id`, or the belongs_to's `primary_key:` column).
-      def counter_cacheable_adjustment(rule, parent_key, delta)
+      def counter_cacheable_adjustment(rule, parent_key, delta, judge = self.class)
         return nil if parent_key.nil?
 
-        reflection = counter_cacheable_reflection(rule)
+        reflection = counter_cacheable_reflection(rule, judge)
         { klass: reflection.klass, key_column: reflection.association_primary_key.to_s, parent_key: parent_key,
           column: rule[:count_column], delta: delta, touch: rule[:touch], association: rule[:association] }
       end
@@ -729,10 +789,17 @@ module ConcernsOnRails
         return unless klass.locking_enabled?
 
         targets = group.map { |adj| adj[:association] }.uniq.filter_map do |name|
-          target = association(name).target
+          target = counter_cacheable_held_target(name)
           target if counter_cacheable_target_row?(target, key_column, parent_key)
         end
         targets.uniq(&:object_id).each { |target| counter_cacheable_sync_target(target, klass, counters) }
+      end
+
+      # What this record's association `name` holds — nil also when its class
+      # does not declare `name`: a rule judged under another class of the STI
+      # tree may name an association only that class declares.
+      def counter_cacheable_held_target(name)
+        association(name).target if self.class.reflect_on_association(name)
       end
 
       # The instance is a live copy of the adjusted row — matched by its key,
@@ -777,28 +844,46 @@ module ConcernsOnRails
              .reject { |_column, delta| delta.zero? }
       end
 
-      def counter_cacheable_fk_value(rule)
-        self[counter_cacheable_reflection(rule).foreign_key]
+      def counter_cacheable_fk_value(rule, judge = self.class)
+        self[counter_cacheable_reflection(rule, judge).foreign_key]
       end
 
-      def counter_cacheable_reflection(rule)
-        self.class.reflect_on_association(rule[:association])
+      # Looked up on the judging class: after a type change its rule may name
+      # an association this record's own class does not declare.
+      def counter_cacheable_reflection(rule, judge = self.class)
+        judge.reflect_on_association(rule[:association])
       end
 
-      def counter_cacheable_counted_now?(rule)
+      # A nil rule: the judging class keeps no such counter, so the row is not
+      # counted in that state.
+      def counter_cacheable_counted_now?(rule, judge = self.class)
+        return false unless rule
+
         condition = rule[:condition]
         return true unless condition
 
-        ConcernsOnRails::Support::Callable.invoke(self, condition) ? true : false
+        ConcernsOnRails::Support::Callable.invoke(counter_cacheable_subject(judge), condition) ? true : false
       end
 
       # Evaluate the condition against the record as it was BEFORE this save by
       # temporarily restoring the changed attributes to their previous values.
-      def counter_cacheable_counted_previously?(rule)
+      def counter_cacheable_counted_previously?(rule, judge = self.class)
+        return false unless rule
+
         condition = rule[:condition]
         return true unless condition
 
-        counter_cacheable_with_attributes(counter_cacheable_changes) { ConcernsOnRails::Support::Callable.invoke(self, condition) ? true : false }
+        counter_cacheable_with_attributes(counter_cacheable_changes) do
+          ConcernsOnRails::Support::Callable.invoke(counter_cacheable_subject(judge), condition) ? true : false
+        end
+      end
+
+      # The record as the judging class sees it: itself, or — after an STI
+      # type change, judged under the other type's rule — a `becomes` copy
+      # sharing its attributes, so that rule's `if:` can call methods only
+      # that class defines (it raised NoMethodError on the receiving class).
+      def counter_cacheable_subject(judge)
+        is_a?(judge) ? self : becomes(judge)
       end
 
       # Temporarily put each changed attribute back to the FIRST value of its

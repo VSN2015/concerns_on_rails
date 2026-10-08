@@ -158,6 +158,71 @@ describe ConcernsOnRails::Models::Sanitizable do
       expect(article.title).to be_nil
     end
 
+    # The rewrite ran in before_validation only, so update_attribute /
+    # save(validate: false) stored raw markup in a column declared sanitized
+    # on write. A prepended before_save backstop (Normalizable's) covers them.
+    context "when validation is skipped" do
+      let(:model) do
+        Class.new(TestModel) do
+          self.table_name = "sanitizable_articles"
+          include ConcernsOnRails::Models::Sanitizable
+
+          sanitizable :title, with: :strip, on: :write
+          sanitizable :code, with: ->(v) { "#{v}!" }, on: :write # deliberately NOT idempotent
+        end
+      end
+
+      it "still sanitizes on update_attribute" do
+        article = model.create!(title: "clean")
+        article.update_attribute(:title, "<script>alert(1)</script>hi")
+        expect(article.reload.title).to eq("alert(1)hi")
+      end
+
+      it "still sanitizes on save(validate: false), for a new record too" do
+        article = model.new(title: "<img src=x onerror=alert(1)>hi", code: "x")
+        article.save(validate: false)
+        expect(article.reload.title).to eq("hi")
+        expect(article.code).to eq("x!")
+      end
+
+      it "sanitizes a value changed after a (failed) validation" do
+        article = model.new(title: "ok")
+        article.valid?
+        article.title = "<b>late</b>"
+        article.save(validate: false)
+        expect(article.reload.title).to eq("late")
+      end
+
+      it "does not run a rule twice in one validated save, or right after a validation" do
+        expect(model.create!(code: "x").reload.code).to eq("x!")
+
+        article = model.new(code: "y")
+        article.valid?
+        article.save(validate: false)
+        expect(article.reload.code).to eq("y!")
+      end
+
+      it "skips a column a partial select did not load" do
+        article = model.create!(title: "t", code: "x")
+        partial = model.select(:id, :code).find(article.id)
+        expect { partial.update_attribute(:code, "y") }.not_to raise_error
+        expect(article.reload.code).to eq("y!")
+      end
+
+      it "runs ahead of a before_save registered before the concern" do
+        seen = nil
+        klass = Class.new(TestModel) do
+          self.table_name = "sanitizable_articles"
+          before_save { seen = title }
+          include ConcernsOnRails::Models::Sanitizable
+
+          sanitizable :title, with: :strip, on: :write
+        end
+        klass.create!(title: "t").update_attribute(:title, "<b>new</b>")
+        expect(seen).to eq("new")
+      end
+    end
+
     # FullSanitizer returns HTML-escaped text, so `:strip, on: :write` used to
     # STORE "Tom &amp; Jerry" — which Rails' output escaping then turned into
     # "Tom &amp;amp; Jerry" on the page. The write-mode value is plain text:
@@ -524,6 +589,49 @@ describe ConcernsOnRails::Models::Sanitizable do
       # an explicit per-child setting still wins
       raw = parent.as_json(sanitized: true, include: { sanitizable_comments: { sanitized: false } })
       expect(raw["sanitizable_comments"].first["body"]).to eq("<script>bad</script>ok")
+    end
+
+    # The flag used to go one level down only, left for the child's own
+    # override to pass on, so a middle model that is not Sanitizable (a join
+    # row with nothing to clean) handed Rails its include: as is and the
+    # grandchild was serialized raw.
+    it "carries sanitized: through a middle model that is not Sanitizable, in every include: form" do
+      parent = article
+      ActiveRecord::Schema.define do
+        create_table :sanitizable_mentions, force: true do |t|
+          t.integer :sanitizable_article_id
+          t.integer :sanitizable_account_id
+        end
+      end
+
+      stub_const("SanitizableAccount", Class.new(TestModel) do
+        self.table_name = "sanitizable_accounts"
+        include ConcernsOnRails::Models::Sanitizable
+
+        sanitizable :email, with: :strip
+      end)
+      stub_const("SanitizableMention", Class.new(TestModel) do
+        self.table_name = "sanitizable_mentions"
+        belongs_to :sanitizable_account, class_name: "SanitizableAccount"
+      end)
+      SanitizableArticle.has_many :sanitizable_mentions, class_name: "SanitizableMention",
+                                                         foreign_key: :sanitizable_article_id
+      account = SanitizableAccount.create!(email: "<script>alert(1)</script>a@b.com")
+      SanitizableMention.create!(sanitizable_article_id: parent.id, sanitizable_account_id: account.id)
+
+      [
+        { sanitizable_mentions: { include: :sanitizable_account } },
+        { sanitizable_mentions: { include: [:sanitizable_account] } },
+        [{ sanitizable_mentions: { include: { sanitizable_account: {} } } }]
+      ].each do |include|
+        json = parent.as_json(sanitized: true, include: include)
+        expect(json["sanitizable_mentions"].first["sanitizable_account"]["email"]).to eq("alert(1)a@b.com")
+      end
+
+      # an explicit opt-out covers the child's whole subtree
+      raw = parent.as_json(sanitized: true,
+                           include: { sanitizable_mentions: { sanitized: false, include: :sanitizable_account } })
+      expect(raw["sanitizable_mentions"].first["sanitizable_account"]["email"]).to include("<script>")
     end
 
     it "sanitizes the serialized value, not the raw column" do

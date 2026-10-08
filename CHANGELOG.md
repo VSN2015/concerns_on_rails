@@ -1,5 +1,114 @@
 <!-- CHANGELOG.md -->
 
+## 1.32.1 (2026-10-08)
+
+A bug-fix release from a six-angle audit of 1.32.0 — data and encryption, state and counters,
+scopes and batch verbs, field transforms, request params, HTTP policy. Every finding was
+reproduced by a failing spec before it was fixed, and every fix ships with a regression spec;
+the batch then went through an adversarial review round. No new concerns, no new options and
+no migrations. A few fixes now raise where the gem used to misbehave silently — read
+**Changed** first. 2827 examples, 0 failures (2795 on Rails 6.0).
+
+### Changed
+- **Encryptable: Lockable's `unlock_token:` cannot be `encryptable`** (`ArgumentError` at
+  declaration, either order). The token is minted, claimed and cleared by callback-skipping
+  SQL keyed on the column value, so an encrypted token was never found: every unlock link was
+  dead. Keep it a plain column — it is random, single-use and cleared with the lock.
+- **Monetizable: an `encryptable` cents column is refused** (`ArgumentError`, either order):
+  `sum_`/`average_`/`minimum_`/`maximum_` ran SQL aggregates over ciphertext.
+- **Auditable: `audited_changes_since` reads its argument in `Time.zone`** — a `Date` is
+  midnight in `Time.zone`, a zone-less String is read in `Time.zone` (not the server's system
+  zone), and a String that names no time raises `ArgumentError` (`"junk"` used to mean June 1).
+- **Encryptable: blind indexes refresh in `before_create`/`before_update`**, after every
+  `before_save`, instead of in an include-time `before_save`. An app `before_save` that rewrites
+  the field (`self.email = email.downcase`) is now fingerprinted as stored, and a new row always
+  refreshes every indexed field, so a copy (`dup`, Duplicable's `reset:`) no longer keeps its
+  original's digest. Rows written by such a callback before this release keep a stale digest
+  until re-saved with a change.
+
+### Fixed
+- **Encryptable**: decrypted text reads back as UTF-8 (binary only when the bytes are not valid
+  UTF-8). Non-ASCII values compared unequal to what was written after a reload, were dirty on
+  every reassignment, and `reencrypt!` fingerprinted different bytes under a `downcase`
+  `expression:`, so rotated rows could no longer be found.
+- **Encryptable**: an empty-String column default (`text null: false, default: ""`) reads as
+  `""` instead of raising `DecryptionError` on every new record.
+- **Encryptable**: `find_by_<field>` / `where_<field>` / `<field>_fingerprint` run the lookup
+  value through the field's Normalizable rule and its Rails 7.1+ `normalizes`, as Rails' own
+  finders do.
+- **Storable**: a `:float` key given `"Infinity"`/`"NaN"` casts to nil instead of raising
+  `JSON::GeneratorError` (a 500 from a form field).
+- **SoftDeletable**: `without_deleted.really_destroy_all` (and any relation repeating the
+  default `deleted_at IS NULL`) no longer hard-deletes the trash, and `without_deleted.restore_all`
+  no longer restores it: only the default scope's own predicate is peeled off.
+- **`*_all` batch verbs** (`Support::BatchOps`) roll the whole batch back inside a caller's
+  transaction too: the batch runs in its own savepoint, so a caller rescuing the
+  `RecordNotSaved` no longer commits the records written before the failing one.
+- **Sluggable**: a record moved to another `scope:` value whose slug that scope already holds
+  rebuilds it against the new scope instead of duplicating it; a slug that is free there is kept.
+- **Sortable**: the position acts_as_list assigns in `before_create` is reported through
+  `Support::GeneratedValues`, so an Auditable model tracking it records it on create.
+- **CounterCacheable**: a save that changes a row's STI type (`becomes!`, `update!(type:)`)
+  judges the old state under the old type's rule and the new state under the new type's, and
+  destroy uses the persisted type's rule — the live counter no longer drifts from
+  `recount_counter_caches!`.
+- **Stateable `lock: true` / Activatable `toggle_active!`**: the reload under the row lock keeps
+  a loaded `belongs_to` parent whose foreign key it didn't change, so CounterCacheable's mirror
+  reaches the caller's parent instead of leaving it to raise `StaleObjectError`.
+- **Stateable**: `transition_all` no longer skips rows already in the target state when the
+  event's `from:` lists that state (a declared self-transition).
+- **Lockable**: `attempts_remaining` returns the full `max_attempts` once a lock has lapsed
+  (`unlock_in`), instead of 0 on an unlocked account.
+- **Sanitizable** `on: :write`, **Taggable** and **Addressable** also normalize in a prepended
+  `before_save` backstop (Normalizable's pattern), so `update_attribute` / `save(validate: false)`
+  no longer store raw markup, un-normalized tags or un-normalized address parts. A validated
+  save stores exactly what it stored before (the backstop never re-runs a rule on a value
+  validation already accepted).
+- **Maskable / Sanitizable**: `as_json(masked: true)` / `as_json(sanitized: true)` carry the flag
+  through every nested `include:` level, so a grandchild reached through a model without the
+  concern is no longer serialized raw.
+- **Masker `:email`** fails closed (full mask) unless the value is exactly one address, so a
+  second address in a list is no longer revealed.
+- **Monetizable**: a `Rational` amount converts (`Rational(1999, 100)` → 1999 cents) instead of
+  being stored as nil.
+- **Searchable / Taggable**: queries and tags are trimmed (and `mode: :all` split) on Unicode
+  whitespace — a no-break or ideographic space no longer becomes part of the LIKE pattern or a
+  distinct tag.
+- **Filterable**: a nested-array param (`?name[][]=a&name[][]=b`) is ignored instead of raising
+  a `TypeError` 500; a JSON-body number on a date/datetime column — compared, in equality,
+  `in`/`not_in`, or handed to a `type: :date` lambda — matches nothing instead of being bound raw
+  (a 500 on PostgreSQL); a date/time operand longer than 128 characters no longer raises
+  `Date._parse`'s `ArgumentError` (a 500) on Rails 6.0–7.0 and is answered as 7.1+ answers it.
+- **Paginatable**: a number where a nested page Hash belongs (`{"page": 2}` under
+  `style: :jsonapi`) falls back to the defaults instead of a `TypeError` 500.
+- **CursorPaginatable**: a page ending on a stored ±Infinity/NaN float no longer raises
+  `JSON::GeneratorError` on every request — the boundary is minted as a string and walked
+  correctly on PostgreSQL and SQLite; a tampered number/boolean for a date/time boundary, or an
+  over-long date String on Rails 6.0–7.0, is an `InvalidCursor` (400), not a decoded position
+  or a 500.
+- **Paginatable / CursorPaginatable**: `Link` header URLs are percent-encoded inside `<…>`, so a
+  crafted request path can no longer inject extra Link entries.
+- **Throttleable**: the first-hit seed is written `raw: true` (to any store whose `write` takes
+  options), so a memcached `Rails.cache` on Rails 6.0–7.0 enforces the limit again (every later
+  `increment` returned nil and the 429 never fired).
+- **Timezoneable**: a `Time-Zone` header or `time_zone` cookie that is not valid UTF-8 is ignored
+  instead of raising a 500 (persistently, for the cookie); the `available:` allow-list matches by
+  zone, not spelling, so `America/New_York` matches an allow-listed `Eastern Time (US & Canada)`.
+- **Cacheable**: per-call `stale_resource?(r, extras: [...])` downgrades `Cache-Control` to
+  `private`, like a Vary-less `etag_with` source, so a CDN no longer serves one caller's
+  representation to the next.
+- **Localizable**: `Accept-Language: pt-BR` (and `?locale=pt-br`) selects an available `:pt_BR`;
+  `-` and `_` are one separator (an exact spelling still wins).
+
+### Known issues (not fixed in this release)
+- CounterCacheable: a parent destroyed inside the same rolled-back transaction keeps the
+  mirrored counter/lock_version in memory.
+- Aliasable: eager-loading an alias together with its source in one query loads each child twice.
+- Encryptable: on the pre-7.1 Marshal format, a record whose field has a per-field Proc `key:`
+  cannot be `Marshal.dump`ed (`Rails.cache`).
+- CursorPaginatable: on PostgreSQL, a page ending on a timestamp stored as `'infinity'` now mints
+  its cursor (it used to be a 500), but the next page answers 400 — the walk cannot step past it.
+
 ## 1.32.0 (2026-10-07)
 
 A dependency release (#127): the `permittable` floor rises to `>= 0.8`, and the Permittable docs

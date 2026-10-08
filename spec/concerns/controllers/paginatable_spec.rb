@@ -323,7 +323,23 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(controller.response.headers).not_to have_key("Link")
       expect(controller.response.headers["X-Page"]).to eq("2")
     end
+
+    # Puma passes `"`, `<`, `>` through in the request target, and a nested
+    # route's `:post_id` segment matches them: the raw path closed the <…>
+    # and put the client's own Link entries ahead of the gem's.
+    it "percent-encodes a crafted request path, so it cannot add Link entries" do
+      env = Rack::MockRequest.env_for("/?page=2&per_page=10")
+      env["PATH_INFO"] = %(/posts/1>;rel="last",<x/comments)
+      _status, headers, body = link_controller.action(:index).call(env)
+      body.close if body.respond_to?(:close)
+      link = headers["Link"] || headers["link"]
+
+      expect(link.scan(/<([^>]*)>; rel="([^"]*)"/).map(&:last)).to eq(%w[first prev next last])
+      expect(link.scan(/<([^>]*)>/).flatten).to all(start_with(%(http://example.org/posts/1%3E;rel=%22last%22,%3Cx/comments?)))
+      expect(link.gsub(/<[^>]*>/, "").scan("rel=").size).to eq(4)
+    end
   end
+
   describe "total: (a page that is already paginated — external APIs, search services)" do
     let(:page_items) { (11..20).map { |i| "remote #{i}" } } # what the upstream returned for page 2 of 10
 
@@ -420,6 +436,26 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(ids(klass, {}).first).to eq(1)
       expect(klass.paginatable_page_param).to eq(%w[page number])
       expect(klass.paginatable_per_page_param).to eq(%w[page size])
+    end
+
+    # A JSON body's `{"page": 2}` (what a flat-style client sends) reached
+    # `2["number"]` — Integer#[] reads a bit — and raised TypeError, a 500.
+    it "falls back to the defaults for a number where the nested Hash belongs (a JSON body's {\"page\": 2})" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        paginate_by style: :jsonapi, per_page: 10
+      end
+      expect(ids(klass, page: 2)).to eq((1..10).to_a)
+      expect(ids(klass, page: 2.5)).to eq((1..10).to_a)
+      expect(ids(klass, page: { number: 2, size: 5 })).to eq((6..10).to_a)
+
+      custom = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        paginate_by page_param: %i[paging page], per_page_param: %i[paging per], per_page: 10
+      end
+      expect(ids(custom, paging: 7)).to eq((1..10).to_a)
     end
 
     it "accepts an explicit nested path and validates the options" do

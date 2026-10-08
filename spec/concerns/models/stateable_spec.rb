@@ -1111,6 +1111,32 @@ describe ConcernsOnRails::Stateable do
       expect(ArchivableOrder.transition_all(:archive)).to eq(0)
     end
 
+    # A `from:` naming the target makes re-entering it a declared
+    # self-transition: may_submit? is true and record.submit! fires (and
+    # re-stamps), so the batch filtering those rows out returned 0 for them.
+    it "runs a self-transition that :from explicitly lists (2026-10-08 audit)" do
+      stub_const("ResubmittableOrder", Class.new(TestModel) do
+        self.table_name = "batch_orders"
+        include ConcernsOnRails::Stateable
+
+        stateable_by :status, states: %i[draft submitted],
+                              transitions: { submit: { from: %i[draft submitted], to: :submitted } }
+
+        cattr_accessor :events
+        self.events = []
+
+        def after_transition(event, from, to)
+          self.class.events << [event, from, to]
+        end
+      end)
+      ResubmittableOrder.create!(status: "draft")
+      ResubmittableOrder.create!(status: "submitted")
+
+      expect(ResubmittableOrder.transition_all(:submit)).to eq(2)
+      expect(ResubmittableOrder.events)
+        .to contain_exactly([:submit, "draft", "submitted"], [:submit, "submitted", "submitted"])
+    end
+
     # `where.not(status: "archived")` compiles to NOT (status = 'archived'),
     # which is NULL — never TRUE — for a NULL state, so those rows were
     # silently skipped and left out of the count, even though may_archive? is

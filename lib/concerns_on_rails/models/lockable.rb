@@ -107,6 +107,10 @@ module ConcernsOnRails
           locked_at = locked_at.to_sym
           unlock_token = unlock_token&.to_sym
           validate_lockable!(attempts, locked_at, max_attempts: max_attempts, unlock_in: unlock_in, unlock_token: unlock_token)
+          # The other declaration order is refused by Encryptable's macro.
+          if unlock_token && respond_to?(:encryptable_rules) && encryptable_rules.key?(unlock_token)
+            raise ArgumentError, ConcernsOnRails::Models::Encryptable.lockable_token_message(unlock_token)
+          end
 
           self.lockable_attempts_field = attempts
           self.lockable_locked_at_field = locked_at
@@ -474,10 +478,13 @@ module ConcernsOnRails
       end
 
       # Failures left before auto-lock (never negative); nil when
-      # max_attempts is nil (counting without auto-lock).
+      # max_attempts is nil (counting without auto-lock). A lapsed lock still
+      # holds its count (expiry is lazy), but the next failure clears it and
+      # counts as attempt 1 of a new window — so the full allowance is left.
       def attempts_remaining
         max = self.class.lockable_max_attempts
         return nil unless max
+        return max if lock_expired?
 
         [max - lockable_current_attempts, 0].max
       end
