@@ -498,6 +498,41 @@ describe ConcernsOnRails::Controllers::Cacheable do
       expect(c.response.headers["Vary"]).to eq("Accept-Language, Accept, X-Fields")
     end
 
+    # stale_resource?(r, extras: [current_user.role]) folds who is asking into
+    # the ETag exactly like a block source, yet kept `public` — a CDN keyed on
+    # the URL served one role's representation to the next caller.
+    it "downgrades a :public rule for a request that passes per-call extras:, on the 304 too" do
+      klass = cacheable_class { http_cache_actions :show, max_age: 60, visibility: :public }
+
+      fresh = instance(klass)
+      expect(fresh.stale_resource?(resource, extras: ["admin"])).to be(true)
+      fresh.apply_http_cache_headers
+      expect(fresh.response.headers["Cache-Control"]).to eq("private, max-age=60")
+
+      revalidated = instance(klass, headers: { "If-None-Match" => fresh.response.headers["ETag"] })
+      expect(revalidated.stale_resource?(resource, extras: ["admin"])).to be(false)
+      revalidated.apply_http_cache_headers
+      expect(revalidated.response.headers["Cache-Control"]).to eq("private, max-age=60")
+
+      # Like a block source returning nil: the dimension exists even when this
+      # caller's value is absent (an anonymous `current_user&.role`).
+      anonymous = instance(klass)
+      anonymous.stale_resource?(resource, extras: [nil])
+      anonymous.apply_http_cache_headers
+      expect(anonymous.response.headers["Cache-Control"]).to eq("private, max-age=60")
+    end
+
+    it "keeps :public for a request that passes no extras (nil or empty)" do
+      klass = cacheable_class { http_cache_actions :show, max_age: 60, visibility: :public }
+
+      [nil, []].each do |extras|
+        c = instance(klass)
+        c.stale_resource?(resource, extras: extras)
+        c.apply_http_cache_headers
+        expect(c.response.headers["Cache-Control"]).to eq("public, max-age=60"), "extras: #{extras.inspect}"
+      end
+    end
+
     it "leaves no_store alone — it already overrides visibility" do
       klass = cacheable_class do
         http_cache_actions :show, no_store: true

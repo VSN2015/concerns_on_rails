@@ -23,8 +23,10 @@ module ConcernsOnRails
     # `ActiveSupport::TimeZone[...]`, so a zone accepted at boot can never be
     # rejected at request time.
     #
-    # Options: `available:` (allow-list applied to param/header/cookie matching;
-    # `default:` bypasses it, mirroring Localizable), `default:`, `param:`
+    # Options: `available:` (allow-list applied to param/header/cookie matching,
+    # by zone rather than spelling — "America/New_York" matches an allow-listed
+    # "Eastern Time (US & Canada)"; `default:` bypasses it, mirroring
+    # Localizable), `default:`, `param:`
     # (default `:time_zone`), `header:` (default `true`), `cookie:` (default
     # `false`; `true` reads the `:time_zone` cookie, or pass a cookie name),
     # `persist:` (default `false`; `true` or a Hash of cookie options — a zone
@@ -191,13 +193,45 @@ module ConcernsOnRails
       # Match a raw source value against the allow-list (when present), returning
       # the resolved TimeZone or nil so the resolution chain falls through.
       def match_zone(raw, allowed)
-        return nil if raw.blank?
+        candidate = time_zone_candidate(raw)
+        return nil if candidate.blank?
 
-        zone = ActiveSupport::TimeZone[raw.to_s]
+        zone = ActiveSupport::TimeZone[candidate]
         return nil unless zone
-        return nil if allowed&.none? { |z| z.name == zone.name }
+        return zone unless allowed
 
-        zone
+        allowed_time_zone(zone, allowed)
+      end
+
+      # A header value arrives ASCII-8BIT (Puma, Unicorn) and a percent-decoded
+      # cookie UTF-8-tagged, so one stray byte (0xFF, `time_zone=%FF`) raised —
+      # TZInfo transcoding a binary miss, String#blank? scanning invalid UTF-8:
+      # a 500, and a sticky one from the cookie. No zone name is anything but
+      # valid UTF-8, so such a value is simply no match.
+      def time_zone_candidate(raw)
+        value = raw.to_s
+        value = value.dup.force_encoding(Encoding::UTF_8) if value.encoding == Encoding::BINARY
+        value.valid_encoding? ? value : nil
+      end
+
+      # The allow-list entry for the requested zone. One zone has two spellings —
+      # the IANA id browsers send ("America/New_York") and Rails' name ("Eastern
+      # Time (US & Canada)") — and comparing names rejected each against the
+      # other, so entries are matched by canonical tzinfo identifier. An exact
+      # name wins (two entries may share an identifier: "Edinburgh", "London"),
+      # and the ALLOW-LISTED zone is returned, so Time.zone, X-Time-Zone and a
+      # persisted cookie keep the app's own spelling.
+      def allowed_time_zone(zone, allowed)
+        exact = allowed.find { |z| z.name == zone.name }
+        return exact if exact
+
+        identifier = canonical_time_zone_identifier(zone)
+        identifier && allowed.find { |z| canonical_time_zone_identifier(z) == identifier }
+      end
+
+      # nil for a hand-built TimeZone without tzinfo — never a match.
+      def canonical_time_zone_identifier(zone)
+        zone.tzinfo&.canonical_identifier
       end
 
       # Final coercion: `default` is already a TimeZone; the Time.zone fallback is

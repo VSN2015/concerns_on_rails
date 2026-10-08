@@ -195,6 +195,58 @@ describe ConcernsOnRails::Controllers::Throttleable do
     end
   end
 
+  describe "the first-hit seed" do
+    # ActiveSupport::Cache::MemCacheStore as it behaves on Rails 6.0–7.0: Dalli
+    # `incr` is called with no initial value, so incrementing a missing key
+    # answers nil — and so does incrementing a value NOT written with
+    # `raw: true` (memcached refuses to incr Marshal bytes; the store rescues
+    # the error to nil). Rails 7.1+ passes an initial value and never seeds.
+    let(:legacy_memcache_store) do
+      Class.new do
+        def initialize
+          @data = {}
+        end
+
+        def increment(key, amount = 1, _options = {})
+          value = @data[key]
+          return nil unless value.is_a?(String) && value.match?(/\A\d+\z/)
+
+          @data[key] = (value.to_i + amount).to_s
+          @data[key].to_i
+        end
+
+        # Truthy on success, false when unless_exist finds the key taken.
+        def write(key, value, options = {})
+          return false if options[:unless_exist] && @data.key?(key)
+
+          @data[key] = options[:raw] ? value.to_s : Marshal.dump(value)
+        end
+      end.new
+    end
+
+    def statuses_for(store, hits:)
+      klass = throttled_class(store) { throttle_by limit: 2, period: 60 }
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        Array.new(hits) do
+          c = instance(klass, remote_ip: "203.0.113.9")
+          c.enforce_throttles
+          c.rendered && c.rendered[:status]
+        end
+      end
+    end
+
+    it "is written raw, so a memcached-backed Rails.cache (Rails 6.0–7.0) still enforces the limit" do
+      # A Marshal-encoded seed made every later increment nil — each hit
+      # counted as 1 and the 429 never fired.
+      expect(statuses_for(legacy_memcache_store, hits: 4))
+        .to eq([nil, nil, :too_many_requests, :too_many_requests])
+    end
+
+    it "keeps counting on a real ActiveSupport::Cache::MemoryStore (which seeds before Rails 7.1)" do
+      expect(statuses_for(ActiveSupport::Cache::MemoryStore.new, hits: 3)).to eq([nil, nil, :too_many_requests])
+    end
+  end
+
   describe "argument validation" do
     def declare(&block)
       Class.new(base_class) do

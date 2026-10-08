@@ -64,7 +64,8 @@ module ConcernsOnRails
     #     method, a block, or a preset with `vary: false` — makes the response
     #     unshareable, so `Cache-Control` is emitted as `private` however the
     #     rule declared its `visibility:`. `:query` is exempt: the URL already
-    #     carries it.
+    #     carries it. Per-call `extras:` are such a source too (they carry no
+    #     Vary), so a request that passes any is `private` as well.
     #
     # Notes:
     #   * `no_store: true` overrides everything (emits the lone `no-store`),
@@ -279,10 +280,13 @@ module ConcernsOnRails
       # the computed { etag:, last_modified: } pair. Class-level `etag_with`
       # values and per-call `extras:` are folded into the ETag (an explicit
       # `etag:` stays verbatim only when there are none), and the sources' Vary
-      # headers are merged into the response.
+      # headers are merged into the response. Per-call extras advertise no Vary,
+      # so — exactly like a Vary-less etag_with source — they make this
+      # response `private` (see http_cache_visibility_for).
       def set_cache_validators(resource = nil, etag: nil, last_modified: nil, extras: nil)
         etag ||= cache_etag_for(resource) unless resource.nil?
         last_modified ||= cache_last_modified_for(resource) unless resource.nil?
+        http_cache_note_request_extras(extras)
         context = cache_etag_extras(extras)
         etag = http_cache_combine_etag(etag, context) if etag && context.any?
         http_cache_write_validators(etag, last_modified)
@@ -378,7 +382,10 @@ module ConcernsOnRails
       # `vary: false` — is a dimension no cache can key on (`Vary` has no way to
       # say "who is asking"), so the representation is simply not shareable and
       # the declared `visibility:` is downgraded rather than trusted. `:query`
-      # is exempt: the query string is already part of the cache key.
+      # is exempt: the query string is already part of the cache key. Per-call
+      # `extras:` (`stale_resource?(r, extras: [current_user.role])`) are the
+      # same kind of dimension and used to keep `public`, so a CDN keyed on the
+      # URL handed one caller's representation to the next.
       def http_cache_visibility_for(rule)
         return "private" if http_cache_unshareable_etag?
 
@@ -386,7 +393,15 @@ module ConcernsOnRails
       end
 
       def http_cache_unshareable_etag?
+        return true if @http_cache_request_extras
+
         self.class.cacheable_etag_extras.any? { |entry| entry[:vary].empty? && entry[:source] != :query }
+      end
+
+      # Any per-call extra counts, a nil one included — just as a block source
+      # downgrades whatever it returns: the dimension exists either way.
+      def http_cache_note_request_extras(extras)
+        @http_cache_request_extras = true unless Array(extras).empty?
       end
 
       # Previously a hand-rolled, case-SENSITIVE merge that also appended to
