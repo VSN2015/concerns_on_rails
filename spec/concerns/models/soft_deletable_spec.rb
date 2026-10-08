@@ -590,6 +590,24 @@ describe ConcernsOnRails::SoftDeletable do
           expect(vetoing_class.where.not(deleted_at: nil).count).to eq(0)
         end
 
+        # The batch used to JOIN the caller's transaction: a caller rescuing
+        # the RecordNotSaved inside it committed the records before the veto.
+        it 'soft_delete_all rolls the batch back inside a caller transaction, keeping the caller writes' do
+          vetoing_class.delete_all
+          vetoing_class.create!(name: 'a')
+          vetoing_class.create!(name: 'b')
+          vetoing_class.define_method(:after_soft_delete) { raise ActiveRecord::Rollback if name == 'b' }
+
+          ActiveRecord::Base.transaction do
+            vetoing_class.create!(name: 'caller')
+            expect { vetoing_class.where.not(name: 'caller').soft_delete_all }
+              .to raise_error(ActiveRecord::RecordNotSaved, /failed to soft-delete/)
+          end
+
+          expect(vetoing_class.where.not(deleted_at: nil).count).to eq(0)
+          expect(vetoing_class.where(name: 'caller').count).to eq(1)
+        end
+
         it 'restore_all raises RecordNotSaved and commits nothing' do
           vetoing_class.veto = :restore
           vetoing_class.delete_all
@@ -844,6 +862,14 @@ describe ConcernsOnRails::SoftDeletable do
           expect(klass.where(name: 'nope').restore_all).to eq(0)
           expect(klass.soft_deleted.count).to eq(3)
         end
+
+        # The caller's `deleted_at IS NULL` is structurally equal to the
+        # default scope's, and used to be peeled off with it.
+        it 'without_deleted.restore_all restores nothing (the caller asked for live rows)' do
+          seed(klass)
+          expect(klass.without_deleted.restore_all).to eq(0)
+          expect(klass.soft_deleted.count).to eq(3)
+        end
       end
     end
 
@@ -894,6 +920,22 @@ describe ConcernsOnRails::SoftDeletable do
         seed(fast_class)
         fast_class.deleted_within(1.day).really_destroy_all
         expect(fast_class.unscoped.pluck(:name)).to match_array(%w[old live])
+      end
+
+      # A caller's own `deleted_at IS NULL` equals the default scope's node
+      # by value: it was subtracted with it, so each of these purged the
+      # whole trash can along with the live rows.
+      {
+        'without_deleted' => :without_deleted.to_proc,
+        'active' => :active.to_proc,
+        'with_deleted.where(deleted_at: nil)' => ->(k) { k.with_deleted.where(deleted_at: nil) },
+        'where(deleted_at: nil)' => ->(k) { k.where(deleted_at: nil) }
+      }.each do |label, relation|
+        it "#{label}.really_destroy_all purges only the live rows" do
+          seed(fast_class)
+          relation.call(fast_class).really_destroy_all
+          expect(fast_class.unscoped.pluck(:name)).to match_array(%w[old recent other-kind])
+        end
       end
     end
   end

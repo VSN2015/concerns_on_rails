@@ -7,7 +7,8 @@ module ConcernsOnRails
     # before_create, whatever order the concerns were included or declared in.
     # Tokenizable's token, Hashable's code and Sequenceable's number are
     # assigned in before_create (on purpose: only a row that is really being
-    # inserted draws one), so every sibling that already ran has missed them:
+    # inserted draws one), and so is the position acts_as_list gives a Sortable
+    # record — so every sibling that already ran has missed them:
     # Encryptable fingerprinted a nil blind index, friendly_id built no slug,
     # Auditable's creation entry left the column out.
     #

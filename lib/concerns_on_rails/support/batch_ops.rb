@@ -72,11 +72,16 @@ module ConcernsOnRails
       # revisited, and the relation is never materialized in full (see
       # each_record for how an ordered or limited relation is iterated).
       #
+      # The batch is its OWN savepoint (`requires_new: true`). Joined to a
+      # caller's transaction, the raise had no rollback point but the caller's:
+      # a caller rescuing the RecordNotSaved inside it (the usual `rescue`
+      # around a batch) committed every record before the failing one.
+      #
       # The block returns truthy (counted), `:skip` (not counted, not an
       # error — a record that legitimately can't transition), or falsey
       # (raises and rolls the whole batch back).
       def run(relation, label:, message: "failed to update record")
-        relation.klass.transaction do
+        relation.klass.transaction(requires_new: true) do
           count = 0
           each_record(relation) do |record|
             result = yield(record)

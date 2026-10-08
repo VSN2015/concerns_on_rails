@@ -114,7 +114,7 @@ User.where(deleted_at: from..to).restore_all     # any predicate on the column c
 User.only_deleted.really_destroy_all             # purge everything in the trash, nothing live
 ```
 
-`restore_all` and `really_destroy_all` peel off only the default scope's own `deleted_at IS NULL`; predicates *you* add on the column survive, and so does any other `default_scope` the model declares (a tenant scope, say) — the `cascade:` honours a dependent's the same way. The *scopes* themselves still `unscope` the column, so put them first in a chain — `soft_deleted.where(...)` rather than `where(...).soft_deleted`.
+`restore_all` and `really_destroy_all` peel off only the default scope's own `deleted_at IS NULL`; predicates *you* add on the column survive — even one identical to the default scope's, so `without_deleted.really_destroy_all` purges only the live rows and `without_deleted.restore_all` restores nothing — and so does any other `default_scope` the model declares (a tenant scope, say) — the `cascade:` honours a dependent's the same way. The *scopes* themselves still `unscope` the column, so put them first in a chain — `soft_deleted.where(...)` rather than `where(...).soft_deleted`.
 
 **Basic soft-delete and restore cycle:**
 
@@ -199,7 +199,7 @@ order.restore!       # raises if fulfilled?, deleted_at stays set
 
 - **`really_delete!` freezes the instance.** After calling `really_delete!`, the Ruby object is frozen and cannot be modified. `is_really_deleted?` will return `true`.
 
-- **`really_destroy_all` peels off the soft-delete predicate.** Since 1.22 it honors the calling relation (`Article.where(user_id: 42).really_destroy_all` deletes only that user's rows, soft-deleted included) — but `unscope(where: <field>)` also drops a caller's own condition on the soft-delete column, so `only_deleted.really_destroy_all` widens to the whole relation. Purge trash with `Article.soft_deleted.delete_all` instead.
+- **`really_destroy_all` peels off only the default scope's soft-delete predicate.** It honors the calling relation (`Article.where(user_id: 42).really_destroy_all` deletes only that user's rows, soft-deleted included), and a condition you put on the soft-delete column survives: `only_deleted.really_destroy_all` purges the trash and nothing else, `without_deleted.really_destroy_all` the live rows and nothing else.
 
 - **Custom field names are fully supported.** Any `datetime` column works: `soft_deletable_by :removed_on`. All scopes and methods adapt to the configured field. Multiple models can use different field names independently — `class_attribute` ensures isolation between classes.
 
