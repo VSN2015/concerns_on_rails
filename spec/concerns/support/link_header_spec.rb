@@ -55,6 +55,26 @@ RSpec.describe ConcernsOnRails::Support::LinkHeader do
       described_class.append(response, next: nil, prev: nil)
       expect(response.headers).not_to have_key("Link")
     end
+
+    # Only the query string was ever encoded: the host and path went into
+    # <…> raw, and a route segment (`:post_id` matches [^/.?]+) accepts `>`
+    # and `"`, so the path closed the bracket and injected Link entries.
+    it "percent-encodes what could leave the <…> (a crafted request path cannot add entries)" do
+      crafted = FakeLinkRequest.new("http://h", %(/posts/1>;rel="last",<x/comments), { "page" => "2" })
+      described_class.append(response, first: described_class.url_for(crafted, page: 1), next: described_class.url_for(crafted, page: 3))
+      link = response.headers["Link"]
+
+      expect(link.scan(/<([^>]*)>; rel="([^"]*)"/))
+        .to eq([[%(http://h/posts/1%3E;rel=%22last%22,%3Cx/comments?page=1), "first"],
+                [%(http://h/posts/1%3E;rel=%22last%22,%3Cx/comments?page=3), "next"]])
+      expect(link.gsub(/<[^>]*>/, "").scan("rel=").size).to eq(2)
+    end
+
+    it "encodes whitespace, control characters and non-ASCII bytes, leaving existing escapes alone" do
+      described_class.append(response, next: "http://h/a b\tc\r\n/café/%20?page=2")
+      expect(response.headers["Link"]).to eq('<http://h/a%20b%09c%0D%0A/caf%C3%A9/%20?page=2>; rel="next"')
+      expect(described_class.uri_reference("http://[::1]:3000/a,b;c=d?x=1&y=%2F")).to eq("http://[::1]:3000/a,b;c=d?x=1&y=%2F")
+    end
   end
 
   describe ".available?" do

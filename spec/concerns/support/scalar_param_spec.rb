@@ -87,5 +87,23 @@ RSpec.describe ConcernsOnRails::Support::ScalarParam do
       expect(described_class.where_safe?([ActionController::Parameters.new("x" => 1)])).to be(false)
       expect(described_class.where_safe?([["a"], { "x" => 1 }])).to be(false)
     end
+
+    # `?name[][]=a&name[][]=b` — `where(name: [["a"], ["b"]])` raised
+    # TypeError ("can't cast Array"), a 500.
+    it "rejects an array of arrays (the ?name[][]=a&name[][]=b shape)" do
+      expect(described_class.where_safe?([%w[a], %w[b]])).to be(false)
+      expect(described_class.where_safe?(["a", %w[b]])).to be(false)
+      expect(described_class.where_safe?([[]])).to be(false)
+    end
+  end
+
+  describe ".hash_like?" do
+    it "is true only for a Hash or ActionController::Parameters" do
+      expect(described_class.hash_like?({ "number" => "2" })).to be(true)
+      expect(described_class.hash_like?(ActiveSupport::HashWithIndifferentAccess.new)).to be(true)
+      expect(described_class.hash_like?(ActionController::Parameters.new("number" => "2"))).to be(true)
+      # Integer#[] reads a bit and String#[] a substring: neither is a Hash.
+      [2, "2", ["2"], nil, true].each { |value| expect(described_class.hash_like?(value)).to be(false) }
+    end
   end
 end

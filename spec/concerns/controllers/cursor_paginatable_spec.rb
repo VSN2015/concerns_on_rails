@@ -311,6 +311,35 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
       end
     end
 
+    # The date and time casts hand a non-String back UNCHANGED, so
+    # `(created_at, id) > (12345, 3)` decoded: SQLite sorts any number before
+    # a date's text (the walk silently restarted at page one), PostgreSQL
+    # raised on the bind. Zone-aware or not, the gem never mints one.
+    it "rejects a number or boolean for a date/time boundary" do
+      zone_aware = Class.new(Item) { self.time_zone_aware_attributes = true }
+
+      [12_345, 1.5, true, false].each do |tampered|
+        token = encode("t" => "items", "o" => ["created_at:asc", "id:asc"], "v" => [tampered, 3])
+
+        [Item, zone_aware].each do |model|
+          expect do
+            make_controller(cursor: token).cursor_paginated(model.all, order: { created_at: :asc })
+          end.to raise_error(described_class::InvalidCursor, /Invalid pagination cursor/), "accepted: #{tampered.inspect}"
+        end
+      end
+    end
+
+    # Rails 6.0–7.0's date/time casts raise Date._parse's ArgumentError for a
+    # String over 128 characters (7.1 casts it to nil): a 500, not this 400.
+    # Runs on every line; it only ever failed on those.
+    it "rejects a date/time boundary String too long for Date._parse" do
+      token = encode("t" => "items", "o" => ["created_at:asc", "id:asc"], "v" => ["2026-01-01 #{'x' * 130}", 3])
+
+      expect do
+        make_controller(cursor: token).cursor_paginated(Item.all, order: { created_at: :asc })
+      end.to raise_error(described_class::InvalidCursor, /Invalid pagination cursor/)
+    end
+
     it "rejects a value list whose length does not match the column set" do
       token = encode("t" => "items", "o" => ["created_at:asc", "id:asc"], "v" => [5])
 
@@ -324,6 +353,76 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
         controller = make_controller(cursor: blank)
         expect(controller.cursor_paginated(Item.all).size).to eq(25)
       end
+    end
+  end
+
+  # A JSON body's 1e400 decodes to Float::INFINITY, and a float column stores
+  # it (SQLite, PostgreSQL — which stores NaN too). JSON.generate raised on
+  # such a boundary, so its page was a 500 on every request; and SQLite reads
+  # no quoted Infinity as a number (a bare word before Rails 7.2, TEXT after,
+  # which sorts after every number and matched the boundary row again).
+  describe "non-finite float boundaries" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :rated_items, force: true do |t|
+          t.float :rating, null: false
+        end
+      end
+    end
+
+    let(:rated) { Class.new(TestModel) { self.table_name = "rated_items" } }
+
+    def walk_ids(klass, order)
+      ids = []
+      cursor = nil
+      loop do
+        controller = klass.new(params: cursor ? { cursor: cursor } : {})
+        ids.concat(controller.cursor_paginated(rated.all, order: order).map(&:id))
+        cursor = controller.response.headers["X-Next-Cursor"]
+        break unless cursor
+        raise "the walk does not end: #{ids.inspect}" if ids.size > 20
+      end
+      ids
+    end
+
+    it "mints Infinity / -Infinity boundaries as Strings and walks every row exactly once" do
+      skip "MySQL stores no non-finite float" if TestDatabase.mysql?
+
+      [Float::INFINITY, 1.0, -Float::INFINITY, Float::INFINITY, -Float::INFINITY, 0.5].each { |r| rated.create!(rating: r) }
+      rated.create!(rating: Float::NAN) if TestDatabase.postgresql?
+
+      %i[auto or].each do |predicate|
+        klass = Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::CursorPaginatable
+
+          cursor_paginate_by order: { rating: :asc }, per_page: 1, predicate: predicate
+        end
+        %i[asc desc].each do |dir|
+          expect(walk_ids(klass, { rating: dir })).to eq(rated.order(rating: dir, id: dir).pluck(:id)), "#{predicate} #{dir}"
+        end
+      end
+
+      first = Class.new(FakeController) { include ConcernsOnRails::Controllers::CursorPaginatable }.new(params: { per_page: 1 })
+      first.cursor_paginated(rated.all, order: { rating: :asc })
+      expect(decode(first.response.headers["X-Next-Cursor"])["v"]).to eq(["-Infinity", rated.order(:rating, :id).first.id])
+    end
+
+    # Admitted only where one is minted: NaN only on PostgreSQL (SQLite
+    # stores it as NULL), nothing on MySQL. Elsewhere it is tampering, and
+    # the adapter's quoting would send it as a bare word (a 500).
+    it "refuses a non-finite boundary the adapter never stores" do
+      rated.create!(rating: 1.0)
+      cursor = ->(value) { encode("t" => "rated_items", "o" => ["rating:asc", "id:asc"], "v" => [value, 1]) }
+      page = ->(value) { make_controller(cursor: cursor.call(value)).cursor_paginated(rated.all, order: { rating: :asc }) }
+
+      expect { page.call("NaN") }.to raise_error(described_class::InvalidCursor) unless TestDatabase.postgresql?
+      expect { page.call("Infinity") }.to raise_error(described_class::InvalidCursor) if TestDatabase.mysql?
+      expect(page.call("-Infinity").map(&:rating)).to eq([1.0]) unless TestDatabase.mysql?
+      # Never on another column type: "Infinity" for a datetime is refused as before.
+      expect do
+        make_controller(cursor: encode("t" => "items", "o" => ["created_at:asc", "id:asc"], "v" => ["Infinity", 1]))
+          .cursor_paginated(Item.all, order: { created_at: :asc })
+      end.to raise_error(described_class::InvalidCursor)
     end
   end
 

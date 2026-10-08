@@ -104,4 +104,14 @@ RSpec.describe "Filterable operators through real ActionController dispatch" do
     expect(names("stock_gt[]=1&stock_gt[]=2")).to eq(%w[Lamp Desk Chair])
     expect(names("status_in[x]=1")).to eq(%w[Lamp Desk Chair])
   end
+
+  # Rack parses `name[][]=a&name[][]=b` as [["a"], ["b"]]; where_safe? used to
+  # admit it, and `where(name: [["a"], ["b"]])` raised TypeError ("can't cast
+  # Array") — a 500 on every non-numeric direct-where filter and on in/not_in.
+  it "ignores an array of arrays (?name[][]=a&name[][]=b) instead of 500ing" do
+    expect(names("name[][]=Lamp&name[][]=Desk")).to eq(%w[Lamp Desk Chair])
+    expect(names("status_in[][]=active&status_in[][]=archived")).to eq(%w[Lamp Desk Chair])
+    expect(names("status[not_in][][]=active")).to eq(%w[Lamp Desk Chair])
+    expect(names("discontinued_at[][]=2026-01-01")).to eq(%w[Lamp Desk Chair])
+  end
 end

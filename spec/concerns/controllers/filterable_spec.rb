@@ -547,6 +547,74 @@ describe ConcernsOnRails::Controllers::Filterable do
       end
     end
 
+    context "with a date or time operand the type cannot read" do
+      before do
+        ActiveRecord::Schema.define { add_column :products, :launched_on, :date }
+        Product.reset_column_information
+        Product.where(name: "Desk").update_all(launched_on: Date.new(2026, 1, 1), discontinued_at: Time.utc(2026, 1, 1))
+      end
+
+      let(:dated) do
+        Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Filterable
+
+          filter_by :launched_on, :discontinued_at, operators: true
+        end
+      end
+
+      def dated_names(params, model = Product)
+        dated.new(params: params).filtered(model.order(:id)).pluck(:name)
+      end
+
+      # The date and time casts hand a non-String back UNCHANGED, so a JSON
+      # body's number bound `launched_on >= 12345`: SQLite sorts any number
+      # before a date's text (every row for gt/gte), PostgreSQL raised.
+      it "matches nothing for a JSON-body number, on date and (zone-aware) datetime columns alike" do
+        zone_aware = Class.new(Product) { self.time_zone_aware_attributes = true }
+
+        [12_345, 2026.5].each do |number|
+          %i[gt gte lt lte].each do |op|
+            expect(dated_names({ "launched_on_#{op}" => number })).to eq([]), "launched_on #{op} #{number}"
+            expect(dated_names(discontinued_at: { op => number })).to eq([]), "discontinued_at #{op} #{number}"
+            expect(dated_names({ discontinued_at: { op => number } }, zone_aware)).to eq([]), "zone-aware #{op} #{number}"
+          end
+        end
+        expect(dated_names(launched_on_gte: "2026-01-01")).to eq(["Desk"])
+        expect(dated_names({ discontinued_at_lt: "2027-01-01" }, zone_aware)).to eq(["Desk"])
+      end
+
+      # Rails 6.0–7.0's date/time casts raise Date._parse's ArgumentError for
+      # a String over 128 characters (7.1 casts it to nil): a 500 from the
+      # comparison, from `where`'s own cast on equality, and from a `type:`
+      # lambda's pre-cast. Runs on every line; it only ever failed on those.
+      it "answers a String too long for Date._parse like any unreadable one (Rails 6.0–7.0 raised)" do
+        long = "2026-01-01 #{'x' * 130}"
+
+        expect(dated_names(launched_on_gte: long)).to eq([])
+        expect(dated_names(discontinued_at: { lt: long })).to eq([])
+        expect(dated_names(launched_on: long)).to eq([])
+        expect(dated_names(launched_on_in: [long, "2026-01-01"])).to eq(["Desk"])
+
+        received = []
+        lambda_filter = Class.new(FakeController) do
+          include ConcernsOnRails::Controllers::Filterable
+
+          filter_by :launched, type: :date, with: ->(rel, value) { rel.tap { received << value } }
+        end
+        lambda_filter.new(params: { launched: long }).filtered(Product.all).to_a
+        expect(received).to eq([nil])
+      end
+
+      # PostgreSQL's own date/time types read "infinity" as ±Float::INFINITY
+      # and bind it back; that String keeps working as before.
+      it "still binds PostgreSQL's 'infinity'" do
+        skip "PostgreSQL only" unless TestDatabase.postgresql?
+
+        expect(dated_names(discontinued_at_lt: "infinity")).to eq(["Desk"])
+        expect(dated_names(launched_on_gt: "-infinity")).to eq(["Desk"])
+      end
+    end
+
     # LIKE on a non-text column is an error on PostgreSQL (`integer ~~* unknown`
     # has no operator) — a 500 from `?stock_contains=1` — while SQLite/MySQL
     # quietly matched against the number's text. Fail closed everywhere.
