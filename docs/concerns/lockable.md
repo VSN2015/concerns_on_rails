@@ -78,7 +78,7 @@ Both columns must exist (and `attempts:` must be an integer column) or the macro
 | `access_locked? → Boolean` | Locked right now. Lazy expiry: a stale lock reads as unlocked but the column is never cleared by a reader. |
 | `lock_expired? → Boolean` | Was locked and the `unlock_in` window has fully elapsed. Always `false` when `unlock_in` is `nil`. |
 | `lock_expires_at → Time \| nil` | `locked_at + unlock_in`; `nil` when not locked or manual-unlock-only. |
-| `attempts_remaining → Integer \| nil` | Failures left before auto-lock (never negative); `nil` when `max_attempts: nil`. |
+| `attempts_remaining → Integer \| nil` | Failures left before auto-lock (never negative); `nil` when `max_attempts: nil`. Once a lock has lapsed (`unlock_in`) it returns the full `max_attempts`: the next failure clears the old count and starts a new window. |
 | `User.unlock_by_token(token) → record \| nil` | _(class method, needs `unlock_token:`)_ Finds the row holding `token` (through the model's default scope, then a constant-time compare on the fetched value), claims the token with a conditional `UPDATE` so concurrent clicks on the same link cannot both win, then runs `unlock_access!` — hooks fire, counter zeroed, token cleared — and returns the record. `nil` for a blank, unknown or already-used token, and for a token whose lock has already lapsed under `unlock_in:` (that token is retired on the spot). A hook vetoing the unlock with `ActiveRecord::Rollback` puts the token back, so the link stays usable. Raises `ArgumentError` when `unlock_token:` is not configured. |
 
 ### Scopes

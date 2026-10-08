@@ -614,6 +614,23 @@ describe ConcernsOnRails::Lockable do
       expect(klass.create!.attempts_remaining).to eq(4)
     end
 
+    # The lapsed lock's count is still stored (expiry is lazy), but the next
+    # failure clears it and counts as attempt 1 — so the reader said 0 on an
+    # account access_locked? reports unlocked.
+    it "attempts_remaining is the full allowance once the lock has lapsed" do
+      user = expiring_class.create!(email: "a@b.c")
+      3.times { user.register_failed_attempt! }
+      expect(user.attempts_remaining).to eq(0)
+
+      travel_to(16.minutes.from_now) do
+        expect(user.access_locked?).to be(false)
+        expect(user.attempts_remaining).to eq(3)
+
+        user.register_failed_attempt!
+        expect(user.attempts_remaining).to eq(2)
+      end
+    end
+
     it "attempts_remaining is nil with max_attempts: nil" do
       klass = Class.new(TestModel) do
         self.table_name = "lock_users"

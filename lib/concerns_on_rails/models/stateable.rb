@@ -171,7 +171,9 @@ module ConcernsOnRails
 
         # Run one declared transition across the relation. Returns the Integer
         # count of records transitioned; records whose current state the
-        # event's guard rejects are skipped, not errors.
+        # event's guard rejects are skipped, not errors. So are records already
+        # in the target state (the batch is idempotent) — unless `from:` names
+        # that state, which makes re-entering it a declared self-transition.
         #
         # There is deliberately NO single-UPDATE fast path here: the
         # per-record path goes through `update!`, which runs validations,
@@ -197,7 +199,11 @@ module ConcernsOnRails
           # returns true for them, and `record.<event>!` on the same row
           # succeeds. A NULL state is reachable through an imported row,
           # insert_all, or the documented `create!(status: nil)`.
-          eligible = eligible.where(arel_table[field].not_eq(to).or(arel_table[field].eq(nil)))
+          # A `from:` listing the target itself (`from: %i[draft submitted],
+          # to: :submitted`) keeps those rows: the guard accepts them, and
+          # `record.submit!` on one re-stamps it and fires the hooks.
+          state = arel_table[field]
+          eligible = eligible.where(state.not_eq(to).or(state.eq(nil))) unless from.include?(to)
 
           ConcernsOnRails::Support::BatchOps.run(
             eligible,

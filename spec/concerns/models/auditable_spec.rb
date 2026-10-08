@@ -335,6 +335,41 @@ describe ConcernsOnRails::Auditable do
       expect(p.audited_changes_since(Time.utc(2026, 6, 1, 12, 0, 1)).map { |e| e["to"] }).to eq([])
       expect(p.audited_changes_since(Time.utc(2026, 6, 1)).map { |e| e["to"] }).to eq([1, 2])
     end
+
+    # Date#to_time and String#to_time use the process's zone (ENV["TZ"]), so
+    # on a UTC server an app in Tokyo lost the first 9 hours of "today".
+    context "with Time.zone ahead of the system zone (2026-10-08 audit)" do
+      around do |example|
+        previous_tz = ENV.fetch("TZ", nil)
+        ENV["TZ"] = "UTC"
+        Time.use_zone("Tokyo") { example.run }
+      ensure
+        ENV["TZ"] = previous_tz
+      end
+
+      # Created 2026-10-07 19:00 Tokyo; changed 2026-10-08 01:00 Tokyo
+      # (2026-10-07 16:00 UTC), which is "today" in the app's zone.
+      let(:product) do
+        travel_to(Time.utc(2026, 10, 7, 10)) { AuditProduct.create!(price: 1) }.tap do |p|
+          travel_to(Time.utc(2026, 10, 7, 16)) { p.update!(price: 2) }
+        end
+      end
+
+      it "cuts a Date at midnight in Time.zone" do
+        expect(product.audited_changes_since(Date.new(2026, 10, 8)).map { |e| e["to"] }).to eq([2])
+      end
+
+      it "reads a zone-less String in Time.zone" do
+        expect(product.audited_changes_since("2026-10-08").map { |e| e["to"] }).to eq([2])
+        expect(product.audited_changes_since("2026-10-08 00:30").map { |e| e["to"] }).to eq([2])
+        expect(product.audited_changes_since("2026-10-08 01:30").map { |e| e["to"] }).to eq([])
+        expect(product.audited_changes_since("2026-10-07T15:00:00Z").map { |e| e["to"] }).to eq([2])
+      end
+
+      it "refuses a String that names no time" do
+        expect { product.audited_changes_since("junk") }.to raise_error(ArgumentError, /cannot be parsed as a time/)
+      end
+    end
   end
 
   describe "max_entries trimming" do
