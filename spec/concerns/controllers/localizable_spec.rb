@@ -123,6 +123,22 @@ describe ConcernsOnRails::Controllers::Localizable do
       c = controller(accept_language: "fr;q=0.,de;q=0") { localizable available: %i[en fr de], default: :de }
       expect(c.resolved_locale).to eq(:de)
     end
+
+    # Accept-Language tags are BCP 47 (`pt-BR`); Rails locales are often
+    # `:pt_BR`. The concern emits `Content-Language: pt-BR` for :pt_BR, yet a
+    # client sending that very tag back was served the fallback.
+    it "treats `-` and `_` as one separator, returning the app's own locale symbol" do
+      I18n.available_locales = %i[en pt pt_BR zh-TW]
+
+      header = controller(accept_language: "pt-BR,en;q=0.5") { localizable available: %i[en pt pt_BR], default: :en }
+      expect(header.resolved_locale).to eq(:pt_BR)
+
+      param = controller(params: { locale: "PT-br" }) { localizable available: %i[en pt_BR], default: :en }
+      expect(param.resolved_locale).to eq(:pt_BR)
+
+      dashed = controller(accept_language: "zh_tw") { localizable available: %i[en zh-TW], default: :en }
+      expect(dashed.resolved_locale).to eq(:'zh-TW')
+    end
   end
 
   describe "#switch_locale" do

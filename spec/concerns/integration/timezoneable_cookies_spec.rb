@@ -42,4 +42,15 @@ RSpec.describe "Timezoneable cookies through real ActionController dispatch" do
     expect(result.status).to eq(200)
     expect(result.body).to end_with("|current")
   end
+
+  # Rack percent-decodes `%FF` into a UTF-8-tagged String that is not valid
+  # UTF-8; String#blank? raised on it, and the cookie persists, so that
+  # browser got a 500 on every page until the cookie was cleared.
+  it "ignores a cookie that decodes to invalid UTF-8 rather than raising" do
+    klass = controller_class(cookie: :time_zone, default: "UTC")
+    result = IntegrationHarness.dispatch_with_cookies(klass, :show, cookie: "time_zone=%FF")
+
+    expect(result.status).to eq(200)
+    expect(result.body).to eq("UTC|default")
+  end
 end

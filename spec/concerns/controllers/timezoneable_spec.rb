@@ -77,6 +77,66 @@ describe ConcernsOnRails::Controllers::Timezoneable do
       c = controller { timezoneable available: %w[UTC London] }
       expect(c.resolved_time_zone.name).to eq("UTC")
     end
+
+    # Browsers report Intl.DateTimeFormat().resolvedOptions().timeZone — an
+    # IANA id — while an allow-list built from ActiveSupport::TimeZone.all
+    # holds Rails names. The two spellings of ONE zone were compared as
+    # strings, so the client silently got the default.
+    it "matches the allow-list by zone, not spelling, answering with the allow-listed name" do
+      iana = controller(time_zone_header: "America/New_York") do
+        timezoneable available: ["UTC", "Eastern Time (US & Canada)"], default: "UTC"
+      end
+      expect(iana.resolved_time_zone.name).to eq("Eastern Time (US & Canada)")
+      expect(iana.time_zone_source).to eq(:header)
+
+      rails_name = controller(params: { time_zone: "Eastern Time (US & Canada)" }) do
+        timezoneable available: %w[UTC America/New_York], default: "UTC"
+      end
+      expect(rails_name.resolved_time_zone.name).to eq("America/New_York")
+    end
+
+    it "prefers the exact entry when allow-listed names share a zone, and still rejects every other zone" do
+      shared = controller(time_zone_header: "London") { timezoneable available: %w[Edinburgh London], default: "UTC" }
+      expect(shared.resolved_time_zone.name).to eq("London")
+
+      other = controller(time_zone_header: "America/Chicago") do
+        timezoneable available: ["UTC", "Eastern Time (US & Canada)"], default: "UTC"
+      end
+      expect(other.resolved_time_zone.name).to eq("UTC")
+      expect(other.time_zone_source).to eq(:default)
+    end
+
+    # Puma/Unicorn hand header values over as ASCII-8BIT, and Rack
+    # percent-decodes a cookie into a UTF-8-tagged String: one stray byte used
+    # to raise — a 500, and a sticky one from the cookie.
+    it "treats a value that is not valid UTF-8 as no match instead of raising" do
+      header = controller(time_zone_header: "Europe/Paris\xFF".b) { timezoneable default: "UTC" }
+      expect(header.resolved_time_zone.name).to eq("UTC")
+      expect(header.time_zone_source).to eq(:default)
+
+      cookie = controller(cookies: { time_zone: "\xFF" }) { timezoneable default: "UTC", cookie: true }
+      expect(cookie.resolved_time_zone.name).to eq("UTC")
+
+      binary = controller(time_zone_header: "London".b) { timezoneable default: "UTC" }
+      expect(binary.resolved_time_zone.name).to eq("London")
+    end
+
+    it "answers a real request whose Time-Zone header carries a non-UTF-8 byte" do
+      klass = IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Timezoneable
+
+        timezoneable default: "UTC", response_header: true
+
+        def show
+          render json: { zone: Time.zone.name }
+        end
+      end
+
+      result = IntegrationHarness.dispatch(klass, :show, headers: { "Time-Zone" => "Europe/Paris\xFF".b })
+
+      expect(result.status).to eq(200)
+      expect(JSON.parse(result.body)).to eq("zone" => "UTC")
+    end
   end
 
   describe "#switch_time_zone" do

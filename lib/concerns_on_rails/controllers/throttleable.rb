@@ -242,10 +242,18 @@ module ConcernsOnRails
       # Seed with unless_exist so two concurrent first hits can't both write 1
       # and under-count the window; when this seed loses that race, increment
       # the winner's counter instead.
+      #
+      # `raw: true` because the seed is only ever read back by #increment:
+      # MemCacheStore on Rails 6.0–7.0 (the store that reaches this seed — its
+      # Dalli `incr` has no initial value) can only increment a raw value, so a
+      # Marshal-encoded seed made every later increment nil, each hit counted
+      # as 1 and the limit never fired. Redis serializes a raw value as the
+      # plain integer string INCRBY needs; MemoryStore, FileStore and NullStore
+      # ignore the option.
       def seed_throttle_key(store, key, period)
         return 1 unless store.respond_to?(:write)
 
-        if store.write(key, 1, expires_in: period, unless_exist: true)
+        if store.write(key, 1, expires_in: period, unless_exist: true, raw: true)
           1
         else
           store.increment(key, 1, expires_in: period) || 1
