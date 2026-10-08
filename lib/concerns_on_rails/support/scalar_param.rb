@@ -37,15 +37,25 @@ module ConcernsOnRails
       end
 
       # Safe to pass to `.where(column: value)`: scalars and nil are fine, and
-      # Arrays become `IN (...)` — but only when every member is itself
-      # where-safe (`?status[][x]=1` yields `[Parameters]`, which AR cannot
-      # quote). Hash-likes (Hash / ActionController::Parameters) are not safe.
+      # Arrays become `IN (...)` — but only an Array of scalars. AR cannot
+      # quote a member that is itself structured: `?status[][x]=1` yields
+      # `[Parameters]`, and `?status[][]=a&status[][]=b` yields
+      # `[["a"], ["b"]]` (a TypeError 500, "can't cast Array", on every
+      # non-numeric column). Hash-likes (Hash / ActionController::Parameters)
+      # are not safe.
       def where_safe?(value)
-        return value.all? { |member| where_safe?(member) } if value.is_a?(Array)
-        return false if value.is_a?(Hash)
-        return false if defined?(ActionController::Parameters) && value.is_a?(ActionController::Parameters)
+        return value.all? { |member| !member.is_a?(Array) && where_safe?(member) } if value.is_a?(Array)
 
-        true
+        !hash_like?(value)
+      end
+
+      # A Hash or ActionController::Parameters: the params shapes a nested
+      # path may be dug into. Anything else answering `#[]` is not one —
+      # Integer#[] reads a bit, String#[] a substring.
+      def hash_like?(value)
+        return true if value.is_a?(Hash)
+
+        defined?(ActionController::Parameters) ? value.is_a?(ActionController::Parameters) : false
       end
 
       # Coerce an untrusted param to Integer, falling back to `default` for

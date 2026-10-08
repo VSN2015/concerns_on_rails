@@ -186,10 +186,17 @@ module ConcernsOnRails
         return options[:with].call(relation, type ? type.cast(value) : value) unless type
 
         operand = ConcernsOnRails::Support::NumericOperand.classify(value, type, column_type: nil)
-        return options[:with].call(relation, type.cast(value)) if operand.nil?
+        return options[:with].call(relation, filterable_lambda_cast(type, value)) if operand.nil?
         return relation.none unless operand.status == :exact
 
         options[:with].call(relation, operand.value)
+      end
+
+      # What the type answers for any other String it cannot read: nil — also
+      # for the one Rails 6.0–7.0 raised on (filterable_type_cast).
+      def filterable_lambda_cast(type, value)
+        cast = filterable_type_cast(type, value)
+        cast.equal?(UNCASTABLE) ? nil : cast
       end
 
       # ?price[gte]=10&price[lte]=50 — unknown keys are ignored.
@@ -366,23 +373,28 @@ module ConcernsOnRails
           filterable_time_equality_values(relation, field, values)
       end
 
-      # A date or time no stored value can equal (outside TimeValue::YEARS)
-      # drops out of the list, like an out-of-range number. On PostgreSQL it
-      # used to raise (a 500). nil when no member is out of range, so the
-      # caller keeps its unchanged path. A member that casts to no date or time
-      # stays exactly as it was.
+      # A date or time no stored value can equal drops out of the list, like
+      # an out-of-range number: one outside TimeValue::YEARS (on PostgreSQL it
+      # used to raise, a 500), and a String Rails 6.0–7.0 cannot parse
+      # (filterable_type_cast), on which `where`'s own cast raised the same
+      # 500. nil when no member drops, so the caller keeps its unchanged path.
+      # Any other member that casts to no date or time stays exactly as it was.
       def filterable_time_equality_values(relation, field, values)
         column_type = filterable_column_type(relation, field)
         return nil unless column_type
 
-        kept = values.reject { |member| filterable_time_beyond(filterable_equality_cast(column_type, member)) }
+        kept = values.reject do |member|
+          cast = filterable_equality_cast(column_type, member)
+          cast.equal?(UNCASTABLE) || filterable_time_beyond(cast)
+        end
         kept.size == values.size ? nil : kept
       end
 
       # Only to classify the member: `where` still casts the raw value itself,
-      # so a type whose cast raises is left to fail (or not) exactly as before.
+      # so a type whose cast raises is left to fail (or not) exactly as before
+      # — except the date/time cast filterable_type_cast answers UNCASTABLE for.
       def filterable_equality_cast(column_type, member)
-        column_type.cast(member)
+        filterable_type_cast(column_type, member)
       rescue StandardError
         nil
       end
@@ -457,9 +469,23 @@ module ConcernsOnRails
       def filter_cast(relation, field, value, options)
         type = options[:type] || filterable_column_type(relation, field)
         return value if type.nil?
-        return UNCASTABLE if filterable_uncastable?(type, value)
+        return UNCASTABLE if filterable_non_numeric?(type, value)
 
+        cast = filterable_type_cast(type, value)
+        filterable_uncastable?(type, value, cast) ? UNCASTABLE : cast
+      end
+
+      # type.cast, or UNCASTABLE for a String a date/time type cannot parse on
+      # Rails 6.0–7.0: Date._parse refuses one over 128 characters with an
+      # ArgumentError, which their date and time casts only rescue (to nil)
+      # from 7.1 on, so `?happened_on_gte=<129 characters>` was a 500. Any
+      # other type's ArgumentError is left alone.
+      def filterable_type_cast(type, value)
         type.cast(value)
+      rescue ArgumentError
+        raise unless ConcernsOnRails::Support::TimeValue.temporal_type?(type)
+
+        UNCASTABLE
       end
 
       # PostgreSQL's Column answers `array` (its sql_type drops the "[]", so
@@ -484,20 +510,35 @@ module ConcernsOnRails
 
       # Numeric types are checked against the string BEFORE casting, because
       # `Integer#cast`/`Decimal#cast` answer 0 for any non-numeric string rather
-      # than nil — the cast result alone cannot tell "0" from "twelve". Every
-      # other type reports the failure by casting to nil (blank values never get
-      # this far; `apply_filter_operator` skipped them).
-      def filterable_uncastable?(type, value)
-        return type.cast(value).nil? unless NUMERIC_TYPES.include?(type.type)
+      # than nil — the cast result alone cannot tell "0" from "twelve".
+      def filterable_non_numeric?(type, value)
+        return false unless NUMERIC_TYPES.include?(type.type)
         return false if value.is_a?(Numeric)
 
         !NUMERIC_STRING.match?(value.to_s)
       end
 
+      # Every other type reports the failure by casting to nil (blank values
+      # never get this far; `apply_filter_operator` skipped them) — except the
+      # date/time types, whose casts return a non-String they cannot read
+      # unchanged: a JSON body's `{"happened_on_gte": 12345}` bound
+      # `happened_on >= 12345`, which SQLite answered with every row (it sorts
+      # any number before a date's text) and PostgreSQL with a 500. Their cast
+      # must be a date or time, or the ±Float::INFINITY PostgreSQL's own types
+      # read "infinity" as — which only a String can ask for.
+      def filterable_uncastable?(type, value, cast)
+        return true if cast.nil? || cast.equal?(UNCASTABLE)
+        return false unless ConcernsOnRails::Support::TimeValue.temporal_type?(type)
+        return false if ConcernsOnRails::Support::TimeValue.temporal?(cast)
+
+        !(value.is_a?(String) && cast.is_a?(Float) && cast.infinite?)
+      end
+
       # Scalars (and arrays of scalars, which AR turns into `IN (...)`) are safe
       # to pass to .where; a Hash / ActionController::Parameters is not — and
       # since 1.22 neither is an array CONTAINING one (`?status[][x]=1` used to
-      # slip through as [Parameters] and 500 with a TypeError).
+      # slip through as [Parameters] and 500 with a TypeError), nor, now, an
+      # array of arrays (`?status[][]=a&status[][]=b`, the same TypeError).
       def filterable_scalar?(value)
         ConcernsOnRails::Support::ScalarParam.where_safe?(value)
       end

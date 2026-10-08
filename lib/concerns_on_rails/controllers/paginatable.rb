@@ -377,10 +377,13 @@ module ConcernsOnRails
 
       # Dig the configured path out of params: `["page"]` → params[:page];
       # `["page", "number"]` → params[:page][:number]. A scalar where a Hash
-      # is expected yields nil (→ the default), like any other garbage.
+      # is expected yields nil (→ the default), like any other garbage. Only
+      # a Hash / Parameters is dug into: a JSON body's `{"page": 2}` under
+      # `style: :jsonapi` reached `2["number"]` (Integer#[] reads a bit) and
+      # raised TypeError, a 500.
       def pagination_param(path)
         path.reduce(params) do |node, key|
-          break nil unless node.respond_to?(:[]) && !node.is_a?(String) && !node.is_a?(Array)
+          break nil unless ConcernsOnRails::Support::ScalarParam.hash_like?(node)
 
           node[key]
         end

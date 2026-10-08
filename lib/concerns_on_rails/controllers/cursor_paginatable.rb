@@ -558,11 +558,15 @@ module ConcernsOnRails
       # redefined #is_a? returns true for Time). iso8601(6) keeps microsecond
       # precision so boundary equality survives the round trip. The UTC form is
       # a copy: `to_time.utc` converted the boundary record's own attribute in
-      # place (TimeWithZone#to_time is memoized).
+      # place (TimeWithZone#to_time is memoized). A non-finite Float — a
+      # stored ±Infinity or NaN (see cursor_non_finite_minted?) — is written
+      # as the String ActiveModel's Float type casts back ("Infinity",
+      # "-Infinity", "NaN"): JSON has no such number, and JSON.generate raised
+      # on it, so one such row on a page boundary made that page a 500.
       def serialize_cursor_value(value)
         return ConcernsOnRails::Support::TimeValue.utc(value).iso8601(6) if value.is_a?(Time) || value.is_a?(DateTime)
         return value.iso8601 if value.is_a?(Date)
-        return value.to_s if value.is_a?(BigDecimal)
+        return value.to_s if value.is_a?(BigDecimal) || (value.is_a?(Float) && !value.finite?)
 
         value
       end
@@ -596,24 +600,38 @@ module ConcernsOnRails
       # drops unboundable values to 1=0) and a RangeError 500 on 6.0. A
       # timestamp outside years 0001..9999 casts fine too, then raised
       # DatetimeFieldOverflow on PostgreSQL (a 500) and compared as text on
-      # SQLite. We never mint any of them, so each is tampering and gets the
+      # SQLite. So did a number or `true` for a datetime boundary: the date
+      # and time casts hand a non-String back unchanged, and
+      # `(created_at, id) > (12345, 3)` restarted the walk on SQLite (it sorts
+      # any number before a date's text) and was a 500 on PostgreSQL. We
+      # never mint any of them, so each is tampering and gets the
       # InvalidCursor 400.
       def cast_cursor_value!(model, col, raw)
         return nil if raw.nil? # a NULL boundary; valid_cursor_values? only admits it on a nullable column
 
         type = model.type_for_attribute(col.to_s)
-        value = type.cast(raw)
-        raise InvalidCursor, "Invalid pagination cursor." unless cursor_bindable?(type, value)
+        value = cursor_type_cast(type, raw)
+        raise InvalidCursor, "Invalid pagination cursor." unless cursor_bindable?(model, type, value)
 
         value
       end
 
+      # Rails 6.0–7.0's date and time casts raise Date._parse's ArgumentError
+      # for a String over 128 characters (7.1 casts it to nil): a tampered
+      # date boundary was a 500 instead of the 400 below. Any other type's
+      # ArgumentError is left alone.
+      def cursor_type_cast(type, raw)
+        type.cast(raw)
+      rescue ArgumentError
+        raise unless ConcernsOnRails::Support::TimeValue.temporal_type?(type)
+
+        raise InvalidCursor, "Invalid pagination cursor."
+      end
+
       # `serializable?` is the Rails 6.1+ range probe; on 6.0 only serialize
-      # itself knows, raising ActiveModel::RangeError (a ::RangeError). A
-      # non-finite Float/BigDecimal is refused outright: it is never minted
-      # and adapters disagree on how (or whether) to quote it.
-      def cursor_bindable?(type, value)
-        return false if cursor_never_minted?(value)
+      # itself knows, raising ActiveModel::RangeError (a ::RangeError).
+      def cursor_bindable?(model, type, value)
+        return false if cursor_never_minted?(model, type, value)
         return type.serializable?(value) if type.respond_to?(:serializable?)
 
         type.serialize(value)
@@ -622,12 +640,37 @@ module ConcernsOnRails
         false
       end
 
-      # nil, a non-finite Float/BigDecimal, or a date/time outside
-      # Support::TimeValue::YEARS: none of them is ever minted.
-      def cursor_never_minted?(value)
-        value.nil? ||
-          ((value.is_a?(Float) || value.is_a?(BigDecimal)) && !value.finite?) ||
-          !ConcernsOnRails::Support::TimeValue.representable?(value)
+      # nil, a non-finite Float/BigDecimal (except where one is minted, see
+      # cursor_non_finite_minted?), anything but a date or time on a date/time
+      # column, or a date/time outside Support::TimeValue::YEARS: none of them
+      # is ever minted.
+      def cursor_never_minted?(model, type, value)
+        return true if value.nil?
+        return !cursor_non_finite_minted?(model, type, value) if value.is_a?(Float) && !value.finite?
+        return true if value.is_a?(BigDecimal) && !value.finite?
+
+        !cursor_time_minted?(type, value)
+      end
+
+      # A date/time column's boundary is a date or time, and any date or time
+      # lies within Support::TimeValue::YEARS.
+      def cursor_time_minted?(type, value)
+        time_value = ConcernsOnRails::Support::TimeValue
+        return false if time_value.temporal_type?(type) && !time_value.temporal?(value)
+
+        time_value.representable?(value)
+      end
+
+      # A float column can hold a non-finite boundary on PostgreSQL (±Infinity
+      # and NaN) and SQLite (±Infinity; it stores NaN as NULL). Anywhere else
+      # — another column type, NaN on SQLite, MySQL, which stores none — it is
+      # tampering, and refused outright: adapters disagree on how (or
+      # whether) to quote one.
+      def cursor_non_finite_minted?(model, type, value)
+        return false unless type.type == :float
+
+        adapter = model.connection.adapter_name
+        adapter.match?(/postgres/i) || (adapter.match?(/sqlite/i) && !value.nan?)
       end
 
       # Pre-bidirectional cursors carry no "d" — they are forward cursors and
@@ -702,11 +745,25 @@ module ConcernsOnRails
       # tuple cannot say "NULLs last" (`(c, id) > (v, x)` is never TRUE for a
       # NULL c), so :auto AND an explicit :row fall back to it.
       def cursor_predicate(model, pairs, values, nullable: [], backward: false)
+        values = values.map { |value| cursor_sql_value(model, value) }
         if nullable.empty? && cursor_row_predicate?(model, pairs)
           cursor_row_predicate(model, pairs, values)
         else
           cursor_or_predicate(model, pairs, values, nullable: nullable, backward: backward)
         end
+      end
+
+      # A boundary as the WHERE binds it. Only an infinite float on SQLite
+      # differs: SQLite reads no quoted literal as infinity — Rails before 7.2
+      # quote Float::INFINITY as the bare word Infinity (no such column, a
+      # 500), later ones as the TEXT 'Infinity', which SQLite sorts after
+      # every number, so the boundary row matched again and the walk never
+      # ended — but it reads a literal past the largest double as one.
+      # PostgreSQL reads its quoted 'Infinity' / 'NaN' as float8.
+      def cursor_sql_value(model, value)
+        return value unless value.is_a?(Float) && value.infinite? && model.connection.adapter_name.match?(/sqlite/i)
+
+        Arel.sql(value.positive? ? "9e999" : "-9e999")
       end
 
       # :auto picks :row when it is expressible (>= 2 uniform-direction
