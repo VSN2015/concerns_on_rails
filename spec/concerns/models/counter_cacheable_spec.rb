@@ -402,6 +402,79 @@ describe ConcernsOnRails::Models::CounterCacheable do
       end
     end
 
+    # The live adjustments judged the row's old AND new state under the
+    # receiving class's rules, so a save that changed the STI type made no
+    # adjustment and left the counter where the recount (which judges each
+    # stored type under its own class) disagreed (2026-10-08 audit).
+    context "when a save changes the STI type" do
+      before do
+        stub_const("Reply", reply_class)
+        stub_const("ModeratedReply", Class.new(reply_class) do
+          counter_cacheable_by :post, count: :comments_count, if: -> { approved? }
+        end)
+      end
+
+      def agrees_with_recount?(parent)
+        live = parent.reload.comments_count
+        Reply.recount_counter_caches!
+        live == parent.reload.comments_count
+      end
+
+      it "judges the old state under the old type's rule and the new under the new type's (becomes!)" do
+        reply = Reply.create!(post: post)
+        expect(post.reload.comments_count).to eq(1)
+
+        moderated = reply.becomes!(ModeratedReply)
+        moderated.save!
+        expect(post.reload.comments_count).to eq(0)
+        expect(agrees_with_recount?(post)).to be(true)
+
+        moderated.becomes!(Reply).save!
+        expect(post.reload.comments_count).to eq(1)
+        expect(agrees_with_recount?(post)).to be(true)
+      end
+
+      it "judges an assigned inheritance column the same way" do
+        reply = Reply.create!(post: post)
+
+        reply.update!(type: "ModeratedReply")
+        expect(post.reload.comments_count).to eq(0)
+
+        reply.update!(type: "Reply")
+        expect(post.reload.comments_count).to eq(1)
+        expect(agrees_with_recount?(post)).to be(true)
+      end
+
+      it "settles both parents when the type and the parent change together" do
+        reply = Reply.create!(post: post)
+
+        reply.becomes!(ModeratedReply).update!(post: other, approved: true)
+        expect([post.reload.comments_count, other.reload.comments_count]).to eq([0, 1])
+      end
+
+      it "decrements a destroyed row under its persisted type's rule, not an unsaved becomes!" do
+        reply = Reply.create!(post: post)
+
+        reply.becomes!(ModeratedReply).destroy! # not approved: the new type would not count it
+        expect(post.reload.comments_count).to eq(0)
+      end
+
+      it "settles a counter only the old type keeps, on an association only it declares" do
+        ActiveRecord::Schema.define { add_column :replies, :author_id, :integer }
+        reply_class.reset_column_information
+        author = User.create!
+        stub_const("AuthoredReply", Class.new(reply_class) do
+          belongs_to :author, class_name: "User", optional: true
+          counter_cacheable_by :author, count: :posts_count
+        end)
+        authored = AuthoredReply.create!(post: post, author: author)
+        expect([post.reload.comments_count, author.reload.posts_count]).to eq([1, 1])
+
+        authored.becomes!(Reply).save!
+        expect([post.reload.comments_count, author.reload.posts_count]).to eq([1, 0])
+      end
+    end
+
     # The per-type tally resolves each stored type to its class WITHOUT
     # building a record: `instantiate(type => ...)` ran after_find /
     # after_initialize on a fabricated type-only row, and raised

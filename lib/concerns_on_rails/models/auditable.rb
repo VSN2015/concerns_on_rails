@@ -167,8 +167,11 @@ module ConcernsOnRails
       # entry written by 1.29.0 or earlier has second precision — it only says
       # "during that second" — so it is compared against `time` truncated to
       # the second rather than silently dropped by a sub-second cutoff.
+      # A Date means midnight in Time.zone and a zone-less String is read in
+      # Time.zone, as a datetime column casts them — not in the server's
+      # system zone, where Date#to_time / String#to_time put them.
       def audited_changes_since(time)
-        cutoff = time.to_time
+        cutoff = auditable_cutoff(time)
         whole_second = Time.at(cutoff.to_i).utc
         audit_trail.select do |entry|
           raw = entry["at"]
@@ -351,6 +354,18 @@ module ConcernsOnRails
         Time.iso8601(raw.to_s)
       rescue ArgumentError, TypeError
         nil
+      end
+
+      # audited_changes_since's argument as an instant in Time.zone. A String
+      # must name a date the way the verbs' time arguments must
+      # (TimeValue.names_year?): String#to_time read "junk" as June 1st.
+      def auditable_cutoff(time)
+        time_value = ConcernsOnRails::Support::TimeValue
+        cutoff = time_value.names_year?(time) ? time_value.cast(time, zone_aware: true) : nil
+        return cutoff if time_value.temporal?(cutoff)
+
+        raise ArgumentError,
+              "#{LABEL}: #{time.inspect} cannot be parsed as a time — pass a Time, a Date or a parseable String"
       end
 
       # "…T12:00:00.123456Z" vs an older (<= 1.29.0) "…T12:00:00Z".

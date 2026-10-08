@@ -474,10 +474,13 @@ module ConcernsOnRails
       end
 
       # Failures left before auto-lock (never negative); nil when
-      # max_attempts is nil (counting without auto-lock).
+      # max_attempts is nil (counting without auto-lock). A lapsed lock still
+      # holds its count (expiry is lazy), but the next failure clears it and
+      # counts as attempt 1 of a new window — so the full allowance is left.
       def attempts_remaining
         max = self.class.lockable_max_attempts
         return nil unless max
+        return max if lock_expired?
 
         [max - lockable_current_attempts, 0].max
       end
