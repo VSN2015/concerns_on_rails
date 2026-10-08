@@ -148,7 +148,7 @@ across all 43 concerns — press <kbd>/</kbd> and type.
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured columns exist and raises `ArgumentError` early — listing *every* missing column at once, with one ready-to-paste `rails generate migration` command that adds them all
 - **Composable** — concerns are independent; mix and match per model
-- **Tested like an app, not a snippet** — **2,723 RSpec examples** run against a real database on every CI build
+- **Tested like an app, not a snippet** — **2,827 RSpec examples** run against a real database on every CI build
 - **Documented twice** — everything in this README also lives as a per-concern page on the [docs site](https://vsn2015.github.io/concerns_on_rails), searchable and deep-linkable
 
 ---
@@ -1271,7 +1271,7 @@ end
 | `fingerprint:`    | `nil`                                | A `string` column to store `address_fingerprint` in (stamped in `before_validation`, after normalization) so duplicates are one indexed query away: `Location.with_address(record)`. |
 | `if:` / `unless:` | `nil`                                | Standard Rails validation conditions (Symbol, Proc, or Array) gating the address **validations** — e.g. `if: :on_addresses?`. Normalization still runs unconditionally. Per class: a later `addressable_by` (or a subclass's) replaces the condition. Procs get Rails' callback arguments for their arity (`-> {}`, `->(record) {}`, `->(record, _) {}`). |
 
-**What it normalizes** (in `before_validation`)
+**What it normalizes** (in `before_validation`, plus a `before_save` backstop for saves that skip validation)
 - Text parts: `strip` + `squish`.
 - `postal_code`: squish + upcase, with canonical spacing for CA (`A1A1A1` → `A1A 1A1`).
 - `country` / `state`: upcased when they look like a 2-letter code (full names left alone). With `normalize_country: true`, a recognized ISO country name or alpha-3 code is canonicalized to its alpha-2 (`"Canada"`/`"CAN"` → `"CA"`); unrecognized values are left as-is.
@@ -1349,7 +1349,7 @@ Article.normalize_tags!                        # repair rows written around the 
 **Notes**
 - Matching is **boundary-safe** — searching `rail` does not match `rails`. An explicit SQL `ESCAPE` clause makes tags containing `_` / `%` match literally on every adapter.
 - `tagged_with` matches **case-insensitively on every adapter** — `LIKE` on SQLite and MySQL, `ILIKE` on PostgreSQL — so one call means one thing everywhere (how non-ASCII characters fold is still the database collation's business). The Ruby-side helpers (`tagged_with?`, `all_tags`, `tag_counts`) compare exactly, so `downcase: true` — which folds on write — is what makes the scope and the helpers agree.
-- Tags are normalized in `before_validation`, so a direct `record.tags = "a, b"` assignment is cleaned too. An empty list stores `NULL`.
+- Tags are normalized in `before_validation` (plus a `before_save` backstop for saves that skip validation), so a direct `record.tags = "a, b"` assignment is cleaned too. An empty list stores `NULL`.
 - An [Encryptable](#-encryptable) tag column holds ciphertext, which `tagged_with`'s `LIKE` never matches — declaring it raises `ArgumentError` at declaration, in either order (an undeclared default `:tags` column is refused when `tagged_with` is called).
 - `tagged_with` matches the **normalized** column form (`"ruby,rails"`) — which every write through the model produces. A row written around the callbacks (`update_column`, `update_all`, raw SQL, an import) as `"ruby, rails"` is found by `tagged_with?` but not by `tagged_with`; run `Model.normalize_tags!` (relation-aware, one `update_columns` per changed row in a transaction, no validations/callbacks, returns the count; `unscoped` to include default-scoped-away rows) to rewrite such rows.
 - `tag_counts` runs one `GROUP BY` on the raw column — identical tag strings ship once with their row count and are split in Ruby — so it scales with distinct tag strings, not rows; ordered by count desc then name, `limit:` keeps the top N.
@@ -1408,7 +1408,7 @@ Article.where(legacy: true).sanitize_all!(:body)   # scope-aware, subset of fiel
 
 **Notes**
 - `on: :read` (default) is **non-destructive**: it adds a `sanitized_<field>` reader and leaves the stored column untouched.
-- `on: :write` overwrites the column in `before_validation` — **lossy and irreversible** (never use it on code, Markdown, math, or prices), and bypassed by `update_column` / `update_all` / raw SQL.
+- `on: :write` overwrites the column in `before_validation` (plus a `before_save` backstop for `update_attribute` / `save(validate: false)`) — **lossy and irreversible** (never use it on code, Markdown, math, or prices), and bypassed only by `update_column` / `update_all` / raw SQL.
 - `with: :strip, on: :write` stores **plain text**, not HTML-escaped text: `"<b>Tom</b> & Jerry"` is stored as `"Tom & Jerry"` (so `<%= %>` shows it once, not as `Tom &amp;amp; Jerry`). `&lt;` / `&gt;` are deliberately kept encoded — the stored value can never become markup, even rendered with `raw` — so a typed `a < b` is stored as `a &lt; b`. An `&amp;` that would read back as a character reference (a literal `&amp;copy;`) also stays encoded (a static, linear-time rule: `&` followed by `#`, a `name;`, or an HTML5 semicolon-less legacy name), so re-saving and `sanitize_all!` are idempotent. `sanitize_all!` uses the same plain-text form, and repairs rows stored double-escaped by earlier versions. The `on: :read` reader and `sanitized:` serialization still return HTML-escaped text.
 - `sanitize_all!` is the repair tool for that bypass (and for rows written before the concern was added): one `update_columns` per row that actually changes, skipping validations/callbacks on purpose, inside a transaction. A bare call repairs the `on: :write` fields only — with none declared it returns `0` without a query.
 - `sanitized:` sanitizes the **serialized** value, so it composes with [Maskable](#-maskable) in either include order: `as_json(masked: true, sanitized: true)` never falls back to the raw column.
@@ -2722,9 +2722,9 @@ Point your agent at `llms.txt` for an overview, or paste a single concern's `.md
 
 ```sh
 bundle install                                  # install dev dependencies
-bundle exec rspec                               # run the test suite (2,723 examples)
+bundle exec rspec                               # run the test suite (2,827 examples)
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.32.0.gem      # install locally
+gem install ./concerns_on_rails-1.32.1.gem      # install locally
 
 # Preview the docs site locally (GitHub Pages serves docs/ as-is):
 cd docs && python3 -m http.server 8000          # → http://localhost:8000
