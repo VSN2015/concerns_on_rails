@@ -54,6 +54,13 @@ module ConcernsOnRails
           field = self.class.sluggable_field
           slug_column = self.class.friendly_id_config.slug_column
 
+          # A missing slug is built whenever there is a source to build it
+          # from: legacy/imported rows with a NULL slug self-heal, and a blank
+          # slug ASSIGNED in this save — "" from an optional form field, or
+          # nil, friendly_id's way to ask for a fresh one — is not stored as
+          # is (a second "" would trip the slug's unique index).
+          return true if send(slug_column).blank? && slug_source.present?
+
           # An explicitly-assigned slug wins — don't overwrite it with a generated
           # one when the slug column itself is being changed in this save. The
           # exception is a slug friendly_id BUILT earlier in this save whose
@@ -64,11 +71,8 @@ module ConcernsOnRails
 
           source_changed = respond_to?("will_save_change_to_#{field}?") &&
                            send("will_save_change_to_#{field}?")
-          # Backfill a missing slug even when the source did not change, so
-          # legacy/imported rows with a NULL slug still self-heal.
-          slug_missing = send(slug_column).blank? && slug_source.present?
 
-          source_changed || slug_missing || sluggable_scope_changed?
+          source_changed || sluggable_scope_changed?
         end
 
         # Defined on the class (like the method above) so it sits ABOVE

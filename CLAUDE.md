@@ -57,7 +57,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 ### Model concerns (`lib/concerns_on_rails/models/`)
 
 - **`Sluggable`** — wraps `friendly_id` (`:slugged`). Regenerates the slug when the source
-  field changes, backfills a blank slug, and won't overwrite an explicitly-assigned slug.
+  field changes, backfills a blank slug (an ASSIGNED `""`/nil too, whenever the source is present), and
+  won't overwrite an explicitly-assigned non-blank slug.
   Options: `history:`, `scope:`, `reserved_words:`, `finders:`. A saved record whose `scope:`
   column changes keeps a slug the new scope has free and rebuilds one that scope already holds.
 - **`Sortable`** — wraps `acts_as_list`; `default_scope` orders by the configured
