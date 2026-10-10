@@ -40,6 +40,11 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Controllers::Authorizable".freeze
       # Sentinel so a nil only:/except: is distinguishable from "not passed".
       UNSET = Object.new.freeze
+      # The envelope `code` follows the denial's status, so a `status:
+      # :not_found` concealment rule answers exactly what ErrorHandleable's
+      # missing-record 404 does (no existence oracle) and a 401 is not
+      # labelled "forbidden". 403 and every status not listed stay "forbidden".
+      DENIAL_CODES = { 401 => "unauthorized", 404 => "not_found" }.freeze
 
       included do
         class_attribute :authorizable_rules, instance_accessor: false, default: []
@@ -226,17 +231,32 @@ module ConcernsOnRails
 
       # Public override point for how a denial is rendered. Fails CLOSED: when
       # there is no response object to render into, raise — returning nil here
-      # (the pre-1.22 behavior) let the action run unauthorized.
+      # (the pre-1.22 behavior) let the action run unauthorized. The envelope
+      # code is derived from the status (DENIAL_CODES), so an override keeping
+      # this two-keyword signature still gets it through `super`.
       def authorization_denied(status:, message:)
         unless respond_to?(:response) && response
           raise "#{LABEL}: denial for '#{authorization_action_name}' " \
                 "could not be rendered (no response object) — refusing to fail open"
         end
 
-        ConcernsOnRails::Support::ErrorEnvelope.render(self, message: message, status: status, code: "forbidden")
+        ConcernsOnRails::Support::ErrorEnvelope.render(
+          self, message: message, status: status, code: authorization_denial_code(status)
+        )
       end
 
       private
+
+      # Symbol, Integer or numeric String → the envelope code for that status.
+      def authorization_denial_code(status)
+        number =
+          if status.is_a?(Integer) || status.to_s.match?(/\A\d+\z/)
+            status.to_i
+          elsif defined?(::Rack::Utils)
+            ::Rack::Utils::SYMBOL_TO_STATUS_CODE[status.to_s.to_sym]
+          end
+        DENIAL_CODES.fetch(number, "forbidden")
+      end
 
       def authorization_rule_applies?(rule, action)
         return rule[:only].include?(action) if rule[:only]
