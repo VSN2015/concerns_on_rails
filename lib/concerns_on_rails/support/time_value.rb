@@ -16,6 +16,9 @@ module ConcernsOnRails
     #     `type: :datetime` fields), which ActiveRecord never sees as datetime
     #     attributes: `cast` (user input) and `read` (the stored ISO8601 String)
     #     mirror ActiveRecord's TimeZoneConversion for the model.
+    #   * Instance-predicate BOUNDS (`expired?`, `current?`, `published?`):
+    #     `predicate_bound` casts the instant through the column's type, as
+    #     the matching scope's bind is, so a date column compares dates.
     #   * UTC renderings: `utc` never converts its receiver in place.
     #     Time#utc (alias #gmtime) does, so it rewrote the caller's own Time,
     #     or the record's attribute value, and raised FrozenError on a frozen one.
@@ -96,6 +99,25 @@ module ConcernsOnRails
 
         raise ArgumentError,
               "#{label}: #{value.inspect} cannot be parsed as a time for '#{field}' — pass #{accepts}"
+      end
+
+      # ---- predicate bounds ----------------------------------------------
+
+      # The instant an instance predicate compares `field`'s value against,
+      # cast through the column's own attribute type — exactly what the
+      # matching scope's bind goes through. A datetime column gets the same
+      # instant back. A DATE column gets the date that instant falls on in
+      # Time.zone: comparing the stored Date with the Time itself (Date <=
+      # TimeWithZone) puts the Date at UTC midnight, so outside UTC
+      # `expired?`/`current?`/`published?` disagreed with `.expired`/
+      # `.current`/`.published` for the zone's offset hours every day. A
+      # value the type cannot cast (nil included) is returned as given, so
+      # the comparison behaves as it always did.
+      def predicate_bound(klass, field, value)
+        return value if value.nil?
+
+        cast = klass.type_for_attribute(field.to_s).cast(value)
+        cast.nil? ? value : cast
       end
 
       # A String argument must read as a date, the way Time.zone.parse (the

@@ -222,11 +222,15 @@ module ConcernsOnRails
       # The unaffixed checks behind the public predicates. Internal logic and
       # the affixed predicates call these, never `active?` / `expired?`,
       # which a sibling concern may own.
+      # The instant is cast through the column's type, as the `.expired`
+      # scope's bind is, so a date column compares against today in
+      # Time.zone (Support::TimeValue.predicate_bound).
       def expirable_expired?
-        value = self[self.class.expirable_field]
+        field = self.class.expirable_field
+        value = self[field]
         return false if value.nil?
 
-        value <= Time.zone.now
+        value <= ConcernsOnRails::Support::TimeValue.predicate_bound(self.class, field, Time.zone.now)
       end
 
       def expirable_live?

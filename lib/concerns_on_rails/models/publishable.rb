@@ -274,11 +274,13 @@ module ConcernsOnRails
       # Check if the record is published
       # Example:
       #   record.published?
+      # The instant is cast through the column's type, as the scopes' binds
+      # are, so a date column compares against today in Time.zone.
       def published?
         value = self[self.class.publishable_field]
         return false unless value.present?
 
-        value.respond_to?(:<=) ? value <= Time.zone.now : true
+        value.respond_to?(:<=) ? value <= publishable_now : true
       end
 
       # Check if the record is unpublished
@@ -293,7 +295,7 @@ module ConcernsOnRails
         value = self[self.class.publishable_field]
         return false if value.blank?
 
-        value.respond_to?(:>) ? value > Time.zone.now : false
+        value.respond_to?(:>) ? value > publishable_now : false
       end
 
       # Never set — a true draft.
@@ -332,6 +334,12 @@ module ConcernsOnRails
       # validation rolls back the before-hook's side effects too. (Postfix
       # private — the keyword form trips RuboCop's scope analysis against the
       # `private` inside the class_methods block.)
+      # Time.zone.now as the publish column's type casts it (see published?).
+      def publishable_now
+        ConcernsOnRails::Support::TimeValue.predicate_bound(self.class, self.class.publishable_field, Time.zone.now)
+      end
+      private :publishable_now
+
       def publishable_write_with_hooks(value, kind)
         field = self.class.publishable_field
         before, after = kind == :publish ? %i[before_publish after_publish] : %i[before_unpublish after_unpublish]
