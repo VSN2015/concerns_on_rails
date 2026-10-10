@@ -74,7 +74,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   Every hooked verb (here and in SoftDeletable/Expirable/Activatable/Stateable/Anonymizable)
   runs through `Support::HookedWrite`. The boolean `.published` predicate is an Arel
   Grouping (`= TRUE`) so `default_scope: true` never pre-sets new records (Rails 6.0 can't
-  unscope a Grouping, so it alone uses `<> FALSE`).
+  unscope a Grouping, so it alone uses `<> FALSE`); unpublishing a boolean writes `false`, never NULL.
 - **`SoftDeletable`** — timestamp (default `deleted_at`) + `default_scope` hiding deleted
   rows (opt out with `default_scope: false`); scopes affixable via `prefix:`/`suffix:`.
   `soft_delete!`/`restore!`, batch `soft_delete_all`/`restore_all` (atomic, routed through

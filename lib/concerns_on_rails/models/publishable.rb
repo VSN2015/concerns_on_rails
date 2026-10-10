@@ -106,6 +106,15 @@ module ConcernsOnRails
           Arel::Nodes::Grouping.new(column.eq(true))
         end
 
+        # What unpublishing writes: NULL on a timestamp column, false on a
+        # boolean one. Writing NULL into a boolean raised NotNullViolation on
+        # the usual `t.boolean :published, null: false, default: false` (so a
+        # record could never be unpublished) and left a third state on a
+        # nullable one. (Public only because the instance verb reads it.)
+        def publishable_cleared_value
+          publishable_boolean_column? ? false : nil
+        end
+
         # Publish every not-currently-published record in the relation.
         # Returns the Integer count. NOTE this includes *scheduled* rows,
         # whose future timestamp is overwritten with now — chain the draft
@@ -140,15 +149,16 @@ module ConcernsOnRails
           )
         end
 
-        # Unpublish every published record in the relation. Writes nil on both
-        # column types, exactly as `unpublish!` does. The `published` scope
+        # Unpublish every published record in the relation. Writes exactly
+        # what `unpublish!` does (publishable_cleared_value: NULL on a
+        # timestamp column, false on a boolean one). The `published` scope
         # does NOT unscope the field, so a caller's own constraint on the
         # publish column composes here as it should.
         def unpublish_all
           live = all.public_send(publishable_scope_names.fetch(:published))
           if publishable_batch_fast_path?(:unpublish)
             return live.update_all(
-              ConcernsOnRails::Support::BatchOps.with_timestamps(self, publishable_field => nil)
+              ConcernsOnRails::Support::BatchOps.with_timestamps(self, publishable_field => publishable_cleared_value)
             )
           end
 
@@ -268,7 +278,7 @@ module ConcernsOnRails
       # Example:
       #   record.unpublish!
       def unpublish!
-        publishable_write_with_hooks(nil, :unpublish)
+        publishable_write_with_hooks(self.class.publishable_cleared_value, :unpublish)
       end
 
       # Check if the record is published
