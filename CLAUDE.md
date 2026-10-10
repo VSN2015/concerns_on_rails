@@ -297,7 +297,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`ErrorHandleable`** — `rescue_from` for RecordNotFound / ParameterMissing / RecordInvalid.
 - **`Includable`** — allow-listed association sideloading (nested include trees via `Support::IncludeTree`,
   `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets.
-- **`SecureHeadable`** — security response headers + native CSP DSL passthrough.
+- **`SecureHeadable`** — security response headers + native CSP DSL passthrough
+  (`content_security_policy_for` always forwards `report_only:` as true/false, so `false`
+  enforces over an inherited or app-wide report-only flag).
 - **`Localizable`** — per-request `I18n.locale` from params / `Accept-Language` (strict
   RFC 9110 q-values, stable order on ties; `-` and `_` match each other, case-insensitively,
   returning the app's own symbol). Like Timezoneable's zone, the locale stays

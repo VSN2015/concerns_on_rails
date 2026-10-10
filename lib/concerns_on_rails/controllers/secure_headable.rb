@@ -138,7 +138,9 @@ module ConcernsOnRails
 
         # Thin pass-through to Rails' native CSP DSL — never re-implement CSP.
         # Forwards per-action conditions (only: / except: / if: / unless:) and
-        # the policy block straight through.
+        # the policy block straight through. Every call also sets the mode for
+        # the actions it covers: report_only: false (the default) ENFORCES, even
+        # over a report-only flag a parent controller or the app config set.
         def content_security_policy_for(report_only: false, **action_opts, &block)
           unless respond_to?(:content_security_policy)
             raise ArgumentError,
@@ -148,11 +150,14 @@ module ConcernsOnRails
 
           # The policy block is ONLY accepted by content_security_policy; the
           # report-only variant is a flag toggle that takes no block. So always
-          # define the policy via content_security_policy, then additionally mark
-          # it report-only when requested — otherwise a report-only rollout would
-          # silently register no policy at all (the block would be dropped).
+          # define the policy via content_security_policy, then set the flag —
+          # otherwise a report-only rollout would silently register no policy at
+          # all (the block would be dropped). The flag is forwarded BOTH ways:
+          # Rails keeps it in its own inherited before_action, not in the policy,
+          # so only an explicit `false` turns an inherited (or app-wide)
+          # report-only policy into an enforced one.
           content_security_policy(**action_opts, &block)
-          content_security_policy_report_only(true, **action_opts) if report_only
+          content_security_policy_report_only(report_only ? true : false, **action_opts)
         end
       end
 

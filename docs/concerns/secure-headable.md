@@ -73,13 +73,15 @@ A thin pass-through to Rails' native CSP class methods. It never reimplements CS
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `report_only` | Boolean | `false` | When `true`, delegates to `content_security_policy_report_only(true, ...)`. When `false`, delegates to `content_security_policy(...)`. |
+| `report_only` | Boolean | `false` | The policy is always defined through `content_security_policy(...)`, and the flag is always forwarded as `content_security_policy_report_only(true/false, ...)` for the same actions. `true` reports only. `false` **enforces**, even when a parent controller or `config.content_security_policy_report_only` made the policy report-only. |
 | `only` | Symbol / Array | — | Forwarded to Rails as a per-action condition. |
 | `except` | Symbol / Array | — | Forwarded to Rails as a per-action condition. |
 | `if` | Symbol / Proc | — | Forwarded to Rails as a per-action condition. |
 | `unless` | Symbol / Proc | — | Forwarded to Rails as a per-action condition. |
 
-All `**action_opts` not listed above are forwarded unchanged to the underlying Rails method. The policy block receives the Rails `ActionDispatch::ContentSecurityPolicy` object.
+All `**action_opts` not listed above are forwarded unchanged to both underlying Rails methods.
+
+Rails keeps the report-only flag in its own inherited `before_action`, not in the policy. Every call therefore sets the mode for the actions it covers. A subclass's `content_security_policy_for { ... }` (or `report_only: false`) switches an inherited or app-wide report-only policy to enforcing. To add directives and stay report-only, pass `report_only: true` again. The policy block receives the Rails `ActionDispatch::ContentSecurityPolicy` object.
 
 Calling this method when `ActionController::ContentSecurityPolicy` is not available (i.e., Rails < 5.2 or a non-standard controller base) raises `ArgumentError`.
 
@@ -96,7 +98,7 @@ Calling this method when `ActionController::ContentSecurityPolicy` is not availa
 | Signature | Description |
 |---|---|
 | `secure_headers(*presets, **custom)` | Registers preset and/or custom headers. Merges into the inherited `secure_headable_headers` hash; later calls win on collision. |
-| `content_security_policy_for(report_only: false, **action_opts, &block)` | Delegates to Rails' native `content_security_policy` or `content_security_policy_report_only` class methods with the supplied block and per-action options. |
+| `content_security_policy_for(report_only: false, **action_opts, &block)` | Delegates to Rails' native `content_security_policy` (with the block) and `content_security_policy_report_only(report_only, ...)` class methods, with the same per-action options. Each call sets the mode for the actions it covers. |
 
 ## Examples
 
