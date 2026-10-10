@@ -1297,7 +1297,7 @@ end
 ```ruby
 loc.address_fingerprint        # => "9f2c…" — SHA-256 of the normalized parts: case, whitespace, postal spacing
                                #    and a blank country (→ default_country) don't change it; nil for a blank address
-loc.same_address_as?(other)    # fingerprints equal (never true for two blanks)
+loc.same_address_as?(other)    # fingerprints equal — other is a record or a digest String (never true for two blanks)
 loc.address_changed?           # any mapped column dirty (address_parts_changed? when you have an `address` column)
 
 addressable_by fingerprint: :address_fingerprint     # add a string column + index
