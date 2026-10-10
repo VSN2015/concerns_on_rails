@@ -229,7 +229,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `before_create` (EVERY indexed field — a copy never keeps its original's digest) and
   `before_update` (changed fields), i.e. after every `before_save`; the finders run the
   lookup value through the field's Rails 7.1+ `normalizes` first. Decrypted text is UTF-8
-  (binary only when invalid), and a stored `""` (a column default) reads as `""`.
+  (binary only when invalid), and a stored `""` (a column default) reads as `""`; any other
+  non-NULL column default is refused at macro time (it can never decrypt).
 - **`CounterCacheable`** — conditional denormalized counters ("counter_culture-lite"),
   declared on the CHILD. `counter_cacheable_by association, count:, if:, touch:`
   (repeatable; belongs_to must be declared first; polymorphic rejected;
