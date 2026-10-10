@@ -213,4 +213,4 @@ order.restore!       # raises if fulfilled?, deleted_at stays set
 
 - `really_destroy_all` now honors the calling relation (previously it hard-deleted the entire table regardless of scope).
 - `soft_delete_all` / `restore_all` / `destroy_all` return Integer counts and raise `ActiveRecord::RecordNotSaved` (rolling the batch back) on failure — previously the rollback was silent and returned nil.
-- With `touch: false` and no overridden hooks, the batch methods collapse to a single `UPDATE` statement.
+- With `touch: false` and no overridden hooks, the batch methods collapse to a single `UPDATE` statement. On an STI table, "no overridden hooks" covers every loaded subclass, because a base-class `soft_delete_all` also writes the subclasses' rows. With lazy loading (no `eager_load`) an STI table always takes the per-record path, since a subclass that is not loaded yet cannot be checked. This matters most for an `after_soft_delete` override on a subclass, which the single `UPDATE` used to skip.

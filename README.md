@@ -413,7 +413,10 @@ Post.published.unpublish_all # unpublishes every currently-published post; retur
 Both respect the current relation, return an Integer count, and run in a transaction — a
 record that fails to save raises `ActiveRecord::RecordNotSaved` and rolls the whole batch
 back. With no overridden `before_publish`/`after_publish`/`before_unpublish`/`after_unpublish`/
-`publish!`/`unpublish!` and no validations on the model — neither `validates`/`validates_with`,
+`publish!`/`unpublish!` and no validations on the model (on an STI table: on the model and every
+subclass whose rows the relation holds, so a `Press < Article` override or validator keeps
+`Article.publish_all` on the per-record path; with lazy loading — no `eager_load` — an STI table always
+streams, since an unloaded subclass cannot be inspected) — neither `validates`/`validates_with`,
 a custom `validate :method`, nor an association's autosave validation (a bare `has_many`
 registers one, so most models with associations take the streaming path) — both collapse to a
 single `UPDATE`, which bumps `updated_at`
@@ -1570,7 +1573,10 @@ User.unlock_by_token(params[:token])   # constant-time lookup; unlocks once (hoo
 count, runs in a transaction. Returns `0` without querying when `unlock_in` is `nil` (manual
 unlock only). Because `unlock_access!` persists via `update_columns` (which already skips
 validations), the single-`UPDATE` fast path and the per-record path are equivalent here —
-unlike Publishable/Expirable/Activatable, this one has no validators gate.
+unlike Publishable/Expirable/Activatable, this one has no validators gate. The hook-override gate
+does cover STI subclasses: `User.unlock_expired` streams when an `Admin < User` overrides
+`after_unlock` (it used to skip the subclass's hook), and an STI table without eager loading
+always streams.
 
 **Notes**
 - The increment is SQL-side (`COALESCE(attempts, 0) + 1` via `update_counters`), so concurrent failures never lose updates and a NULL counter needs no column default; a locked account stops counting.

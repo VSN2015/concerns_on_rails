@@ -19,8 +19,17 @@ module ConcernsOnRails
       # path already skips validations (SoftDeletable under `touch: false` and
       # Lockable, both of which write via update_column(s)) and so are exempt
       # from the validations half.
+      #
+      # Checked on every class whose rows the relation can hold (see
+      # row_classes): on an STI table `Article.publish_all` also writes the
+      # Press rows, so a Press override must move it off the fast path too.
+      # Refused outright while those classes may be incomplete.
       def unoverridden?(klass, owner, *methods)
-        methods.all? { |name| klass.instance_method(name).owner == owner }
+        return false if unloaded_subclasses_possible?(klass)
+
+        row_classes(klass).all? do |row_class|
+          methods.all? { |name| row_class.instance_method(name).owner == owner }
+        end
       end
 
       # The whole safety decision for a single-UPDATE fast path: it is only
@@ -34,7 +43,38 @@ module ConcernsOnRails
       # Save callbacks are deliberately NOT gated on: update_all skipping
       # callbacks is documented Rails behavior shared by every *_all method.
       def fast_path?(klass, owner, *methods)
-        !validations?(klass) && unoverridden?(klass, owner, *methods)
+        unoverridden?(klass, owner, *methods) && row_classes(klass).none? { |row_class| validations?(row_class) }
+      end
+
+      # The classes `klass`'s relation instantiates rows as: on an STI table,
+      # klass and its loaded subclasses; otherwise klass alone (a subclass of
+      # a non-STI model shares the table, but its parent's rows are never
+      # instances of it).
+      def row_classes(klass)
+        sti_table?(klass) ? [klass, *klass.descendants] : [klass]
+      end
+
+      def sti_table?(klass)
+        return false unless klass.respond_to?(:inheritance_column)
+
+        column = klass.inheritance_column
+        column.present? && klass.column_names.include?(column.to_s)
+      end
+
+      # `descendants` lists LOADED classes only. In an app that loads code
+      # lazily (Rails without eager loading — development, and test unless
+      # it eager loads) an STI subclass that overrides a hook or declares
+      # validations may not be loaded yet, so the fast path is refused on an
+      # STI table there: the per-record path is always correct, only slower.
+      # With eager loading (production) the descendants are complete.
+      def unloaded_subclasses_possible?(klass)
+        lazily_loaded? && sti_table?(klass)
+      end
+
+      def lazily_loaded?
+        return false unless defined?(::Rails) && ::Rails.respond_to?(:application) && ::Rails.application
+
+        !::Rails.application.config.eager_load
       end
 
       # True when the host model declares anything that runs at validation time.
@@ -177,7 +217,7 @@ module ConcernsOnRails
 
         relation.klass.unscoped.from(relation, relation.klass.quoted_table_name).pluck(key)
       end
-      private_class_method :each_row, :joined?, :unjoined, :limited_keys
+      private_class_method :each_row, :joined?, :unjoined, :limited_keys, :sti_table?, :unloaded_subclasses_possible?
 
       # The validate callbacks every ActiveRecord model carries out of the box
       # (Rails 7.1 registers :cant_modify_encrypted_attributes_when_frozen on

@@ -423,7 +423,8 @@ and a subclass never rips a scope out from under its parent), `BatchOps` (the ho
 fast-path predicate — every named instance method still owned by the concern, i.e.
 unoverridden — plus the transactional `find_each` batch runner shared by every `*_all` verb:
 Integer count, DB-side filtering for idempotency, its own `requires_new` savepoint, rollback
-via `ActiveRecord::RecordNotSaved` on a failed record (inside a caller's transaction too) — and `each_record`, the ONLY way to `find_each` a relation: it strips the
+via `ActiveRecord::RecordNotSaved` on a failed record (inside a caller's transaction too); on an STI table
+the fast-path checks cover every loaded subclass (`row_classes`) and are refused without eager loading — and `each_record`, the ONLY way to `find_each` a relation: it strips the
 ORDER (error_on_ignored_order), resolves a LIMIT/OFFSET to plucked PKs first (bare `find_each`
 keeps the limit but pages by PK), and yields each record once even over a has_many join (a
 joined limited slice is re-plucked, then loaded unjoined — one instance per record)),
