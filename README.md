@@ -2176,7 +2176,9 @@ races Rails leaves as 500s (`RecordNotUnique`, `InvalidForeignKey`) get the REST
 for database- and parser-level errors are deliberately generic (`"Resource already exists"`,
 `"Malformed request body"`, …): the raw messages carry SQL fragments, table/column names, model class
 names or the offending input, none of which belongs in an API response. `details` is present only when
-there is something to list.
+there is something to list. A malformed query string (bad %-escape, invalid UTF-8) also gets the
+`bad_request` envelope, although Rails raises it while logging the parameters, before `rescue_from` is in
+scope. ErrorHandleable hands that one exception to the handler chain itself.
 
 Response shape (matches `Respondable#render_error`):
 

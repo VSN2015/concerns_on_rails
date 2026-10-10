@@ -294,7 +294,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   on `render_success` (names and values stripped of illegal bytes, `Link` appended
   case-insensitively). `respondable_by error_format: :problem_details` switches every
   error-rendering concern to RFC 9457 app-wide.
-- **`ErrorHandleable`** — `rescue_from` for RecordNotFound / ParameterMissing / RecordInvalid.
+- **`ErrorHandleable`** — `rescue_from` for RecordNotFound / ParameterMissing / RecordInvalid; a private
+  `process_action` hands the BadRequest Instrumentation raises for a malformed query string
+  (before `rescue_from` is in scope) to the handlers, unless `:bad_request` was trimmed.
 - **`Includable`** — allow-listed association sideloading (nested include trees via `Support::IncludeTree`,
   `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets.
 - **`SecureHeadable`** — security response headers + native CSP DSL passthrough.

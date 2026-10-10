@@ -237,6 +237,32 @@ module ConcernsOnRails
 
       private
 
+      # ActionController::Instrumentation#process_action reads
+      # request.filtered_parameters BEFORE ActionController::Rescue#process_action
+      # (the frame that applies rescue_from) is entered, and filtered_parameters
+      # rescues only ParseError -- so the BadRequest a malformed query string
+      # (bad %-encoding, invalid UTF-8) raises escaped every rescue_from, and the
+      # client got Rails' HTML 400 page instead of the :bad_request envelope.
+      # Included into the controller class, this frame sits above
+      # Instrumentation, so it can hand that one exception to the rescue_from
+      # chain exactly as Rescue would. Only while :bad_request is still handled
+      # (`handle_errors except: :bad_request` keeps propagating) and nothing has
+      # been rendered yet.
+      def process_action(*)
+        super
+      rescue StandardError => e
+        raise unless error_handleable_rescue_early_bad_request?(e)
+
+        rescue_with_handler(e) || raise
+      end
+
+      def error_handleable_rescue_early_bad_request?(error)
+        return false unless defined?(::ActionController::BadRequest) && error.is_a?(::ActionController::BadRequest)
+        return false if respond_to?(:performed?, true) && performed?
+
+        self.class.error_handleable_keys.include?(:bad_request) && respond_to?(:rescue_with_handler, true)
+      end
+
       # Renders the envelope for a HANDLERS key: code = key, status from the table.
       def render_handled_error(key, message:, errors: nil)
         status = HANDLERS.fetch(key)[:status]
