@@ -121,7 +121,7 @@ describe ConcernsOnRails::Controllers::SecureHeadable do
       expect(report[3]).to be_nil
     end
 
-    it "delegates to content_security_policy (enforcing) by default and forwards per-action options" do
+    it "delegates to content_security_policy and clears report-only by default, forwarding per-action options to both" do
       calls = []
       base = Class.new(base_class) do
         define_singleton_method(:content_security_policy) { |*a, **k, &b| calls << [:enforce, a, k, b] }
@@ -132,12 +132,16 @@ describe ConcernsOnRails::Controllers::SecureHeadable do
 
       klass.content_security_policy_for(only: :show, &block)
 
-      expect(calls.size).to eq(1)
+      expect(calls.size).to eq(2)
       kind, args, opts, forwarded = calls.first
       expect(kind).to eq(:enforce)
       expect(args).to eq([])
       expect(opts).to eq(only: :show)
       expect(forwarded).to eq(block)
+      # The flag is forwarded as `false`, not skipped: Rails keeps report-only
+      # in its own inherited before_action, so skipping it left an inherited
+      # (or app-wide) report-only policy reporting instead of enforcing.
+      expect(calls.last).to eq([:report, [false], { only: :show }, nil])
     end
   end
   describe "modern presets and bundles" do
