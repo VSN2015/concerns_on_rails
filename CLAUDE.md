@@ -130,7 +130,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   captures the field's cast type per declaring class. Guarded `<event>!` + `may_<event>?`, `before/after_transition` plus
   per-event `before_/after_<event>` hooks (invoked with `send`, so private overrides work).
   Batch `transition_all(event)` — deliberately NO fast path, since the per-record path runs
-  validations via `update!` and `update_all` would skip them.
+  validations via `update!` and `update_all` would skip them; under `lock: true` it reads each guard
+  under the row lock, so a row moved concurrently is skipped (a single `<event>!` still raises).
 - **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all`,
   `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only).
 - **`Normalizable`** — `before_validation` normalization + a PREPENDED `before_save` backstop
