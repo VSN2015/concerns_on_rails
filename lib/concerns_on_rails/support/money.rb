@@ -85,8 +85,9 @@ module ConcernsOnRails
       # It must follow a digit, and is checked only once the unit is gone, so
       # a unit ending in e/E ("Le100.00", "CHE100.00") is not mistaken for one.
       OVERSIZED_EXPONENT = /\d[eE][+-]?\d{3}/
-      # "1.234" / "-1.234.567": "."-grouped thousands.
-      DOTTED_THOUSANDS = /\A[+-]?\d{1,3}(?:\.\d{3})+\z/
+      # "1.234" / "-1.234.567": "."-grouped thousands. Digit grouping never
+      # leads with a "0" group, so "0.500" is the decimal 0.5, never 500.
+      DOTTED_THOUSANDS = /\A[+-]?[1-9]\d{0,2}(?:\.\d{3})+\z/
       # The only shape handed to BigDecimal(): sign, digits with an optional
       # "." fraction, optional exponent. BigDecimal() itself also accepts
       # Ruby-literal underscores, so "5_5" read as 55 while the equally
@@ -178,9 +179,11 @@ module ConcernsOnRails
         whole && "#{sign}#{whole}#{'.' unless sep.empty?}#{frac}"
       end
 
+      # A leading "0" group is not grouping: "0,500" (a wrong-locale 0.5) is
+      # garbage (nil), not 500.
       def ungroup(whole, delimiter)
         return whole if delimiter.empty? || !whole.include?(delimiter)
-        return nil unless whole.match?(/\A\d{1,3}(?:#{Regexp.escape(delimiter)}\d{3})+\z/)
+        return nil unless whole.match?(/\A[1-9]\d{0,2}(?:#{Regexp.escape(delimiter)}\d{3})+\z/)
 
         whole.gsub(delimiter, "")
       end
