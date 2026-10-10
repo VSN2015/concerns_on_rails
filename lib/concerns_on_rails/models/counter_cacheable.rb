@@ -629,9 +629,9 @@ module ConcernsOnRails
       # class judging it: the persisted STI type's, not an unsaved one's.
       def counter_cacheable_run_destroy
         adjustments = counter_cacheable_with_attributes(counter_cacheable_unsaved_changes) do
-          counter_cacheable_presence_adjustments(-1) { |rule, judge| !counter_cacheable_destroyed_by_parent?(rule, judge) }
+          counter_cacheable_presence_adjustments(-1) { |rule, judge| !counter_cacheable_destroyed_by_parent?(rule, judge, :has_many) }
         end
-        counter_cacheable_flush(adjustments)
+        counter_cacheable_flush(adjustments.compact.map { |adj| counter_cacheable_pin_has_one_destroy(adj) })
       end
 
       # Rails' native counter cache skips the decrement when the child is being
@@ -642,11 +642,25 @@ module ConcernsOnRails
       # Only a has_many marks the parent as going away: a has_one sets
       # destroyed_by_association when a REPLACEMENT destroys the old record,
       # and there the parent survives and must be decremented.
-      def counter_cacheable_destroyed_by_parent?(rule, judge)
+      def counter_cacheable_destroyed_by_parent?(rule, judge, macro)
         by = destroyed_by_association
-        return false unless by && by.macro == :has_many
+        return false unless by && by.macro == macro
 
         Array(by.foreign_key).map(&:to_s) == Array(counter_cacheable_reflection(rule, judge).foreign_key).map(&:to_s)
+      end
+
+      # A has_one's dependent: :destroy may be the parent going away OR a
+      # replacement (the parent survives), and the child cannot tell which. So
+      # the decrement is kept but PINNED: it leaves the parent row's
+      # lock_version alone. Bumping it stranded a parent the bump could not be
+      # mirrored onto — a scoped (inverse-less) has_one's owner is not the
+      # instance the child's belongs_to holds — and that parent's own DELETE
+      # raised StaleObjectError, so it could never be destroyed. A parent being
+      # destroyed has nothing stale; a replacement still gets its count.
+      def counter_cacheable_pin_has_one_destroy(adjustment)
+        return adjustment unless counter_cacheable_destroyed_by_parent?(adjustment[:rule], adjustment[:judge], :has_one)
+
+        adjustment.merge(pinned: true)
       end
 
       def counter_cacheable_run_update
@@ -755,7 +769,8 @@ module ConcernsOnRails
 
         reflection = counter_cacheable_reflection(rule, judge)
         { klass: reflection.klass, key_column: reflection.association_primary_key.to_s, parent_key: parent_key,
-          column: rule[:count_column], delta: delta, touch: rule[:touch], association: rule[:association] }
+          column: rule[:count_column], delta: delta, touch: rule[:touch], association: rule[:association],
+          rule: rule, judge: judge }
       end
 
       # One update_counters per distinct (parent class, key column, key value):
@@ -763,16 +778,39 @@ module ConcernsOnRails
       # approved_comments_count) ride a single UPDATE instead of one statement
       # each. Addressed by the association key, not `id` — the class-level
       # update_counters(id, ...) would hit whichever row's id equals the key.
+      # A pinned adjustment (see counter_cacheable_pin_has_one_destroy) rides
+      # its own UPDATE, which leaves lock_version where it is.
       def counter_cacheable_flush(adjustments)
-        groups = adjustments.compact.group_by { |adj| [adj[:klass], adj[:key_column], adj[:parent_key]] }
-        groups.each do |(klass, key_column, parent_key), group|
+        groups = adjustments.compact.group_by { |adj| [adj[:klass], adj[:key_column], adj[:parent_key], adj[:pinned] == true] }
+        groups.each do |(klass, key_column, parent_key, pinned), group|
           counters = counter_cacheable_merged_counters(group)
           next if counters.empty?
 
-          touch = group.any? { |adj| adj[:touch] }
-          affected = klass.unscoped.where(key_column => parent_key).update_counters(touch ? counters.merge(touch: true) : counters)
-          counter_cacheable_sync_targets(klass, key_column, parent_key, group, counters) if affected.positive?
+          pinned &&= klass.locking_enabled?
+          relation = klass.unscoped.where(key_column => parent_key)
+          affected = counter_cacheable_write_counters(relation, klass, counters, group.any? { |adj| adj[:touch] }, pinned)
+          counter_cacheable_sync_targets(klass, key_column, parent_key, group, counters, bump: !pinned) if affected.positive?
         end
+      end
+
+      def counter_cacheable_write_counters(relation, klass, counters, touch, pinned)
+        return counter_cacheable_pinned_update(relation, klass, counters, touch) if pinned
+
+        relation.update_counters(touch ? counters.merge(touch: true) : counters)
+      end
+
+      # update_counters' UPDATE (`col = COALESCE(col, 0) ± n`, plus the touch
+      # timestamps) with the locking column pinned to itself: update_counters
+      # goes through update_all, which adds the lock_version increment unless
+      # the Hash names the column — and its Hash cannot carry one.
+      def counter_cacheable_pinned_update(relation, klass, counters, touch)
+        connection = klass.connection
+        updates = counters.to_h do |column, delta|
+          quoted = connection.quote_column_name(column)
+          [column.to_s, Arel.sql("COALESCE(#{quoted}, 0) #{delta.negative? ? '-' : '+'} #{Integer(delta.abs)}")]
+        end
+        updates.merge!(klass.touch_attributes_with_time) if touch
+        relation.update_all(updates.merge(ConcernsOnRails::Support::Locking.pinned(klass)))
       end
 
       # The UPDATE above bumped the parent row's lock_version (update_counters
@@ -785,14 +823,14 @@ module ConcernsOnRails
       # many rules (associations) share the UPDATE. Only under optimistic
       # locking: elsewhere the loaded parent is left exactly as before
       # (documented: reload it to read the counter).
-      def counter_cacheable_sync_targets(klass, key_column, parent_key, group, counters)
+      def counter_cacheable_sync_targets(klass, key_column, parent_key, group, counters, bump: true)
         return unless klass.locking_enabled?
 
         targets = group.map { |adj| adj[:association] }.uniq.filter_map do |name|
           target = counter_cacheable_held_target(name)
           target if counter_cacheable_target_row?(target, key_column, parent_key)
         end
-        targets.uniq(&:object_id).each { |target| counter_cacheable_sync_target(target, klass, counters) }
+        targets.uniq(&:object_id).each { |target| counter_cacheable_sync_target(target, klass, counters, bump: bump) }
       end
 
       # What this record's association `name` holds — nil also when its class
@@ -816,9 +854,10 @@ module ConcernsOnRails
       # lock_version bump. Mirroring the counter is what keeps the lock sync
       # safe: a current lock_version over a stale count would let a full-row
       # save (partial updates off) write the old count back.
-      def counter_cacheable_sync_target(target, klass, counters)
+      # A pinned UPDATE (`bump: false`) moved no lock_version, so none is mirrored.
+      def counter_cacheable_sync_target(target, klass, counters, bump: true)
         applied = counter_cacheable_apply_counters(target, counters)
-        bumped = ConcernsOnRails::Support::Locking.mirror_bump!(target, klass)
+        bumped = bump && ConcernsOnRails::Support::Locking.mirror_bump!(target, klass)
         MirrorUndo.record(klass.connection, target, klass, applied, bumped)
       end
 
