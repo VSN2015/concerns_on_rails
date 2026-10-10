@@ -2000,6 +2000,9 @@ are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`
 cannot represent (`?price_gte=abc`) matches **nothing** rather than silently comparing against `0` —
 nothing raises at request time. For strict, validated contracts reach for `Permittable`.
 
+On an `enum` column an unknown label (`?status=drfat`) equals nothing — it drops out of an `in` list — where
+Rails 7.0+ turned it into `status IS NULL` and returned the rows with no status.
+
 Numeric columns are read **strictly, never truncated**, in every form (direct `?stock=`, suffix, bracket,
 `in`/`not_in` lists):
 

@@ -369,11 +369,27 @@ module ConcernsOnRails
         operands.select { |operand| operand.status == :exact }.map(&:value)
       end
 
-      # The members to keep on a numeric or date/time column, or nil to keep
-      # the raw value unchanged.
+      # The members to keep on a numeric, enum or date/time column, or nil to
+      # keep the raw value unchanged.
       def filterable_equality_values(relation, field, values, negate: false)
         filterable_numeric_equality_values(relation, field, values) ||
+          filterable_enum_equality_values(relation, field, values) ||
           filterable_time_equality_values(relation, field, values, negate)
+      end
+
+      # An enum member that is neither a label nor a value a label stores
+      # (filterable_enum_label) equals nothing, so it drops out of the list,
+      # like an out-of-range number. On Rails 7.0+ such a label serializes to
+      # nil, and EnumType has a subtype, so ActiveRecord's QueryAttribute
+      # reports nil? and `where` emitted `status IS NULL`: `?status=drfat`
+      # returned exactly the rows with NO status. An explicit nil member keeps
+      # its IS NULL meaning. nil when the field is no enum or nothing drops.
+      def filterable_enum_equality_values(relation, field, values)
+        mapping = filterable_enum_mapping(relation, field)
+        return nil unless mapping
+
+        kept = values.select { |member| member.nil? || filterable_enum_label(mapping, member) }
+        kept.size == values.size ? nil : kept
       end
 
       # A date or time no stored value can equal drops out of the list, like
@@ -520,6 +536,23 @@ module ConcernsOnRails
         return true if column.respond_to?(:array) && column.array
 
         column.respond_to?(:sql_type) && column.sql_type.to_s.end_with?("[]")
+      end
+
+      # An enum attribute's label => stored-value mapping; nil for any other
+      # field.
+      def filterable_enum_mapping(relation, field)
+        model = relation.model
+        model.respond_to?(:defined_enums) ? model.defined_enums[field.to_s] : nil
+      end
+
+      # The label an enum operand names: the label itself, or the label that
+      # stores the value (in its String form: "1", a JSON body's 1). nil for
+      # anything else — an unknown label, or a value the enum does not map.
+      def filterable_enum_label(mapping, raw)
+        operand = raw.to_s
+        return operand if mapping.key?(operand)
+
+        mapping.find { |_label, stored| stored.to_s == operand }&.first
       end
 
       def filterable_column_type(relation, field)
