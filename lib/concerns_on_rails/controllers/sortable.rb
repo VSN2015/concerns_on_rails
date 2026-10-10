@@ -154,10 +154,15 @@ module ConcernsOnRails
       end
 
       # Apply ordering to a relation based on params[:sort] / params[:direction].
-      # Falls back to defaults; never orders by a non-allow-listed key.
+      # Falls back to defaults; never orders by a non-allow-listed key. A bare
+      # model class is sorted through its default relation (`.all`), as the
+      # paginators take one: the orderings ask `relation.model`, which a class
+      # does not answer, so `sorted(Article)` was a NoMethodError 500.
       def sorted(relation)
         requested = sort_requests
         return relation if requested.empty?
+
+        relation = relation.all if relation.is_a?(Class) && relation.respond_to?(:all)
 
         # reorder (not order) so the requested columns REPLACE any prior
         # ORDER BY — including a model default_scope order.
