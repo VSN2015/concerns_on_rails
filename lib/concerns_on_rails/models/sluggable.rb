@@ -48,7 +48,7 @@ module ConcernsOnRails
 
         # we must override should_generate_new_friendly_id? to support update slug
         # if we don't override this method, friendly_id will not generate the new slug when update
-        define_method :should_generate_new_friendly_id? do # rubocop:disable Metrics/CyclomaticComplexity
+        define_method :should_generate_new_friendly_id? do
           return true if @sluggable_force_regenerate # regenerate_slug!
 
           field = self.class.sluggable_field
@@ -62,13 +62,11 @@ module ConcernsOnRails
                           send("will_save_change_to_#{slug_column}?")
           return sluggable_built_slug_stale? if changing_slug
 
-          source_changed = respond_to?("will_save_change_to_#{field}?") &&
-                           send("will_save_change_to_#{field}?")
           # Backfill a missing slug even when the source did not change, so
           # legacy/imported rows with a NULL slug still self-heal.
           slug_missing = send(slug_column).blank? && slug_source.present?
 
-          source_changed || slug_missing || sluggable_scope_changed?
+          sluggable_source_rebuild?(field) || slug_missing || sluggable_scope_changed?
         end
 
         # Defined on the class (like the method above) so it sits ABOVE
@@ -287,6 +285,20 @@ module ConcernsOnRails
         return false unless current == built[:slug] || current == sluggable_transform_slug(built[:slug])
 
         sluggable_candidate_key != built[:from]
+      end
+
+      # A changed source rebuilds the slug only while it still yields a
+      # usable candidate. A cleared source (nil, blank, or "!!!", which
+      # normalizes to nothing) would leave friendly_id only its bare uuid
+      # fallback, silently swapping a meaningful slug — and every URL to it —
+      # for a random one; stock friendly_id keeps the slug then too. The
+      # scope rule (#sluggable_scope_changed?) is deliberately not gated: a
+      # record moved into a scope that already holds its slug must not keep a
+      # duplicate there, so it still gets friendly_id's uuid.
+      def sluggable_source_rebuild?(field)
+        return false unless respond_to?("will_save_change_to_#{field}?") && send("will_save_change_to_#{field}?")
+
+        sluggable_candidate_key.any?
       end
 
       def sluggable_forget_built_slug
