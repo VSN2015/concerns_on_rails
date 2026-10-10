@@ -246,7 +246,8 @@ module ConcernsOnRails
                     else
                       %i[before_unpublish after_unpublish unpublish!]
                     end
-          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Publishable, *methods)
+          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Publishable, *methods,
+                                                        writes: [publishable_field])
         end
       end
 

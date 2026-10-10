@@ -111,6 +111,8 @@ Comment.recount_counter_caches!(:post, parents: Post.where(author: me))
 
 ## Notes & gotchas
 
+- **Batch verbs keep a conditional counter in step.** A rule with `if:` can flip when a sibling concern's batch verb writes the row (`if: -> { published? }` under `publish_all`). So `publish_all` / `unpublish_all`, `expire_all` and `activate_all` / `deactivate_all` take their per-record path on such a model, and the counter moves exactly as with `publish!`. Their single-`UPDATE` fast path used to skip the callback and leave the counter behind. A rule without `if:` never moves under a batch verb (none changes a foreign key), so it keeps the fast path.
+
 - **Declare `belongs_to` first.** The reflection is validated when the macro runs; a missing association raises with a hint. Polymorphic associations are **not supported** in this version.
 - **Don't combine with native `counter_cache: true`** on the same column — both would fire and the counter would double.
 - **Counters track the persisted record.** Writes that skip callbacks — `update_column(s)`, `update_all`, `delete`, raw SQL — leave the cache stale; run `recount_counter_caches!` to reconcile.
