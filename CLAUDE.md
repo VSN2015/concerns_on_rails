@@ -205,7 +205,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   exactly as `attribute :x, :datetime` (never re-declare per subclass: that drops `normalizes`);
   Rails 7.2+ decides that at declaration, so a late/subclass skip list raises when
   `_default_attributes` is built (skipped during `load_schema!` and `encryptable`).
-  Normalizes-before-encrypt and masks-decrypted for free; RAISES if a field is
+  Normalizes-before-encrypt and masks-decrypted for free; a `serialize`/`normalizes` declared
+  BEFORE `encryptable` on the field raises (its type would be replaced; 6.0's serialize composes);
+  RAISES if a field is
   also `auditable_by` (either declaration order), or a friendly_id slug source — the
   `sluggable_by` field, a `candidates:` entry, an `alias_attribute` of one (chains followed),
   a bare friendly_id base (at the macro where it can, else at save), or a `searchable_by`/
