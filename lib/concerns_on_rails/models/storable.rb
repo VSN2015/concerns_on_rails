@@ -520,9 +520,14 @@ module ConcernsOnRails
       # a Time. deep_dup leaves non-duplicable values (nil, Integers,
       # Symbols, true/false) as they are. A Class/Module is an identity, not
       # a value — Rails 6.0's deep_dup would hand back an anonymous copy.
+      # The result then reads back exactly as the same value stored under the
+      # key would (only :json stays uncast): a `default: "false"` on a
+      # :boolean key used to come back as the truthy String "false".
       def storable_default(spec)
         value = storable_raw_default(spec[:default])
-        spec[:type] == :datetime ? storable_as_stored(spec, value) : value
+        return value if value.nil? || spec[:type] == :json
+
+        storable_as_stored(spec, value)
       end
 
       def storable_raw_default(default)
@@ -532,10 +537,10 @@ module ConcernsOnRails
         default.deep_dup
       end
 
-      # A :datetime default reads back exactly as the same value stored under
-      # the key would: through the writer's cast, then the reader's (a
-      # TimeWithZone under time_zone_aware_attributes). A String default used
-      # to come back as that String.
+      # A default reads back exactly as the same value stored under the key
+      # would: through the writer's cast, then the reader's (a BigDecimal for
+      # :decimal, a Date for :date, a TimeWithZone for :datetime under
+      # time_zone_aware_attributes).
       def storable_as_stored(spec, value)
         stored = storable_cast_write(spec, value)
         stored.nil? ? nil : storable_cast_read(spec, stored)
