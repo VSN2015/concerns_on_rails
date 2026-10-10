@@ -379,6 +379,7 @@ article = Article.create!(title: "Draft")
 article.published?      # => false
 article.publish!
 article.published?      # => true
+article.publish!        # already published: a no-op (true), keeps published_at, no hooks
 article.unpublish!
 
 Article.published       # WHERE published_at <= NOW()
@@ -962,6 +963,7 @@ sub = Subscription.create!(active: true)
 sub.active?            # => true
 sub.deactivate!
 sub.inactive?          # => true
+sub.deactivate!        # already inactive: a no-op (true), no hooks, deactivated_at kept
 sub.toggle_active!     # flips back to true
 
 Subscription.active     # WHERE active = TRUE
