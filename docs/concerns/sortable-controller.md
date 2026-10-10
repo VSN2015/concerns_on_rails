@@ -41,7 +41,7 @@ sortable_by(*allowed_fields, default: nil, direction: :asc, **rules)
 | `*allowed_fields` | `Symbol` / `String` positional arguments | — | Plain sort keys: each sorts by the column of the same name on the relation's own table. |
 | `**rules` | `key: { column:, joins:, join:, nulls: }` | — | Sort keys with a rule (see below). At least one plain field or rule must be supplied or `ArgumentError` is raised. |
 | `default:` | `Symbol` or `String` | First declared key | The key used when `params[:sort]` is absent or contains no allow-listed key. It need **not** be one of the declared keys: an undeclared `default:` is registered as an ordering rule but deliberately kept out of the allow-list, so clients still cannot request it. |
-| `direction:` | `:asc` or `:desc` | `:asc` | The direction used for un-prefixed keys when `params[:direction]` is absent or invalid. Any other value is silently coerced to `:asc`. |
+| `direction:` | `:asc` or `:desc` | `:asc` | The direction used for un-prefixed keys when `params[:direction]` is absent or invalid. Case-insensitive, String or Symbol (`"DESC"`, `:Desc`); anything else (a typo like `:dsc`, `nil`) raises `ArgumentError` at class load. It used to be silently coerced to `:asc` — `direction: "DESC"` included, so the default listing came out the wrong way round. |
 
 ### Rule options
 
