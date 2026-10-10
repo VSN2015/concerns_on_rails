@@ -630,10 +630,17 @@ module ConcernsOnRails
           # reader named `_ciphertext`, documented for "asserting no plaintext
           # is at rest", handed back the SSN, so `log.info(user.ssn_ciphertext)`
           # wrote it straight to the log.
+          #
+          # And "not changed" is not "the attribute is the database value": an
+          # assignment that leaves the value equal (an edit form re-submitting
+          # the same SSN, an assign-then-revert, CounterCacheable restoring an
+          # old value to judge `if:`) still holds the PLAINTEXT as its raw
+          # value. So the envelope is read from the attribute that came from
+          # the database (encryptable_stored_value).
           define_method("#{field}_ciphertext") do
             next nil if new_record? || public_send("#{field}_changed?")
 
-            read_attribute_before_type_cast(field)
+            encryptable_stored_value(field)
           end
 
           # True only when what is stored really is an encryption envelope. The
@@ -900,8 +907,24 @@ module ConcernsOnRails
 
       def encryptable_stored_field_names(fields)
         (fields || self.class.encryptable_rules.keys.map(&:to_s)).select do |name|
-          has_attribute?(name) && !read_attribute_before_type_cast(name).nil?
+          has_attribute?(name) && !encryptable_stored_value(name).nil?
         end
+      end
+
+      # The column's raw value as this record last read or wrote it: the
+      # value_before_type_cast of the attribute that came from the database.
+      # Any assignment — also one that leaves the value unchanged — wraps that
+      # attribute in a user-assigned one whose raw value is the caller's
+      # PLAINTEXT, holding the database attribute as its original; this walks
+      # back to it. An attribute written with its cast value (update_columns)
+      # has no original and is returned as it is. (ActiveModel::Attribute's
+      # original_attribute is private on every supported line, 6.0-8.1.)
+      def encryptable_stored_value(field)
+        attribute = @attributes[field.to_s]
+        while (original = attribute.send(:original_attribute))
+          attribute = original
+        end
+        attribute.value_before_type_cast
       end
 
       # What reencrypt! would write: the new values (plus their refreshed blind
@@ -911,7 +934,7 @@ module ConcernsOnRails
         guards = []
         binds = []
         self.class.encryptable_rotatable_fields(fields).each do |field|
-          stored = read_attribute_before_type_cast(field)
+          stored = encryptable_stored_value(field)
           next if stored.nil? || public_send("#{field}_changed?")
 
           value = public_send(field)

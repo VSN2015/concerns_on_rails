@@ -522,11 +522,14 @@ module ConcernsOnRails
 
       # Whether an encrypted field holds a value, without decrypting it: a
       # pending assignment is in-memory plaintext (no crypto to read it);
-      # otherwise the column's stored ciphertext is either there or NULL.
+      # otherwise the column's stored ciphertext is either there or NULL —
+      # read from the attribute that came from the database, as Encryptable's
+      # own readers do (an unchanged re-assignment holds plaintext as its raw
+      # value). Only asked of an encryptable field, so the reader exists.
       def anonymizable_stored_value?(field)
         return !public_send(field).nil? if public_send("#{field}_changed?")
 
-        !read_attribute_before_type_cast(field.to_s).nil?
+        !encryptable_stored_value(field).nil?
       end
 
       def anonymizable_encrypted_field?(field)
