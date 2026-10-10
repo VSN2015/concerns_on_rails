@@ -1,3 +1,5 @@
+require "concerns_on_rails/support/primary_key"
+
 module ConcernsOnRails
   module Support
     # Keeping a record instance honest with its row around the concerns' raw
@@ -67,14 +69,17 @@ module ConcernsOnRails
       # yield them as { "column" => value } (cast through the model's
       # attribute types), or nil when the row has gone. The row stays locked
       # until the outermost transaction ends, so a write made in the block is
-      # made against the value it read. The block's value is returned.
+      # made against the value it read. The block's value is returned. The
+      # primary key is plucked alongside (so a row always comes back as an
+      # Array), every column of it under a composite key.
       def with_row_lock(record, *columns)
         klass = record.class
-        primary_key = klass.primary_key
+        key_columns = PrimaryKey.columns(klass)
         names = columns.map(&:to_s)
         record.transaction do
-          row = klass.unscoped.where(primary_key => record.id).lock.limit(1).pluck(primary_key, *names).first
-          yield(row && names.zip(row.drop(1)).to_h)
+          row = klass.unscoped.where(PrimaryKey.condition(klass, record.id)).lock.limit(1)
+                     .pluck(*key_columns, *names).first
+          yield(row && names.zip(row.drop(key_columns.size)).to_h)
         end
       end
 

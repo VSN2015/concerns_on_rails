@@ -4,6 +4,7 @@ require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/slug_sources"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/locking"
+require "concerns_on_rails/support/primary_key"
 require "active_model/type"
 require "bigdecimal"
 require "time"
@@ -888,7 +889,8 @@ module ConcernsOnRails
         names = encryptable_stored_field_names(fields)
         return if names.empty?
 
-        sql = self.class.unscoped.where(self.class.primary_key => id_in_database).select(*names).to_sql
+        condition = ConcernsOnRails::Support::PrimaryKey.condition(self.class, id_in_database)
+        sql = self.class.unscoped.where(condition).select(*names).to_sql
         row = self.class.connection.select_rows(sql).first
         names.each_with_index { |name, index| @attributes.write_from_database(name, row[index]) } if row
       end
@@ -941,12 +943,8 @@ module ConcernsOnRails
       # into a StaleObjectError. (A write the app makes meanwhile still bumps
       # it as usual; the ciphertext guard is what keeps the two apart.)
       def encryptable_rotate_row!(updates, guards, binds)
-        primary_key = self.class.primary_key
-        # id_in_database is Rails 5.2+; for a persisted row whose primary key
-        # has not been reassigned in memory the attribute is the same value.
-        pk_value = respond_to?(:id_in_database) ? id_in_database : self[primary_key]
         self.class.unscoped
-            .where(primary_key => pk_value)
+            .where(ConcernsOnRails::Support::PrimaryKey.condition(self.class, id_in_database))
             .where(guards.join(" AND "), *binds)
             .update_all(updates.merge(ConcernsOnRails::Support::Locking.pinned(self.class)))
       end
