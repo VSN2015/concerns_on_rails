@@ -147,7 +147,7 @@ module ConcernsOnRails
         # find the row, so this raises rather than failing every login as nil.
         def timing_safe_find(field, value)
           tokenizable_refuse_unqueryable!(field)
-          return nil if value.blank?
+          return nil unless tokenizable_lookup_value?(value)
 
           candidate = find_by(ConcernsOnRails::Support::EncryptedLookup.condition(self, field, value))
           return nil unless candidate
@@ -174,6 +174,16 @@ module ConcernsOnRails
                             .where(ConcernsOnRails::Support::EncryptedLookup.condition(self, field, value))
                             .update_all(tokenizable_consumed_attributes(record, field))
           revoked == 1 ? record.reload : nil
+        end
+
+        # Only a non-blank String (or an Integer — a numeric code from a JSON
+        # body) is looked up. A crafted param (`?token[a]=b`) arrives as a
+        # Hash or ActionController::Parameters, which find_by cannot cast
+        # (TypeError: a 500 instead of a 401), and an Array would run an
+        # IN (...) over the caller's guesses; anything else answers nil, like
+        # a wrong token, without a query.
+        def tokenizable_lookup_value?(value)
+          (value.is_a?(String) || value.is_a?(Integer)) && value.present?
         end
 
         def tokenizable_consumed_attributes(record, field)
