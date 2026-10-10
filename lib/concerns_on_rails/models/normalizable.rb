@@ -6,6 +6,7 @@ require "active_support/core_ext/string/filters"
 require "active_support/core_ext/string/inflections"
 require "uri"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
   module Models
@@ -106,13 +107,17 @@ module ConcernsOnRails
         class_attribute :normalizable_rules, instance_accessor: false, default: {}
         before_validation :apply_normalizations
         # Backstop for the saves that skip validation — update_attribute,
-        # save(validate: false) — which otherwise stored the raw value.
-        # PREPENDED: callbacks run in registration order, and a sibling's
-        # earlier before_save (Encryptable's blind index, Auditable's entry,
-        # Addressable's fingerprint) must see the value that gets stored, not
-        # the raw one — whichever order the concerns were included in.
-        # Registered once, here; re-declaring `normalizable` only merges rules.
-        before_save :normalizable_apply_unvalidated, prepend: true
+        # save(validate: false) — which otherwise stored the raw value. Run
+        # by the shared PREPENDED dispatcher (Support::TransformBackstop), in
+        # the same order as the sibling transforms' before_validation passes,
+        # so a sibling's earlier before_save (Encryptable's blind index,
+        # Auditable's entry, Addressable's fingerprint) sees the value that
+        # gets stored. normalizable_settle runs after every sibling's
+        # backstop. Installed once, here; re-declaring `normalizable` only
+        # merges rules.
+        ConcernsOnRails::Support::TransformBackstop.install(
+          self, :normalizable_apply_unvalidated, settle: :normalizable_settle
+        )
       end
 
       class_methods do
@@ -188,12 +193,23 @@ module ConcernsOnRails
 
       private
 
-      # Normalize only what before_validation did not: a field it already
-      # handled, still holding the value it produced, is skipped, so a
-      # non-idempotent Proc runs exactly once in a validated save. A field
-      # assigned after that validation (or never validated at all) is
-      # normalized here. The record is cleared for the next save.
+      # A save that skipped validation gets, at this concern's place in the
+      # before_validation order, the pass validation would have run —
+      # recorded the same way, so normalizable_settle can tell whether a
+      # later sibling rewrote the field. After a validation it does nothing:
+      # the pass already ran there.
       def normalizable_apply_unvalidated
+        apply_normalizations if @normalizable_applied.nil?
+      end
+
+      # Runs after every transform's backstop. Normalize only what the pass
+      # did not: a field it handled, still holding the value it produced, is
+      # skipped, so a non-idempotent Proc runs exactly once per save. A field
+      # assigned after the pass — or rewritten by a later sibling transform,
+      # since Normalizable compares against what IT produced, not what
+      # validation accepted — is normalized here, whether or not the save
+      # was validated. The record is cleared for the next save.
+      def normalizable_settle
         applied = @normalizable_applied || {}
         @normalizable_applied = nil
         normalizable_each_pending_rule do |field, normalizer, value|

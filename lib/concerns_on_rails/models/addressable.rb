@@ -2,6 +2,7 @@ require "active_support/concern"
 require "digest"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/address_data"
+require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
   module Models
@@ -63,10 +64,11 @@ module ConcernsOnRails
         before_validation :normalize_address
         after_validation :addressable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
-        # save(validate: false) — which otherwise stored the raw parts.
-        # PREPENDED (Normalizable's rule), so it runs ahead of the
-        # fingerprint stamp below and any sibling's earlier before_save.
-        before_save :addressable_normalize_unvalidated, prepend: true
+        # save(validate: false) — which otherwise stored the raw parts. Run
+        # by the shared PREPENDED dispatcher (Support::TransformBackstop) in
+        # before_validation order, so it runs ahead of the fingerprint stamp
+        # below and any sibling's earlier before_save.
+        ConcernsOnRails::Support::TransformBackstop.install(self, :addressable_normalize_unvalidated)
         # Stamping is its OWN callback, not a tail call inside normalize_address:
         # a sibling concern's later before_validation (Normalizable, say) can
         # still rewrite a mapped column, and a fingerprint computed before that
