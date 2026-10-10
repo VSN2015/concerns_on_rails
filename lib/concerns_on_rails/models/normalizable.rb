@@ -56,13 +56,27 @@ module ConcernsOnRails
         scheme = stripped[URL_SCHEME, 1]
         return stripped if scheme && !URL_SCHEMES.include?(scheme.downcase)
 
-        uri = URI.parse(scheme ? stripped : "https://#{stripped}")
+        uri = URI.parse(url_with_scheme(stripped, scheme))
+        # Nothing to name a host after the defaulted scheme ("///x", "/path"):
+        # not a URL this preset can canonicalize.
+        return stripped if !scheme && uri.host.to_s.empty?
+
         uri.scheme = uri.scheme.downcase
         downcase_host!(uri)
         uri.to_s
       rescue URI::InvalidURIError, URI::InvalidComponentError
         stripped
       end
+
+      # A protocol-relative "//host/path" already carries the "//", so it
+      # gets only "https:" — prefixing "https://" made "https:////host",
+      # which never parsed, and the URL kept no scheme and its host's case.
+      def self.url_with_scheme(stripped, scheme)
+        return stripped if scheme
+
+        stripped.start_with?("//") ? "https:#{stripped}" : "https://#{stripped}"
+      end
+      private_class_method :url_with_scheme
 
       # String#strip only removes ASCII whitespace (and NUL): a pasted no-break
       # space, em space or ideographic space survived it. Strip every
