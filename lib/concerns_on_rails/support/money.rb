@@ -44,7 +44,7 @@ module ConcernsOnRails
         unknown = overrides.keys - FORMAT_OPTIONS
         raise ArgumentError, "#{label}: unknown formatting option(s): #{unknown.join(', ')}" if unknown.any?
 
-        coerce_numeric_options(config.merge(overrides), label)
+        coerce_numeric_options(config.merge(overrides), label).tap { |options| validate_marks!(options, label) }
       end
 
       # A unit that contains the delimiter or the separator (",", "Fr." with
@@ -55,6 +55,27 @@ module ConcernsOnRails
         return unless marks.any? { |mark| unit.include?(mark) }
 
         raise ArgumentError, "#{label}: :unit must not contain the :delimiter or :separator (unit: #{unit.inspect})"
+      end
+
+      # A separator equal to the delimiter ("," with the default ",") prints
+      # "1,234,56", and an empty one with decimals to show prints "1,23456":
+      # neither reads back (the writer stored nil), so neither is accepted.
+      # Expects coerced options; a nil :precision is a default, which always
+      # shows decimals.
+      def validate_marks!(options, label)
+        delimiter = options.fetch(:delimiter, ",").to_s
+        separator = options.fetch(:separator, ".").to_s
+        if separator.empty?
+          precision = options.fetch(:precision, nil)
+          return unless precision.nil? || precision.positive?
+
+          raise ArgumentError, "#{label}: :separator must not be empty while :precision is positive " \
+                               "(formatted output could not be read back)"
+        end
+        return unless separator == delimiter
+
+        raise ArgumentError, "#{label}: :separator must differ from the :delimiter (both #{separator.inspect}); " \
+                             "formatted output could not be read back"
       end
 
       # :subunit_to_unit to a positive Integer, :precision to an Integer
