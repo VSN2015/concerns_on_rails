@@ -132,6 +132,7 @@ module ConcernsOnRails
         #   sluggable_by :wonderful_name
         #   sluggable_by :title, history: true            # old slugs keep resolving (needs a friendly_id_slugs table)
         #   sluggable_by :title, scope: :account_id       # slugs unique per scope column
+        #   sluggable_by :title, scope: %i[account_id locale]  # ... or per combination of columns
         #   sluggable_by :title, reserved_words: %w[new]  # block these slugs (a UUID is appended instead)
         #   sluggable_by :title, finders: true            # Model.find accepts a slug directly
         #   sluggable_by :title, candidates: [:title, %i[title city]]   # try "title", then "title-city", then a uuid
@@ -145,10 +146,12 @@ module ConcernsOnRails
           max_length = sluggable_validate_max_length!(max_length)
           sluggable_guard_encryptable!(sluggable_source_fields(field, candidates))
           # Validate the slug column too (a missing one used to fail at first save
-          # with an opaque friendly_id error); an association scope: is exempt.
-          scope_column = scope && reflect_on_association(scope.to_sym) ? nil : scope
+          # with an opaque friendly_id error). scope: is one entry or, as
+          # friendly_id allows, an Array of them; an association entry is
+          # exempt (friendly_id scopes by its foreign key).
+          scope_columns = Array(scope).reject { |entry| reflect_on_association(entry.to_sym) }
           ensure_columns!("ConcernsOnRails::Models::Sluggable",
-                          [field, friendly_id_config.slug_column, scope_column].compact,
+                          [field, friendly_id_config.slug_column, *scope_columns],
                           types: { friendly_id_config.slug_column.to_sym => "string:uniq" })
           self.sluggable_field = field
           self.sluggable_candidates = candidates
