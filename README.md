@@ -483,6 +483,7 @@ in memory.
 
 **Notes**
 - "Published" means `published_at` is set **and** in the past — so future-dated posts stay unpublished until their time arrives.
+- On a `date` publish column (`publishable_by :published_on`), `published?` / `scheduled?` compare against today in `Time.zone`, as `.published` / `.scheduled` do.
 - `publish_at!` casts its argument through the column's type. A value that is not a time raises `ArgumentError` before any hook runs: a String must name a year (ISO 8601, RFC 2822, `"Oct 1 2026"` and `"2026-10-01 10:30"` all do; `"junk"`, `"Monday"` and `"10:30"` do not, although `Time.zone.parse` reads them as June 1st and today), and `42` or `1.hour` never cast. It used to write `NULL` and return `true`. `nil` still writes `NULL` (and fires the publish hooks).
 - No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`). An explicit `default_scope: false` on a later call or an STI subclass turns it off again; omitting the option keeps the current (inherited) setting.
 - A boolean publishable column works too (`publishable_by :is_published`). Its `.published` scope is `(is_published = TRUE)`, wrapped in parentheses (an Arel Grouping) so that Rails does not copy the condition onto new records built through the scope. So with `default_scope: true` a new record still starts unpublished, and so does `Post.published.new`. The predicate stays in the index-friendly `= TRUE` form, so a partial index `WHERE published = true` still matches. On Rails 6.0, which cannot `unscope` a Grouping, the scope uses `is_published <> FALSE` instead; it selects the same rows.
@@ -738,6 +739,7 @@ Expirable also defines) belongs to whichever concern is included last.
 - A `nil` end means "never expires"; a `nil` start means "not yet started".
 - `start!` / `finish!` / `reschedule!` cast each time through its column's type. A value that is not a time raises `ArgumentError` and nothing is written (it used to clear the column): a String must name a year (ISO 8601, RFC 2822, `"Oct 1 2026"` and `"2026-10-01 10:30"` all do; `"junk"`, `"Monday"` and `"10:30"` do not, although `Time.zone.parse` reads them as June 1st and today), and `42` or `1.hour` never cast. `nil` still clears a side.
 - No `default_scope`; chain `.current` explicitly.
+- `date` columns work (`schedulable_by starts_at: :starts_on, ends_at: :ends_on`): the predicates cast the instant through the column's type, as the scopes' binds are, so `current?` / `upcoming?` / `expired?` / `active_at?` / `overlaps?` compare against the date in `Time.zone` and agree with `.current` / `.upcoming` / `.expired`. They used to compare the stored Date at UTC midnight, so outside UTC they disagreed with the scopes for part of every day. Expirable's and Publishable's predicates do the same.
 
 ---
 
@@ -808,6 +810,7 @@ plain names, but Activatable (`active?`) and Schedulable (`expired?`) define the
 that combines them, the concern included last owns the plain name, so use the affixed predicates.
 The plain predicates keep their old relationship: `active?` is `!expired?`, so overriding `expired?` changes both.
 The affixed predicates always give Expirable's own answer.
+On a `date` expiry column, `expired?` / `active?` compare against today in `Time.zone`, as `.expired` / `.active` do.
 
 The same rules apply to every concern with affixed predicates (Expirable, Activatable, Schedulable):
 - The macro raises `ArgumentError` if an affixed predicate would shadow a column's query method. For
