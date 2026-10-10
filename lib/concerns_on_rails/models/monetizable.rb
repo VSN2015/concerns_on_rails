@@ -63,6 +63,7 @@ module ConcernsOnRails
             LABEL
           ).freeze
           ConcernsOnRails::Support::Money.validate_unit!(config, LABEL)
+          ConcernsOnRails::Support::Money.validate_marks!(config, LABEL)
 
           ensure_columns!("ConcernsOnRails::Models::Monetizable", fields, types: :integer)
           monetizable_guard_encryptable!(fields)
