@@ -133,6 +133,8 @@ order.audited_changes_since(1.day.ago).map { |e| "#{e['field']}: #{e['from']} â†
 
 ## Notes & gotchas
 
+- **Batch verbs record their changes.** When a tracked column is one that a sibling concern's batch verb writes (Publishable's `published_at`, Expirable's expiry, Activatable's flag or stamps, or `updated_at`), `publish_all` / `unpublish_all`, `expire_all` and `activate_all` / `deactivate_all` take their per-record path, so each row gets its audit entry as with `publish!`. Their single-`UPDATE` fast path used to skip `before_save` and record nothing.
+
 - **Callback-skipping writes are not audited.** `update_column`/`update_columns`, `touch`, `increment!`, and `delete` bypass `before_save`, so they leave no entries. `save(validate: false)` *is* audited (callbacks still run).
 - **Bounded by design.** The default `max_entries: 200` keeps the row from growing without limit; the oldest entries are silently trimmed. Pass `nil` only when you have an external cleanup story. For large tracked text fields, add `max_value_length:` so individual entries stay small too â€” otherwise each change stores the full old *and* new values.
 - **Corrupt JSON is tolerated, then replaced.** A hand-edited or truncated column decodes as `[]` and is overwritten by a fresh trail on the next tracked save.

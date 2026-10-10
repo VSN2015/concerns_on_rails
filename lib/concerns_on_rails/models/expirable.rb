@@ -81,7 +81,8 @@ module ConcernsOnRails
         # validations, plus why) lives in Support::BatchOps.fast_path?.
         def expirable_batch_fast_path?
           ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Expirable,
-                                                        :expire!, :before_expire, :after_expire)
+                                                        :expire!, :before_expire, :after_expire,
+                                                        writes: [expirable_field])
         end
 
         # Scopes live here (not in `included do`) so their names can be affixed —

@@ -424,6 +424,11 @@ exactly those ten on the streaming path too (it resolves the limit to primary ke
 `has_many` join (`Post.joins(:comments).publish_all`) publishes — and runs `after_publish` for —
 each post once however many comments it joins, and a model's default-scope `ORDER BY` (Sortable)
 no longer trips `error_on_ignored_order` — true of every `*_all` verb.
+They also stream per record whenever one of the gem's own sibling concerns keeps data in step from
+save callbacks that `update_all` would skip: a CounterCacheable rule with an `if:` condition, or
+Auditable tracking a column the verb writes. The single `UPDATE` used to leave such a counter or audit
+trail behind, and whether it did depended on whether some unrelated validator forced the per-record
+path. (`expire_all`, `activate_all` and `deactivate_all` are gated the same way.)
 
 `publish_all` targets every not-currently-published row — **including scheduled ones**, whose
 future `published_at` it overwrites — so chain `.draft` (`Post.draft.publish_all`) to exclude
@@ -830,7 +835,8 @@ returns the Integer count, in a transaction. With `expire!` and both hooks unove
 the model — neither `validates`/`validates_with`, a custom `validate :method`, nor an
 association's autosave validation (a bare `has_many` registers one, so most models with
 associations take the streaming path) — it collapses
-to a single `UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise it
+to a single `UPDATE`, which bumps `updated_at` exactly as the per-record path does (unless a CounterCacheable
+rule with `if:` or Auditable tracking the expiry column needs the per-record callbacks); otherwise it
 streams per record through `expire!` so validations still run, and a record that fails to save
 raises `ActiveRecord::RecordNotSaved` and rolls the whole batch back.
 
@@ -985,7 +991,8 @@ streaming path) — `activate_all` collapses to a single
 per record so the hooks and validations still run, and a record that fails to save raises
 `ActiveRecord::RecordNotSaved` and rolls the whole batch back. `deactivate_all` is gated the
 same way by `deactivate!`/`before_deactivate`/`after_deactivate`, so overriding only
-`after_deactivate` leaves `activate_all` on the fast path. `toggle_active!`'s row lock has
+`after_deactivate` leaves `activate_all` on the fast path. A CounterCacheable rule with `if:`, or
+Auditable tracking the flag or a stamp, also keeps both on the per-record path (see Publishable). `toggle_active!`'s row lock has
 no batch analogue. It reloads a clean record under the lock; a record with unsaved changes (which
 `with_lock` refuses) has only the flag read under the lock, and its changes save with the flip.
 

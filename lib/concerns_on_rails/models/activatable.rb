@@ -133,7 +133,8 @@ module ConcernsOnRails
         # no validations, plus why) lives in Support::BatchOps.fast_path?.
         def activatable_batch_fast_path?(kind)
           ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Activatable,
-                                                        :"#{kind}!", *HOOKS.fetch(kind))
+                                                        :"#{kind}!", *HOOKS.fetch(kind),
+                                                        writes: activatable_attributes(kind == :activate, kind).keys)
         end
 
         # true -> both default columns; a Hash renames a side or drops it with
