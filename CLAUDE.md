@@ -200,7 +200,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   plaintext (random IV never re-encrypts unchanged data); `type:` reuses the
   Storable casters; keys from `ConcernsOnRails.configure_encryption` / per-field
   `key:` (PBKDF2, lazy Proc), missing key raises at first use. `<field>_ciphertext`
-  / `<field>_encrypted?` readers; wrong-key/tamper/malformed → `DecryptionError`.
+  / `<field>_encrypted?` readers (read the DATABASE attribute behind any assignment —
+  `encryptable_stored_value`, also Anonymizable's); wrong-key/tamper/malformed → `DecryptionError`.
   A `:datetime` field reports `type :datetime`, so ActiveRecord's own TimeZoneConverter wraps it
   exactly as `attribute :x, :datetime` (never re-declare per subclass: that drops `normalizes`);
   Rails 7.2+ decides that at declaration, so a late/subclass skip list raises when
