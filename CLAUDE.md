@@ -86,6 +86,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `length:`, `alphabet:`, `unique:` (retry on collision).
 - **`Tokenizable`** — multiple security-token columns. `type:` `:urlsafe`/`:hex`/
   `:alphanumeric`/`:numeric`, `length:`; `regenerate_/revoke_/<field>?` + uniqueness retry.
+  `authenticate_by_`/`consume_` look up only a String or Integer (a Hash/Array/Parameters param → nil).
 - **`Sequenceable`** — ordered reference numbers (invoice/order numbers). `into:`, `prefix:`,
   `padding:`, `scope:`, `reset:` (`:year`/`:month`/`:day`), `template:`, `assign:`
   (`:create`/`:manual`), `time_zone:` (`reset:` periods — MAX range AND token — are cut in ONE
