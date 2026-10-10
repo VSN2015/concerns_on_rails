@@ -190,7 +190,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   reader/writer/`?` (boolean)/`_changed?`/`_was`/`reset_`. Manual JSON codec (never
   `serialize`; native-json and host-serialized columns auto-detected), nil-vs-unset
   semantics, macro-time collision/type validation, ActiveModel::Type casting
-  (`:decimal` stored as string, `:datetime` ISO8601 UTC microseconds). `where_<key>`
+  (`:decimal` stored as string, `:datetime` ISO8601 UTC microseconds; a `default:` reads
+  back cast exactly as the same value stored would, `:json` excepted). `where_<key>`
   raises on an `encryptable` column (ciphertext isn't JSON), in either declaration order.
 - **`Encryptable`** — transparent per-field encryption for sensitive columns
   (AES-256-GCM, stdlib OpenSSL, no deps) via a custom `ActiveModel::Type` on the
