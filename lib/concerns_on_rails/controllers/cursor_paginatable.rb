@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
 require "concerns_on_rails/support/scalar_param"
+require "concerns_on_rails/support/numeric_operand"
 require "concerns_on_rails/support/time_value"
 require "json"
 require "concerns_on_rails/support/link_header"
@@ -72,6 +73,9 @@ module ConcernsOnRails
       # "Option not passed" for cursor_paginate_by, so a re-declaration keeps
       # (inherits) what it omits — see the macro.
       UNSET = Object.new.freeze
+      # The Strings ActiveModel's Float type reads as a non-finite number — the
+      # form a stored ±Infinity / NaN boundary is minted in.
+      NON_FINITE_FLOATS = %w[Infinity -Infinity NaN].freeze
       # Adapters whose SQL supports row-value (tuple) comparison: (a, b) > (x, y).
       ROW_PREDICATE_ADAPTERS = /postgres|mysql|trilogy|sqlite/i
       # Deliberately mutable: memoizes adapter row-predicate support per model
@@ -610,10 +614,36 @@ module ConcernsOnRails
         return nil if raw.nil? # a NULL boundary; valid_cursor_values? only admits it on a nullable column
 
         type = model.type_for_attribute(col.to_s)
+        raise InvalidCursor, "Invalid pagination cursor." unless cursor_numeric_minted?(type, raw)
+
         value = cursor_type_cast(type, raw)
         raise InvalidCursor, "Invalid pagination cursor." unless cursor_bindable?(model, type, value)
 
         value
+      end
+
+      # A plain numeric column's boundary is read the way Filterable reads an
+      # operand (Support::NumericOperand) and must be :exact — a value the
+      # column holds as-is. Nothing else checked a DECIMAL against the
+      # column's precision: `1e20` on a decimal(10,2) column (never minted)
+      # was bound and silently ended the walk with an empty 200. Nor its
+      # size: BigDecimal#to_s("F") expanded `"1e5000000"` into a
+      # 5,000,060-character SQL literal (`"1e99999999"`, 12 bytes, ~100 MB).
+      # NumericOperand's length / exponent bounds stop that before any
+      # BigDecimal is built. Minted boundaries are always exact (an Integer,
+      # a finite Float, a decimal's `to_s`). A float column's non-finite
+      # forms are left to cursor_bindable?, which knows where they are minted.
+      def cursor_numeric_minted?(type, raw)
+        return true unless ConcernsOnRails::Support::NumericOperand.kind(type)
+        return true if cursor_non_finite_float?(type, raw)
+
+        ConcernsOnRails::Support::NumericOperand.classify(raw, type)&.status == :exact
+      end
+
+      def cursor_non_finite_float?(type, raw)
+        return false unless type.type == :float
+
+        raw.is_a?(Float) ? !raw.finite? : NON_FINITE_FLOATS.include?(raw)
       end
 
       # Rails 6.0–7.0's date and time casts raise Date._parse's ArgumentError
