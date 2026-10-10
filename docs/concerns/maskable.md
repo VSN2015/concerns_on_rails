@@ -64,7 +64,7 @@ For each field declared with `maskable`, the concern defines one reader on the m
 | Signature | Description |
 |-----------|-------------|
 | `masked_<field>` | Returns the masked representation of the attribute. Returns `nil` when the column value is `nil`. Returns non-`String` values unchanged (for preset strategies). |
-| `masked_attributes` | Every declared field masked, as a `Hash` with `String` keys (like `attributes`): `{ "email" => "j***@x.com", "card" => "**** **** **** 4242" }`. Undeclared columns are not included. |
+| `masked_attributes` | Every declared field masked, as a `Hash` with `String` keys (like `attributes`): `{ "email" => "j***@x.com", "card" => "**** **** **** 4242" }`. Undeclared columns are not included, and neither is a declared column a partial `select` did not load (as with `attributes`). |
 | `serializable_hash(masked: true \| [:field, ...])` | The standard Rails serialization entry point (so `as_json` and `to_json` accept the same option). `masked: true` swaps every declared field for its masked form; an Array/Symbol limits it to those fields. Fields removed by `only:`/`except:` stay removed; a field in `masked:` that was never declared `maskable` raises `ArgumentError`. Nested `include:` records inherit the request at every depth unless they set `masked:` themselves. Without `masked:` the output is unchanged. |
 
 ### Class methods
