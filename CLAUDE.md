@@ -109,7 +109,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Expirable`** — single expiry column (default `expires_at`); `active`/`expired`/
   `expiring_within` scopes (affixable via `prefix:`/`suffix:`). Batch `expire_all` (single-
   UPDATE fast path when `expire!` is unoverridden AND the model has no validators).
-  `expire!`/`expire_all` with nil/blank mean "now"; an unparseable time raises before hooks.
+  `expire!`/`expire_all` with nil/blank mean "now"; an unparseable time raises before hooks;
+  neither pushes a saved expiry later (`expire!` is then a no-op; only `expire_in!`/`extend_expiry!` may).
   When affixed, Expirable/Activatable/Schedulable also define AFFIXED predicates (plain
   ones kept; internal logic uses private checks, so sibling collisions can't flip
   `toggle_active!`); an affixed predicate shadowing a different column's query method raises.

@@ -766,12 +766,18 @@ ApiToken.expiring_within(1.day)  # future expiry within the next 1 day
 
 ```ruby
 token.expire!                       # expires_at = now (nil or "" also mean now)
-token.expire!(2.hours.from_now)     # explicit time (a Time, or a parseable String)
+token.expire!(2.hours.from_now)     # explicit time (a Time, or a parseable String); never pushes an expiry later
 token.expire!("garbage")            # ArgumentError, raised before any hook runs (a String must name a year)
 token.expire_in!(15.minutes)        # absolute lifetime from now, whatever the current expiry
 token.extend_expiry!(by: 1.day)     # pushes expiry forward
 token.clear_expiry!                 # never expires (nil)
 ```
+
+Expiring only ever brings an expiry **forward**. When the saved expiry is already at or before the
+requested time, `expire!` returns `true` and writes nothing, and no hook fires: calling `expire!` on an
+already-expired token keeps its expiry, and `expire!(1.week.from_now)` on a token expiring in an hour keeps
+the hour. Until this fix it rewrote the expiry (to a later time) and fired `after_expire` again. To set a
+later expiry, use `expire_in!` (an absolute lifetime, whatever the current expiry) or `extend_expiry!`.
 
 `extend_expiry!` is smart about the base:
 - If `expires_at` is `nil` or in the past → new value is `now + by`
@@ -825,8 +831,10 @@ The same rules apply to every concern with affixed predicates (Expirable, Activa
 ApiToken.expiring_within(1.day).expire_all   # => 12
 ```
 
-`expire_all(time = Time.zone.now)` expires every currently-active record in the relation and
-returns the Integer count, in a transaction. With `expire!` and both hooks unoverridden and no validations on
+`expire_all(time = Time.zone.now)` expires every currently-active record in the relation whose expiry
+is unset or later than `time`, and returns the Integer count of rows written, in a transaction. Like
+`expire!` it never pushes an expiry later: `Token.where(user: u).expire_all(1.hour.from_now)` leaves a
+token due in 5 minutes at 5 minutes (it used to be extended to the hour). With `expire!` and both hooks unoverridden and no validations on
 the model — neither `validates`/`validates_with`, a custom `validate :method`, nor an
 association's autosave validation (a bare `has_many` registers one, so most models with
 associations take the streaming path) — it collapses
