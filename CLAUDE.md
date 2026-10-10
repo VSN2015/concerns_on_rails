@@ -196,8 +196,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (AES-256-GCM, stdlib OpenSSL, no deps) via a custom `ActiveModel::Type` on the
   declared column, so reads/writes stay plaintext and siblings compose.
   `encryptable :ssn, :dob, type:, key:` (repeatable; column stores a versioned
-  Base64 envelope — use `text`). Immutable value type ⇒ dirty tracking on
-  plaintext (random IV never re-encrypts unchanged data); `type:` reuses the
+  Base64 envelope — use `text`). Dirty tracking on plaintext (random IV never
+  re-encrypts unchanged data; `changed_in_place?` decrypts the stored value so an in-place
+  String edit is saved); `type:` reuses the
   Storable casters; keys from `ConcernsOnRails.configure_encryption` / per-field
   `key:` (PBKDF2, lazy Proc), missing key raises at first use. `<field>_ciphertext`
   / `<field>_encrypted?` readers; wrong-key/tamper/malformed → `DecryptionError`.

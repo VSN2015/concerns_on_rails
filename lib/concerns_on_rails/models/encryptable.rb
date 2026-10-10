@@ -265,9 +265,9 @@ module ConcernsOnRails
 
       # Custom type registered on each encrypted column. cast handles user input
       # (plaintext in memory), serialize encrypts on the write-to-DB path, and
-      # deserialize decrypts on the read-from-DB path. An immutable value type,
-      # so dirty tracking compares the cast plaintext — a re-save of unchanged
-      # data is not dirtied by GCM's random IV.
+      # deserialize decrypts on the read-from-DB path. Dirty tracking compares
+      # the cast plaintext (an in-place String edit too, see changed_in_place?)
+      # — a re-save of unchanged data is not dirtied by GCM's random IV.
       #
       # A :datetime field reports the :datetime type, so ActiveRecord gives it
       # the time-zone handling it gives any `attribute :name, :datetime`: under
@@ -320,6 +320,18 @@ module ConcernsOnRails
           return nil if plaintext.nil?
 
           @type == :datetime ? read_time(plaintext) : cast_typed(plaintext)
+        end
+
+        # An in-place edit of a decrypted String (`notes << "x"`, `gsub!`,
+        # `squish!`) is a change, as it is for a plain string column — the
+        # base Value type answers false, so such an edit was silently lost on
+        # save. ActiveModel asks only for an attribute that has been read, and
+        # hands over the value AT REST, so the comparison is on PLAINTEXT:
+        # comparing envelopes would dirty every read field, since GCM's random
+        # IV never re-encrypts to the same bytes. Only a String can be edited
+        # in place (the other types cast to immutable values).
+        def changed_in_place?(raw_old_value, new_value)
+          new_value.is_a?(::String) && deserialize(raw_old_value) != new_value
         end
 
         # The typed value a blind index is computed from: the cast value, a
