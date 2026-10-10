@@ -112,7 +112,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `expire!`/`expire_all` with nil/blank mean "now"; an unparseable time raises before hooks.
   When affixed, Expirable/Activatable/Schedulable also define AFFIXED predicates (plain
   ones kept; internal logic uses private checks, so sibling collisions can't flip
-  `toggle_active!`); an affixed predicate shadowing a different column's query method raises.
+  `toggle_active!`, and the batch verbs build their row predicates inline); an affixed predicate
+  shadowing a different column's query method raises, and so does an affixed predicate/scope name another
+  gem concern already generates (`Affix.refuse_sibling_names!`).
 - **`Activatable`** — boolean active flag (default `active`); `active`/`inactive` scopes
   (affixable via `prefix:`/`suffix:`), `activate!`/`deactivate!`/`toggle_active!`. Batch
   `activate_all`/`deactivate_all` (same validators-gated fast path as Publishable/Expirable).

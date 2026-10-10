@@ -141,11 +141,13 @@ module ConcernsOnRails
         end
 
         # Unpublish every published record in the relation. Writes nil on both
-        # column types, exactly as `unpublish!` does. The `published` scope
-        # does NOT unscope the field, so a caller's own constraint on the
-        # publish column composes here as it should.
+        # column types, exactly as `unpublish!` does. The rows are selected
+        # with the `published` scope's predicate built inline (it does NOT
+        # unscope the field, so a caller's own constraint on the publish
+        # column composes here as it should), never through the public
+        # scope name, which the model or another concern may have replaced.
         def unpublish_all
-          live = all.public_send(publishable_scope_names.fetch(:published))
+          live = publishable_live_relation
           if publishable_batch_fast_path?(:unpublish)
             return live.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, publishable_field => nil)
@@ -187,9 +189,13 @@ module ConcernsOnRails
         def define_publishable_scopes(prefix, suffix) # rubocop:disable Metrics/PerceivedComplexity
           prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: publishable_field)
           suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: publishable_field)
-          self.publishable_scope_names = SCOPE_BASES.to_h do |base|
+          names = SCOPE_BASES.to_h do |base|
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
+          ConcernsOnRails::Support::Affix.refuse_sibling_names!(
+            self, label: "ConcernsOnRails::Models::Publishable", scopes: names.values, prefix: prefix, suffix: suffix
+          )
+          self.publishable_scope_names = names
           ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, publishable_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::Publishable")
 
           # See publishable_true_predicate for why the boolean branch is not
@@ -224,6 +230,14 @@ module ConcernsOnRails
               unscope(where: publishable_field).where(publishable_field => nil)
             end
           }
+        end
+
+        # "Currently published", built against the CURRENT relation: the
+        # `published` scope's predicate (see unpublish_all).
+        def publishable_live_relation
+          return all.where(publishable_true_predicate) if publishable_boolean_column?
+
+          all.where(arel_table[publishable_field].lteq(Time.zone.now))
         end
 
         # "Not currently published", built against the CURRENT relation: the

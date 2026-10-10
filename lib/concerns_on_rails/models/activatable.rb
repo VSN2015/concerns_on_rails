@@ -62,10 +62,14 @@ module ConcernsOnRails
 
           prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: activatable_field)
           suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: activatable_field)
-          self.activatable_scope_names = {
+          names = {
             active: ConcernsOnRails::Support::Affix.name(:active, prefix: prefix, suffix: suffix),
             inactive: ConcernsOnRails::Support::Affix.name(:inactive, prefix: prefix, suffix: suffix)
           }.freeze
+          ConcernsOnRails::Support::Affix.refuse_sibling_names!(
+            self, label: LABEL, scopes: names.values, predicates: %i[active inactive], prefix: prefix, suffix: suffix
+          )
+          self.activatable_scope_names = names
 
           # Affix the scope names so two concerns that each define `.active`
           # (e.g. SoftDeletable / Expirable) can coexist on one model.
@@ -83,8 +87,14 @@ module ConcernsOnRails
         end
 
         # Activate every inactive record in the relation; returns the count.
+        # The rows each verb targets are selected inline (NULL counts as
+        # inactive), never through the public `.active` / `.inactive`
+        # scopes: Expirable and SoftDeletable define `.active` too, and the
+        # concern declared last owns it, so with Expirable after Activatable
+        # deactivate_all iterated the not-expired rows instead of the active
+        # ones.
         def activate_all
-          inactive = all.public_send(activatable_scope_names.fetch(:inactive))
+          inactive = all.where(activatable_field => [false, nil])
           if activatable_batch_fast_path?(:activate)
             return inactive.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, activatable_attributes(true, :activate))
@@ -101,7 +111,7 @@ module ConcernsOnRails
 
         # Deactivate every active record in the relation; returns the count.
         def deactivate_all
-          active = all.public_send(activatable_scope_names.fetch(:active))
+          active = all.where(activatable_field => true)
           if activatable_batch_fast_path?(:deactivate)
             return active.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, activatable_attributes(false, :deactivate))

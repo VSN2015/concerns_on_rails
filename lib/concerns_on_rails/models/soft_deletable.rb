@@ -183,9 +183,13 @@ module ConcernsOnRails
         def define_soft_delete_scopes(prefix, suffix)
           prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: soft_delete_field)
           suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: soft_delete_field)
-          self.soft_delete_scope_names = SCOPE_BASES.to_h do |base|
+          names = SCOPE_BASES.to_h do |base|
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
+          ConcernsOnRails::Support::Affix.refuse_sibling_names!(
+            self, label: soft_delete_label, scopes: names.values, prefix: prefix, suffix: suffix
+          )
+          self.soft_delete_scope_names = names
 
           soft_deleted_name = soft_delete_scope_names.fetch(:soft_deleted)
           ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, soft_delete_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::SoftDeletable")

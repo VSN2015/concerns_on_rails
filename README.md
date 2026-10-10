@@ -818,6 +818,16 @@ The same rules apply to every concern with affixed predicates (Expirable, Activa
 - Re-declaring the macro with a different affix (or none) removes the previous affix's predicates. On a
   subclass, every inherited affixed predicate that the current affix no longer defines is hidden, and the
   parent keeps its own.
+- An affixed predicate or scope that another concern already generates on the model raises
+  `ArgumentError` naming that concern. For example, `expirable_by prefix: :term` followed by
+  `activatable_by prefix: :term` would generate `term_active?` / `.term_active` twice, and
+  `activatable_by suffix: :at` would generate `.active_at`, which is Schedulable's scope. The scopes of
+  Publishable, SoftDeletable, Schedulable, Expirable, Activatable and Lockable are all checked. Choose a
+  different affix. Until this fix the second concern silently replaced the first one's predicate and
+  scope. Unaffixed names are still shared: the concern declared last owns them.
+- The batch verbs never select their rows through those shared scope names. `expire_all`,
+  `activate_all` / `deactivate_all` and `unpublish_all` build their own predicates, so whichever concern
+  owns `.active` cannot change which rows they write.
 
 **Bulk operations**
 
