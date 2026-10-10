@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/association_scope"
+require "concerns_on_rails/support/primary_key"
 
 module ConcernsOnRails
   module Models
@@ -326,7 +327,8 @@ module ConcernsOnRails
           columns = counter_cache_columns(record.class)
           return if columns.empty? || !record.persisted?
 
-          values = record.class.unscoped.where(record.class.primary_key => record.id).pluck(*columns).first
+          row = ConcernsOnRails::Support::PrimaryKey.condition(record.class, record.id)
+          values = record.class.unscoped.where(row).pluck(*columns).first
           return if values.nil?
 
           columns.zip(Array(values)).each { |column, value| record[column] = value }

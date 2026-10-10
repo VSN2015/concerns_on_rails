@@ -394,7 +394,9 @@ row around raw SQL: `mirror_bump!` copies Rails' `increment!` in-memory lock_ver
 adopting the row's value; `by: -1` undoes it), `pinned` keeps an `update_all` from bumping lock_version,
 `with_row_lock` reads named columns with SELECT … FOR UPDATE without reloading, and `with_locked_column`
 — Stateable `lock: true`, Activatable `toggle_active!` — reloads a clean record under the lock
-(`with_lock`) and reads + adopts only the column for one with unsaved changes), `ErrorEnvelope` (the shared `render_error`-or-inline error
+(`with_lock`) and reads + adopts only the column for one with unsaved changes), `PrimaryKey`
+(the one-row `where` Hash for hand-built SQL, Rails 7.1+ composite keys included — never
+`where(primary_key => id)`), `ErrorEnvelope` (the shared `render_error`-or-inline error
 renderer used by seven controller concerns), `FilterParameterRegistry` (live
 filter_parameters registry consulted by the proc `ConcernsOnRails::Railtie` appends at
 boot), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,
