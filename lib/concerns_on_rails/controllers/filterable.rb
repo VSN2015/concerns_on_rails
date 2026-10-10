@@ -70,6 +70,9 @@ module ConcernsOnRails
       # PostgreSQL (`integer ~~* unknown`), so contains/starts_with fail closed.
       LIKE_TYPES = %i[string text citext].freeze
       UNCASTABLE = Object.new.freeze
+      # `type:` names resolved to ActiveRecord's own types (see
+      # filterable_record_temporal_type).
+      RECORD_TEMPORAL_TYPES = { date: :Date, datetime: :DateTime, time: :Time }.freeze
 
       included do
         class_attribute :filterable_rules, default: {}
@@ -115,11 +118,27 @@ module ConcernsOnRails
         def filterable_normalize_type(type)
           return nil if type.nil?
 
-          ActiveModel::Type.lookup(type.to_sym)
+          filterable_record_temporal_type(type.to_sym) || ActiveModel::Type.lookup(type.to_sym)
         rescue ArgumentError
           raise ArgumentError, "#{LABEL}: type: #{type.inspect} is not an ActiveModel type (try :integer, :decimal, :date, ...)"
         end
-        private :filterable_normalize_operators, :filterable_operator_list, :filterable_normalize_type
+
+        # :date / :datetime / :time as ActiveRecord's own types, which read
+        # `ActiveRecord.default_timezone` (UTC unless :local) at cast time,
+        # exactly as a datetime column's type does. ActiveModel's guess the
+        # zone from Time.zone_default instead — `:local`, the server's
+        # ENV["TZ"], in every app that sets config.time_zone — so
+        # `?happened_at_gte=2026-01-01 10:00` under `type: :datetime` meant
+        # 10:00 in whatever zone the host ran in. Built directly:
+        # ActiveRecord::Type.lookup would need a connection at class load.
+        def filterable_record_temporal_type(name)
+          klass = RECORD_TEMPORAL_TYPES[name]
+          return nil unless klass && defined?(::ActiveRecord::Type::DateTime)
+
+          ::ActiveRecord::Type.const_get(klass).new
+        end
+        private :filterable_normalize_operators, :filterable_operator_list, :filterable_normalize_type,
+                :filterable_record_temporal_type
       end
 
       # Apply all declared filters to a relation based on params. Unset values
