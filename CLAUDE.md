@@ -136,8 +136,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Normalizable`** — `before_validation` normalization + a PREPENDED `before_save` backstop
   for saves that skip validation (so an earlier sibling `before_save` — Auditable,
   Addressable — sees the stored value; a field the validation pass already normalized is
-  skipped, so a Proc runs once per save). Sanitizable `on: :write`, Taggable and Addressable
-  copy the same prepended backstop, but re-record the values in `after_validation`, so a later
+  skipped, so a Proc runs once per save — a repeat validation (`save if valid?`) skips it
+  too). Sanitizable `on: :write`, Taggable and Addressable copy the same prepended backstop, but re-record the values in `after_validation`, so a later
   `before_validation`'s rewrite is never re-processed (Normalizable itself keeps comparing to
   what IT produced — a slug friendly_id builds afterwards must still be normalized). Presets (`:email`, `:phone`,
   `:squish`, …) or a Proc. (On Rails 7.1+, native `normalizes` is an alternative.)

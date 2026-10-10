@@ -278,10 +278,16 @@ module ConcernsOnRails
       # their raw column value and are exposed through their sanitized_ reader.
       def apply_sanitizations
         # field => the value this pass left it holding, so the before_save
-        # backstop can tell "already sanitized" from "changed since".
+        # backstop can tell "already sanitized" from "changed since". A
+        # previous pass of the same save cycle (`save if valid?` validates
+        # twice) already sanitized a field still holding what that
+        # validation accepted: running a non-idempotent Proc on it again
+        # compounded it.
+        previous = @sanitizable_applied || {}
         @sanitizable_applied = {}
         sanitizable_each_write_rule do |field, writer, value|
-          self[field] = writer.call(value) # plain String, never a SafeBuffer
+          # A plain String, never a SafeBuffer.
+          self[field] = writer.call(value) unless previous.key?(field) && previous[field] == value
           # A copy: an in-place mutation after validation must not mutate the
           # recorded value too and look sanitized.
           @sanitizable_applied[field] = self[field].dup

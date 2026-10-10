@@ -276,11 +276,17 @@ module ConcernsOnRails
 
       def normalize_address
         # column => the value this pass left it holding, so the before_save
-        # backstop can tell "already normalized" from "changed since".
+        # backstop can tell "already normalized" from "changed since". A
+        # column a previous pass of the same save cycle (`save if valid?`)
+        # already normalized, still holding what validation accepted, is
+        # not normalized again (Normalizable's rule).
+        previous = @addressable_normalized || {}
         @addressable_normalized = {}
         addressable_each_pending_part do |part, column, value, country|
-          normalized = normalize_part(part, country, value)
-          self[column] = normalized unless normalized == value
+          unless previous.key?(column) && previous[column] == value
+            normalized = normalize_part(part, country, value)
+            self[column] = normalized unless normalized == value
+          end
           # A copy: an in-place mutation after validation must not look normalized.
           @addressable_normalized[column] = self[column].dup
         end

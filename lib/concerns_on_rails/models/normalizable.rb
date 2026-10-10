@@ -175,11 +175,17 @@ module ConcernsOnRails
 
       def apply_normalizations
         # field => the value this pass left it holding, so the before_save
-        # backstop can tell "already normalized" from "changed since".
+        # backstop can tell "already normalized" from "changed since". A
+        # previous pass of the same save cycle (`save if valid?` validates
+        # twice) already normalized a field still holding what it produced:
+        # running a non-idempotent Proc on it again compounded it.
+        previous = @normalizable_applied || {}
         @normalizable_applied = {}
         normalizable_each_pending_rule do |field, normalizer, value|
-          normalized = normalizer.call(value)
-          self[field] = normalized unless normalized == value
+          unless previous.key?(field) && previous[field] == value
+            normalized = normalizer.call(value)
+            self[field] = normalized unless normalized == value
+          end
           # A copy: an in-place mutation after validation (`name << "  x"`)
           # would otherwise mutate the recorded value too and look normalized.
           @normalizable_applied[field] = self[field].dup
