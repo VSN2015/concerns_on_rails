@@ -260,7 +260,14 @@ module ConcernsOnRails
       def before_unpublish; end
       def after_unpublish; end
 
+      # A no-op on a record that is already published (returns true, writes
+      # nothing, fires no hook) — the rows publish_all skips. It used to
+      # rewrite the "published on" time to now and fire after_publish again
+      # on every call (a double-submitted button, a retried job). A draft or
+      # scheduled record is published now; publish_at! still writes any time.
       def publish!
+        return true if published?
+
         publishable_write_with_hooks(Time.zone.now, :publish)
       end
 

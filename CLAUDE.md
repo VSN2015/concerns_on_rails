@@ -68,7 +68,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   the column type. `default_scope: true` hides unpublished (ONE flag-driven default_scope,
   registered only once a class first asks; an omitted `default_scope:` keeps the inherited
   flag, an explicit `false` turns it off). Lifecycle hooks:
-  `before/after_publish`, `before/after_unpublish`. Batch `publish_all`/`unpublish_all`
+  `before/after_publish`, `before/after_unpublish` (`publish!` on a published record is a no-op). Batch `publish_all`/`unpublish_all`
   (atomic; single-UPDATE fast path when the hooks/bang methods are unoverridden AND the
   model has no validators — `update` in the per-record path runs them, `update_all` doesn't).
   Every hooked verb (here and in SoftDeletable/Expirable/Activatable/Stateable/Anonymizable)
@@ -114,7 +114,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   ones kept; internal logic uses private checks, so sibling collisions can't flip
   `toggle_active!`); an affixed predicate shadowing a different column's query method raises.
 - **`Activatable`** — boolean active flag (default `active`); `active`/`inactive` scopes
-  (affixable via `prefix:`/`suffix:`), `activate!`/`deactivate!`/`toggle_active!`. Batch
+  (affixable via `prefix:`/`suffix:`), `activate!`/`deactivate!` (no-ops in the target state)/`toggle_active!`. Batch
   `activate_all`/`deactivate_all` (same validators-gated fast path as Publishable/Expirable).
 - **`Stateable`** — lightweight string-backed state machine: states, `default:`,
   `transitions:`, `prefix:`/`suffix:`, `lock:`, `timestamps:` (`<state>_at` stamped on entry;

@@ -188,11 +188,20 @@ module ConcernsOnRails
       def before_deactivate; end
       def after_deactivate; end
 
+      # activate! / deactivate! are no-ops on a record already in that state
+      # (true, nothing written, no hook) — the rows activate_all /
+      # deactivate_all skip. They used to rewrite activated_at /
+      # deactivated_at and fire the hooks again. deactivate! still writes
+      # false over a NULL flag. toggle_active! always flips.
       def activate!
+        return true if activatable_on?
+
         activatable_transition(true, :activate)
       end
 
       def deactivate!
+        return true if self[self.class.activatable_field] == false
+
         activatable_transition(false, :deactivate)
       end
 
