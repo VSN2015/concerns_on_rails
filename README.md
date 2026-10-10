@@ -1490,7 +1490,7 @@ Product.in_stock.average_price         # average_ / minimum_ / maximum_ too — 
 Order.paid.formatted_sum_total         # => "€3.500,50"  every aggregate has a formatted_ twin (overrides accepted)
 ```
 
-**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors. A `unit:` containing the `delimiter:` or `separator:` raises (formatted output could not be read back). `precision:` and `subunit_to_unit:` are coerced (`"2"` works, `"two"` raises) at the macro and in per-call `formatted_` overrides alike.
+**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`, or every decimal a power-of-ten `subunit_to_unit:` carries — `3` for `1000`, so `"KD1.999"` round-trips), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors. A `unit:` containing the `delimiter:` or `separator:` raises (formatted output could not be read back). `precision:` and `subunit_to_unit:` are coerced (`"2"` works, `"two"` raises) at the macro and in per-call `formatted_` overrides alike.
 
 ---
 

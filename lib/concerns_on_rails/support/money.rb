@@ -13,12 +13,14 @@ module ConcernsOnRails
       # format(199999) => "$1,999.99"
       # format(-500, unit: "£") => "-£5.00"
       # format(1234, unit: "¥", precision: 0, subunit_to_unit: 1) => "¥1,234"
+      # format(1999, unit: "KD", subunit_to_unit: 1000) => "KD1.999"
       def format(cents, options = {})
         unit      = options.fetch(:unit, "$")
-        precision = options.fetch(:precision, 2)
         delimiter = options.fetch(:delimiter, ",")
         separator = options.fetch(:separator, ".")
         subunit   = options.fetch(:subunit_to_unit, 100)
+        precision = options[:precision]
+        precision = default_precision(subunit) if precision.nil?
 
         decimal = BigDecimal(cents.to_s) / subunit
         # BigDecimal#round returns an Integer for precision <= 0, so re-wrap it
@@ -58,13 +60,26 @@ module ConcernsOnRails
       end
 
       # :subunit_to_unit to a positive Integer, :precision to an Integer
-      # (a String "2" is fine; "two" or 1.5 raises). Returns a new Hash.
+      # (a String "2" is fine; "two" or 1.5 raises). Returns a new Hash. A
+      # nil (or absent) :precision stays nil, which #format reads as
+      # default_precision of whatever subunit it formats with — so a
+      # per-call subunit_to_unit: override gets its own default too.
       def coerce_numeric_options(options, label)
         subunit = options.key?(:subunit_to_unit) ? options[:subunit_to_unit].to_i : 100
         raise ArgumentError, "#{label}: :subunit_to_unit must be a positive integer" unless subunit.positive?
 
-        precision = options.key?(:precision) ? coerce_precision(options[:precision], label) : 2
+        precision = options[:precision].nil? ? nil : coerce_precision(options[:precision], label)
         options.merge(subunit_to_unit: subunit, precision: precision)
+      end
+
+      # Decimal places shown when :precision is not given: every place a
+      # power-of-ten subunit carries (1000 fils -> 3: "KD1.999", which reads
+      # back as 1999, where "KD2.00" read back as 2000), and never fewer
+      # than 2 — the long-standing default for cents, and for 1-, 10- and
+      # non-power-of-ten subunits.
+      def default_precision(subunit)
+        places = subunit.to_s.length - 1
+        subunit == 10**places ? [places, 2].max : 2
       end
 
       def coerce_precision(value, label)

@@ -56,7 +56,7 @@ monetizable(*fields, as:, unit:, precision:, delimiter:, separator:, subunit_to_
 | `fields` (positional) | `Symbol` / `Symbol...` | — | One or more integer column names to wrap. At least one field is required. |
 | `as:` | `Symbol` | derived from column name | Overrides the generated method base name. Required when the column name does not end in `_cents`. Cannot be combined with multiple positional fields. |
 | `unit:` | `String` | `"$"` | Currency symbol prepended to the formatted string. Must not contain the `delimiter:` or `separator:` (raises `ArgumentError` at class load), since the writer could not tell them apart when reading formatted output back. |
-| `precision:` | `Integer` | `2` | Number of decimal places in the formatted output. |
+| `precision:` | `Integer` | `2`, or more for a power-of-ten `subunit_to_unit:` | Number of decimal places in the formatted output. When omitted it is every decimal place a power-of-ten `subunit_to_unit:` carries, and never fewer than 2: `3` for `1000` (KWD, BHD, OMR — `"KD1.999"`, which reads back as 1999 fils, where 2 places printed `"KD2.00"` and read back as 2000), `2` for `100`, `10`, `1` and any non-power-of-ten ratio. A per-call `subunit_to_unit:` override gets its own default. An explicit value is used as given. |
 | `delimiter:` | `String` | `","` | Thousands separator used in the formatted string (e.g. `"."` for European format). |
 | `separator:` | `String` | `"."` | Decimal separator used in the formatted string (e.g. `","` for European format). |
 | `subunit_to_unit:` | `Integer` | `100` | Number of subunits per major unit. Use `1` for currencies with no fractional unit (e.g. JPY). |

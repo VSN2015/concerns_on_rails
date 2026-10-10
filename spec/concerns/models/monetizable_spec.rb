@@ -311,7 +311,8 @@ describe ConcernsOnRails::Models::Monetizable do
 
   describe "Support::Money formatting edge cases" do
     it "does not print a spurious minus for an amount that rounds to zero" do
-      expect(ConcernsOnRails::Support::Money.format(-1, subunit_to_unit: 100_000)).to eq("$0.00")
+      # precision: 2 explicitly: a 100_000 subunit now defaults to 5 places.
+      expect(ConcernsOnRails::Support::Money.format(-1, subunit_to_unit: 100_000, precision: 2)).to eq("$0.00")
     end
   end
 
