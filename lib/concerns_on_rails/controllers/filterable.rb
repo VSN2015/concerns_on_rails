@@ -248,6 +248,7 @@ module ConcernsOnRails
 
       def apply_filter_comparison(relation, field, operator, raw, options)
         return relation unless ConcernsOnRails::Support::ScalarParam.scalar?(raw)
+        return relation.none if filterable_nul?(relation, field, [raw])
 
         column_type = filterable_column_type(relation, field)
         operand = ConcernsOnRails::Support::NumericOperand.classify(raw, options[:type] || column_type, column_type: column_type)
@@ -351,6 +352,16 @@ module ConcernsOnRails
         filterable_where(relation, field, value.is_a?(Array) ? kept : kept.first, negate)
       end
 
+      # A String operand carrying a NUL byte (Support::ScalarParam.nul_free?)
+      # fails the whole filter closed — `not`/`not_in` included, as an
+      # uncastable number does — where it used to be a 500. Not on a binary
+      # column: there NUL is an ordinary byte, quoted and bound as a blob.
+      def filterable_nul?(relation, field, values)
+        return false if values.all? { |member| ConcernsOnRails::Support::ScalarParam.nul_free?(member) }
+
+        filterable_column_type(relation, field)&.type != :binary
+      end
+
       def filterable_where(relation, field, value, negate)
         negate ? relation.where.not(field => value) : relation.where(field => value)
       end
@@ -370,8 +381,10 @@ module ConcernsOnRails
       end
 
       # The members to keep on a numeric or date/time column, or nil to keep
-      # the raw value unchanged.
+      # the raw value unchanged. A NUL member fails the filter closed.
       def filterable_equality_values(relation, field, values, negate: false)
+        return :uncastable if filterable_nul?(relation, field, values)
+
         filterable_numeric_equality_values(relation, field, values) ||
           filterable_time_equality_values(relation, field, values, negate)
       end
@@ -474,6 +487,7 @@ module ConcernsOnRails
       # so it is refused on the column itself: `varchar[] ILIKE` is an error.
       def apply_filter_like(relation, field, operator, raw)
         return relation unless ConcernsOnRails::Support::ScalarParam.scalar?(raw)
+        return relation.none if filterable_nul?(relation, field, [raw])
 
         column_type = filterable_column_type(relation, field)
         return relation.none if column_type && !LIKE_TYPES.include?(column_type.type)

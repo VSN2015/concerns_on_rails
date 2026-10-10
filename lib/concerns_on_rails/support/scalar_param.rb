@@ -36,6 +36,17 @@ module ConcernsOnRails
         value.is_a?(String) || value.is_a?(Numeric)
       end
 
+      # False only for a String carrying a NUL byte. SQLite and PostgreSQL
+      # read statement text as a C string, so a NUL in an operand Arel
+      # inlines as a quoted literal (a comparison or LIKE operand) cut the
+      # SQL short — a StatementInvalid 500 — and the pg driver refuses one
+      # in a BOUND text parameter as well. Rack decodes `%00`, and Rails'
+      # parameter check only refuses INVALID UTF-8 (NUL is valid), so the
+      # byte reaches the concerns. No text column can hold one.
+      def nul_free?(value)
+        !(value.is_a?(String) && value.include?("\u0000"))
+      end
+
       # Safe to pass to `.where(column: value)`: scalars and nil are fine, and
       # Arrays become `IN (...)` — but only an Array of scalars. AR cannot
       # quote a member that is itself structured: `?status[][x]=1` yields

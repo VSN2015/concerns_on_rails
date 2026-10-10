@@ -1998,7 +1998,9 @@ represent exactly (`abc`, or `5.5` for `:integer`) fails the filter closed witho
 Range limits only ever come from a real numeric column, never from a declared `type:`. Blank values
 are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`/`lte` value the type
 cannot represent (`?price_gte=abc`) matches **nothing** rather than silently comparing against `0` —
-nothing raises at request time. For strict, validated contracts reach for `Permittable`.
+nothing raises at request time. So does any operand carrying a NUL byte (`?title_gte=a%00b`,
+`?title_contains=%00`, `?title=a%00b`, a NUL member of an `in` list; binary columns excepted): it used to
+cut the SQL short, a `StatementInvalid` 500. For strict, validated contracts reach for `Permittable`.
 
 Numeric columns are read **strictly, never truncated**, in every form (direct `?stock=`, suffix, bracket,
 `in`/`not_in` lists):

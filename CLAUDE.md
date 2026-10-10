@@ -282,7 +282,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Filterable`** — declarative URL-param filtering (`filter_by`: direct-where / `scope:` /
   `with:` lambda) + comparison operators (`?price_gte=` suffix or `?price[gte]=` bracket form,
   from a frozen allow-list mapped to fixed Arel nodes) and type coercion; an uncastable
-  comparison value returns `none` (fail-closed), blank values are skipped in both forms, and
+  comparison value returns `none` (fail-closed), as does any operand with a NUL byte
+  (`ScalarParam.nul_free?`; binary columns exempt), blank values are skipped in both forms, and
   `contains`/`starts_with` are case-insensitive (except under MySQL `_bin`/`_cs` collations)
   and fail closed on non-text and array columns. Numeric operands go through
   `Support::NumericOperand`: exact, never truncated (`gte 5.5` on an integer column is
