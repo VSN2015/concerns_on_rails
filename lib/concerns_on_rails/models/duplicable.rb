@@ -160,11 +160,15 @@ module ConcernsOnRails
 
       # Persisted deep copy — the copy and its copied children save together
       # (autosave) inside one transaction. Returns the saved copy, its counter
-      # columns re-read from the row the children's saves incremented.
+      # columns (and lock_version) re-read from the row the children's saves
+      # incremented — inside that transaction, so the row read is the one this
+      # save produced and no other writer can have touched it yet.
       def duplicate!(overrides = {}, **)
         copy = duplicate(overrides, **)
-        transaction { copy.save! }
-        Duplicable.refresh_counter_cache_columns(copy)
+        transaction do
+          copy.save!
+          Duplicable.refresh_counter_cache_columns(copy)
+        end
         copy
       end
 
@@ -321,12 +325,21 @@ module ConcernsOnRails
         end
 
         # After the save the database holds the true counts (each child's
-        # create incremented them); mirror them into the saved copy.
+        # create incremented them); mirror them into the saved copy. Under
+        # optimistic locking each of those increments also bumped the row's
+        # lock_version, which reaches the copy only when the child's
+        # belongs_to target IS the copy (inverse detection) — through a scoped
+        # has_many the copy was left a version behind its own row and raised
+        # StaleObjectError on its next save. The row's lock_version is read
+        # with the counters: the caller (duplicate!) reads inside the
+        # transaction that created the row, so the value is this save's own.
         def refresh_counter_cache_columns(record)
-          columns = counter_cache_columns(record.class)
+          klass = record.class
+          columns = counter_cache_columns(klass)
+          columns += [klass.locking_column] if klass.locking_enabled? && record.has_attribute?(klass.locking_column)
           return if columns.empty? || !record.persisted?
 
-          values = record.class.unscoped.where(record.class.primary_key => record.id).pluck(*columns).first
+          values = klass.unscoped.where(klass.primary_key => record.id).pluck(*columns).first
           return if values.nil?
 
           columns.zip(Array(values)).each { |column, value| record[column] = value }

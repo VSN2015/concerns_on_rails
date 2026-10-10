@@ -274,7 +274,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   attempts/locked_at, counter columns kept by children's CounterCacheable rules or native
   `counter_cache:`) so sibling concerns regenerate on save; a Duplicable
   child copies via its OWN rules (recursive graphs); `on_duplicate(copy)`
-  hook.
+  hook. `duplicate!` re-reads the counters + `lock_version` inside its save transaction.
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 
