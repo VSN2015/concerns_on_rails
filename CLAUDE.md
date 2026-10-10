@@ -209,7 +209,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   also `auditable_by` (either declaration order), or a friendly_id slug source — the
   `sluggable_by` field, a `candidates:` entry, an `alias_attribute` of one (chains followed),
   a bare friendly_id base (at the macro where it can, else at save), or a `searchable_by`/
-  `taggable_by` column (either order; undeclared Taggable `:tags` at `tagged_with`). Ciphertext is
+  `taggable_by` column (either order; undeclared Taggable `:tags` at `tagged_with`), or a
+  `uniqueness:` attribute/`scope:` (either order — a later one via a `validates_with` override). Ciphertext is
   non-deterministic ⇒ unsearchable; opt into `blind_index: true` (or
   `{ column:, expression: }`) for a deterministic-HMAC companion column +
   `find_by_<field>`/`where_<field>`/`<field>_fingerprint` finders (nil values
