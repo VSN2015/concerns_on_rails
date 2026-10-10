@@ -78,7 +78,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`SoftDeletable`** — timestamp (default `deleted_at`) + `default_scope` hiding deleted
   rows (opt out with `default_scope: false`); scopes affixable via `prefix:`/`suffix:`.
   `soft_delete!`/`restore!`, batch `soft_delete_all`/`restore_all` (atomic, routed through
-  `Support::BatchOps`), `really_destroy_all`/`really_delete!` for hard deletes. Hooks:
+  `Support::BatchOps`), `really_destroy_all`/`really_delete!` for hard deletes (`really_delete!` leaves the instance
+  `destroyed?`, as AR's `delete` does). Hooks:
   `before/after_soft_delete`, `before/after_restore`. The default scope's `deleted_at IS NULL`
   is its own Arel node (`DefaultScopePredicate`), so the batch verbs peel exactly it — never
   a caller's identical predicate (`without_deleted.really_destroy_all` keeps the trash).

@@ -506,7 +506,7 @@ user.deleted?              # => true
 user.restore!
 user.deleted?              # => false
 
-user.really_delete!        # bypasses callbacks, hard deletes from DB
+user.really_delete!        # bypasses callbacks, hard deletes from DB; the instance is then destroyed? (not persisted?)
 ```
 
 **Scopes**
