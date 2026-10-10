@@ -132,7 +132,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   Batch `transition_all(event)` — deliberately NO fast path, since the per-record path runs
   validations via `update!` and `update_all` would skip them.
 - **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all`,
-  `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only).
+  `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only), `ranked:` (a grouped or
+  DISTINCT relation is returned unranked — its rank CASE would sit outside the GROUP BY / SELECT list).
 - **`Normalizable`** — `before_validation` normalization + a PREPENDED `before_save` backstop
   for saves that skip validation (so an earlier sibling `before_save` — Auditable,
   Addressable — sees the stored value; a field the validation pass already normalized is

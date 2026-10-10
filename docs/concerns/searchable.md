@@ -67,7 +67,7 @@ searchable_by(*fields, mode:, match:, case_sensitive:, ranked:)
 | `mode:` | `:any` \| `:all` | `:any` | `:any` treats the entire query string (leading/trailing whitespace stripped, interior whitespace kept) as a single term. `:all` splits the query on whitespace and requires every term to match at least one of the configured columns (each term adds an `AND` `WHERE` clause; columns for that term are combined with `OR`). |
 | `match:` | `:contains` \| `:prefix` \| `:exact` | `:contains` | Controls the LIKE pattern shape. `:contains` wraps the term as `%term%`. `:prefix` appends a trailing wildcard: `term%`. `:exact` emits the term verbatim with no wildcards. |
 | `case_sensitive:` | `Boolean` | `false` | When `false`, Arel emits `ILIKE` on PostgreSQL (case-insensitive). When `true`, plain `LIKE` is emitted on all adapters. SQLite's `LIKE` is case-insensitive for ASCII by default regardless of this setting. |
-| `ranked:` | `Boolean` | `false` | When `true`, `.search` orders results by relevance: exact matches first, then prefix matches, then substring matches; within a tier the earlier-declared column wins. Built as a `CASE` expression over the same `LIKE`/`ILIKE` predicates (so it follows `case_sensitive:`), applied with `reorder` — the relation's existing `ORDER BY` becomes the tiebreaker. Under `mode: :all` the per-term scores are summed. A relation that already carries a `GROUP BY` is returned unranked. Anything other than `true`/`false` raises `ArgumentError`. |
+| `ranked:` | `Boolean` | `false` | When `true`, `.search` orders results by relevance: exact matches first, then prefix matches, then substring matches; within a tier the earlier-declared column wins. Built as a `CASE` expression over the same `LIKE`/`ILIKE` predicates (so it follows `case_sensitive:`), applied with `reorder` — the relation's existing `ORDER BY` becomes the tiebreaker. Under `mode: :all` the per-term scores are summed. A relation that already carries a `GROUP BY`, or is `DISTINCT`, is returned unranked (its own `ORDER BY`, if any, is kept): the rank expression is in neither the GROUP BY nor the SELECT list, which PostgreSQL and MySQL reject. Anything other than `true`/`false` raises `ArgumentError`. |
 
 Valid values for `mode:` are `:any` and `:all`. Valid values for `match:` are `:contains`, `:prefix`, and `:exact`. Passing any other value raises `ArgumentError` at class-load time.
 
@@ -191,6 +191,7 @@ Article.search("ruby").pluck(:title, Article.search_rank("ruby"))
 Article.order(created_at: :desc).search("ruby")   # relevance first, newest first within a tier
 Article.search("ruby", ranked: false)             # plain filter, no ORDER BY
 Article.group(:author_id).search("ruby").count    # grouped: returned unranked, so the aggregate is valid SQL
+Article.joins(:tags).distinct.search("ruby")       # DISTINCT: returned unranked too (valid on Postgres/MySQL)
 ```
 
 ## Notes & gotchas
