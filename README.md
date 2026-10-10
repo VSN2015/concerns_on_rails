@@ -302,6 +302,7 @@ Post.friendly.find("old-slug")   # still resolves to the renamed post
 
 # Unique slug only within a scope column (same slug allowed in different accounts)
 sluggable_by :title, scope: :account_id
+sluggable_by :title, scope: %i[account_id locale]   # ... or within each combination of columns
 
 # Reject reserved slugs — saving a record whose slug would be reserved fails validation
 sluggable_by :title, reserved_words: %w[new edit admin]
@@ -318,7 +319,7 @@ Post.find("hello-world")   # resolves by slug
 **Notes**
 - Schema must have a `slug` column (string).
 - `history: true` requires a `friendly_id_slugs` table — generate with `rails generate friendly_id` or add a manual migration.
-- `scope: :col` requires `col` to exist in the same table.
+- `scope: :col` (or an Array of columns) requires each column to exist in the same table; a `belongs_to` association name is accepted too (friendly_id scopes by its foreign key).
 - `candidates:` takes friendly_id's shapes — a Symbol/String method, a Proc, or an Array of those joined with `-` — tried in order until one is free (all taken → the first candidate plus a uuid); the slug still regenerates only when the **primary** field changes (a candidate-only change doesn't churn the URL), and a NULL slug backfills through the candidates.
 - `max_length:` truncates each candidate at the last `-` inside the limit (a single long word is hard-cut); friendly_id's conflict suffix is appended afterwards, so a colliding slug may exceed the limit — unlike friendly_id's own `slug_limit`, which squeezes the uuid inside it.
 - `regenerate_slug!` is the escape hatch for the explicit-slug rule: it forces regeneration and saves (`save!`), keeping uniqueness handling.
