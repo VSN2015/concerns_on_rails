@@ -43,7 +43,7 @@ authorize_by(only: nil, except: nil, status: :forbidden, message: "Forbidden", &
 |---|---|---|---|
 | `only` | `Symbol`, `Array<Symbol>`, or `nil` | `nil` | Restricts the rule to the listed action names. Mutually exclusive with `except`. |
 | `except` | `Symbol`, `Array<Symbol>`, or `nil` | `nil` | Skips the rule for the listed action names; applies to all others. Mutually exclusive with `only`. |
-| `status` | `Symbol` or `Integer` | `:forbidden` | HTTP status code used in the denial response (e.g., `:unauthorized`, `422`). |
+| `status` | `Symbol` or `Integer` | `:forbidden` | HTTP status code used in the denial response (e.g., `:unauthorized`, `422`). The envelope `code` follows it: `"unauthorized"` for 401, `"not_found"` for 404, `"forbidden"` for 403 and anything else. |
 | `message` | `String` | `"Forbidden"` | Human-readable message included in the error envelope under `error.message`. |
 | `name` | `Symbol`/`String` or `nil` | `nil` | A label for the rule, surfaced as `rule:` in the `authorization_denied.concerns_on_rails` payload so logs can say which rule denied. |
 | `&block` | `Proc` (required) | — | Predicate evaluated via `instance_exec` on the controller instance. Must return truthy to allow the request. Receives zero, one (`action_name`), or two (`action_name, current_user`) arguments — whichever matches the block's declared arity. |
@@ -65,7 +65,7 @@ require_role(*roles, via: :current_user, role_method: :role, only: nil, except: 
 | `role_method` | `Symbol` | `:role` | Name of the method called on the actor to read its role. |
 | `only` | `Symbol`, `Array<Symbol>`, or `nil` | `nil` | Same semantics as `authorize_by`'s `only:`. |
 | `except` | `Symbol`, `Array<Symbol>`, or `nil` | `nil` | Same semantics as `authorize_by`'s `except:`. |
-| `status` | `Symbol` or `Integer` | `:forbidden` | HTTP status for the denial response. |
+| `status` | `Symbol` or `Integer` | `:forbidden` | HTTP status for the denial response (the envelope `code` follows it, as for `authorize_by`). |
 | `message` | `String` | `"Forbidden"` | Message in the error envelope. |
 | `name` | `Symbol`/`String` or `nil` | `nil` | Rule label for the instrumentation payload (see `authorize_by`). |
 
@@ -109,7 +109,7 @@ end
 | Signature | Description |
 |---|---|
 | `enforce_authorization` | `before_action` hook; iterates all declared rules in order and calls `authorization_denied` on the first failing one. Public so subclasses can override or call it explicitly. |
-| `authorization_denied(status:, message:)` | Renders the error envelope. Delegates to `render_error` when `Respondable` is also included; otherwise renders inline JSON. Public override point. |
+| `authorization_denied(status:, message:)` | Renders the error envelope, with a `code` derived from the status (`"unauthorized"` for 401, `"not_found"` for 404, `"forbidden"` otherwise). Delegates to `render_error` when `Respondable` is also included; otherwise renders inline JSON. Public override point. |
 | `authorized?(action = action_name)` | Evaluates the rules for `action` (default: the current action) exactly as `enforce_authorization` would — honouring `only:`/`except:` and `skip_authorization` — but never renders. Returns `true`/`false`. Declare it as a `helper_method` to drive conditional UI (`link_to "Delete", ... if authorized?(:destroy)`). |
 | `authorization_skipped?(action = action_name)` | `true` when `skip_authorization` exempts the action. |
 | `on_authorization_denied(rule)` | Called before a denial is rendered. Instruments `authorization_denied.concerns_on_rails` with `controller`, `action`, `actor_id`, `actor_type`, `rule` (the `name:`), `status` and `message`. Public override point — call `super` to keep the event, or replace it to log/alert differently. |
@@ -219,7 +219,7 @@ end
 - **`require_role` requires at least one role.** Calling it with no positional arguments raises `ArgumentError`.
 - **Arity slicing is proc-based, not lambda-based.** The internal check is stored as a `proc` (never a `lambda`), which means Ruby's strict arity enforcement does not apply — a block written with any number of args from zero to two will work safely. Blocks with a splat or optional parameters receive all two args.
 - **`current_user` resolution in `require_role`.** The method named by `via:` is called with `respond_to?` first; if the controller does not expose that method, `nil` is used as the actor, which causes the role check to fail and the request to be denied.
-- **Respondable integration.** When `ConcernsOnRails::Controllers::Respondable` is also included in the controller, `authorization_denied` delegates to `render_error`, which produces a consistent `{ success: false, error: { message:, code: "forbidden" } }` envelope. Without Respondable the same shape is rendered inline directly. The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`.
+- **Respondable integration.** When `ConcernsOnRails::Controllers::Respondable` is also included in the controller, `authorization_denied` delegates to `render_error`, which produces a consistent `{ success: false, error: { message:, code: "forbidden" } }` envelope. The `code` follows the rule's `status:`: `"unauthorized"` for 401, `"not_found"` for 404, and `"forbidden"` for 403 and any other status. A `status: :not_found, message: "Resource not found"` concealment rule therefore renders exactly what [ErrorHandleable](error-handleable.md)'s missing-record 404 renders, so the response does not reveal that the hidden record exists. Without Respondable the same shape is rendered inline directly. The body is an RFC 9457 problem document instead when [Respondable](respondable.md) is configured with `respondable_by error_format: :problem_details`.
 - **`authorization_denied` fails CLOSED when `response` is nil or absent (since 1.22).** A denial that cannot be rendered raises instead of returning nil — pre-1.22 the silent no-op let the action run unauthorized. Test harnesses driving `enforce_authorization` directly must provide a response object (or expect the raise).
 - **Subclass inheritance.** `authorizable_rules` is a `class_attribute`. Each call to `add_authorization_rule` replaces it with `authorizable_rules + [rule]` (a new array), so subclasses that add rules do not mutate the parent's array and the parent's rules are preserved at the front of the child's list.
 - **`skip_authorization` vs `skip_before_action`.** `skip_before_action :enforce_authorization, only: %i[index show]` *is* selective and *does* work per subclass — that is not the difference. What it cannot do is follow the exemption outside the callback chain: it removes the callback, so `authorized?` and `authorization_skipped?` still report the action as gated, and a view driven by `authorized?` hides buttons for an action the controller in fact allows. `skip_authorization` records the exemption on the class, so the gate, the predicate and the view all agree. Pundit's `skip_authorization` is an *instance* method with a different purpose; the two don't collide, but don't confuse them.
