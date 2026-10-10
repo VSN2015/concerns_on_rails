@@ -157,7 +157,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   delimiters, locale separator); garbage, non-finite and oversized input → nil (a Rational
   converts). An `encryptable` cents column is refused at macro time, either order.
 - **`Addressable`** — postal-address normalization + format validation across columns;
-  `full_address`, `address_complete?`, `verify_with:`.
+  `full_address`, `address_complete?`, `verify_with:`. `default_country:` is canonicalized to
+  an alpha-2 at the macro (an unrecognized one raises; `nil` = none).
 - **`Auditable`** — single-column JSON change history ("paper_trail-lite"). `auditable_by
   *fields, into:, actor:, max_entries:, max_value_length:`; `audit_trail` /
   `last_change_for` / `audited_changes_since` / `clear_audit_trail!`.
