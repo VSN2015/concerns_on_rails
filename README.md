@@ -2589,7 +2589,7 @@ etag_with { current_user&.role }             # => Cache-Control: private, max-ag
 
 **Conditional-GET correctness**
 - Weak ETag `W/"<md5>"` from the resource's cache key (collections fold their members' keys + size); `If-None-Match` is matched with **weak comparison**, honours `*`, and accepts a comma-separated list.
-- `Last-Modified` is an IMF-fixdate via `Time#httpdate` (not hand-rolled ISO 8601); `If-Modified-Since` is compared at whole-second granularity.
+- `Last-Modified` is an IMF-fixdate via `Time#httpdate` (not hand-rolled ISO 8601); `If-Modified-Since` is compared at whole-second granularity. It comes from `updated_at`: an ActiveRecord relation's SQL `MAX(updated_at)`, any other collection's newest member timestamp (members without `updated_at`, or with a nil one, are skipped — none at all means no `Last-Modified`, just the ETag).
 - When both are sent, `If-None-Match` wins and the date is ignored (RFC 7232 §3.3); a 304 is only sent for safe (GET/HEAD) requests, and still carries the validators and the `Cache-Control` policy.
 - Override `cache_etag_for` / `cache_last_modified_for` to customise validator derivation. For write-side preconditions (`If-Match` → 412), reach for Rails' own helpers.
 
