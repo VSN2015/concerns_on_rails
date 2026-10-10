@@ -242,7 +242,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `recount_counter_caches!` drift repair (transactional, one UPDATE per
   distinct tally value). Destroy decrements only when the DELETE removed a row, reads the
   persisted FK/`if:` values, honours `belongs_to primary_key:`, and (like Rails) skips the
-  decrement when a `has_many … dependent: :destroy` is removing the child. With `lock_version`
+  decrement when a `has_many … dependent: :destroy` is removing the child (a `has_one`'s still
+  decrements — maybe a replacement — with lock_version pinned). With `lock_version`
   on the parent, the loaded parent gets the delta + bump mirrored in memory; a rollback takes it
   back via `MirrorUndo`, its OWN transaction record (WeakRef to the parent, one per
   (transaction, parent), follows a savepoint released into a `joinable: false` parent; a column
