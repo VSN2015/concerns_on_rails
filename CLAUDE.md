@@ -337,7 +337,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   columns selected UNALIASED (unselected → MissingAttributeError, nil-cast → ArgumentError).
   A non-finite float boundary is minted as `"Infinity"`/`"-Infinity"`/`"NaN"` and accepted
   back only where the adapter stores it (SQLite binds a `9e999` literal); a date/time
-  boundary that doesn't decode to a date/time is an InvalidCursor.
+  boundary that doesn't decode to a date/time is an InvalidCursor. A binary boundary
+  (binary PK tiebreaker / ordering column) travels as strict Base64 (not Base64 → InvalidCursor).
 - **`Deprecatable`** — standards-based endpoint deprecation. `deprecate_actions *actions,
   deprecated_at:, sunset_at:, link:, successor:, after_sunset:, header_format:, notify:`
   (repeatable; no actions = catch-all; LAST matching rule wins). Emits RFC 9745

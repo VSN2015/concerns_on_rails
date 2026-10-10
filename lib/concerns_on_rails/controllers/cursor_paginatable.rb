@@ -456,7 +456,7 @@ module ConcernsOnRails
           "t" => model.table_name, # pin the table so cross-model replay is rejected
           "o" => pairs.map { |col, dir| "#{col}:#{dir}" },
           "d" => direction,
-          "v" => pairs.map { |col, _dir| serialize_cursor_value(cursor_boundary_value!(model, record, col)) }
+          "v" => pairs.map { |col, _dir| cursor_minted_value(model, record, col) }
         }
         token = cursor_base64_encode(JSON.generate(payload))
         cursor_signing_key ? "#{token}.#{cursor_signature(token)}" : token
@@ -553,6 +553,18 @@ module ConcernsOnRails
         [record.read_attribute(name), record.read_attribute_before_type_cast(name).nil?]
       end
 
+      # A binary column's bytes (a binary(16) UUID primary key — the
+      # ever-present tiebreaker — or a binary ordering column) are not UTF-8
+      # text: JSON.generate raised on them, so such an endpoint could not
+      # paginate at all. They travel as strict Base64, decoded by
+      # cast_cursor_value!.
+      def cursor_minted_value(model, record, col)
+        value = cursor_boundary_value!(model, record, col)
+        return [value.to_s].pack("m0") if !value.nil? && model.type_for_attribute(col.to_s).type == :binary
+
+        serialize_cursor_value(value)
+      end
+
       # Explicit is_a? checks (NOT acts_like?, which needs an un-required
       # core_ext; NOT case/when, whose Module#=== misses TimeWithZone — its
       # redefined #is_a? returns true for Time). iso8601(6) keeps microsecond
@@ -610,10 +622,22 @@ module ConcernsOnRails
         return nil if raw.nil? # a NULL boundary; valid_cursor_values? only admits it on a nullable column
 
         type = model.type_for_attribute(col.to_s)
+        raw = cursor_binary_boundary!(raw) if type.type == :binary
         value = cursor_type_cast(type, raw)
         raise InvalidCursor, "Invalid pagination cursor." unless cursor_bindable?(model, type, value)
 
         value
+      end
+
+      # A binary column's boundary is minted as strict Base64 (see
+      # cursor_minted_value); anything else — not a String, or not Base64 —
+      # is tampering.
+      def cursor_binary_boundary!(raw)
+        raise InvalidCursor, "Invalid pagination cursor." unless raw.is_a?(String)
+
+        raw.unpack1("m0")
+      rescue ArgumentError
+        raise InvalidCursor, "Invalid pagination cursor."
       end
 
       # Rails 6.0–7.0's date and time casts raise Date._parse's ArgumentError
