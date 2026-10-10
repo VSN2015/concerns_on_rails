@@ -104,7 +104,7 @@ All method names honor `prefix:` / `suffix:` configuration. For example, with `p
 
 ### Class methods
 
-`stateable_by` is the configuration macro. Besides it the concern adds `transition_all(event)` (run one declared transition across the relation; returns the count transitioned, skipping rows the guard rejects and — so a re-run is a no-op — rows already in the target state, unless the event's `from:` lists that state as a deliberate self-transition) and the `stateable_timestamps` reader (the states `timestamps:` stamps); all builder helpers are private.
+`stateable_by` is the configuration macro. Besides it the concern adds `transition_all(event)` (run one declared transition across the relation; returns the count transitioned, skipping rows the guard rejects and — so a re-run is a no-op — rows already in the target state, unless the event's `from:` lists that state as a deliberate self-transition; on an STI table each record is judged by its **own** class's declaration, so rows of a subclass that dropped the event are skipped and rows a subclass's wider `from:` accepts are transitioned) and the `stateable_transition_config(event)` / `stateable_timestamps` readers (the states `timestamps:` stamps); all builder helpers are private.
 
 ## Examples
 

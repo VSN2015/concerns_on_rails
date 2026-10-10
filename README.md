@@ -1167,7 +1167,10 @@ Returns the Integer count of records transitioned, running in a transaction; rec
 guard rejects are skipped (not errors). Unlike every other batch verb in this gem,
 `transition_all` has **no single-UPDATE fast path** — it always streams per record through
 the guarded `<event>!` method, because that path runs validations via `update!` while a bulk
-`update_all` would silently skip them.
+`update_all` would silently skip them. On an STI table each row is judged by its own class's
+declaration: a base-class `transition_all` skips the rows of a subclass that re-declared
+`stateable_by` without the event (it used to abort with `NoMethodError`) and transitions the rows a
+subclass's wider `from:` accepts (the base's `from:` used to filter them out).
 
 **Timestamps and per-event hooks**
 
