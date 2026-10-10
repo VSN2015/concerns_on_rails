@@ -1167,7 +1167,9 @@ Returns the Integer count of records transitioned, running in a transaction; rec
 guard rejects are skipped (not errors). Unlike every other batch verb in this gem,
 `transition_all` has **no single-UPDATE fast path** — it always streams per record through
 the guarded `<event>!` method, because that path runs validations via `update!` while a bulk
-`update_all` would silently skip them.
+`update_all` would silently skip them. With `lock: true` each record's guard is checked under its row
+lock, so a row another process moved after the batch loaded it is skipped like any other rejected row
+(it used to raise `InvalidTransition` and roll the whole batch back); a single `<event>!` still raises.
 
 **Timestamps and per-event hooks**
 
