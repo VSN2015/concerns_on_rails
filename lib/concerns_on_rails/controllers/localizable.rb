@@ -140,16 +140,38 @@ module ConcernsOnRails
         req.respond_to?(:headers) ? req.headers["Accept-Language"] : nil
       end
 
+      # RFC 4647 §3.4 Lookup: each range in preference order, and for each the
+      # full tag first (fr-CA matches an available :"fr-CA" or :fr_CA), then
+      # ever-shorter prefixes (zh-Hant-TW → zh-Hant → zh) before the next
+      # range is tried. Jumping from the full tag straight to the primary
+      # subtag served :zh (usually Simplified) to a zh-Hant-TW client although
+      # :"zh-Hant" was available.
       def parse_accept_language(header, allowed)
+        depth = allowed.map { |locale| locale.to_s.count("-_") }.max.to_i + 1
         ranked_accept_languages(header).each do |lang|
-          # Full tag first (fr-CA matches an available :"fr-CA" or :fr_CA),
-          # then the primary subtag (fr). Pre-1.22 the region was discarded
-          # outright, so a regional locale in available: could never match its
-          # own Accept-Language tag.
-          match = match_locale(lang, allowed) || match_locale(lang.split(/[-_]/).first, allowed)
-          return match if match
+          accept_language_lookup_ranges(lang, depth).each do |range|
+            match = match_locale(range, allowed)
+            return match if match
+          end
         end
         nil
+      end
+
+      # The prefixes of `lang` that Lookup tries, longest first, cut one subtag
+      # off the right at a time and kept in the client's own spelling (so an
+      # exact `pt_BR` still beats `pt-BR` at every level). A single-character
+      # subtag left exposed by a cut (the `x` of en-US-x-pirate) goes with it,
+      # as RFC 4647 requires. A prefix with more subtags than `depth` — the
+      # most any allowed locale has — is never built: matching compares whole
+      # tags, so it could not match, and a tag of thousands of subtags stays
+      # cheap.
+      def accept_language_lookup_ranges(lang, depth)
+        parts = lang.split(/(?=[-_])/, depth + 1) # "zh-Hant-TW" → ["zh", "-Hant", "-TW"]
+        [parts.length, depth].min.downto(1).filter_map do |count|
+          next if count > 1 && count < parts.length && parts[count - 1].length == 2
+
+          parts.first(count).join
+        end
       end
 
       # Language tags from an Accept-Language header (kept whole — see
