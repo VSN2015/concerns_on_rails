@@ -24,6 +24,37 @@ module ConcernsOnRails
       # merges and seeds new records exactly as `where(field => nil)` does.
       class DefaultScopePredicate < Arel::Nodes::Equality; end
 
+      # ActiveRecord::Relation defines its own destroy_all, so the class-level
+      # override below never reached `Post.where(...).destroy_all`,
+      # `Post.destroy_by(...)` or `post.comments.where(...).destroy_all`: they
+      # destroyed each row, a HARD delete of the rows the caller meant to put
+      # in the trash. Prepended into the model's generated relation classes
+      # (ClassMethods#soft_delete_install_destroy_all!), it soft-deletes them
+      # instead and — unlike the class-level form — keeps Relation#destroy_all's
+      # return contract, the Array of records it acted on: ActiveRecord itself
+      # calls `relation.destroy_all.count(&:destroyed?)` (in_batches, and
+      # has_many :through removing join rows), which an Integer would break.
+      # A soft-deleted record is not `destroyed?`, so those counts read 0 (and
+      # a soft-deletable JOIN model's rows go to the trash, not away). Like
+      # Relation#destroy_all, the relation is reset so a later read reloads.
+      module RelationDestroyAll
+        def destroy_all
+          klass.send(:soft_delete_records_in, self).tap { reset }
+        end
+      end
+
+      # The association proxy (`post.comments.destroy_all`) soft-deletes its
+      # records the same way and resets itself, so the next read reloads. A
+      # :through proxy keeps ActiveRecord's behavior: there destroy_all removes
+      # the LINKS (the join rows), never the target records.
+      module CollectionProxyDestroyAll
+        def destroy_all
+          return super if proxy_association.reflection.through_reflection?
+
+          klass.send(:soft_delete_records_in, scope).tap { reset }
+        end
+      end
+
       included do
         # declare class attributes and set default values
         class_attribute :soft_delete_field, instance_accessor: false, default: :deleted_at
@@ -56,6 +87,8 @@ module ConcernsOnRails
 
           unscope(where: soft_delete_field).where(DefaultScopePredicate.new(arel_table[soft_delete_field], nil))
         end
+
+        soft_delete_install_destroy_all!
       end
 
       # A real module (not `class_methods do`) so the batch helpers and their
@@ -112,7 +145,8 @@ module ConcernsOnRails
 
         # Override destroy_all to soft delete. Kept for backwards compatibility, but prefer the
         # explicit `soft_delete_all` — silently redefining a standard AR method is a known footgun
-        # (and unlike AR's destroy_all this returns a count, not the records).
+        # (and unlike AR's destroy_all this returns a count, not the records). A relation's or an
+        # association's destroy_all soft-deletes too (RelationDestroyAll), returning the records.
         def destroy_all
           soft_delete_all
         end
@@ -149,6 +183,46 @@ module ConcernsOnRails
         end
 
         private
+
+        # Every subclass gets its own generated relation classes (ActiveRecord
+        # builds them in `inherited`), so the destroy_all overrides are
+        # installed on each — an STI subclass's `where(...).destroy_all` too.
+        def inherited(subclass)
+          super
+          subclass.send(:soft_delete_install_destroy_all!)
+        end
+
+        # The ActiveRecord relation classes whose generated per-model subclass
+        # gets RelationDestroyAll (DisableJoinsAssociationRelation is 7.0+).
+        def soft_delete_relation_bases
+          [ActiveRecord::Relation, ActiveRecord::AssociationRelation,
+           (ActiveRecord::DisableJoinsAssociationRelation if defined?(ActiveRecord::DisableJoinsAssociationRelation))].compact
+        end
+
+        def soft_delete_install_destroy_all!
+          soft_delete_relation_bases.each do |base|
+            delegate = relation_delegate_class(base)
+            delegate.prepend(RelationDestroyAll) if delegate && !(delegate < RelationDestroyAll)
+          end
+          proxy = relation_delegate_class(ActiveRecord::Associations::CollectionProxy)
+          proxy.prepend(CollectionProxyDestroyAll) if proxy && !(proxy < CollectionProxyDestroyAll)
+        end
+
+        # The relation/association form of destroy_all: soft-delete every
+        # not-yet-deleted record of `relation` through its own soft_delete!
+        # (hooks, cascade), in one transaction with soft_delete_all's
+        # RecordNotSaved + rollback contract, and return those records.
+        def soft_delete_records_in(relation)
+          records = []
+          ConcernsOnRails::Support::BatchOps.run(
+            relation.where(soft_delete_field => nil),
+            label: soft_delete_label,
+            message: "failed to soft-delete record"
+          ) do |record|
+            record.soft_delete!.tap { |ok| records << record if ok }
+          end
+          records
+        end
 
         # The current relation with the DEFAULT SCOPE's soft-delete predicate
         # peeled off — and nothing else. `unscope(where: field)` (what the
