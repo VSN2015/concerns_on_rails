@@ -292,8 +292,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Respondable`** — standard JSON success/error envelopes (`render_success`/`render_error`),
   plus `render_created(data:, location:)` and `render_invalid(record)`; `location:`/`headers:`
   on `render_success` (names and values stripped of illegal bytes, `Link` appended
-  case-insensitively). `respondable_by error_format: :problem_details` switches every
-  error-rendering concern to RFC 9457 app-wide.
+  case-insensitively, `Vary` appended through `Support::VaryHeader`, a caller's `*` replacing
+  it). `respondable_by error_format: :problem_details` switches every error-rendering concern
+  to RFC 9457 app-wide.
 - **`ErrorHandleable`** — `rescue_from` for RecordNotFound / ParameterMissing / RecordInvalid.
 - **`Includable`** — allow-listed association sideloading (nested include trees via `Support::IncludeTree`,
   `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets.
