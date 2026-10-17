@@ -208,9 +208,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   Normalizes-before-encrypt and masks-decrypted for free; RAISES if a field is
   also `auditable_by` (either declaration order), or a friendly_id slug source — the
   `sluggable_by` field, a `candidates:` entry, an `alias_attribute` of one (chains followed),
-  a bare friendly_id base (at the macro where it can, else at save), or a `searchable_by`/
-  `taggable_by` column (either order; undeclared Taggable `:tags` at `tagged_with`). Ciphertext is
-  non-deterministic ⇒ unsearchable; opt into `blind_index: true` (or
+  a bare friendly_id base (at the macro where it can, else at save), a `searchable_by`/
+  `taggable_by` column (either order; undeclared Taggable `:tags` at `tagged_with`), or a
+  Sequenceable `scope:` / friendly_id scope column (either order; a bare friendly_id after
+  it, at save). Ciphertext is non-deterministic ⇒ unsearchable; opt into `blind_index: true` (or
   `{ column:, expression: }`) for a deterministic-HMAC companion column +
   `find_by_<field>`/`where_<field>`/`<field>_fingerprint` finders (nil values
   return none/nil, never `bidx IS NULL` matches). Key rotation: gem-level

@@ -144,6 +144,7 @@ module ConcernsOnRails
           candidates = sluggable_validate_candidates!(candidates)
           max_length = sluggable_validate_max_length!(max_length)
           sluggable_guard_encryptable!(sluggable_source_fields(field, candidates))
+          sluggable_guard_encryptable_scope!(scope)
           # Validate the slug column too (a missing one used to fail at first save
           # with an opaque friendly_id error); an association scope: is exempt.
           scope_column = scope && reflect_on_association(scope.to_sym) ? nil : scope
@@ -188,6 +189,30 @@ module ConcernsOnRails
                 "#{LABEL}: #{overlap.map { |f| ":#{f}" }.join(', ')} declared with both Encryptable and " \
                 "Sluggable; the slug would store the decrypted plaintext in the slug column. " \
                 "Slug from a non-sensitive field instead."
+        end
+
+        # friendly_id's uniqueness check scopes its query with
+        # `where(column => value)` per scope column; on an `encryptable`
+        # column that serializes a fresh envelope (random IV) matching no
+        # stored row, so two records in one scope get the same slug, and a
+        # unique index over the ciphertext never rejects it. Resolved the way
+        # friendly_id resolves `scope_columns` (an association to its foreign
+        # key; a multi-column scope flattened), before anything is assigned.
+        # Encryptable#encryptable mirrors this for the reverse order.
+        def sluggable_guard_encryptable_scope!(scope)
+          return if scope.nil? || !respond_to?(:encryptable_rules)
+
+          overlap = sluggable_scope_columns(scope) & encryptable_rules.keys
+          return if overlap.empty?
+
+          raise ArgumentError,
+                "#{LABEL}: scope: #{overlap.map { |f| ":#{f}" }.join(', ')} is an `encryptable` column; " \
+                "friendly_id's uniqueness check would compare ciphertext (a fresh random IV per query), match no " \
+                "row and give two records in one scope the same slug. Scope by a non-encrypted column instead."
+        end
+
+        def sluggable_scope_columns(scope)
+          Array(scope).map { |entry| (reflect_on_association(entry.to_sym)&.foreign_key || entry).to_sym }
         end
 
         # Mirror of Hashable's macro-time guard, covering the reverse

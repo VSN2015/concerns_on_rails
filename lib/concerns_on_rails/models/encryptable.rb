@@ -136,6 +136,14 @@ module ConcernsOnRails
         blind_fingerprints(rule, value, zone_aware: zone_aware, legacy: false).first
       end
 
+      # The friendly_id scope columns of a `:scoped` model, as Symbols
+      # (friendly_id resolves an association to its foreign key), else [].
+      def self.friendly_id_scope_columns(klass)
+        return [] unless klass.respond_to?(:friendly_id_config) && klass.friendly_id_config.uses?(:scoped)
+
+        klass.friendly_id_config.scope_columns.map(&:to_sym)
+      end
+
       # Shared by both declaration orders of the Lockable unlock-token guard.
       def self.lockable_token_message(field)
         "#{LABEL}: ':#{field}' is Lockable's unlock_token. The token is written and looked up by " \
@@ -461,6 +469,7 @@ module ConcernsOnRails
             encryptable_guard_sluggable!(field)
             encryptable_guard_queryable!(field)
             encryptable_guard_lockable_token!(field)
+            encryptable_guard_scope_column!(field)
             bi = encryptable_normalize_blind_index(field, blind_index)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
@@ -759,6 +768,29 @@ module ConcernsOnRails
           raise ArgumentError, ConcernsOnRails::Models::Encryptable.lockable_token_message(field)
         end
 
+        # A Sequenceable `scope:` column or a friendly_id scope column is
+        # queried with `where(column => value)`, which on ciphertext (random
+        # IV) matches no row: the counter issues the same number twice,
+        # friendly_id the same slug. Refused here for the order
+        # sequenceable_by / sluggable_by / friendly_id first; Sequenceable and
+        # Sluggable refuse the reverse order, and the save-time slug guard
+        # covers a bare friendly_id declared after `encryptable`.
+        def encryptable_guard_scope_column!(field)
+          if respond_to?(:sequenceable_config) && sequenceable_config.values.any? { |cfg| cfg[:scope].include?(field) }
+            raise ArgumentError, encryptable_scope_column_message(field, "a Sequenceable scope: column",
+                                                                  "counter's MAX", "issue the same number twice")
+          end
+          return unless ConcernsOnRails::Models::Encryptable.friendly_id_scope_columns(self).include?(field)
+
+          raise ArgumentError, encryptable_scope_column_message(field, "a friendly_id scope column",
+                                                                "slug uniqueness check", "give two records the same slug")
+        end
+
+        def encryptable_scope_column_message(field, role, query, outcome)
+          "#{LABEL}: ':#{field}' is #{role}; its #{query} would compare ciphertext (a fresh random IV per " \
+            "query), match no row and #{outcome}. Keep scope columns unencrypted."
+        end
+
         def encryptable_slug_source_message(field)
           "#{LABEL}: ':#{field}' is also a slug source (Sluggable / friendly_id); the slug would store " \
             "the decrypted plaintext in the slug column. Slug from a non-sensitive field instead."
@@ -997,9 +1029,12 @@ module ConcernsOnRails
       def encryptable_guard_slug_source!
         klass = self.class
         overlap = ConcernsOnRails::Support::SlugSources.names(klass) & klass.encryptable_rules.keys
-        return if overlap.empty?
+        raise ArgumentError, klass.send(:encryptable_slug_source_message, overlap.first) unless overlap.empty?
 
-        raise ArgumentError, klass.send(:encryptable_slug_source_message, overlap.first)
+        # A bare friendly_id scoped by a column encrypted earlier (the
+        # macro-time scope guards cannot see friendly_id's own macro).
+        scoped = ConcernsOnRails::Models::Encryptable.friendly_id_scope_columns(klass) & klass.encryptable_rules.keys
+        klass.send(:encryptable_guard_scope_column!, scoped.first) unless scoped.empty?
       end
     end
   end
