@@ -272,7 +272,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   automatically (timestamps, Sluggable slug, Tokenizable/Hashable tokens,
   Sequenceable numbers, Auditable trail, SoftDeletable stamp, Lockable
   attempts/locked_at, counter columns kept by children's CounterCacheable rules or native
-  `counter_cache:`) so sibling concerns regenerate on save; a Duplicable
+  `counter_cache:`, and the TOP-LEVEL copy's acts_as_list position — deep-copied children keep
+  theirs) so sibling concerns regenerate on save; a Duplicable
   child copies via its OWN rules (recursive graphs); `on_duplicate(copy)`
   hook.
 

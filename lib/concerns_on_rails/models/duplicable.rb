@@ -35,6 +35,13 @@ module ConcernsOnRails
     #     creation is then audited normally, like any create)
     #   * SoftDeletable timestamp — a copy of trash is a live record
     #   * Lockable attempts (0) / locked_at (nil) — a copy starts unlocked
+    #   * Sortable's acts_as_list position — on the TOP-LEVEL copy only, so
+    #     acts_as_list places it per `add_new_at:` instead of inserting it at
+    #     the original's slot and pushing the original down. Deep-copied
+    #     children keep theirs: the copied list keeps its order. (Sortable
+    #     with `use_acts_as_list: false` has nothing to regenerate it: kept.
+    #     Under `add_new_at: nil` the copy, like any new row, starts outside
+    #     the list.)
     #   * counter-cache columns (0) maintained by a child — a child class's
     #     CounterCacheable rules or a native `belongs_to ..., counter_cache:`
     #     pointing at this class (found through its has_many / has_one
@@ -190,11 +197,15 @@ module ConcernsOnRails
         end
       end
 
+      # The copy's own resets. Only `duplicate` calls this, so the list
+      # position blanked here is the TOP-LEVEL copy's (see
+      # #duplicable_child_copy for a Duplicable child's).
       def duplicable_reset_attributes(copy)
         self.class.duplicable_config[:reset].each do |column|
           copy[column] = nil if copy.class.column_names.include?(column.to_s)
         end
         Duplicable.reset_identity_columns(copy)
+        Duplicable.reset_list_position(copy)
       end
 
       def duplicable_apply_suffixes(copy)
@@ -282,8 +293,12 @@ module ConcernsOnRails
       # every sibling concern's token/slug/number/trail — so a plain child
       # regenerates them on save instead of sharing a credential with the
       # original or colliding with its unique index.
+      #
+      # A child keeps its list position either way (a Duplicable child's own
+      # `duplicate` blanked it as if it were a top-level copy), so the copied
+      # children keep their order in the new parent's list.
       def duplicable_child_copy(child)
-        return child.duplicate if child.class.include?(Duplicable)
+        return Duplicable.keep_list_position(child, child.duplicate) if child.class.include?(Duplicable)
 
         plain = child.dup
         Duplicable.reset_identity_columns(plain)
@@ -301,6 +316,41 @@ module ConcernsOnRails
           end
           record[klass.lockable_attempts_field] = 0 if concern?(klass, :Lockable)
           zero_counter_cache_columns(record)
+        end
+
+        # Blank the acts_as_list position of a TOP-LEVEL copy (see the module
+        # docs): acts_as_list assigns it on create per `add_new_at:`, as for
+        # any new record. Since 1.32.1 that position is a reported
+        # create-time generated value (Sortable::GeneratedPosition).
+        def reset_list_position(record)
+          column = list_position_column(record)
+          record[column] = nil if column
+        end
+
+        # A deep-copied Duplicable child keeps the original child's position
+        # unless its own `on_duplicate` set one or its own `reset:` lists the
+        # column. Returns the copy.
+        def keep_list_position(child, copy)
+          column = list_position_column(copy)
+          return copy if column.nil? || !copy[column].nil?
+          return copy if copy.class.duplicable_config[:reset].include?(column.to_sym)
+
+          copy[column] = child[column]
+          copy
+        end
+
+        # The acts_as_list position column of a Sortable record whose list is
+        # kept by acts_as_list, or nil (`use_acts_as_list: false` has nothing
+        # to regenerate it, so it is never blanked). Read through
+        # acts_as_list's `position_column` instance reader, which every
+        # supported acts_as_list version defines (`acts_as_list_options` is
+        # 1.2+ only — the Rails 6.0 line resolves 1.1).
+        def list_position_column(record)
+          klass = record.class
+          return nil unless concern?(klass, :Sortable) && klass.method_defined?(:acts_as_list_top)
+
+          column = record.position_column.to_s
+          klass.column_names.include?(column) ? column : nil
         end
 
         # Zero every counter-cache column on `record`'s class (see the module
