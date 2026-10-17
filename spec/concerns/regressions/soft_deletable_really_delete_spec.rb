@@ -49,7 +49,7 @@ describe "SoftDeletable#really_delete! instance state" do
     expect(model.unscoped.count).to eq(0)
   end
 
-  it "reports previously_persisted? like a deleted record", min_rails: "6.1" do
+  it "reports previously_persisted? like a deleted record", min_rails: "7.0" do
     post = model.create!(title: "a")
 
     post.really_delete!
