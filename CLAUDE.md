@@ -257,7 +257,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   serialize through attribute types so encryptable fields stay ciphertext) +
   reload. `anonymized?`, `.anonymized`/`.not_anonymized`, batch
   `anonymize_all!` (count of rows actually erased; skips stamped; a vetoed record is
-  skipped, each record in its own savepoint). Clears the Auditable trail when an
+  skipped, each record in its own savepoint; on the model it also reaches rows the gem's
+  default scopes hide — `AssociationScope.without` peels only those — on a relation exactly
+  that relation, like `reencrypt_all!`). Clears the Auditable trail when an
   erased field (a rewritten slug included) is tracked, and Addressable's `fingerprint:` when a
   mapped column is erased. Never blocked by crypto state: presence-only strategies never
   decrypt, and `:hash`/callables on an undecryptable value write a fresh random 64-hex.
