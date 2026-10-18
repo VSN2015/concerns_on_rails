@@ -94,7 +94,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   of the call (pluck/records), so a row the call itself trashes is never purged, and each purge
   re-checks (EXISTS, no row lock) the row is still trashed in the DB (`soft_delete_purge!`: true purged / false vetoed /
   nil skipped). A purged parent first purges its TRASHED cascade children of any stamp, a visited
-  set of [base_class, id] stops cascade cycles, and a vetoed child rolls the parent back (relation:
+  set of [base_class, id] stops cascade cycles, the purge pass ignores a cascaded association's own limit/offset, and a vetoed child rolls the parent back (relation:
   skipped; association: RecordNotDestroyed). The association form rides Rails' own `delete_or_destroy` (before/after_remove,
   marks the loaded instances, nil on abort); a loaded / limited / composite-key / disable_joins relation
   acts on its records as loaded (deduped by id). Rails' OWN maintenance stays hard (HMT
@@ -170,8 +170,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only), `ranked:` (a grouped or
   DISTINCT relation is returned unranked — its rank CASE would sit outside the GROUP BY / SELECT list).
 - **`Normalizable`** — `before_validation` normalization + a `before_save` backstop (run by the
-  prepended `Support::TransformBackstop` dispatcher, below) for saves that skip validation (so an earlier sibling `before_save` — Auditable,
-  Addressable — sees the stored value; a field the validation pass already normalized is
+  prepended `Support::TransformBackstop` dispatcher, below) for saves that skip validation (so an earlier sibling `before_save` — Addressable's
+  fingerprint — sees the stored value; a field the validation pass already normalized is
   skipped, so a Proc runs once per save — a repeat validation (`save if valid?`) skips it
   too, and `reload` drops the record). Sanitizable `on: :write`, Taggable and Addressable
   have the same backstop, but re-record the values in `after_validation`, so a later

@@ -43,7 +43,7 @@ authorize_by(only: nil, except: nil, status: :forbidden, message: "Forbidden", &
 |---|---|---|---|
 | `only` | `Symbol`, `Array<Symbol>`, or `nil` | `nil` | Restricts the rule to the listed action names. Mutually exclusive with `except`. |
 | `except` | `Symbol`, `Array<Symbol>`, or `nil` | `nil` | Skips the rule for the listed action names; applies to all others. Mutually exclusive with `only`. |
-| `status` | `Symbol` or `Integer` | `:forbidden` | HTTP status code used in the denial response (e.g., `:unauthorized`, `422`). The envelope `code` follows it: `"unauthorized"` for 401, `"not_found"` for 404, `"forbidden"` for 403 and anything else. |
+| `status` | `Symbol` or `Integer` | `:forbidden` | HTTP status code used in the denial response (e.g., `:unauthorized`, `422`). The envelope `code` follows it: `"unauthorized"` for 401, `"not_found"` for 404, `"forbidden"` for 403 and anything else. 404 concealment also needs `message: "Resource not found"` (ErrorHandleable's wording), or the body tells a hidden record from a missing one. |
 | `message` | `String` | `"Forbidden"` | Human-readable message included in the error envelope under `error.message`. |
 | `name` | `Symbol`/`String` or `nil` | `nil` | A label for the rule, surfaced as `rule:` in the `authorization_denied.concerns_on_rails` payload so logs can say which rule denied. |
 | `&block` | `Proc` (required) | — | Predicate evaluated via `instance_exec` on the controller instance. Must return truthy to allow the request. Receives zero, one (`action_name`), or two (`action_name, current_user`) arguments — whichever matches the block's declared arity. |

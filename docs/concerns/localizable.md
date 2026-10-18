@@ -128,5 +128,5 @@ end
 
 ## Changed in 1.22.0
 
-- Regional tags match: `Accept-Language: fr-CA` tries the full tag before falling back to the primary subtag, so `available: [:"fr-CA"]` can now match.
+- Regional tags match: `Accept-Language: fr-CA` is tried as the full tag first, then truncated one subtag at a time (`zh-Hant-TW` → `zh-Hant` → `zh`), so `available: [:"fr-CA"]` can now match.
 - `resolved_locale` is memoized per request.
