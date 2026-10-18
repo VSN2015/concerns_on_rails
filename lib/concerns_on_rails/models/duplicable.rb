@@ -80,6 +80,10 @@ module ConcernsOnRails
       SUPPORTED_MACROS = %i[has_many has_one has_and_belongs_to_many].freeze
       TIMESTAMP_COLUMNS = %w[created_at updated_at].freeze
 
+      # Ids per refresh SELECT in duplicate! (keeps the IN list inside the
+      # bind limits of older SQLite builds; still one query per class).
+      REFRESH_BATCH_SIZE = 500
+
       included do
         class_attribute :duplicable_config, instance_accessor: false,
                                             default: { associations: [], reset: [], suffix: {} }.freeze
@@ -326,19 +330,33 @@ module ConcernsOnRails
           before.each { |column, value| record[column] = value }
         end
 
-        # Refresh `record` and, recursively, every persisted Duplicable
-        # record copied below it. A child copied through its own rules is
-        # bumped exactly like the root: ITS copied children's counter UPDATEs
-        # raise its row's counters and lock_version, so a copy refreshed only
-        # at the top raised StaleObjectError one level down. Walks the copy's
-        # in-memory association targets (what `duplicate` attached — a
+        # Refresh the copy and every persisted Duplicable record copied below
+        # it. A child copied through its own rules is bumped exactly like the
+        # root: ITS copied children's counter UPDATEs raise its row's counters
+        # and lock_version, so a copy refreshed only at the top raised
+        # StaleObjectError one level down. Walks the copy's in-memory
+        # association targets (what `duplicate` attached — a
         # `duplicate!(only:)` that left an association out has nothing there);
-        # plain children are skipped, since their own children are never copied.
-        def refresh_copied_records(record)
-          refresh_counter_cache_columns(record)
+        # plain children are skipped, since their own children are never
+        # copied. The cost is one SELECT per CLASS in the graph, never per
+        # record: the records are grouped by class first (the walk reads only
+        # loaded targets) and a class with no lock or counter column is
+        # skipped. The per-class column list is computed once per call.
+        def refresh_copied_records(root)
+          groups = {}
+          collect_copied_records(root, groups)
+          groups.each do |klass, records|
+            columns = refreshable_columns(klass)
+            refresh_columns_for(klass, records, columns) unless columns.empty?
+          end
+        end
+
+        # Records per class, `record` and everything copied below it.
+        def collect_copied_records(record, groups)
+          (groups[record.class] ||= []) << record if record.persisted?
           return unless record.class.include?(Duplicable)
 
-          copied_children(record).each { |child| refresh_copied_records(child) }
+          copied_children(record).each { |child| collect_copied_records(child, groups) }
         end
 
         # The persisted Duplicable children `record` carries through its
@@ -352,26 +370,42 @@ module ConcernsOnRails
           end
         end
 
-        # After the save the database holds the true counts (each child's
-        # create incremented them); mirror them into the saved copy. Under
-        # optimistic locking each of those increments also bumped the row's
-        # lock_version, which reaches the copy only when the child's
-        # belongs_to target IS the copy (inverse detection) — through a scoped
-        # has_many the copy was left a version behind its own row and raised
-        # StaleObjectError on its next save. The row's lock_version is read
-        # with the counters: the caller (duplicate!) reads inside the
-        # transaction that created the row, so the value is this save's own.
-        def refresh_counter_cache_columns(record)
-          klass = record.class
+        # What the save's child inserts bumped on `klass`'s rows: its counter
+        # columns, and under optimistic locking the lock column — each of
+        # those increments also bumped the row's lock_version, which reaches
+        # the copy only when the child's belongs_to target IS the copy
+        # (inverse detection); through a scoped has_many the copy was left a
+        # version behind its own row and raised StaleObjectError on its next
+        # save.
+        def refreshable_columns(klass)
           columns = counter_cache_columns(klass)
-          columns += [klass.locking_column] if klass.locking_enabled? && record.has_attribute?(klass.locking_column)
-          return if columns.empty? || !record.persisted?
+          columns += [klass.locking_column.to_s] if klass.locking_enabled? && klass.column_names.include?(klass.locking_column.to_s)
+          columns
+        end
 
-          values = klass.unscoped.where(klass.primary_key => record.id).pluck(*columns).first
-          return if values.nil?
+        # After the save the database holds the true counts and versions:
+        # read them for ALL of `records` (one class) with one SELECT per batch
+        # and mirror them into each, clearing the change. The caller reads
+        # inside the transaction that created the rows, so the values are this
+        # save's own.
+        #
+        # The primary-key condition is the one `where` below (DATA-12 turns it
+        # into a `PrimaryKey.condition` for composite keys).
+        def refresh_columns_for(klass, records, columns)
+          key = klass.primary_key
+          rows = {}
+          records.each_slice(REFRESH_BATCH_SIZE) do |batch|
+            klass.unscoped.where(key => batch.map(&:id)).pluck(key, *columns).each do |id, *values|
+              rows[id] = values
+            end
+          end
+          records.each do |record|
+            values = rows[record.id]
+            next if values.nil?
 
-          columns.zip(Array(values)).each { |column, value| record[column] = value }
-          record.send(:clear_attribute_changes, columns)
+            columns.zip(values).each { |column, value| record[column] = value }
+            record.send(:clear_attribute_changes, columns)
+          end
         end
 
         # Columns of `klass` maintained by a child's counter — CounterCacheable
