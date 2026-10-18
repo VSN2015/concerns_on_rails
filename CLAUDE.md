@@ -60,7 +60,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   field changes to a value with a usable candidate (a cleared/blank source keeps the slug, never a
   bare uuid), backfills a blank slug (an ASSIGNED `""`/nil too, whenever the source is present), and
   won't overwrite an explicitly-assigned non-blank slug.
-  Options: `history:`, `scope:`, `reserved_words:`, `finders:`. A saved record whose `scope:`
+  Options: `history:`, `scope:` (a column, an association, or an Array of them), `reserved_words:`, `finders:`. A saved record whose `scope:`
   column changes keeps a slug the new scope has free and rebuilds one that scope already holds.
 - **`Sortable`** — wraps `acts_as_list`; `default_scope` orders by the configured
   field/direction. `sortable_by :position` / `position: :desc`; `scope:`, `add_new_at:`,
