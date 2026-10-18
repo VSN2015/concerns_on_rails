@@ -84,4 +84,46 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
     expect(page(:price, "12.5").map(&:price)).to eq([BigDecimal("12.5")])
     expect(page(:price, "0.125e2").map(&:price)).to eq([BigDecimal("12.5")])
   end
+
+  # Review follow-up: NumericOperand.numeric_string? ran its regexp on the raw
+  # String, and an invalid-UTF-8 one (a tampered cursor whose JSON carries raw
+  # bytes) raised ArgumentError: invalid byte sequence — a 500 where master
+  # cast it silently.
+  describe "a boundary String that is not valid UTF-8, or holds a NUL" do
+    # JSON.generate refuses invalid UTF-8, so the payload is spelled by hand.
+    def raw_token(column, boundary_json)
+      payload = %({"t":"priced_items","o":["#{column}:asc","id:asc"],"d":"next","v":[#{boundary_json},1]})
+      [payload.b].pack("m0").tr("+/", "-_").delete("=")
+    end
+
+    def raw_page(column, boundary_json)
+      controller_for({ column => :asc }).new(params: { cursor: raw_token(column, boundary_json) })
+                                        .cursor_paginated(PricedItem.all)
+    end
+
+    it "is an InvalidCursor on a decimal, an integer and a float column, never an ArgumentError" do
+      { price: "1\xFF", weight: "\xC3\x28", rating: "2.5\xFE" }.each do |column, bytes|
+        expect { raw_page(column, %("#{bytes}")) }
+          .to raise_error(ConcernsOnRails::Controllers::CursorPaginatable::InvalidCursor), column.to_s
+      end
+      expect { raw_page(:id, %("1\xFF")) }
+        .to raise_error(ConcernsOnRails::Controllers::CursorPaginatable::InvalidCursor)
+    end
+
+    it "is an InvalidCursor with a NUL byte" do
+      [%("12\\u00005"), %("\\u000012.5"), %("12.5\\u0000")].each do |nul|
+        expect { raw_page(:price, nul) }
+          .to raise_error(ConcernsOnRails::Controllers::CursorPaginatable::InvalidCursor), "accepted: #{nul}"
+      end
+    end
+
+    # The raise lived in NumericOperand, so Filterable (an operand from a JSON
+    # body or a hand-built params hash) reached it the same way.
+    it "reads as uncastable through NumericOperand, for Filterable's operands too" do
+      %w[integer decimal float].each do |kind|
+        type = ActiveModel::Type.lookup(kind.to_sym)
+        expect(ConcernsOnRails::Support::NumericOperand.classify("1\xFF", type)&.status).to eq(:uncastable), kind
+      end
+    end
+  end
 end
