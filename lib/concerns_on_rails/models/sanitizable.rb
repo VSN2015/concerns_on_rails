@@ -212,8 +212,12 @@ module ConcernsOnRails
       # Every declared field (read- and write-mode alike) run through its
       # sanitizer against the current value, keyed like `attributes`:
       #   article.sanitized_attributes  # => { "body" => "<b>Hi</b>", "summary" => "sum" }
+      # A column a partial `select` did not load is left out, as `attributes`
+      # leaves it out (reading it raised MissingAttributeError).
       def sanitized_attributes
-        self.class.sanitizable_rules.to_h { |field, rule| [field.to_s, rule[:sanitizer].call(self[field])] }
+        self.class.sanitizable_rules.each_with_object({}) do |(field, rule), sanitized|
+          sanitized[field.to_s] = rule[:sanitizer].call(self[field]) if has_attribute?(field)
+        end
       end
 
       # `sanitized: true` (all declared fields) or `sanitized: [:body, ...]`

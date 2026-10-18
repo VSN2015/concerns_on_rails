@@ -1395,7 +1395,7 @@ article.sanitized_body  # => "<b>Hi</b>alert(1)"                    (script tag 
 **Serialization & clean-up**
 
 ```ruby
-article.sanitized_attributes                 # => { "body" => "<b>Hi</b>alert(1)", "summary" => "sum" } — every declared field, cleaned
+article.sanitized_attributes                 # => { "body" => "<b>Hi</b>alert(1)", "summary" => "sum" } — every declared (loaded) field, cleaned
 article.as_json(sanitized: true)             # declared fields swapped for their sanitized form, the rest raw
 render json: article.as_json(sanitized: [:body], only: %i[id body])   # subset; composes with only:/except:/methods:
 article.as_json(sanitized: true, include: :comments)                  # nested records are sanitized too
@@ -1447,7 +1447,7 @@ end
 **Serialization** — mask in the response, not just in the view
 
 ```ruby
-user.masked_attributes            # => { "email" => "j****@example.com", "card" => "**** **** **** 4242" }
+user.masked_attributes            # => { "email" => "j****@example.com", "card" => "**** **** **** 4242" } (loaded columns only, like attributes)
 user.as_json(masked: true)        # every declared field swapped for its masked form, the rest raw
 user.as_json(masked: [:email])    # just these fields (undeclared ones raise)
 user.to_json(masked: true, only: %i[id email])   # composes with only:/except:/methods:/include:

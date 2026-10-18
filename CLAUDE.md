@@ -156,7 +156,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `as_json(sanitized: true)` (and Maskable's `masked: true`) carry the flag through EVERY
   nested `include:` level, also past a model without the concern.
 - **`Maskable`** — non-destructive display masking (`masked_<field>` readers): `:email`,
-  `:phone`, `:credit_card`, `:last4`, `:all`, or a Proc.
+  `:phone`, `:credit_card`, `:last4`, `:all`, or a Proc. `masked_attributes` (and Sanitizable's
+  `sanitized_attributes`) leave out a column a partial `select` did not load.
 - **`Monetizable`** — integer-cents money accessors via BigDecimal: `<name>`, `<name>=`,
   `formatted_<name>`; `unit:`, `precision:` (default: max(2, a power-of-ten subunit's decimals)),
   `delimiter:`, `separator:`, `subunit_to_unit:`.

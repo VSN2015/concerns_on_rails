@@ -88,8 +88,12 @@ module ConcernsOnRails
 
       # Every declared field, masked, keyed like `attributes` (String keys):
       #   user.masked_attributes  # => { "email" => "j***@x.com", "card" => "**** **** **** 4242" }
+      # A column a partial `select` did not load is left out, as `attributes`
+      # leaves it out (reading it raised MissingAttributeError).
       def masked_attributes
-        self.class.maskable_rules.to_h { |field, masker| [field.to_s, masker.call(self[field])] }
+        self.class.maskable_rules.each_with_object({}) do |(field, masker), masked|
+          masked[field.to_s] = masker.call(self[field]) if has_attribute?(field)
+        end
       end
 
       # `masked: true` (all declared fields) or `masked: [:email, ...]` swaps
