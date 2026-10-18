@@ -303,7 +303,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `Support::NumericOperand`: exact, never truncated (`gte 5.5` on an integer column is
   `>= 6`, `eq 5.5` is none), out-of-range answered per operator, oversized strings refused
   before any BigDecimal is built.
-- **`Sortable`** — allow-listed, multi-column ordering from `params[:sort]` (uses `reorder`).
+- **`Sortable`** — allow-listed, multi-column ordering from `params[:sort]` (uses `reorder`);
+  the macro's `direction:` is case-insensitive and anything but asc/desc raises at class load.
 - **`Respondable`** — standard JSON success/error envelopes (`render_success`/`render_error`),
   plus `render_created(data:, location:)` and `render_invalid(record)`; `location:`/`headers:`
   on `render_success` (names and values stripped of illegal bytes, `Link` appended
