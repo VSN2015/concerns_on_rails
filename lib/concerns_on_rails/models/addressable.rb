@@ -94,10 +94,11 @@ module ConcernsOnRails
         def addressable_by(required: DEFAULT_REQUIRED, default_country: "US",
                            validate_state: false, verify_with: nil,
                            lengths: {}, allow_blank: false, normalize_country: false, fingerprint: nil, **mapping)
+          country = resolve_default_country(default_country)
           condition = extract_validation_condition!(mapping)
           overrides = normalize_address_overrides(mapping)
           self.addressable_required = Array(required).map(&:to_sym)
-          self.addressable_default_country = default_country.to_s.upcase
+          self.addressable_default_country = country
           self.addressable_validate_state = validate_state
           self.addressable_verifier = verify_with
           self.addressable_lengths = resolve_lengths(lengths)
@@ -154,6 +155,23 @@ module ConcernsOnRails
           return if has_address_column
 
           alias_method :address_changed?, :address_parts_changed?
+        end
+
+        # The default as an ISO alpha-2 code, canonicalized like a country
+        # value ("Canada" / "CAN" / " ca " -> "CA") whether or not
+        # normalize_country: is on. Stored verbatim, a name or a typo made
+        # every blank-country record an unknown country: permissive postal
+        # rules, no state check, and a fingerprint that missed the same
+        # address with the country spelled out. nil / blank: no default.
+        def resolve_default_country(value)
+          return nil if value.nil? || value.to_s.strip.empty?
+
+          code = ConcernsOnRails::Support::AddressData.normalize_country_code(value.to_s).to_s.upcase
+          return code if ConcernsOnRails::Support::AddressData.valid_country?(code)
+
+          raise ArgumentError,
+                "#{LABEL}: default_country must be an ISO 3166-1 alpha-2 code (or a country name / alpha-3 code " \
+                "that maps to one), got #{value.inspect}"
         end
 
         def resolve_fingerprint_column(fingerprint)
