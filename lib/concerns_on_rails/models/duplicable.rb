@@ -394,8 +394,16 @@ module ConcernsOnRails
 
         def sequence_columns(klass)
           klass.sequenceable_config.flat_map do |field, cfg|
-            [field, cfg[:into]].compact
+            [field, cfg[:into], sequence_period_column(cfg)].compact
           end
+        end
+
+        # A custom period_column (a finalized_at stamp) belongs to the number it
+        # anchors, so it is cleared with it; created_at is already a timestamp
+        # reset.
+        def sequence_period_column(cfg)
+          column = cfg[:period_column]
+          column unless cfg[:reset] == :never || TIMESTAMP_COLUMNS.include?(column.to_s)
         end
 
         # By NAME, never a bare constant: a concern still behind its autoload

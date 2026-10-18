@@ -75,6 +75,7 @@ A partial format is never merged onto an inherited one, because the result would
 | `separator:` | String | `"-"` | Joins the prefix, period token, and padded number in the default formatter. Has no effect when `template:` is set. |
 | `start_at:` | Integer | `1` | The first value assigned when the scope/period has no rows yet. |
 | `scope:` | Symbol / Array of Symbols / nil | `nil` | Column or array of columns that partition the counter. Each distinct combination of scope-column values maintains its own independent counter. |
+| `period_column:` | Symbol | `:created_at` | The datetime (or date) column the `reset:` period is cut from — the `MAX` range, the period token and `sequenceable_period_time` all read it. See "Numbering drafts when they are finalized" below. Not `:updated_at`. Ignored with `reset: :never`. Part of the format: a re-declaration that passes any format option restates it. |
 | `reset:` | Symbol | `:never` | Restarts the counter at `start_at` each calendar period. Valid values: `:never`, `:year`, `:month`, `:day`. Any value other than `:never` requires a `created_at` column. |
 | `time_zone:` | String / Symbol / `ActiveSupport::TimeZone` / nil | `nil` (app zone) | The zone `reset:` periods are cut in — for the `MAX` range and the period token alike. `nil` resolves at use time to the app's configured zone (`config.time_zone`, i.e. `Time.zone_default`), falling back to UTC. Never the per-request `Time.zone`. An unknown zone name raises `ArgumentError` at class-load time. Has no effect with `reset: :never`. |
 | `template:` | Callable / nil | `nil` | A callable (e.g. a lambda) with signature `->(seq, record)` that returns the formatted string. When set, it completely overrides `prefix`, `padding`, `separator`, and the period token. Must respond to `#call`. |
@@ -270,7 +271,17 @@ The block must draw a fresh value on every attempt; re-saving a record whose num
 
 **`into:` requires a string column.** Integer columns in most databases strip leading zeros, so `"00001"` would be stored as `1`. Always use a `string`/`varchar` column for `into:`.
 
-**`reset:` requires `created_at`.** Any value of `reset:` other than `:never` causes `sequenceable_by` to verify that the `created_at` column exists. If it does not, an `ArgumentError` is raised at class-load time. The period is derived from each row's own `created_at`, not from the current time at query time, so historical records land in the correct period bucket.
+**Numbering drafts when they are finalized (`period_column:`).** With the default anchor, a draft is numbered into the period it was **created** in: a draft created 2025-12-20 and finalized with `assign_sequence!` on 2026-01-05 gets `INV-2025-<n>` — the MAX of 2025 plus one, after `INV-2026-1` was issued. If your numbering must follow finalization (sequential invoice numbers per fiscal year), give the period its own stored stamp:
+
+```ruby
+# t.datetime :finalized_at
+sequenceable_by :sequence, into: :number, prefix: "INV-", reset: :year,
+                assign: :manual, period_column: :finalized_at
+```
+
+`assign_sequence!` stamps `finalized_at` (now) when it is blank, in the same save as the number, so the next `MAX` finds the row in the period it was finalized in; a `finalized_at` you set yourself is kept. Under `assign: :create` the column is stamped at create. Drafts keep a NULL `finalized_at` and are never counted (they have no number). A `duplicate` blanks the column with the number.
+
+**`reset:` requires `created_at` (or your `period_column:`).** Any value of `reset:` other than `:never` causes `sequenceable_by` to verify that the `created_at` column (the `period_column:`) exists. If it does not, an `ArgumentError` is raised at class-load time. The period is derived from each row's own `created_at` (or `period_column:`), not from the current time at query time, so historical records land in the correct period bucket.
 
 **Periods are cut in a fixed zone, not the request's.** With `reset:`, the `MAX` range and the period token are computed from `created_at` in the field's `time_zone:` (default: `config.time_zone`, else UTC). The per-request `Time.zone` set by `Timezoneable` or `Time.use_zone` plays no part. If it did, a Tokyo request and a New York request would disagree on which day it is, read `MAX` over different ranges and issue the same number, and `formatted_<field>` without `into:` would render a different date depending on the reader's zone.
 
@@ -311,7 +322,7 @@ For **independent per-type series without gaps**, declare once on the base with 
 
 `next_<field>` previews exactly what the receiving class's next `create!` gets in every one of these setups — under `scope: :type`, an omitted `type:` resolves to the receiver's own STI name (NULL for the base).
 
-**Column validation runs at class load time.** `sequenceable_by` calls `ensure_columns!` for `field`, `into:`, all `scope:` columns, and `created_at` (when `reset:` is not `:never`). A missing column raises `ArgumentError` with the message `"does not exist in the database"` before any records are created.
+**Column validation runs at class load time.** `sequenceable_by` calls `ensure_columns!` for `field`, `into:`, all `scope:` columns, and `created_at`/`period_column:` (when `reset:` is not `:never`). A missing column raises `ArgumentError` with the message `"does not exist in the database"` before any records are created.
 
 **Valid `reset:` values are strictly enforced.** Passing an unrecognized symbol (e.g. `reset: :decade`) raises `ArgumentError` with the message `"unknown reset"`. Valid values are `:never`, `:year`, `:month`, and `:day`.
 

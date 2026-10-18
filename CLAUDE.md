@@ -88,7 +88,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `:alphanumeric`/`:numeric`, `length:`; `regenerate_/revoke_/<field>?` + uniqueness retry.
 - **`Sequenceable`** — ordered reference numbers (invoice/order numbers). `into:`, `prefix:`,
   `padding:`, `scope:`, `reset:` (`:year`/`:month`/`:day`), `template:`, `assign:`
-  (`:create`/`:manual`), `time_zone:` (`reset:` periods — MAX range AND token — are cut in ONE
+  (`:create`/`:manual`), `period_column:` (default `created_at`; the datetime column the `reset:` MAX range, token and `sequenceable_period_time` read — `assign_<field>!`/the create path stamp it when blank; part of the format tuple; refuses `updated_at`/non-date types; a Duplicable copy blanks it), `time_zone:` (`reset:` periods — MAX range AND token — are cut in ONE
   fixed zone, default `Time.zone_default` resolved at use time, never the request's `Time.zone`;
   `sequenceable_period_time(field)` hands that instant to templates). Under STI the
   series is MAX over the DECLARING class's relation (an abstract declarer falls back to the

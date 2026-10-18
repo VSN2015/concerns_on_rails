@@ -39,7 +39,7 @@ module ConcernsOnRails
         return rel if cfg[:reset] == :never
 
         time = period_time(cfg, record)
-        in_period = rel.where(created_at: period_range(cfg[:reset], time))
+        in_period = rel.where(cfg[:period_column] => period_range(cfg[:reset], time))
         return in_period unless cfg[:into] && cfg[:template].nil?
 
         in_period.or(rel.where(sequence_stored_token_match(cfg, time)))
@@ -110,7 +110,7 @@ module ConcernsOnRails
       # applied by an initializer that may run after the model is loaded.
       def period_time(cfg, record)
         zone = cfg[:time_zone] || Time.zone_default || ActiveSupport::TimeZone["UTC"]
-        base_time(record).in_time_zone(zone)
+        base_time(record, cfg[:period_column]).in_time_zone(zone)
       end
 
       # nil (the option omitted) stays nil: the app default is resolved at use.
@@ -146,16 +146,17 @@ module ConcernsOnRails
         end
       end
 
-      # created_at is the natural anchor for the period, but it may not be set yet
-      # during before_create — fall back to the current time, which is what the
-      # timestamp will resolve to anyway.
-      def base_time(record)
+      # The period column (created_at by default) is the anchor for the period,
+      # but it may not be set yet during before_create — fall back to the
+      # current time, which is what the timestamp will resolve to anyway (and
+      # what a custom column is pinned to).
+      def base_time(record, column = :created_at)
         return Time.current unless record
 
         # Memoize the fallback "now" on the record so every base_time call within a
         # single create resolves to the SAME instant — otherwise two Time.current
         # reads could straddle a period boundary (year/month/day) and disagree.
-        record.created_at ||
+        record[column] ||
           record.instance_variable_get(:@_sequenceable_now) ||
           record.instance_variable_set(:@_sequenceable_now, Time.current)
       end
