@@ -118,5 +118,18 @@ describe "Composite primary keys in the data concerns' own row lookups" do
       expect(ConcernsOnRails::Support::Locking.with_row_lock(record, :name, :lock_version) { |row| row })
         .to eq("name" => "b", "lock_version" => 0)
     end
+
+    it "Duplicable#duplicate! refreshes the copy's lock_version from its own row" do
+      klass = model { include ConcernsOnRails::Models::Duplicable }
+      record = klass.create!(id: [2, 1], name: "b")
+      klass.create!(id: [1, 1], name: "a")
+      copy = klass.new(id: [2, 2], name: "copy")
+      allow(record).to receive(:duplicate).and_return(copy)
+
+      expect(record.duplicate!).to equal(copy)
+      expect(copy).to be_persisted
+      expect(copy.lock_version).to eq(klass.find([2, 2]).lock_version)
+      expect { copy.update!(name: "again") }.not_to raise_error
+    end
   end
 end
