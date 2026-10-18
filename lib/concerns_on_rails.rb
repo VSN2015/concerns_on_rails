@@ -90,6 +90,7 @@ module ConcernsOnRails
     autoload :SlugSources,             "concerns_on_rails/support/slug_sources"
     autoload :GeneratedValues,         "concerns_on_rails/support/generated_values"
     autoload :EncryptedLookup,         "concerns_on_rails/support/encrypted_lookup"
+    autoload :TransformBackstop,       "concerns_on_rails/support/transform_backstop"
   end
 end
 

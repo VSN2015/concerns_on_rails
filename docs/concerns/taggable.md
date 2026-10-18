@@ -44,7 +44,7 @@ end
 
 ### `taggable_by(field = :tags, delimiter:, downcase:)`
 
-Call once per model. Validates that the column exists at class-load time and registers the `before_validation` normalization hook, plus a prepended `before_save` backstop that normalizes the saves that skip validation (`update_attribute`, `save(validate: false)`).
+Call once per model. Validates that the column exists at class-load time and registers the `before_validation` normalization hook, plus a `before_save` backstop that normalizes the saves that skip validation (`update_attribute`, `save(validate: false)`). The backstop runs in the one prepended dispatcher shared with Normalizable, Sanitizable and Addressable, in `before_validation` order (re-declaring moves it to the end of that order, as it moves the `before_validation` hook).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|

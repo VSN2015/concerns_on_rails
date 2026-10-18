@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/html_sanitizers"
+require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
   module Models
@@ -78,10 +79,11 @@ module ConcernsOnRails
         after_validation :sanitizable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
         # save(validate: false) — which otherwise stored the raw markup in a
-        # column declared sanitized on write. PREPENDED, like Normalizable's,
+        # column declared sanitized on write. Run by the shared PREPENDED
+        # dispatcher (Support::TransformBackstop) in before_validation order,
         # so a sibling's earlier before_save (Encryptable's blind index,
         # Auditable's entry) sees the value that gets stored.
-        before_save :sanitizable_apply_unvalidated, prepend: true
+        ConcernsOnRails::Support::TransformBackstop.install(self, :sanitizable_apply_unvalidated)
       end
 
       module ClassMethods

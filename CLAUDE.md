@@ -137,11 +137,15 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   for saves that skip validation (so an earlier sibling `before_save` — Auditable,
   Addressable — sees the stored value; a field the validation pass already normalized is
   skipped, so a Proc runs once per save — a repeat validation (`save if valid?`) skips it
-  too, and `reload` drops the record). Sanitizable `on: :write`, Taggable and Addressable copy the same prepended backstop, but re-record the values in `after_validation`, so a later
+  too, and `reload` drops the record). Sanitizable `on: :write`, Taggable and Addressable
+  have the same backstop, but re-record the values in `after_validation`, so a later
   `before_validation`'s rewrite is never re-processed (Normalizable's backstop keeps comparing to
   what IT produced — a slug friendly_id builds afterwards must still be normalized — while its
   repeat validation compares to the value it ALSO records in `after_validation`, so a later
-  transform's rewrite of the field, Sanitizable `on: :write` escaping it, is not normalized again). Presets (`:email`, `:phone`,
+  transform's rewrite of the field, Sanitizable `on: :write` escaping it, is not normalized again).
+  All four backstops run in ONE prepended dispatcher (`Support::TransformBackstop`, an inheritable
+  list in `before_validation` order; Normalizable's re-check is a `settle:` step after all of
+  them), never one prepend each, which ran them in reverse. Presets (`:email`, `:phone`,
   `:squish`, …) or a Proc. (On Rails 7.1+, native `normalizes` is an alternative.)
 - **`Taggable`** — delimiter-joined tags in one string column (no join table). `tagged_with`,
   `all_tags`, boundary-safe and LIKE-escaped (tag and delimiter); tags are stripped of

@@ -170,7 +170,8 @@ describe ConcernsOnRails::Taggable do
       it "registers the backstop once, however often the macro is re-declared" do
         TagArticle.taggable_by :tags
         filters = TagArticle._save_callbacks.map(&:filter)
-        expect(filters.count(:taggable_normalize_unvalidated)).to eq(1)
+        expect(filters.count(ConcernsOnRails::Support::TransformBackstop::DISPATCHER)).to eq(1)
+        expect(TagArticle.concerns_on_rails_transform_backstops.count(:taggable_normalize_unvalidated)).to eq(1)
       end
     end
   end

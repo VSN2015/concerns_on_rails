@@ -274,7 +274,8 @@ describe ConcernsOnRails::Models::Normalizable do
       it "registers the backstop once, however often the macro is re-declared" do
         model.normalizable :email, with: :strip
         filters = model._save_callbacks.map(&:filter)
-        expect(filters.count(:normalizable_apply_unvalidated)).to eq(1)
+        expect(filters.count(ConcernsOnRails::Support::TransformBackstop::DISPATCHER)).to eq(1)
+        expect(model.concerns_on_rails_transform_backstops.count(:normalizable_apply_unvalidated)).to eq(1)
       end
     end
   end
