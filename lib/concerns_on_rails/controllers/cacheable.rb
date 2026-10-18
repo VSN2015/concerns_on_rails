@@ -503,14 +503,22 @@ module ConcernsOnRails
         end
       end
 
+      # The SQL aggregate is for a real relation only: ActiveSupport 7.0+ gives
+      # every Enumerable a #maximum(key) (map(&key).max), which raises on a member
+      # without #updated_at or a nil timestamp -- an Array or Hash folds its
+      # members here instead, skipping the ones that carry no timestamp.
       def http_cache_timestamp_for(resource)
         if resource.respond_to?(:updated_at)
           resource.updated_at
-        elsif resource.respond_to?(:maximum)
+        elsif http_cache_relation?(resource)
           resource.maximum(:updated_at)
         elsif !resource.is_a?(String) && resource.respond_to?(:map)
           resource.map { |member| member.respond_to?(:updated_at) ? member.updated_at : nil }.compact.max
         end
+      end
+
+      def http_cache_relation?(resource)
+        defined?(::ActiveRecord::Relation) ? resource.is_a?(::ActiveRecord::Relation) : false
       end
 
       def http_cache_action_name
