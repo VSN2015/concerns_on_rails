@@ -14,21 +14,29 @@ module ConcernsOnRails
       module_function
 
       # True when every named instance method is still the concern's own — the
-      # host model overrode none of them. This is the ownership half of the
-      # fast-path decision on its own, for the two concerns whose per-record
-      # path already skips validations (SoftDeletable under `touch: false` and
-      # Lockable, both of which write via update_column(s)) and so are exempt
-      # from the validations half.
+      # host model overrode none of them — and the model is not an STI table.
+      # This is the ownership half of the fast-path decision on its own, for
+      # the two concerns whose per-record path already skips validations
+      # (SoftDeletable under `touch: false` and Lockable, both of which write
+      # via update_column(s)) and so are exempt from the validations half.
+      #
+      # An STI table never takes the single UPDATE (see sti_table?): the
+      # relation also holds every subclass's rows, and a subclass may override a
+      # hook, declare validations or re-declare the macro with other options —
+      # none of which the receiver can see, and a bulk UPDATE built from the
+      # receiver's configuration would skip all of it. The per-record path is
+      # always correct (each record applies its own class's hooks, validations
+      # and configuration); the fast path is only an optimisation.
       def unoverridden?(klass, owner, *methods)
-        methods.all? { |name| klass.instance_method(name).owner == owner }
+        !sti_table?(klass) && methods.all? { |name| klass.instance_method(name).owner == owner }
       end
 
       # The whole safety decision for a single-UPDATE fast path: it is only
       # taken when per-record behavior cannot differ from `update_all` —
-      # the host model overrode none of the concern's hooks or bang methods,
-      # AND it declares no validations (update_all skips validations
-      # entirely, so an unguarded fast path would silently write invalid
-      # records instead of honoring the batch contract: RecordNotSaved +
+      # the table is not STI, the host model overrode none of the concern's
+      # hooks or bang methods, AND it declares no validations (update_all skips
+      # validations entirely, so an unguarded fast path would silently write
+      # invalid records instead of honoring the batch contract: RecordNotSaved +
       # rollback on a record that can't save).
       #
       # Save callbacks in general are deliberately NOT gated on: update_all
@@ -63,6 +71,17 @@ module ConcernsOnRails
 
         tracked = klass.auditable_fields.map(&:to_s)
         tracked.intersect?(columns.map(&:to_s) | TOUCH_COLUMNS)
+      end
+
+      # True when the model's table is single-table inheritance: it has a
+      # present `inheritance_column` that is a real column. A model that turned
+      # STI off (`self.inheritance_column = nil`, or a name the table lacks) is
+      # not STI, so its rows are only ever instances of the class itself.
+      def sti_table?(klass)
+        return false unless klass.respond_to?(:inheritance_column)
+
+        column = klass.inheritance_column
+        column.present? && klass.column_names.include?(column.to_s)
       end
 
       # True when the host model declares anything that runs at validation time.

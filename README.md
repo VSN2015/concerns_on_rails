@@ -435,6 +435,8 @@ Auditable tracking a column the verb writes. The single `UPDATE` used to leave s
 trail behind, and whether it did depended on whether some unrelated validator forced the per-record
 path. (`expire_all`, `activate_all` and `deactivate_all` are gated the same way.)
 
+**STI tables always use the per-record path.** On a single-table-inheritance table (a present `inheritance_column` that is a real column) the relation also holds every subclass's rows, and a subclass may override a hook, declare validations or re-declare the macro with other options. A bulk `UPDATE` would skip all of that, so no batch verb takes it there: hooks and validations run per record (slower on large STI tables, always correct). A model that sets `self.inheritance_column = nil` is not STI and keeps the single `UPDATE`. This holds for every batch verb below (`publish_all`/`unpublish_all`, `soft_delete_all`/`restore_all`, `expire_all`, `activate_all`/`deactivate_all`, `unlock_expired`).
+
 `publish_all` targets every not-currently-published row — **including scheduled ones**, whose
 future `published_at` it overwrites — so chain `.draft` (`Post.draft.publish_all`) to exclude
 them. Its predicate composes with your own constraint on the publish column, so that chain
@@ -548,7 +550,7 @@ User.only_deleted.really_destroy_all           # empty the trash can, nothing el
 
 A record that fails to transition raises `ActiveRecord::RecordNotSaved` and rolls the whole
 batch back. With `touch: false` and no overridden hooks, `soft_delete_all` / `restore_all`
-collapse to a single `UPDATE`. Both `restore_all` and `really_destroy_all` peel off **only the
+collapse to a single `UPDATE` (never on an STI table, which always streams per record so each class's hooks and validations run). Both `restore_all` and `really_destroy_all` peel off **only the
 default scope's own** `deleted_at IS NULL`: a predicate *you* put on the column — `deleted_within`,
 `where(deleted_at: range)`, `only_deleted` — survives, as does any other default scope the model
 declares. (Previously they unscoped the column outright, so `deleted_within(1.hour).restore_all`
@@ -860,7 +862,7 @@ is unset or later than `time`, and returns the Integer count of rows written, in
 token due in 5 minutes at 5 minutes (it used to be extended to the hour). With `expire!` and both hooks unoverridden and no validations on
 the model — neither `validates`/`validates_with`, a custom `validate :method`, nor an
 association's autosave validation (a bare `has_many` registers one, so most models with
-associations take the streaming path) — it collapses
+associations take the streaming path) — and no STI, it collapses
 to a single `UPDATE`, which bumps `updated_at` exactly as the per-record path does (unless a CounterCacheable
 rule with `if:` or Auditable tracking the expiry column needs the per-record callbacks); otherwise it
 streams per record through `expire!` so validations still run, and a record that fails to save
@@ -1014,7 +1016,7 @@ direction: with `activate!`, `before_activate` and `after_activate` unoverridden
 validations on the model — neither
 `validates`/`validates_with`, a custom `validate :method`, nor an association's autosave
 validation (a bare `has_many` registers one, so most models with associations take the
-streaming path) — `activate_all` collapses to a single
+streaming path) and the table is not STI — `activate_all` collapses to a single
 `UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise it streams
 per record so the hooks and validations still run, and a record that fails to save raises
 `ActiveRecord::RecordNotSaved` and rolls the whole batch back. `deactivate_all` is gated the
@@ -1607,7 +1609,8 @@ User.unlock_by_token(params[:token])   # constant-time lookup; unlocks once (hoo
 count, runs in a transaction. Returns `0` without querying when `unlock_in` is `nil` (manual
 unlock only). Because `unlock_access!` persists via `update_columns` (which already skips
 validations), the single-`UPDATE` fast path and the per-record path are equivalent here —
-unlike Publishable/Expirable/Activatable, this one has no validators gate.
+unlike Publishable/Expirable/Activatable, this one has no validators gate. It does have the STI
+rule: on an STI table `unlock_expired` always streams per record, so a subclass's `after_unlock` and `lockable_by` columns apply to its rows.
 
 **Notes**
 - The increment is SQL-side (`COALESCE(attempts, 0) + 1` via `update_counters`), so concurrent failures never lose updates and a NULL counter needs no column default; a locked account stops counting.

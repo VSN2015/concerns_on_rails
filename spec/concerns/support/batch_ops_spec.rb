@@ -44,6 +44,50 @@ describe ConcernsOnRails::Support::BatchOps do
 
       expect(described_class.unoverridden?(klass, owner, :touched)).to be false
     end
+
+    # An STI table's relation also holds subclass rows the receiver cannot
+    # vouch for, so it is never "unoverridden" (audit 2026-10-10, STATE-8).
+    context "on an STI table" do
+      let(:owner) { Module.new { def touched; end } }
+
+      before do
+        ActiveRecord::Schema.define do
+          create_table :batch_typed_items, force: true do |t|
+            t.string :type
+            t.string :state
+          end
+        end
+      end
+
+      def typed_model(&body)
+        owner = self.owner
+        Class.new(TestModel) do
+          self.table_name = "batch_typed_items"
+          include(owner)
+
+          class_eval(&body) if body
+        end
+      end
+
+      it "is false even with no subclass and nothing overridden" do
+        expect(described_class.sti_table?(typed_model)).to be true
+        expect(described_class.unoverridden?(typed_model, owner, :touched)).to be false
+        expect(described_class.fast_path?(typed_model, owner, :touched)).to be false
+      end
+
+      it "is true once the model turned STI off" do
+        klass = typed_model { self.inheritance_column = nil }
+
+        expect(described_class.sti_table?(klass)).to be false
+        expect(described_class.fast_path?(klass, owner, :touched)).to be true
+      end
+
+      it "is not STI when the inheritance column is not a column of the table" do
+        klass = typed_model { self.inheritance_column = "kind" }
+
+        expect(described_class.sti_table?(klass)).to be false
+      end
+    end
   end
 
   describe ".fast_path?" do
