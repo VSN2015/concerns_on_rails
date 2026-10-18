@@ -174,7 +174,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `nil` = none).
 - **`Auditable`** — single-column JSON change history ("paper_trail-lite"). `auditable_by
   *fields, into:, actor:, max_entries:, max_value_length:`; `audit_trail` /
-  `last_change_for` / `audited_changes_since` / `clear_audit_trail!`.
+  `last_change_for` / `audited_changes_since` / `clear_audit_trail!`. Captured at the write
+  boundary (`Support::WriteBoundary`, after Encryptable's blind index), never in a callback.
 - **`Lockable`** — failed-attempt tracking + account lockout ("Devise lockable-lite").
   `lockable_by attempts:, locked_at:, max_attempts:, unlock_in:, prefix:/suffix:`;
   `register_failed_attempt!` (atomic SQL increment), `access_locked?` (lazy expiry),
@@ -243,9 +244,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `update_all` GUARDED on the ciphertext read at load (a concurrent write is
   skipped, never reverted), fields with unsaved changes are skipped, and a
   successful `reencrypt!` reloads. Fields auto-register with Rails
-  filter_parameters via `FilterParameterRegistry` + the railtie. Blind indexes refresh in
-  `before_create` (EVERY indexed field — a copy never keeps its original's digest) and
-  `before_update` (changed fields), i.e. after every `before_save`; the finders run the
+  filter_parameters via `FilterParameterRegistry` + the railtie. Blind indexes refresh at the
+  write boundary (`Support::WriteBoundary`, after EVERY `before_*` callback) — on create EVERY
+  indexed field (a copy never keeps its original's digest), on update changed fields; the finders run the
   lookup value through the field's Rails 7.1+ `normalizes` first. Decrypted text is UTF-8
   (binary only when invalid), and a stored `""` (a column default) reads as `""`; any other
   non-NULL column default is refused at macro time (it can never decrypt).
@@ -456,9 +457,12 @@ Auditable `actor:`; deliberately NOT Throttleable `if:`'s dispatch),
 friendly_id base, `alias_attribute` resolved — for the Encryptable/Sluggable guards and
 Anonymizable's `slug: :auto`), `GeneratedValues` (producers that assign in `before_create` —
 Tokenizable, Hashable, Sequenceable — report the columns they changed from their create path ONLY
-(Hashable from its own callback after `assign_hashable_value`, never from the public method); the
-consumers' hooks run in a FIXED order — Sluggable's slug, Encryptable's blind index, Auditable's
-creation entry — so none depends on include order), `EncryptedLookup` (equality on a maybe-
+(Hashable from its own callback after `assign_hashable_value`, never from the public method) to
+Sluggable's slug hook; Encryptable's blind index and Auditable's entry derive later, at the write
+boundary), `WriteBoundary` (overrides the private `attributes_for_create`/`_for_update`, which
+Persistence calls after every `before_*` callback on 6.0–8.1; runs consumers in a FIXED order —
+blind index, then audit — and adds only the columns they changed to the written list),
+`EncryptedLookup` (equality on a maybe-
 `encryptable` column: the blind index, or nil when there is none — Tokenizable's finders raise on
 nil, the uniqueness prechecks skip), `TimeValue` (verb time arguments via `cast_argument!` — a
 String must read as Time.zone.parse will: 4-digit year, no yday, date words or a resolved zone —

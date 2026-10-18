@@ -5,6 +5,7 @@ require "concerns_on_rails/support/slug_sources"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/locking"
 require "concerns_on_rails/support/primary_key"
+require "concerns_on_rails/support/write_boundary"
 require "active_model/type"
 require "bigdecimal"
 require "time"
@@ -94,18 +95,17 @@ module ConcernsOnRails
         # { field => { type:, key:, blind_index: } }. Subclasses inherit and may
         # add fields.
         class_attribute :encryptable_rules, instance_accessor: false, default: {}
+        # Blind indexes are refreshed at the write boundary
+        # (Support::WriteBoundary, see #encryptable_before_write), after EVERY
+        # before_* callback — the app's own `before_update { self.email =
+        # email.downcase }` included, whatever its declaration order — so the
+        # digest is taken from the value actually written.
+        include ConcernsOnRails::Support::WriteBoundary
+
         # (The audited-plaintext overlap is guarded at macro time from BOTH
         # declaration orders — here and in Auditable#auditable_by — so no
         # per-save backstop is needed.)
         #
-        # Blind indexes are refreshed in before_create/before_update, which run
-        # after EVERY before_save — the app's own `before_save { self.email =
-        # email.downcase }` included, whatever its declaration order — so the
-        # digest is taken from the value actually written. A new row refreshes
-        # every indexed field, changed or not: a copy (dup, Duplicable's reset)
-        # arrives carrying its original's digest for a field it no longer has.
-        before_create :encryptable_refresh_all_blind_indexes
-        before_update :encryptable_refresh_blind_indexes
         # The slug guard DOES need one: a slug is plaintext of its source, and
         # the macro-time checks cannot see every shape — Sluggable included
         # without sluggable_by (it slugs the implicit :name), or friendly_id
@@ -1005,22 +1005,19 @@ module ConcernsOnRails
             .update_all(updates.merge(ConcernsOnRails::Support::Locking.pinned(self.class)))
       end
 
-      # Recompute each blind-index column from the (changed) plaintext just
-      # before the row is written, so the fingerprint always matches the value.
-      def encryptable_refresh_blind_indexes
-        encryptable_refresh_blind_indexes_for(self.class.encryptable_rules.keys)
-      end
-
-      def encryptable_refresh_all_blind_indexes
-        encryptable_refresh_blind_indexes_for(self.class.encryptable_rules.keys, all: true)
-      end
-
-      # Support::GeneratedValues consumer. A token / code / number generated in
-      # before_create arrives AFTER the before_save refresh above, so without
-      # this the row was INSERTed with a NULL fingerprint and find_by_<field>
-      # never found a freshly created record.
-      def encryptable_generated_values_assigned(columns)
-        encryptable_refresh_blind_indexes_for(columns)
+      # Support::WriteBoundary consumer: recompute each blind-index column from
+      # the plaintext about to be written — after every before_* callback, so
+      # neither the app's own later before_update/before_create rewrite nor a
+      # value a sibling generates in before_create (a Tokenizable token, a
+      # Hashable code, a Sequenceable number) is missed. On update only a
+      # changed field is refreshed; a new row refreshes every indexed field,
+      # changed or not: a copy (dup, Duplicable's reset) arrives carrying its
+      # original's digest for a field it no longer has. Returns the index
+      # columns, for the boundary to add to the written column list.
+      def encryptable_before_write(create)
+        rules = self.class.encryptable_rules
+        encryptable_refresh_blind_indexes_for(rules.keys, all: create)
+        rules.values.filter_map { |rule| rule[:blind_index] && rule[:blind_index][:column] }
       end
 
       def encryptable_refresh_blind_indexes_for(fields, all: false)

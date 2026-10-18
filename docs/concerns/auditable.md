@@ -1,4 +1,4 @@
-The `Auditable` concern adds a lightweight change history ("paper_trail-lite") to any ActiveRecord model by appending JSON entries to a single text column on the same table. There are no extra tables and no versioning engine — changes to the tracked fields are captured in a `before_save` callback and written in the same `INSERT`/`UPDATE` statement, so it works on every database Rails supports, including SQLite. Use it when you need a per-record answer to "who changed this and when" without the operational weight of `paper_trail` or `audited`.
+The `Auditable` concern adds a lightweight change history ("paper_trail-lite") to any ActiveRecord model by appending JSON entries to a single text column on the same table. There are no extra tables and no versioning engine — changes to the tracked fields are captured at the last moment of the save — after every `before_*` callback — and written in the same `INSERT`/`UPDATE` statement, so it works on every database Rails supports, including SQLite. Use it when you need a per-record answer to "who changed this and when" without the operational weight of `paper_trail` or `audited`.
 
 ## When to use it
 
@@ -58,7 +58,9 @@ Configures the tracked fields and the audit column. Every column (tracked fields
 
 ## Entry format
 
-One entry is recorded **per changed tracked field per save**; all entries of one save share the same timestamp. On create, entries are recorded with `"from" => nil` — including a tracked column a sibling generates in `before_create`, after this concern's `before_save` capture: a [Sequenceable](sequenceable.md) number, a [Tokenizable](tokenizable.md)/[Hashable](hashable.md) value, or a [Sluggable](sluggable.md) slug built from one. Those producers report the value (`Support::GeneratedValues`) and the creation entry is rebuilt to include it, whatever the include or declaration order (the trail is rebuilt from the persisted column, so nothing is recorded twice).
+One entry is recorded **per changed tracked field per save**; all entries of one save share the same timestamp. On create, entries are recorded with `"from" => nil`.
+
+Entries describe the values **actually written**. The capture runs at the write boundary (`Support::WriteBoundary`), after every `before_save`/`before_create`/`before_update` callback, whatever the include or declaration order. So a tracked column your own later callback sets is recorded (`before_save { self.total = subtotal + tax }` gets its entry), a value a callback rewrites is recorded as stored (`"B"`, not the `"b"` that was assigned), and a change a callback reverts records nothing. The same goes for a column a sibling generates in `before_create`: a [Sequenceable](sequenceable.md) number, a [Tokenizable](tokenizable.md)/[Hashable](hashable.md) value, a [Sluggable](sluggable.md) slug built from one, an [Encryptable](encryptable.md) blind-index column (refreshed just before the capture). Through 1.32.1 the capture was a `before_save` registered by `auditable_by`, so any callback declared below the macro ran after it. A callback of your own therefore sees the trail as it was loaded; the new entries appear once the row is written (`after_save`).
 
 ```json
 { "field": "price", "from": 100, "to": 200, "at": "2026-06-10T12:34:56.123456Z", "by": "admin@shop.com" }
@@ -133,13 +135,13 @@ order.audited_changes_since(1.day.ago).map { |e| "#{e['field']}: #{e['from']} �
 
 ## Notes & gotchas
 
-- **Callback-skipping writes are not audited.** `update_column`/`update_columns`, `touch`, `increment!`, and `delete` bypass `before_save`, so they leave no entries. `save(validate: false)` *is* audited (callbacks still run).
+- **Callback-skipping writes are not audited.** `update_column`/`update_columns`, `touch`, `increment!`, and `delete` skip the save machinery, so they leave no entries. `save(validate: false)` *is* audited (callbacks still run).
 - **Bounded by design.** The default `max_entries: 200` keeps the row from growing without limit; the oldest entries are silently trimmed. Pass `nil` only when you have an external cleanup story. For large tracked text fields, add `max_value_length:` so individual entries stay small too — otherwise each change stores the full old *and* new values.
 - **Corrupt JSON is tolerated, then replaced.** A hand-edited or truncated column decodes as `[]` and is overwritten by a fresh trail on the next tracked save.
 - **Values come back as primitives.** `from`/`to` are JSON values, not typed Ruby objects — a `Time` round-trips as an ISO8601 string, a `BigDecimal` as a numeric string.
 - **Not concurrency-safe.** The read-modify-write of the JSON column means two simultaneous saves of the same row are last-writer-wins for the entries added in that race.
-- **Entries build on the persisted trail.** New entries are appended to the column's *database* value, so a save aborted by a later callback can't duplicate entries when retried. The flip side: assigning the audit column by hand in the same save as a tracked change is ignored — use `clear_audit_trail!` to reset the trail.
-- **Non-finite floats are stored as strings.** `NaN`/`Infinity` in a tracked float column serialize as `"NaN"`/`"Infinity"` instead of raising inside `before_save`.
+- **Entries build on the persisted trail.** New entries are appended to the column's *database* value, so a save whose `INSERT`/`UPDATE` fails (a unique index, a constraint) can't duplicate entries when retried; a save a callback aborts never captures at all. The flip side: assigning the audit column by hand in the same save as a tracked change is ignored — use `clear_audit_trail!` to reset the trail.
+- **Non-finite floats are stored as strings.** `NaN`/`Infinity` in a tracked float column serialize as `"NaN"`/`"Infinity"` instead of raising during the save.
 - **The actor proc runs on the record.** A lambda with no required parameter (or a block) is `instance_exec`'d — the gem-wide one too — so both globals (`Current.user`) and the record's own attributes are in scope. A `->(record) { … }` lambda (model-level only: the gem-wide setter rejects a lambda that demands arguments), a symbol proc or a callable object is called with the record instead — bare unless its `#call` requires an argument — and a Symbol actor is sent to the record. Exceptions raised inside propagate (fail-fast). The resolved value is JSON-coerced like any entry value, so a Hash such as `{ id:, type: }` works.
 - **Non-goals**: no reify/undo, no who-dunnit queries across models, no association tracking — reach for [`paper_trail`](https://github.com/paper-trail-gem/paper_trail) or [`audited`](https://github.com/collectiveidea/audited) when you need a real audit store.
 
