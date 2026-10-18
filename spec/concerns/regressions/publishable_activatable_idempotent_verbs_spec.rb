@@ -19,6 +19,7 @@ describe "Publishable / Activatable verbs on an already-transitioned record" do
       end
       create_table :idv_flags, force: true do |t|
         t.boolean :published, default: false
+        t.string :note
       end
     end
   end
@@ -125,6 +126,139 @@ describe "Publishable / Activatable verbs on an already-transitioned record" do
       expect(post.deactivate!).to be(true)
       expect(post.reload.active).to be(false)
       expect(post.fired).to eq(%i[before_deactivate after_deactivate])
+    end
+  end
+
+  # Review follow-up: the guards read IN-MEMORY state, so a record carrying
+  # unsaved changes (a new record, an unsaved flip of the flag itself, other
+  # columns) "was already there" and the verb returned true without saving.
+  # The no-op now needs a persisted record, no unsaved change to the field,
+  # and the SAVED value already in the target state.
+  describe "a record with unsaved state" do
+    let(:flag_model) do
+      Class.new(TestModel) do
+        self.table_name = "idv_flags"
+        include ConcernsOnRails::Publishable
+
+        attr_accessor :fired
+
+        publishable_by :published
+        define_method(:after_publish) { (self.fired ||= []) << :after_publish }
+      end
+    end
+
+    it "publish! saves the other pending changes of a live post (no re-stamp, no hooks)" do
+      post = model.create!(published_at: earlier)
+      post.fired = nil
+      post.assign_attributes(active: true)
+
+      expect(post.publish!).to be(true)
+      expect(post.reload.active).to be(true)
+      expect(post.published_at).to eq(earlier)
+      expect(post.fired).to be_nil
+    end
+
+    it "publish! returns the failed save's false when the pending changes are invalid" do
+      invalid = Class.new(model) { validates :active, inclusion: { in: [false] } }
+      post = invalid.create!(published_at: earlier, active: false)
+      post.active = true
+
+      expect(post.publish!).to be(false)
+      expect(post.reload.active).to be(false)
+    end
+
+    it "publish! inserts a new record whose column default already reads as published" do
+      post = flag_model.new(published: true)
+      expect(post.publish!).to be(true)
+      expect(post).to be_persisted
+      expect(post.fired).to eq([:after_publish])
+    end
+
+    it "publish! on a boolean column saves an unsaved published = true" do
+      post = flag_model.create!(published: false)
+      post.published = true
+
+      expect(post.publish!).to be(true)
+      expect(post.reload.published).to be(true)
+      expect(post.fired).to eq([:after_publish])
+    end
+
+    it "publish! on a boolean column saves the other pending changes of a published record" do
+      post = flag_model.create!(published: true)
+      post.fired = nil
+      post.note = "kept"
+
+      expect(post.publish!).to be(true)
+      expect(post.reload.note).to eq("kept")
+      expect(post.fired).to be_nil
+    end
+
+    it "publish! ignores an overridden published?" do
+      lying = Class.new(model) { def published? = false }
+      post = lying.create!(published_at: earlier)
+      post.fired = nil
+
+      expect(post.publish!).to be(true)
+      expect(post.fired).to be_nil
+      expect(post.reload.published_at).to eq(earlier)
+    end
+
+    it "activate! inserts a new record whose column default is already true" do
+      ActiveRecord::Schema.define { create_table(:idv_defaults, force: true) { |t| t.boolean :active, default: true } }
+      with_default = Class.new(TestModel) do
+        self.table_name = "idv_defaults"
+        include ConcernsOnRails::Activatable
+
+        activatable_by :active
+      end
+      sub = with_default.new
+
+      expect(sub.activate!).to be(true)
+      expect(sub).to be_persisted
+    ensure
+      ActiveRecord::Base.connection.drop_table(:idv_defaults, if_exists: true)
+    end
+
+    it "activate! saves the other pending changes of an active record without a hook" do
+      post = model.create!(active: true)
+      post.fired = nil
+      post.assign_attributes(published_at: earlier)
+
+      expect(post.activate!).to be(true)
+      expect(post.reload.published_at).to eq(earlier)
+      expect(post.fired).to be_nil
+    end
+
+    it "activate! saves an unsaved active = true over a stored false" do
+      post = model.create!(active: false)
+      post.active = true
+
+      expect(post.activate!).to be(true)
+      expect(post.reload.active).to be(true)
+      expect(post.activated_at).to be_present
+    end
+
+    it "deactivate! saves an unsaved active = false and stamps deactivated_at" do
+      post = model.create!(active: true)
+      post.fired = nil
+      post.active = false
+
+      expect(post.deactivate!).to be(true)
+      post.reload
+      expect(post.active).to be(false)
+      expect(post.deactivated_at).to be_present
+      expect(post.fired).to eq(%i[before_deactivate after_deactivate])
+    end
+
+    it "deactivate! saves the other pending changes of an inactive record without a hook" do
+      post = model.create!(active: false)
+      post.fired = nil
+      post.assign_attributes(published_at: earlier)
+
+      expect(post.deactivate!).to be(true)
+      expect(post.reload.published_at).to eq(earlier)
+      expect(post.deactivated_at).to be_nil
+      expect(post.fired).to be_nil
     end
   end
 

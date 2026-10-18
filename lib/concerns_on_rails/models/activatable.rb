@@ -188,19 +188,23 @@ module ConcernsOnRails
       def before_deactivate; end
       def after_deactivate; end
 
-      # activate! / deactivate! are no-ops on a record already in that state
-      # (true, nothing written, no hook) — the rows activate_all /
+      # activate! / deactivate! are no-ops on a record ALREADY in that state
+      # (true, nothing stamped, no hook) — the rows activate_all /
       # deactivate_all skip. They used to rewrite activated_at /
-      # deactivated_at and fire the hooks again. deactivate! still writes
-      # false over a NULL flag. toggle_active! always flips.
+      # deactivated_at and fire the hooks again. "Already" means the SAVED
+      # state: a persisted record, no unsaved change to the flag, a saved value
+      # in the target state (deactivate! still writes false over a NULL flag).
+      # A new record or an unsaved flip of the flag runs the transition; a
+      # no-op that finds OTHER pending changes saves them (no stamp, no hooks)
+      # rather than dropping them. toggle_active! always flips.
       def activate!
-        return true if activatable_on?
+        return activatable_settle if activatable_settled?(true)
 
         activatable_transition(true, :activate)
       end
 
       def deactivate!
-        return true if self[self.class.activatable_field] == false
+        return activatable_settle if activatable_settled?(false)
 
         activatable_transition(false, :deactivate)
       end
@@ -242,7 +246,19 @@ module ConcernsOnRails
       def activatable_off?
         !activatable_on?
       end
-      private :activatable_transition, :activatable_on?, :activatable_off?
+
+      # The flag's SAVED value already is `target` (a NULL flag is never
+      # `false`, so deactivate! still writes it).
+      def activatable_settled?(target)
+        field = self.class.activatable_field
+        persisted? && !will_save_change_to_attribute?(field) && self[field] == target
+      end
+
+      def activatable_settle
+        has_changes_to_save? ? save : true
+      end
+      private :activatable_transition, :activatable_on?, :activatable_off?,
+              :activatable_settled?, :activatable_settle
     end
   end
 end

@@ -379,7 +379,7 @@ article = Article.create!(title: "Draft")
 article.published?      # => false
 article.publish!
 article.published?      # => true
-article.publish!        # already published: a no-op (true), keeps published_at, no hooks
+article.publish!        # already published (saved state): a no-op (true), keeps published_at, no hooks
 article.unpublish!
 
 Article.published       # WHERE published_at <= NOW()

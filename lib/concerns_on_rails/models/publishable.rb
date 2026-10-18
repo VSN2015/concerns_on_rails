@@ -260,13 +260,20 @@ module ConcernsOnRails
       def before_unpublish; end
       def after_unpublish; end
 
-      # A no-op on a record that is already published (returns true, writes
-      # nothing, fires no hook) — the rows publish_all skips. It used to
-      # rewrite the "published on" time to now and fire after_publish again
-      # on every call (a double-submitted button, a retried job). A draft or
-      # scheduled record is published now; publish_at! still writes any time.
+      # A no-op on a record that is ALREADY published (the rows publish_all
+      # skips) — nothing is stamped and no hook fires, where it used to
+      # rewrite the "published on" time to now and fire after_publish again on
+      # every call (a double-submitted button, a retried job). "Already" means
+      # the SAVED state: a persisted record, no unsaved change to the column,
+      # a saved value that reads as published. Anything else — a new record, an
+      # unsaved flip of the column, a draft or scheduled row — publishes now.
+      # A no-op that finds OTHER pending changes saves them (no re-stamp, no
+      # hooks) rather than dropping them. Read through the private check, not
+      # the overridable published?. publish_at! still writes any time.
       def publish!
-        return true if published?
+        if persisted? && !will_save_change_to_attribute?(self.class.publishable_field) && publishable_published?
+          return has_changes_to_save? ? save : true
+        end
 
         publishable_write_with_hooks(Time.zone.now, :publish)
       end
@@ -282,10 +289,7 @@ module ConcernsOnRails
       # Example:
       #   record.published?
       def published?
-        value = self[self.class.publishable_field]
-        return false unless value.present?
-
-        value.respond_to?(:<=) ? value <= Time.zone.now : true
+        publishable_published?
       end
 
       # Check if the record is unpublished
@@ -346,7 +350,15 @@ module ConcernsOnRails
           update(field => value)
         end
       end
-      private :publishable_write_with_hooks
+
+      # The unaffixed, non-overridable read behind published? and publish!.
+      def publishable_published?
+        value = self[self.class.publishable_field]
+        return false unless value.present?
+
+        value.respond_to?(:<=) ? value <= Time.zone.now : true
+      end
+      private :publishable_write_with_hooks, :publishable_published?
     end
   end
 end
