@@ -152,7 +152,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Maskable`** — non-destructive display masking (`masked_<field>` readers): `:email`,
   `:phone`, `:credit_card`, `:last4`, `:all`, or a Proc.
 - **`Monetizable`** — integer-cents money accessors via BigDecimal: `<name>`, `<name>=`,
-  `formatted_<name>`; `unit:`, `precision:`, `delimiter:`, `separator:`, `subunit_to_unit:`.
+  `formatted_<name>`; `unit:`, `precision:` (default: max(2, a power-of-ten subunit's decimals)),
+  `delimiter:`, `separator:`, `subunit_to_unit:`.
   The writer reads its own formatted output back (unit at start/end only, grouped
   delimiters — never a leading `0` group, locale separator); garbage, non-finite and oversized input → nil (a Rational
   converts). A separator equal to the delimiter, or empty with decimals, raises (macro and
