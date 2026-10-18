@@ -24,6 +24,19 @@ describe "SoftDeletable destroy_all on a relation or an association" do
         t.datetime :deleted_at
       end
       create_table :srd_users, force: true
+      create_table :srd_nodes, force: true do |t|
+        t.integer :parent_id
+        t.string :title
+        t.datetime :deleted_at
+      end
+      create_table :srd_parents, force: true do |t|
+        t.datetime :deleted_at
+      end
+      # A real foreign key: a child row left behind blocks its parent's DELETE.
+      create_table :srd_children, force: true do |t|
+        t.references :srd_parent, foreign_key: true
+        t.datetime :deleted_at
+      end
       create_table :srd_groups, force: true do |t|
         t.datetime :deleted_at
       end
@@ -51,7 +64,7 @@ describe "SoftDeletable destroy_all on a relation or an association" do
   end
 
   after do
-    %i[srd_memberships srd_posts srd_comments srd_users srd_groups].each do |table|
+    %i[srd_memberships srd_children srd_parents srd_nodes srd_posts srd_comments srd_users srd_groups].each do |table|
       ActiveRecord::Base.connection.drop_table(table, if_exists: true)
     end
   end
@@ -495,6 +508,443 @@ describe "SoftDeletable destroy_all on a relation or an association" do
 
       expect(SrdOwner.only_deleted.count).to eq(1)
       expect(SrdComment.count).to eq(1)
+    end
+  end
+
+  # Review round 2 (PR #169): WHICH relations may purge the trash, and WHEN the
+  # trashed set is decided.
+  describe "purging is opt-in: only the gem's trash scopes reach the trash" do
+    before do
+      stub_const("SrdOpenComment", Class.new(TestModel) do
+        self.table_name = "srd_comments"
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, default_scope: false
+        belongs_to :srd_open_post, foreign_key: :srd_post_id, optional: true
+      end)
+      stub_const("SrdOpenPost", Class.new(TestModel) do
+        self.table_name = "srd_posts"
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, default_scope: false
+        has_many :srd_comments, class_name: "SrdOpenComment", foreign_key: :srd_post_id
+        has_many :every_comment, -> { with_deleted }, class_name: "SrdOpenComment", foreign_key: :srd_post_id
+        has_many :trashed_comments, -> { only_deleted }, class_name: "SrdOpenComment", foreign_key: :srd_post_id
+      end)
+    end
+
+    def trash!(klass, **attrs)
+      klass.create!(**attrs).tap { |record| record.soft_delete!(at: 3.days.ago) }
+    end
+
+    it "leaves the trash alone for a scoped relation on a default_scope: false model (where, all, destroy_by)" do
+      live = SrdOpenPost.create!(title: "a")
+      trash = trash!(SrdOpenPost, title: "a")
+      stamp = SrdOpenPost.find(trash.id).deleted_at
+
+      SrdOpenPost.where(title: "a").destroy_all
+      SrdOpenPost.all.destroy_all
+      SrdOpenPost.destroy_by(title: "a")
+
+      expect(SrdOpenPost.unscoped.count).to eq(2)
+      expect(SrdOpenPost.find(live.id)).to be_deleted
+      expect(SrdOpenPost.find(trash.id).deleted_at).to eq(stamp)
+    end
+
+    it "leaves the trash alone for an association's destroy_all and its scoped relation" do
+      post = SrdOpenPost.create!(title: "p")
+      live = post.srd_comments.create!(body: "x")
+      trash = trash!(SrdOpenComment, srd_post_id: post.id, body: "x")
+
+      post.srd_comments.where(body: "x").destroy_all
+      post.srd_comments.destroy_all
+
+      expect(SrdOpenComment.unscoped.count).to eq(2)
+      expect(SrdOpenComment.find(live.id)).to be_deleted
+      expect(SrdOpenComment.find(trash.id).deleted_at).to be_within(1.minute).of(3.days.ago)
+    end
+
+    it "leaves the trash alone for unscoped on a default_scope model" do
+      SrdPost.create!(title: "live")
+      SrdPost.create!(title: "trash").soft_delete!
+
+      SrdPost.unscoped.destroy_all
+      SrdPost.unscoped.where(title: "trash").destroy_all
+
+      expect(SrdPost.unscoped.count).to eq(2)
+    end
+
+    {
+      only_deleted: :only_deleted.to_proc,
+      soft_deleted: :soft_deleted.to_proc,
+      deleted_within: ->(klass) { klass.deleted_within(7.days) },
+      with_deleted: :with_deleted.to_proc
+    }.each do |name, build|
+      it "purges the trash through #{name}, however it is chained, merged or ordered" do
+        live = SrdOpenPost.create!(title: "live")
+        2.times { trash!(SrdOpenPost, title: "trash") }
+
+        build.call(SrdOpenPost).where(title: "trash").order(:id).destroy_all
+        expect(SrdOpenPost.unscoped.pluck(:title)).to eq(["live"]) if name != :with_deleted
+        SrdOpenPost.unscoped.where.not(id: live.id).delete_all
+        2.times { trash!(SrdOpenPost, title: "trash") }
+
+        SrdOpenPost.where(title: "trash").merge(build.call(SrdOpenPost)).destroy_all
+        expect(SrdOpenPost.unscoped.where(title: "trash").count).to eq(0)
+        trash!(SrdOpenPost, title: "trash")
+
+        build.call(SrdOpenPost).merge(SrdOpenPost.where(title: "trash")).unscope(:order).destroy_all
+        expect(SrdOpenPost.unscoped.where(title: "trash").count).to eq(0)
+      end
+    end
+
+    it "purges through an association declared with a trash scope" do
+      post = SrdOpenPost.create!(title: "p")
+      post.srd_comments.create!(body: "live")
+      2.times { trash!(SrdOpenComment, srd_post_id: post.id, body: "trash") }
+
+      post.trashed_comments.destroy_all
+
+      expect(SrdOpenComment.unscoped.pluck(:body)).to eq(["live"])
+
+      2.times { trash!(SrdOpenComment, srd_post_id: post.id, body: "trash") }
+      post.every_comment.where(body: "trash").destroy_all
+
+      expect(SrdOpenComment.unscoped.pluck(:body)).to eq(["live"])
+    end
+
+    it "purges through an association's trash scope (post.comments.only_deleted)" do
+      post = SrdOpenPost.create!(title: "p")
+      trash!(SrdOpenComment, srd_post_id: post.id, body: "trash")
+
+      post.srd_comments.only_deleted.destroy_all
+
+      expect(SrdOpenComment.unscoped.count).to eq(0)
+    end
+
+    it "honours renamed (affixed) trash scopes" do
+      stub_const("SrdArchived", Class.new(TestModel) do
+        self.table_name = "srd_posts"
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, prefix: :arch, default_scope: false
+      end)
+      SrdArchived.create!(title: "live")
+      trash!(SrdArchived, title: "trash")
+      names = SrdArchived.soft_delete_scope_names
+      expect(names[:only_deleted]).to eq(:arch_only_deleted)
+
+      SrdArchived.where(title: "trash").destroy_all
+      expect(SrdArchived.unscoped.count).to eq(2)
+
+      SrdArchived.public_send(names[:only_deleted]).destroy_all
+      expect(SrdArchived.unscoped.pluck(:title)).to eq(["live"])
+    end
+
+    it "does not let the trash scope of ANOTHER model's relation mark this one" do
+      post = SrdOpenPost.create!(title: "p")
+      trash!(SrdOpenPost, title: "t")
+
+      SrdOpenPost.where(title: "t").joins(:srd_comments).merge(SrdOpenComment.only_deleted).destroy_all
+
+      expect(SrdOpenPost.unscoped.where(title: "t").count).to eq(1)
+      expect(post).to be_present
+    end
+  end
+
+  describe "the trashed set is decided when the call starts" do
+    before do
+      stub_const("SrdNode", Class.new(TestModel) do
+        self.table_name = "srd_nodes"
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, default_scope: false
+        has_many :children, class_name: "SrdNode", foreign_key: :parent_id
+        soft_deletable_by :deleted_at, default_scope: false, cascade: [:children]
+      end)
+    end
+
+    # find_each loads 1000 rows a batch: a child cascaded in batch 1 used to be
+    # loaded as "already trashed" by batch 2 and hard-destroyed (a small table
+    # only re-stamped it), so the outcome depended on the batch size.
+    it "never purges a row that THIS call soft-deleted, whatever the batch size" do
+      root = SrdNode.create!(title: "root")
+      SrdNode.insert_all(Array.new(1100) { |i| { parent_id: root.id, title: "c#{i}", deleted_at: nil } })
+
+      SrdNode.with_deleted.destroy_all
+
+      expect(SrdNode.unscoped.count).to eq(1101)
+      expect(SrdNode.unscoped.where(deleted_at: nil).count).to eq(0)
+    end
+
+    it "purges only the rows trashed before the call (a mixed relation with a cascade)" do
+      root = SrdNode.create!(title: "root")
+      child = SrdNode.create!(title: "child", parent_id: root.id)
+      old = SrdNode.create!(title: "old")
+      old.soft_delete!(at: 2.days.ago)
+
+      SrdNode.with_deleted.destroy_all
+
+      expect(SrdNode.unscoped.pluck(:title)).to contain_exactly("root", "child")
+      expect(SrdNode.unscoped.where(deleted_at: nil).count).to eq(0)
+      expect(child.reload).to be_deleted
+    end
+
+    it "does not purge a row a hook trashed earlier in the call" do
+      stub_const("SrdHooked", Class.new(TestModel) do
+        self.table_name = "srd_nodes"
+        include ConcernsOnRails::SoftDeletable
+
+        soft_deletable_by :deleted_at, default_scope: false
+        def after_soft_delete
+          self.class.unscoped.where(title: "victim").update_all(deleted_at: Time.zone.now)
+        end
+      end)
+      SrdHooked.create!(title: "a")
+      SrdHooked.create!(title: "victim")
+
+      SrdHooked.with_deleted.destroy_all
+
+      expect(SrdHooked.unscoped.pluck(:title)).to contain_exactly("a", "victim")
+    end
+
+    it "decides a loaded relation's trashed set from the loaded records" do
+      live = SrdNode.create!(title: "live")
+      relation = SrdNode.with_deleted.where(title: "live")
+      loaded = relation.to_a
+      expect(loaded.map(&:id)).to eq([live.id])
+
+      relation.destroy_all
+
+      expect(SrdNode.unscoped.count).to eq(1)
+      expect(loaded.first).to be_deleted
+    end
+  end
+
+  describe "purging a trashed parent whose children were cascaded with it" do
+    before do
+      stub_const("SrdChild", Class.new(TestModel) do
+        self.table_name = "srd_children"
+        include ConcernsOnRails::SoftDeletable
+
+        belongs_to :srd_parent
+      end)
+      stub_const("SrdParent", Class.new(TestModel) do
+        self.table_name = "srd_parents"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :srd_children, dependent: :destroy
+        soft_deletable_by :deleted_at, cascade: [:srd_children]
+      end)
+    end
+
+    it "purges the cascaded (trashed) children first, so a real foreign key does not block the parent" do
+      parent = SrdParent.create!
+      2.times { SrdChild.create!(srd_parent: parent) }
+      parent.soft_delete!
+      expect(SrdChild.unscoped.where.not(deleted_at: nil).count).to eq(2)
+
+      expect { SrdParent.only_deleted.destroy_all }.not_to raise_error
+
+      expect(SrdParent.unscoped.count).to eq(0)
+      expect(SrdChild.unscoped.count).to eq(0)
+    end
+
+    it "purges through with_deleted too (a mixed relation)" do
+      parent = SrdParent.create!
+      SrdChild.create!(srd_parent: parent)
+      parent.soft_delete!
+
+      SrdParent.with_deleted.where(id: parent.id).destroy_all
+
+      expect(SrdParent.unscoped.count).to eq(0)
+      expect(SrdChild.unscoped.count).to eq(0)
+    end
+
+    it "keeps a child that was trashed on its own (a different stamp) out of the purge" do
+      parent = SrdParent.create!
+      lone = SrdChild.create!(srd_parent: parent)
+      lone.soft_delete!(at: 5.days.ago)
+      cascaded = SrdChild.create!(srd_parent: parent)
+      parent.soft_delete!
+
+      expect { SrdParent.only_deleted.destroy_all }.to raise_error(ActiveRecord::InvalidForeignKey)
+
+      expect(SrdParent.unscoped.count).to eq(1)
+      expect(SrdChild.unscoped.pluck(:id)).to contain_exactly(lone.id, cascaded.id)
+    end
+  end
+
+  describe "a loaded relation with duplicate rows" do
+    it "soft-deletes each record once (no stale copy per joined row)" do
+      stub_const("SrdCounted", Class.new(TestModel) do
+        self.table_name = "srd_posts"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :srd_comments, foreign_key: :srd_post_id
+        cattr_accessor(:stamped) { [] }
+
+        def before_soft_delete
+          self.class.stamped << id
+        end
+      end)
+      post = SrdCounted.create!(title: "p")
+      3.times { SrdComment.create!(srd_post_id: post.id) }
+      relation = SrdCounted.joins(:srd_comments).load
+      expect(relation.to_a.size).to eq(3)
+
+      result = relation.destroy_all
+
+      expect(SrdCounted.stamped).to eq([post.id])
+      expect(result.map(&:id)).to eq([post.id])
+    end
+  end
+
+  describe "an association destroy_all vetoed by before_remove" do
+    it "returns nil, as ActiveRecord's own destroy_all does" do
+      stub_const("SrdVetoPost", Class.new(TestModel) do
+        self.table_name = "srd_posts"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :srd_comments, foreign_key: :srd_post_id, before_remove: ->(_owner, _c) { throw :abort }
+      end)
+      post = SrdVetoPost.create!(title: "t")
+      post.srd_comments.create!(body: "x")
+
+      expect(post.srd_comments.destroy_all).to be_nil
+      expect(SrdComment.count).to eq(1)
+    end
+
+    it "returns the (empty) record list for an association with nothing to remove" do
+      post = SrdPost.create!(title: "t")
+
+      expect(post.srd_comments.destroy_all).to eq([])
+    end
+  end
+
+  describe "a model that includes SoftDeletable AFTER its subclass was defined" do
+    it "still soft-deletes through the subclass's relation" do
+      stub_const("SrdEarlyBase", Class.new(TestModel) { self.table_name = "srd_posts" })
+      stub_const("SrdEarlyChild", Class.new(SrdEarlyBase))
+      SrdEarlyBase.include(ConcernsOnRails::SoftDeletable)
+      SrdEarlyChild.create!(title: "kid")
+
+      SrdEarlyChild.where(title: "kid").destroy_all
+
+      expect(SrdEarlyBase.unscoped.count).to eq(1)
+      expect(SrdEarlyBase.only_deleted.count).to eq(1)
+    end
+  end
+
+  describe "a has_many :through with disable_joins: true", min_rails: "7.0" do
+    it "soft-deletes through the relation without raising NoMethodError" do
+      stub_const("SrdDjGroup", Class.new(TestModel) do
+        self.table_name = "srd_groups"
+        include ConcernsOnRails::SoftDeletable
+      end)
+      stub_const("SrdDjMembership", Class.new(TestModel) do
+        self.table_name = "srd_memberships"
+        belongs_to :srd_group, class_name: "SrdDjGroup"
+      end)
+      stub_const("SrdDjUser", Class.new(TestModel) do
+        self.table_name = "srd_users"
+        # An ORDERED through scope (and an unordered target) makes Rails hand back a
+        # DisableJoinsAssociationRelation, whose #limit returns an Array.
+        has_many :srd_dj_memberships, -> { order(:id) }, foreign_key: :srd_user_id
+        has_many :srd_dj_groups, through: :srd_dj_memberships, source: :srd_group, disable_joins: true
+      end)
+      user = SrdDjUser.create!
+      2.times { SrdDjMembership.create!(srd_user_id: user.id, srd_group_id: SrdDjGroup.create!.id) }
+
+      relation = user.srd_dj_groups.where.not(id: nil)
+      expect(relation).to be_a(ActiveRecord::DisableJoinsAssociationRelation)
+
+      expect { relation.destroy_all }.not_to raise_error
+
+      expect(SrdDjGroup.unscoped.count).to eq(2)
+      expect(SrdDjGroup.only_deleted.count).to eq(2)
+    end
+  end
+
+  describe "the hard context is one-shot (has_many :through maintenance)" do
+    it "does not hard-delete a destroy_all issued by the join model's own callback" do
+      stub_const("SrdGroup", Class.new(TestModel) do
+        self.table_name = "srd_groups"
+        include ConcernsOnRails::SoftDeletable
+      end)
+      stub_const("SrdMembership", Class.new(TestModel) do
+        self.table_name = "srd_memberships"
+        include ConcernsOnRails::SoftDeletable
+
+        belongs_to :srd_user
+        belongs_to :srd_group
+        after_destroy { self.class.where(srd_user_id: nil).destroy_all }
+      end)
+      stub_const("SrdUser", Class.new(TestModel) do
+        self.table_name = "srd_users"
+        has_many :srd_memberships
+        has_many :srd_groups, through: :srd_memberships, dependent: :destroy
+      end)
+      user = SrdUser.create!
+      SrdMembership.create!(srd_user: user, srd_group: SrdGroup.create!)
+      orphan = SrdMembership.create!(srd_user_id: nil, srd_group: SrdGroup.create!)
+
+      user.destroy
+
+      expect(SrdMembership.unscoped.pluck(:id)).to eq([orphan.id])
+      expect(SrdMembership.only_deleted.pluck(:id)).to eq([orphan.id])
+    end
+  end
+
+  describe "loader bookkeeping" do
+    it "lists Support::ContextualDestroy among the loader's autoloads" do
+      loader = File.read(File.expand_path("../../../lib/concerns_on_rails.rb", __dir__))
+
+      expect(loader).to match(%r{autoload :ContextualDestroy,\s+"concerns_on_rails/support/contextual_destroy"})
+    end
+  end
+
+  describe "association forms that stay Rails' own hard deletes (documented)" do
+    before do
+      stub_const("SrdDepPost", Class.new(TestModel) do
+        self.table_name = "srd_posts"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :srd_comments, foreign_key: :srd_post_id, dependent: :destroy
+        accepts_nested_attributes_for :srd_comments, allow_destroy: true
+      end)
+    end
+
+    let(:post) { SrdDepPost.create!(title: "p") }
+
+    it "hard-deletes through destroy(record) and delete(record) on a dependent: :destroy association" do
+      keep = post.srd_comments.create!(body: "keep")
+      gone = post.srd_comments.create!(body: "gone")
+      dropped = post.srd_comments.create!(body: "dropped")
+
+      post.srd_comments.destroy(gone)
+      post.srd_comments.delete(dropped)
+
+      expect(SrdComment.unscoped.pluck(:id)).to eq([keep.id])
+    end
+
+    it "hard-deletes through collection replace and nested-attributes _destroy" do
+      keep = post.srd_comments.create!(body: "keep")
+      post.srd_comments.create!(body: "replaced")
+      post.srd_comments.replace([keep])
+      expect(SrdComment.unscoped.pluck(:id)).to eq([keep.id])
+
+      post.update!(srd_comments_attributes: [{ id: keep.id, _destroy: "1" }])
+
+      expect(SrdComment.unscoped.count).to eq(0)
+    end
+
+    it "soft-deletes through post.srd_comments.soft_delete_all" do
+      post.srd_comments.create!(body: "x")
+
+      post.srd_comments.soft_delete_all
+
+      expect(SrdComment.only_deleted.count).to eq(1)
     end
   end
 end

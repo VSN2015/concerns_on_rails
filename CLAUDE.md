@@ -81,12 +81,20 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `Support::BatchOps`), `really_destroy_all`/`really_delete!` for hard deletes. `destroy_all`
   is CONTEXTUAL: on the class it soft-deletes (count); on a relation / non-`:through` association
   (records; prepended into the generated relation classes, `Support::ContextualDestroy`) a live
-  record is soft-deleted and an ALREADY soft-deleted one destroyed for real (`only_deleted.destroy_all`
-  purges); the association form rides Rails' own `delete_or_destroy` (before/after_remove, marks the
-  loaded instances), and Rails' OWN maintenance stays hard (HMT `delete_records(:destroy)` is wrapped
-  in a fiber-local hard context for the join model: owner `through:, dependent: :destroy`, link
-  removal); `relation_destroy_all: :hard` opts out; instance `destroy` and `dependent: :destroy`
-  are Rails' (a soft-deleted parent doesn't trigger them — use `cascade:`). Hooks:
+  record is soft-deleted, and an ALREADY soft-deleted one is destroyed for real ONLY when the
+  relation came from a trash scope (`only_deleted`/`soft_deleted`/`deleted_within`/`with_deleted`,
+  affixed or not, tagged with an `extending(TrashScope)` marker that survives chain/merge/association
+  scopes) — every other relation, any `default_scope: false` one included, leaves the trash alone;
+  the trashed set is fixed at the START of the call (pluck/records), so a row the call itself trashes
+  is never purged, and a purged parent first purges its same-stamp cascaded children
+  (`soft_delete_purge!`). The association form rides Rails' own `delete_or_destroy` (before/after_remove,
+  marks the loaded instances, nil on abort); a loaded / limited / composite-key / disable_joins relation
+  acts on its records as loaded (deduped by id). Rails' OWN maintenance stays hard (HMT
+  `delete_records(:destroy)` wrapped in a fiber-local ONE-SHOT hard context for the join model: owner
+  `through:, dependent: :destroy`, link removal; a callback's own `destroy_all` is soft again);
+  `relation_destroy_all: :hard` opts out; instance `destroy`, `dependent: :destroy`, `assoc.destroy(c)`,
+  collection `replace` and nested `_destroy` are Rails' (hard; a soft-deleted parent doesn't trigger
+  `dependent:` — use `cascade:`). Hooks:
   `before/after_soft_delete`, `before/after_restore`. The default scope's `deleted_at IS NULL`
   is its own Arel node (`DefaultScopePredicate`), so the batch verbs peel exactly it — never
   a caller's identical predicate (`without_deleted.really_destroy_all` keeps the trash).
@@ -421,7 +429,10 @@ nil, the uniqueness prechecks skip), `TimeValue` (verb time arguments via `cast_
 String must read as Time.zone.parse will: 4-digit year, no yday, date words or a resolved zone —
 plus virtual-datetime cast/read, a non-mutating `utc`, and the portable 0001..9999 range for
 Filterable/CursorPaginatable), `SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
-allow-list trees + the includes/paths/as_json shapes for Includable), `Affix` (affixed
+allow-list trees + the includes/paths/as_json shapes for Includable), `ContextualDestroy` (SoftDeletable's relation/association `destroy_all`: the `TrashScope`
+marker, the start-of-call trashed set, `destroy_relation`, the association `SoftDestroy` path and the
+one-shot hard context `ThroughMaintenance` sets around Rails' `HasManyThroughAssociation#delete_records`;
+prepends installed lazily by the first SoftDeletable include), `Affix` (affixed
 scope/accessor-name computation + `prefix: true` normalization, shared by Activatable,
 Expirable, Lockable, Anonymizable, Stateable, Storable, Publishable, SoftDeletable and
 Schedulable; the latter three additionally use its guarded scope capture/retirement — a

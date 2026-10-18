@@ -33,29 +33,33 @@ module ConcernsOnRails
       # destroyed each row, a HARD delete of the rows the caller meant to put
       # in the trash. Prepended into the model's generated relation classes
       # (ClassMethods#soft_delete_install_destroy_all!), it makes the app's
-      # destroy_all CONTEXTUAL: a live record is soft-deleted (hooks, cascade),
-      # one that is already soft-deleted is destroyed for real — so
-      # `only_deleted.destroy_all` purges the trash and a mixed relation
-      # soft-deletes its live rows and purges its trashed ones. Unlike the
-      # class-level form it keeps Relation#destroy_all's return contract, the
-      # Array of records it acted on: ActiveRecord itself calls
-      # `relation.destroy_all.count(&:destroyed?)` (in_batches). It stays
-      # ActiveRecord's own destroy_all (a hard delete) when the model opts out
-      # (`relation_destroy_all: :hard`) and inside ActiveRecord's own
-      # has_many :through maintenance (Support::ContextualDestroy). Like
-      # Relation#destroy_all, the relation is reset so a later read reloads.
+      # destroy_all CONTEXTUAL (Support::ContextualDestroy has the rules): a
+      # live record is soft-deleted (hooks, cascade); an already-trashed one is
+      # destroyed for real ONLY when the relation was built by a trash scope
+      # (`only_deleted`, `soft_deleted`, `deleted_within`, `with_deleted`, affixed
+      # or not), and is otherwise left alone. Unlike the class-level form it keeps
+      # Relation#destroy_all's return contract, the Array of records it acted on.
+      # (ActiveRecord 7.2+ itself calls `relation.destroy_all.count(&:destroyed?)`
+      # in `in_batches.destroy_all`, so there the count reads 0 for soft-deleted
+      # rows: they are not `destroyed?`.) It stays ActiveRecord's own destroy_all
+      # (a hard delete) when the model opts out (`relation_destroy_all: :hard`) and
+      # for the ONE destroy_all ActiveRecord's own has_many :through maintenance
+      # issues on the join model. Like Relation#destroy_all, the relation is reset
+      # so a later read reloads.
       module RelationDestroyAll
         def destroy_all
           return super unless klass.send(:soft_delete_contextual_destroy?)
+          return super if ConcernsOnRails::Support::ContextualDestroy.consume_hard(klass)
 
-          klass.send(:soft_delete_destroy_records_in, self).tap { reset }
+          ConcernsOnRails::Support::ContextualDestroy.destroy_relation(self).tap { reset }
         end
       end
 
       # The association proxy (`post.comments.destroy_all`) does the same
       # through ActiveRecord's own remove path (Support::ContextualDestroy::
       # SoftDestroy), so before_remove / after_remove run, the loaded instances
-      # are the ones marked, and the proxy reloads. A :through proxy keeps
+      # are the ones marked, and the proxy reloads (an aborting before_remove
+      # answers nil, as ActiveRecord's does). A :through proxy keeps
       # ActiveRecord's behavior: there destroy_all removes the LINKS (the join
       # rows, hard-deleted), never the target records.
       module CollectionProxyDestroyAll
@@ -105,6 +109,10 @@ module ConcernsOnRails
 
         ConcernsOnRails::Support::ContextualDestroy.install!
         soft_delete_install_destroy_all!
+        # A subclass defined BEFORE this include already has its own generated
+        # relation classes (ActiveRecord builds them in `inherited`, which only
+        # reaches subclasses defined afterwards).
+        descendants.each { |subclass| subclass.send(:soft_delete_install_destroy_all!) }
       end
 
       # A real module (not `class_methods do`) so the batch helpers and their
@@ -242,49 +250,11 @@ module ConcernsOnRails
           proxy.prepend(CollectionProxyDestroyAll) if proxy && !(proxy < CollectionProxyDestroyAll)
         end
 
-        # True when a relation's / association's destroy_all should be the
-        # contextual soft delete: the model did not opt out and the call is not
-        # ActiveRecord's own has_many :through maintenance on this model.
+        # True when a relation's / association's destroy_all may be the contextual
+        # soft delete: the model did not opt out (RelationDestroyAll also yields
+        # to ActiveRecord's own has_many :through maintenance, which it consumes).
         def soft_delete_contextual_destroy?
-          soft_delete_relation_destroy_all == :soft && !ConcernsOnRails::Support::ContextualDestroy.hard?(self)
-        end
-
-        # The relation form of destroy_all: soft-delete every live record of
-        # `relation` through its own soft_delete! (hooks, cascade) and destroy
-        # every already-soft-deleted one, in one transaction with
-        # soft_delete_all's RecordNotSaved + rollback contract, returning the
-        # records acted on. A vetoed hard destroy is skipped, as
-        # Relation#destroy_all skips it. A LOADED relation acts on its loaded
-        # records (as Relation#destroy_all does), so those instances are the
-        # ones marked; otherwise the rows are streamed (BatchOps).
-        def soft_delete_destroy_records_in(relation)
-          records = []
-          step = lambda do |record|
-            result = soft_delete_destroy_record(record)
-            records << record if result == true
-            result
-          end
-          message = "failed to soft-delete record"
-          if relation.loaded?
-            transaction(requires_new: true) do
-              relation.records.each do |record|
-                next if step.call(record)
-
-                raise ActiveRecord::RecordNotSaved.new("#{soft_delete_label}: #{message}", record)
-              end
-            end
-          else
-            ConcernsOnRails::Support::BatchOps.run(relation, label: soft_delete_label, message: message, &step)
-          end
-          records
-        end
-
-        # One record of the relation form: soft-delete a live record (true or
-        # false), destroy a soft-deleted one (true, or :skip when vetoed).
-        def soft_delete_destroy_record(record)
-          return record.soft_delete! unless record.deleted?
-
-          record.destroy ? true : :skip
+          soft_delete_relation_destroy_all == :soft
         end
 
         # The current relation with the DEFAULT SCOPE's soft-delete predicate
@@ -331,13 +301,17 @@ module ConcernsOnRails
                 -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
           scope soft_delete_scope_names[:without_deleted],
                 -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
+          # The trash scopes tag their relation (TrashScope, an `extending` marker that
+          # survives chaining, merge and association scopes): reaching the trash through
+          # one is what lets a relation's destroy_all purge already-trashed rows.
+          trash = ConcernsOnRails::Support::ContextualDestroy::TrashScope
           scope soft_delete_scope_names[:soft_deleted],
-                -> { unscope(where: soft_delete_field).where.not(soft_delete_field => nil) }
+                -> { unscope(where: soft_delete_field).where.not(soft_delete_field => nil).extending(trash) }
           scope soft_delete_scope_names[:only_deleted],
                 -> { public_send(soft_deleted_name) }
           # `with_deleted` peels off the default scope so deleted + non-deleted are both returned.
           scope soft_delete_scope_names[:with_deleted],
-                -> { unscope(where: soft_delete_field) }
+                -> { unscope(where: soft_delete_field).extending(trash) }
           # Records soft-deleted within the last `duration` (e.g. `deleted_within(7.days)`).
           # Arel `gteq` rather than an endless range (`x..`): AR only translates an
           # endless range to `>=` on Rails 6.0+, but this gem supports Rails >= 5.0.
@@ -476,6 +450,31 @@ module ConcernsOnRails
       end
 
       private
+
+      # Destroys this soft-deleted record for real (Rails' own `destroy`:
+      # callbacks, `dependent:`) — the purge of a trash-scope relation's
+      # destroy_all. The children cascaded to the trash WITH this record (the
+      # ones carrying its timestamp, as restore! recognizes them) are purged
+      # first, recursively: Rails' `dependent: :destroy` reaches children
+      # through their default scope, which hides exactly those, so the parent's
+      # DELETE hit the foreign key (or left orphans). All in one savepoint:
+      # returns true, or false when a callback vetoes the destroy (nothing is
+      # purged then). A vetoed child raises RecordNotDestroyed.
+      def soft_delete_purge!
+        self.class.transaction(requires_new: true) do
+          stamp = self[self.class.soft_delete_field]
+          soft_delete_each_dependent(deleted: stamp) { |child| soft_delete_purge_child!(child) } if stamp
+          destroy ? true : raise(ActiveRecord::Rollback)
+        end || false
+      end
+
+      def soft_delete_purge_child!(child)
+        return if child.send(:soft_delete_purge!)
+
+        raise ActiveRecord::RecordNotDestroyed.new(
+          "#{self.class.send(:soft_delete_label)}: failed to purge #{child.class.name}(id: #{child.id.inspect})", child
+        )
+      end
 
       # `touch: true` goes through `update` (validations, callbacks,
       # updated_at); `touch: false` through update_column (none of those).
