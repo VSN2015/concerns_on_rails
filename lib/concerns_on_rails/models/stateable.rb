@@ -188,52 +188,105 @@ module ConcernsOnRails
         # locked re-check and roll back every row already transitioned.
         def transition_all(event)
           name = event.to_sym
-          config = stateable_transitions[name] || stateable_transitions[event.to_s]
-          raise ArgumentError, "#{LABEL}: unknown transition '#{event}'" unless config
-
-          from = Array(config[:from]).map(&:to_s)
-          to = config.fetch(:to).to_s
-          field = stateable_field
-          method_base = stateable_method_name(name)
-
-          eligible = from.empty? ? all : all.where(field => from)
-          # NULL-safe: `where.not(field => to)` compiles to `NOT (state = 'x')`,
-          # which SQL three-valued logic evaluates to NULL — never TRUE — for a
-          # NULL state, so those rows were silently dropped from the batch and
-          # from the returned count. They ARE eligible: a transition with no
-          # `from:` is documented as allowed from any state, `may_<event>?`
-          # returns true for them, and `record.<event>!` on the same row
-          # succeeds. A NULL state is reachable through an imported row,
-          # insert_all, or the documented `create!(status: nil)`.
-          # A `from:` listing the target itself (`from: %i[draft submitted],
-          # to: :submitted`) keeps those rows: the guard accepts them, and
-          # `record.submit!` on one re-stamps it and fires the hooks.
-          state = arel_table[field]
-          eligible = eligible.where(state.not_eq(to).or(state.eq(nil))) unless from.include?(to)
+          raise ArgumentError, "#{LABEL}: unknown transition '#{event}'" unless stateable_transition_config(name)
 
           ConcernsOnRails::Support::BatchOps.run(
-            eligible,
+            stateable_batch_relation(name),
             label: LABEL,
             message: "failed to transition record"
           ) do |record|
-            stateable_batch_transition(record, method_base)
+            stateable_batch_transition(record, name)
           end
+        end
+
+        # This class's declaration of `name` (Symbol or String key), or nil.
+        # (Internal: public so transition_all can ask each record's class.)
+        def stateable_transition_config(name)
+          stateable_transitions[name.to_sym] || stateable_transitions[name.to_s]
         end
 
         private
 
-        # One record of transition_all: fire the event when its guard accepts
-        # the record, else :skip. With `lock: true` the guard is read under
-        # the row lock — Support::Locking.with_locked_column reloads the
-        # record under it — so it sees the row's committed state, and
-        # <event>!'s own locked re-check (which raises) can no longer fail:
-        # the lock is held until the batch's transaction ends. Hooks, the
-        # write and validation failures behave exactly as before.
-        def stateable_batch_transition(record, method_base)
-          fire = -> { record.public_send(:"may_#{method_base}?") ? record.public_send(:"#{method_base}!") : :skip }
-          return fire.call unless record.class.stateable_lock && record.persisted?
+        # The rows transition_all visits, filtered in SQL. On an STI table a
+        # subclass may re-declare stateable_by — drop the event, widen or
+        # narrow its `from:`, change its `to:` — and the relation holds every
+        # subclass's rows, so the filter must admit any row SOME class's
+        # declaration could accept; each record is then judged by its own
+        # class (stateable_batch_transition). With one declaration across the
+        # loaded hierarchy (the usual case) this is the exact filter it always
+        # was: `from:` membership plus "not already in the target".
+        #
+        # NULL-safe: `where.not(field => to)` compiles to `NOT (state = 'x')`,
+        # which SQL three-valued logic evaluates to NULL — never TRUE — for a
+        # NULL state, so those rows were silently dropped from the batch and
+        # from the returned count. They ARE eligible: a transition with no
+        # `from:` is documented as allowed from any state, `may_<event>?`
+        # returns true for them, and `record.<event>!` on the same row
+        # succeeds. A NULL state is reachable through an imported row,
+        # insert_all, or the documented `create!(status: nil)`.
+        # A `from:` listing the target itself (`from: %i[draft submitted],
+        # to: :submitted`) keeps those rows: the guard accepts them, and
+        # `record.submit!` on one re-stamps it and fires the hooks.
+        def stateable_batch_relation(name)
+          declarations = stateable_batch_declarations(name)
+          return all unless declarations.map(&:first).uniq == [stateable_field]
 
-          ConcernsOnRails::Support::Locking.with_locked_column(record, record.class.stateable_field, &fire)
+          froms = declarations.map { |declaration| declaration[1] }
+          relation = froms.any?(&:empty?) ? all : all.where(stateable_field => froms.flatten.uniq)
+          declarations.one? ? stateable_batch_target_filter(relation, *declarations.first.drop(1)) : relation
+        end
+
+        # Drop the rows already in the target state, unless `from:` lists it.
+        def stateable_batch_target_filter(relation, from, to)
+          return relation if from.include?(to)
+
+          state = arel_table[stateable_field]
+          relation.where(state.not_eq(to).or(state.eq(nil)))
+        end
+
+        # The distinct [field, from, to] declarations of `name` across this
+        # class and its loaded subclasses (classes that do not declare it are
+        # left out: their rows are skipped record by record).
+        def stateable_batch_declarations(name)
+          [self, *descendants].filter_map do |klass|
+            config = klass.stateable_transition_config(name)
+            next unless config
+
+            [klass.stateable_field, Array(config[:from]).map(&:to_s).sort, config.fetch(:to).to_s]
+          end.uniq
+        end
+
+        # One record of transition_all, judged by its OWN class's
+        # declaration: a subclass that dropped the event (its `may_<event>?`
+        # is a private retired stub) is skipped, as is a record already in
+        # its class's target state (unless `from:` lists that state), and
+        # otherwise its own guard decides. With `lock: true` ALL of that is
+        # read under the row lock — Support::Locking.with_locked_column
+        # reloads the record under it — so it sees the row's committed state,
+        # and <event>!'s own locked re-check (which raises) can no longer
+        # fail: the lock is held until the batch's transaction ends. Hooks,
+        # the write and validation failures behave exactly as before.
+        def stateable_batch_transition(record, name)
+          klass = record.class
+          judge = -> { stateable_batch_judge(record, name) }
+          return judge.call unless klass.stateable_lock && record.persisted?
+
+          ConcernsOnRails::Support::Locking.with_locked_column(record, klass.stateable_field, &judge)
+        end
+
+        def stateable_batch_judge(record, name)
+          klass = record.class
+          config = klass.stateable_transition_config(name)
+          return :skip unless config
+
+          method_base = klass.send(:stateable_method_name, name)
+          guard = :"may_#{method_base}?"
+          return :skip unless record.respond_to?(guard)
+
+          to = config.fetch(:to).to_s
+          return :skip if record[klass.stateable_field].to_s == to && !Array(config[:from]).map(&:to_s).include?(to)
+
+          record.public_send(guard) ? record.public_send(:"#{method_base}!") : :skip
         end
 
         def stateable_configure!(field, states, options)
