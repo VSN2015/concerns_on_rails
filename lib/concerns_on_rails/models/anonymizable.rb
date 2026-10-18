@@ -6,6 +6,7 @@ require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
 require "concerns_on_rails/support/locking"
+require "concerns_on_rails/support/primary_key"
 require "concerns_on_rails/support/slug_sources"
 require "concerns_on_rails/support/unique_retry"
 require "digest"
@@ -399,7 +400,8 @@ module ConcernsOnRails
 
         columns = anonymizable_column_payload(payload)
         # A copy: update_all adds its lock_version increment to the Hash it is given.
-        written = klass.unscoped.where(klass.primary_key => id_in_database).update_all(columns.dup) == 1
+        row = ConcernsOnRails::Support::PrimaryKey.condition(klass, id_in_database)
+        written = klass.unscoped.where(row).update_all(columns.dup) == 1
         columns.each do |name, value|
           @attributes.write_cast_value(name, value)
           clear_attribute_change(name)
