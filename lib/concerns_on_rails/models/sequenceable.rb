@@ -107,6 +107,7 @@ module ConcernsOnRails
           ensure_columns!(NAME, *cfg[:scope]) unless cfg[:scope].empty?
           ensure_columns!(NAME, :created_at, types: :datetime) unless cfg[:reset] == :never
           validate_sequenceable_options!(cfg[:reset], cfg[:template], cfg[:assign])
+          sequenceable_guard_encryptable_scope!(cfg[:scope])
 
           self.sequenceable_config = sequenceable_config.merge(field => cfg)
 
@@ -270,6 +271,24 @@ module ConcernsOnRails
           private callback
           before_create callback
           self.sequenceable_callback_fields = (sequenceable_callback_fields + [field]).freeze
+        end
+
+        # An `encryptable` column holds ciphertext under a random IV, so the
+        # counter's `where(region: "eu")` serializes a fresh envelope that
+        # matches no stored row: MAX is always NULL and every row in the scope
+        # gets start_at — duplicate numbers a unique index over the ciphertext
+        # never rejects. Encryptable#encryptable mirrors this for the reverse
+        # order (sequenceable_by declared first).
+        def sequenceable_guard_encryptable_scope!(scope)
+          return unless respond_to?(:encryptable_rules)
+
+          overlap = scope & encryptable_rules.keys
+          return if overlap.empty?
+
+          raise ArgumentError,
+                "#{NAME}: scope: #{overlap.map { |f| ":#{f}" }.join(', ')} is an `encryptable` column; the " \
+                "counter's MAX would compare ciphertext (a fresh random IV per query), match no row and issue " \
+                "the same number twice. Scope by a non-encrypted column instead."
         end
 
         def validate_sequenceable_options!(reset, template, assign = :create)

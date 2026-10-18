@@ -63,8 +63,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   Options: `history:`, `scope:` (a column, an association, or an Array of them), `reserved_words:`, `finders:`. A saved record whose `scope:`
   column changes keeps a slug the new scope has free and rebuilds one that scope already holds.
 - **`Sortable`** — wraps `acts_as_list`; `default_scope` orders by the configured
-  field/direction. `sortable_by :position` / `position: :desc`; `scope:`, `add_new_at:`,
-  `use_acts_as_list: false`.
+  field/direction. `sortable_by :position` / `position: :desc`; `scope:` (an `encryptable`
+  column is refused, either order), `add_new_at:`, `use_acts_as_list: false`.
 - **`Publishable`** — timestamp (default `published_at`) **or** boolean column; scopes
   `.published/.unpublished/.scheduled/.draft` (affixable via `prefix:`/`suffix:`) branch on
   the column type. `default_scope: true` hides unpublished (ONE flag-driven default_scope,
@@ -233,7 +233,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `sluggable_by` field, a `candidates:` entry, an `alias_attribute` of one (chains followed),
   a bare friendly_id base (at the macro where it can, else at save), or a `searchable_by`/
   `taggable_by` column (either order; undeclared Taggable `:tags` at `tagged_with`), or a
-  `uniqueness:` attribute/`scope:` (either order — a later one via a `validates_with` override). Ciphertext is
+  `uniqueness:` attribute/`scope:` (either order — a later one via a `validates_with` override), or a
+  Sequenceable / Sortable `scope:` (resolved as acts_as_list does; a String SQL scope isn't
+  inspected) / friendly_id scope column (either order; a bare friendly_id after it, at save). Ciphertext is
   non-deterministic ⇒ unsearchable; opt into `blind_index: true` (or
   `{ column:, expression: }`) for a deterministic-HMAC companion column +
   `find_by_<field>`/`where_<field>`/`<field>_fingerprint` finders (nil values
