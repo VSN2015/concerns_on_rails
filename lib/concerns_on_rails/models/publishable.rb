@@ -154,7 +154,9 @@ module ConcernsOnRails
         # what `unpublish!` does (publishable_cleared_value: NULL on a
         # timestamp column, false on a boolean one). The `published` scope
         # does NOT unscope the field, so a caller's own constraint on the
-        # publish column composes here as it should.
+        # publish column composes here as it should. The rows are selected
+        # with the `published` predicate built inline, never through the
+        # public scope name.
         def unpublish_all
           live = publishable_live_relation
           if publishable_batch_fast_path?(:unpublish)
