@@ -95,6 +95,102 @@ describe "Field transforms run once when valid? precedes save" do
     end
   end
 
+  # Two transforms on ONE column. Normalizable compares against what IT
+  # produced; Sanitizable's writer rewrote the field after that, so a repeat
+  # validation ran Normalizable again (titleize turned "&amp;" into "&Amp;")
+  # and Sanitizable then saw a changed value and escaped it a second time.
+  # A validated save has to store exactly what a plain save stores.
+  context "with Normalizable and a Sanitizable on: :write rule on the same column" do
+    bang = ->(v) { "#{v}!" }
+
+    {
+      "Normalizable first" => %i[normalizable sanitizable],
+      "Sanitizable first" => %i[sanitizable normalizable]
+    }.each do |label, order|
+      {
+        "titleize + html_escape" => [:titleize, escape, "tom & jerry"],
+        "bang + html_escape" => [bang, escape, "a&b"]
+      }.each do |procs, (norm, san, input)|
+        context "#{label}, #{procs}" do
+          let(:klass) do
+            # The include order is what orders the before_validation passes.
+            k = Class.new(TestModel)
+            k.table_name = "valid_then_save_posts"
+            order.each do |kind|
+              if kind == :normalizable
+                k.include ConcernsOnRails::Models::Normalizable
+                k.normalizable :title, with: norm
+              else
+                k.include ConcernsOnRails::Models::Sanitizable
+                k.sanitizable :title, with: san, on: :write
+              end
+            end
+            k
+          end
+          let(:plain) { klass.create!(title: input).reload.title }
+
+          it "stores what a plain save stores (valid? then save)" do
+            record = klass.new(title: input)
+            record.save! if record.valid?
+
+            expect(record.reload.title).to eq(plain)
+          end
+
+          it "stores what a plain save stores across repeated validations" do
+            record = klass.new(title: input)
+            3.times { record.valid? }
+            record.save!
+
+            expect(record.reload.title).to eq(plain)
+          end
+
+          it "stores what a plain save stores on an update" do
+            record = klass.create!(title: "seed")
+            record.title = input
+            record.save! if record.valid?
+
+            expect(record.reload.title).to eq(plain)
+          end
+
+          it "treats an update_attribute after a stray valid? like a fresh one" do
+            expected = klass.create!(title: "seed").tap { |r| r.update_attribute(:title, input) }.reload.title
+
+            record = klass.create!(title: "seed")
+            record.title = "stray"
+            record.valid? # never followed by a save
+            record.update_attribute(:title, input)
+
+            expect(record.reload.title).to eq(expected)
+          end
+        end
+      end
+    end
+  end
+
+  # The previous pass's record belongs to one unsaved state of the row: a
+  # reload throws that state away, so a value assigned afterwards is new work.
+  {
+    "Normalizable" => ->(k, proc) { k.normalizable :title, with: proc },
+    "Sanitizable on: :write" => ->(k, proc) { k.sanitizable :title, with: proc, on: :write }
+  }.each do |label, declare|
+    it "runs a #{label} Proc on a value assigned after a reload" do
+      klass = Class.new(TestModel) do
+        self.table_name = "valid_then_save_posts"
+        include ConcernsOnRails::Models::Normalizable
+        include ConcernsOnRails::Models::Sanitizable
+      end
+      declare.call(klass, ->(v) { "#{v}!" })
+      record = klass.create!(title: "seed")
+      record.title = "a"
+      record.valid? # "a" -> "a!", never saved
+      record.reload
+      record.title = "a!"
+      record.save!
+
+      expect(record.reload.title).to eq("a!!")
+    end
+  end
+
   it "normalizes Addressable parts once when valid? precedes save" do
     klass = Class.new(TestModel) do
       self.table_name = "valid_then_save_locations"

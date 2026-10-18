@@ -105,6 +105,7 @@ module ConcernsOnRails
       included do
         class_attribute :normalizable_rules, instance_accessor: false, default: {}
         before_validation :apply_normalizations
+        after_validation :normalizable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
         # save(validate: false) — which otherwise stored the raw value.
         # PREPENDED: callbacks run in registration order, and a sibling's
@@ -177,22 +178,50 @@ module ConcernsOnRails
         # field => the value this pass left it holding, so the before_save
         # backstop can tell "already normalized" from "changed since". A
         # previous pass of the same save cycle (`save if valid?` validates
-        # twice) already normalized a field still holding what it produced:
-        # running a non-idempotent Proc on it again compounded it.
+        # twice) already normalized a field still holding what validation
+        # left it: running a non-idempotent Proc on it again compounded it.
         previous = @normalizable_applied || {}
+        validated = @normalizable_validated || {}
         @normalizable_applied = {}
+        @normalizable_validated = nil
         normalizable_each_pending_rule do |field, normalizer, value|
-          unless previous.key?(field) && previous[field] == value
-            normalized = normalizer.call(value)
-            self[field] = normalized unless normalized == value
+          # "Left it" is the value at the END of that validation, which a
+          # later transform's before_validation (Sanitizable on: :write
+          # escaping what we produced) may have rewritten; the value we
+          # PRODUCED is only the fallback, for a pass that never finished.
+          if previous.key?(field) && validated.fetch(field) { previous[field] } == value
+            # Skipped, but the record keeps what WE produced, so the
+            # before_save backstop still re-normalizes a field a later
+            # sibling rewrote (a slug friendly_id builds afterwards).
+            @normalizable_applied[field] = previous[field]
+            next
           end
+
+          normalized = normalizer.call(value)
+          self[field] = normalized unless normalized == value
           # A copy: an in-place mutation after validation (`name << "  x"`)
           # would otherwise mutate the recorded value too and look normalized.
           @normalizable_applied[field] = self[field].dup
         end
       end
 
+      # A reload throws the unsaved state away, and the previous pass's
+      # record with it: a value assigned afterwards is new work for the rules.
+      def reload(*)
+        @normalizable_applied = @normalizable_validated = nil
+        super
+      end
+
       private
+
+      # Re-recorded once validation is over: a later before_validation (a
+      # sibling's, the app's own) may have rewritten a field this pass
+      # handled, and the NEXT validation pass of the same save cycle
+      # (`save if valid?`) must recognize what validation left in it, or it
+      # would normalize that rewrite again and hand the sibling a changed value.
+      def normalizable_record_validated
+        @normalizable_validated = @normalizable_applied&.to_h { |field, _| [field, self[field].dup] }
+      end
 
       # Normalize only what before_validation did not: a field it already
       # handled, still holding the value it produced, is skipped, so a
@@ -201,7 +230,7 @@ module ConcernsOnRails
       # normalized here. The record is cleared for the next save.
       def normalizable_apply_unvalidated
         applied = @normalizable_applied || {}
-        @normalizable_applied = nil
+        @normalizable_applied = @normalizable_validated = nil
         normalizable_each_pending_rule do |field, normalizer, value|
           next if applied.key?(field) && applied[field] == value
 

@@ -294,6 +294,13 @@ module ConcernsOnRails
         end
       end
 
+      # A reload throws the unsaved state away, and the previous pass's record
+      # with it: a value assigned afterwards is new work for the rules.
+      def reload(*)
+        @sanitizable_applied = nil
+        super
+      end
+
       # Re-recorded once validation is over: a later before_validation — a
       # sibling's (Normalizable's :squish) or the app's own — may rewrite a
       # field this pass handled, and what validation accepted is what the

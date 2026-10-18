@@ -368,6 +368,13 @@ module ConcernsOnRails
         self.class.addressable_fields.values.any? { |column| attribute_changed?(column) }
       end
 
+      # A reload throws the unsaved state away, and the previous pass's record
+      # with it: a value assigned afterwards is new work for the rules.
+      def reload(*)
+        @addressable_normalized = nil
+        super
+      end
+
       private
 
       # Re-recorded once validation is over: a later before_validation — a
