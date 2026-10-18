@@ -302,7 +302,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   RFC 9110 q-values, stable order on ties; `-` and `_` match each other, case-insensitively,
   returning the app's own symbol). Like Timezoneable's zone, the locale stays
   active for `rescue_from` handlers and is always restored afterwards.
-- **`Authorizable`** — declarative per-action authorization (`authorize_by`, `require_role`).
+- **`Authorizable`** — declarative per-action authorization (`authorize_by`, `require_role`); the
+  denial's envelope `code` follows its `status:` (401 `unauthorized`, 404 `not_found` — the same
+  body as ErrorHandleable's 404 — else `forbidden`).
 - **`Throttleable`** — fixed-window rate limiting with an injectable atomic store. A rule
   without `name:` defaults to `"<DeclaringController>#rule<n>"`, so unrelated controllers
   never share a counter (subclasses share their parent's rule). The first-hit seed is
