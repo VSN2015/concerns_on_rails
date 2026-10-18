@@ -88,7 +88,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   requires the tag's model to share the relation's base_class) — every other relation, any
   `default_scope: false` one included, leaves the trash alone; the trashed set is fixed at the START
   of the call (pluck/records), so a row the call itself trashes is never purged, and each purge
-  re-checks the row is still trashed in the DB (`soft_delete_purge!`: true purged / false vetoed /
+  re-checks (EXISTS, no row lock) the row is still trashed in the DB (`soft_delete_purge!`: true purged / false vetoed /
   nil skipped). A purged parent first purges its TRASHED cascade children of any stamp, a visited
   set of [base_class, id] stops cascade cycles, and a vetoed child rolls the parent back (relation:
   skipped; association: RecordNotDestroyed). The association form rides Rails' own `delete_or_destroy` (before/after_remove,

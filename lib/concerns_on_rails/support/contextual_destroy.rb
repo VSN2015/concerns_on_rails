@@ -30,7 +30,9 @@ module ConcernsOnRails
     # of that set is re-checked right before its purge (SoftDeletable's
     # `soft_delete_purge!`): one restored meanwhile — a loaded relation's
     # instance, a stale copy in a find_each batch, a row a hook brought back —
-    # is skipped, never hard-deleted live.
+    # is not purged. The re-check is a plain EXISTS, not a row lock: a restore
+    # committed by another connection between it and ActiveRecord's DELETE is
+    # still lost (as with any read-then-destroy).
     #
     # Two places in ActiveRecord issue a relation-level `destroy_all` or a
     # per-record destroy that the concern must tell apart from the app's:
@@ -243,7 +245,9 @@ module ConcernsOnRails
       # (soft_delete_purge! then answers false for it) — raises
       # RecordNotDestroyed, which is where ActiveRecord's own association
       # destroy_all raises (`destroy!`). A record that is no longer trashed in
-      # the database when its turn comes is skipped (no raise).
+      # the database when its turn comes is skipped (no raise) — but it still
+      # gets `after_remove` and appears in the returned Array: ActiveRecord
+      # runs those over every target after delete_records returns.
       module SoftDestroy
         # Public on the association: the collection proxy's override calls it.
         # Acts on the loaded target (as ActiveRecord's destroy_all does), so
@@ -269,11 +273,23 @@ module ConcernsOnRails
         def delete_records(records, method)
           return super unless method == SOFT_DESTROY
 
-          reflection.klass.transaction(requires_new: true) { records.each { |record| soft_destroy_record!(record) } }
+          soft_destroy_records!(records)
           # Rails' own bookkeeping for the rows it really removed (a soft
           # delete leaves a counter cache alone, as soft_delete! does).
           hard = records.count(&:destroyed?)
           update_counter(-hard) if hard.positive? && !reflection.inverse_updates_counter_cache?
+        end
+
+        # The trashed targets are purged FIRST, as the relation form does: a
+        # purge takes the record's trashed cascade children with it whatever
+        # their stamp, so a live target soft-deleted earlier in the call (a
+        # reply of a trashed comment, under a self-referential cascade) was
+        # then hard-deleted, depending on the target's order.
+        def soft_destroy_records!(records)
+          trashed, live = records.partition { |record| @concerns_on_rails_trashed&.key?(record) }
+          reflection.klass.transaction(requires_new: true) do
+            (trashed + live).each { |record| soft_destroy_record!(record) }
+          end
         end
 
         def soft_destroy_record!(record)

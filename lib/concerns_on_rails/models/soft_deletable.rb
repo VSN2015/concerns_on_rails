@@ -552,7 +552,8 @@ module ConcernsOnRails
       # a joined table's same-named column) still applies, as it does for
       # Rails' `dependent:`. The association's own
       # conditions apply too; a has_one acts on the child its reader returns
-      # (a hidden one only when the reader returns none).
+      # (a hidden one only when the reader returns none) — except the purge
+      # pass, which takes every trashed child.
       def soft_delete_each_dependent(deleted:, &block)
         self.class.soft_delete_cascade.each do |name|
           reflection = self.class.reflect_on_association(name)
@@ -564,7 +565,10 @@ module ConcernsOnRails
           relation = ConcernsOnRails::Support::AssociationScope.without(
             ConcernsOnRails::Support::AssociationScope.unfiltered(self, name), field
           )
-          relation = if deleted == true then relation.where.not(field => nil)
+          # The purge pass (`deleted: true`) takes EVERY trashed child: a
+          # has_one's LIMIT 1 (its reader's row) would leave the others holding
+          # the foreign key (or orphaned).
+          relation = if deleted == true then relation.where.not(field => nil).unscope(:limit, :offset)
                      elsif deleted then relation.where(field => deleted)
                      else relation.where(field => nil)
                      end

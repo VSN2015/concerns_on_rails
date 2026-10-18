@@ -560,7 +560,8 @@ User.only_deleted.really_destroy_all           # empty the trash can, nothing el
    this call soft-deletes (a self-referential `cascade:`, an `after_soft_delete` hook) is never purged by a later
    batch (it stays in the trash; as with `soft_delete_all`, a stale copy that a self-referential `cascade:`
    already trashed can be re-stamped, so the parent's `restore!` may not bring it back). Each row is re-checked
-   right before its purge, so one restored in the meantime is skipped, never hard-deleted live. The real destroy
+   right before its purge, so a row restored before its turn is not purged (a plain `EXISTS`, not a row lock: a
+   restore committed concurrently between that check and the `DELETE` is still lost). The real destroy
    is Rails' own (callbacks and `dependent: :destroy` run); a trashed parent first purges its **trashed**
    `cascade:` children, whatever their timestamp (live ones are left to `dependent:`), because
    `dependent: :destroy` cannot see them through their default scope; a cascade cycle (a self-parented row, a

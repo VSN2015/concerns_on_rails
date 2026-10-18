@@ -65,7 +65,7 @@ describe "SoftDeletable destroy_all on a relation or an association" do
 
   after do
     %i[srd_memberships srd_children srd_parents srd_nodes srd_posts srd_comments srd_users srd_groups
-       srd_cyc_users srd_cyc_teams].each do |table|
+       srd_cyc_users srd_cyc_teams srd_replies].each do |table|
       ActiveRecord::Base.connection.drop_table(table, if_exists: true)
     end
   end
@@ -863,6 +863,72 @@ describe "SoftDeletable destroy_all on a relation or an association" do
 
       expect(SrdParent.unscoped.count).to eq(1)
       expect(SrdChild.unscoped.count).to eq(1)
+    end
+
+    # Round 3 re-review: AssociationScope.unfiltered keeps a has_one's LIMIT 1
+    # (its reader's row), so only one trashed child was purged and the other
+    # still held the foreign key.
+    it "purges EVERY trashed child of a has_one cascade" do
+      stub_const("SrdOneParent", Class.new(TestModel) do
+        self.table_name = "srd_parents"
+        include ConcernsOnRails::SoftDeletable
+
+        has_one :srd_child, foreign_key: :srd_parent_id
+        soft_deletable_by :deleted_at, cascade: [:srd_child]
+      end)
+      parent = SrdOneParent.create!
+      SrdChild.create!(srd_parent_id: parent.id).soft_delete!(at: 5.days.ago)
+      SrdChild.create!(srd_parent_id: parent.id)
+      parent.soft_delete!
+      expect(SrdChild.unscoped.where.not(deleted_at: nil).count).to eq(2)
+
+      expect { SrdOneParent.only_deleted.destroy_all }.not_to raise_error
+
+      expect(SrdOneParent.unscoped.count).to eq(0)
+      expect(SrdChild.unscoped.count).to eq(0)
+    end
+  end
+
+  # Round 3 re-review: the association form handled its targets in target
+  # order, so a live record soft-deleted early in the call was then picked up
+  # (now trashed) by a later trashed record's purge of its trashed cascade
+  # children and hard-deleted. Trashed targets are purged first now, as the
+  # relation form does.
+  describe "an association destroy_all over a self-referential cascade" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :srd_replies, force: true do |t|
+          t.integer :srd_post_id
+          t.integer :parent_id
+          t.datetime :deleted_at
+        end
+      end
+      stub_const("SrdReply", Class.new(TestModel) do
+        self.table_name = "srd_replies"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :replies, class_name: "SrdReply", foreign_key: :parent_id
+        soft_deletable_by :deleted_at, cascade: [:replies]
+      end)
+      stub_const("SrdThread", Class.new(TestModel) do
+        self.table_name = "srd_posts"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :all_replies, -> { with_deleted.order(id: :desc) }, class_name: "SrdReply", foreign_key: :srd_post_id
+      end)
+    end
+
+    it "never purges a live target it soft-deleted earlier in the call, whatever the target order" do
+      thread = SrdThread.create!(title: "t")
+      trashed = SrdReply.create!(srd_post_id: thread.id)
+      trashed.soft_delete!(at: 2.days.ago)
+      live = SrdReply.create!(srd_post_id: thread.id, parent_id: trashed.id)
+      expect(thread.all_replies.map(&:id)).to eq([live.id, trashed.id])
+
+      thread.all_replies.destroy_all
+
+      expect(SrdReply.unscoped.pluck(:id)).to eq([live.id])
+      expect(SrdReply.unscoped.find(live.id)).to be_deleted
     end
   end
 
