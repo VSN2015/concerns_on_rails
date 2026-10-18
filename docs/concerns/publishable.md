@@ -89,7 +89,7 @@ Article.published.where(category: "news").order(:published_at)
 | Signature | Description |
 |---|---|
 | `publish!` | Sets the publish field to `Time.zone.now` and persists the record. Returns the `update` result. |
-| `unpublish!` | Sets the publish field to `nil` and persists the record. |
+| `unpublish!` | Clears the publish field and persists the record: `nil` on a timestamp column, `false` on a boolean one (`unpublish_all` writes the same). |
 | `publish_at!(time)` | Sets the publish field to `time` and persists the record. Pass a future time to schedule the record. `time` is cast through the column's type. A value that is not a time raises `ArgumentError` before any hook runs, and nothing is written: a String must name a year (ISO 8601, RFC 2822, `"Oct 1 2026"` and `"2026-10-01 10:30"` all do; `"junk"`, `"Monday"` and `"10:30"` do not, although `Time.zone.parse` reads them as June 1st and today), and `42` or `1.hour` never cast. `nil` still writes `NULL` (and fires the publish hooks). |
 | `published?` | Returns `true` if the field is present and its value is `<= Time.zone.now`. |
 | `unpublished?` | Returns `true` if `published?` is `false` (logical inverse; covers both drafts and scheduled records). |
@@ -166,6 +166,8 @@ Post.unscoped.count         # => 3
 - **`published?` on non-datetime columns.** When the field holds a value that does not respond to `<=` (for example a `boolean true`), `published?` returns `true` unconditionally. Similarly, `scheduled?` returns `false` for non-comparable types. This allows the concern to be used with boolean columns, though timestamp columns are strongly preferred.
 
 - **A boolean column's `.published` is a grouped `(= TRUE)`.** Rails copies a top-level equality condition from a scope onto records built through it. So a `default_scope: true` built on `where(is_published: true)` made every new record start out published. Wrapping the equality in an Arel Grouping hides it from that copy while keeping the index-friendly `= TRUE` form, so new records start unpublished. That includes `Post.published.new`. Rails 6.0 cannot `unscope` a Grouping, so there the scope is `<> FALSE`, which selects the same rows (`NULL` stays out) and is never copied either.
+
+- **Unpublishing a boolean column writes `false`.** `unpublish!` and `unpublish_all` write `false` into a boolean column and `NULL` into a timestamp one. They used to write `NULL` on both, which raised `ActiveRecord::NotNullViolation` on the usual `t.boolean :published, null: false, default: false` (a record could never be unpublished) and left a third state on a nullable column.
 
 - **Hooks can veto the write.** The hooks and the write run in their own savepoint (`Support::HookedWrite`). A hook that raises, or that calls `raise ActiveRecord::Rollback`, undoes the write. `publish!` / `unpublish!` / `publish_at!` then return `false` and nothing is written, even inside a caller's transaction. `publish_all` / `unpublish_all` raise `ActiveRecord::RecordNotSaved` and roll back the whole batch. A write that fails validation returns `false` and rolls back the before-hook's side effects. After any aborted write, every in-memory attribute goes back to its previous state — the column, and anything else the write changed (an Auditable trail entry appended by its `before_save`, a hook's assignment, even an in-place edit nested inside a json value) — so a later unrelated save cannot persist it. Unsaved edits made before the call stay, still dirty.
 
