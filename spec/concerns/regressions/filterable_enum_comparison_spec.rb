@@ -25,16 +25,18 @@ describe ConcernsOnRails::Controllers::Filterable do
       create_table :enum_tickets, force: true do |t|
         t.string :title
         t.integer :status
+        t.integer :priority
         t.string :state
       end
     end
     model = Class.new(TestModel) { self.table_name = "enum_tickets" }
     define_enum(model, :status, { draft: 0, review: 1, published: 2 })
+    define_enum(model, :priority, { low: 0, medium: 5, high: 10 })
     define_enum(model, :state, { open: "o", closed: "c" })
     stub_const("EnumTicket", model)
-    EnumTicket.create!(title: "alpha", status: :draft, state: :open)
-    EnumTicket.create!(title: "beta", status: :review, state: :closed)
-    EnumTicket.create!(title: "gamma", status: :published, state: :open)
+    EnumTicket.create!(title: "alpha", status: :draft, priority: :low, state: :open)
+    EnumTicket.create!(title: "beta", status: :review, priority: :medium, state: :closed)
+    EnumTicket.create!(title: "gamma", status: :published, priority: :high, state: :open)
   end
 
   after(:each) do
@@ -49,7 +51,7 @@ describe ConcernsOnRails::Controllers::Filterable do
     Class.new(FakeController) do
       include ConcernsOnRails::Controllers::Filterable
 
-      filter_by :status, :state, operators: %i[gt gte lt lte]
+      filter_by :status, :priority, :state, operators: %i[gt gte lt lte]
     end
   end
 
@@ -77,7 +79,54 @@ describe ConcernsOnRails::Controllers::Filterable do
   it "matches nothing for an unknown label or a value the enum does not map, and never raises" do
     expect(titles(status_gte: "drfat")).to eq([])
     expect(titles(status_gt: "7")).to eq([])
-    expect(titles(status_lt: "1.5")).to eq([])
+    expect(titles(status_lt: "abc")).to eq([])
     expect(titles(state_lt: "zzz")).to eq([])
+  end
+
+  # Review follow-up: a comparison threshold need not be a mapped value. On an
+  # integer-backed enum a non-label operand is a NUMBER, read exactly
+  # (NumericOperand, like any integer column) and compared as such; only an
+  # unknown non-numeric label, or a number NumericOperand rejects, is `none`.
+  describe "a numeric threshold on an integer-backed enum" do
+    it "compares a number that no label stores, like an integer column" do
+      # priority: low 0, medium 5, high 10
+      expect(titles(priority_gte: "2")).to eq(%w[beta gamma])
+      expect(titles(priority_gt: "2")).to eq(%w[beta gamma])
+      expect(titles(priority_lt: "7")).to eq(%w[alpha beta])
+      expect(titles(priority_lte: 7)).to eq(%w[alpha beta])
+      expect(titles(priority: { gte: "2", lt: "10" })).to eq(%w[beta])
+    end
+
+    it "reads a fractional threshold exactly: gte 1.5 is >= 2, lt 1.5 is <= 1" do
+      expect(titles(status_lt: "1.5")).to eq(%w[alpha beta])
+      expect(titles(status_lte: "1.5")).to eq(%w[alpha beta])
+      expect(titles(status_gt: "1.5")).to eq(%w[gamma])
+      expect(titles(status_gte: "1.5")).to eq(%w[gamma])
+      expect(titles(priority_lte: "5.5")).to eq(%w[alpha beta])
+    end
+
+    it "reads an exponent and bounds the operand like NumericOperand" do
+      expect(titles(priority_gte: "1e1")).to eq(%w[gamma])
+      expect(titles(priority_lt: "99999999999999999999")).to eq(%w[alpha beta gamma])
+      expect(titles(priority_gt: "99999999999999999999")).to eq([])
+      expect(titles(priority_gt: "-99999999999999999999")).to eq(%w[alpha beta gamma])
+    end
+
+    it "still matches nothing for a non-numeric unknown label, and never raises" do
+      expect(titles(priority_gte: "urgent")).to eq([])
+      expect(titles(priority_lt: "0x10")).to eq([])
+      expect(titles(priority_gt: "1_0")).to eq([])
+    end
+
+    it "keeps a label as that label (a numeric-looking value a label stores too)" do
+      expect(titles(priority_gte: "medium")).to eq(%w[beta gamma])
+      expect(titles(priority_gte: "5")).to eq(%w[beta gamma])
+      expect(titles(priority_gt: 5)).to eq(%w[gamma])
+    end
+
+    it "keeps a String-backed enum label-only" do
+      expect(titles(state_gte: "1")).to eq([])
+      expect(titles(state_lt: "1.5")).to eq([])
+    end
   end
 end

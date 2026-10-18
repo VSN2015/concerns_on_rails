@@ -2000,8 +2000,11 @@ are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`
 cannot represent (`?price_gte=abc`) matches **nothing** rather than silently comparing against `0` —
 nothing raises at request time. For strict, validated contracts reach for `Permittable`.
 
-On an `enum` column a comparison operand is a **label** (`?status_gte=review` is `status >= 1`), or the
-value a label stores (`?status_gte=1`); an unknown label or an unmapped value matches nothing, never a 500.
+On an `enum` column a comparison operand is a **label** (`?status_gte=review` is `status >= 1`). On an
+integer-backed enum anything else is read as a number, exactly like an integer column's operand, so a
+threshold need not be a mapped value: with `{ low: 0, medium: 5, high: 10 }`, `?priority_gte=2` is
+`priority >= 2` and `?priority_lt=1.5` is `priority <= 1`. An unknown non-numeric label (or a value that is not
+a number) matches nothing, never a 500.
 
 Numeric columns are read **strictly, never truncated**, in every form (direct `?stock=`, suffix, bracket,
 `in`/`not_in` lists):
