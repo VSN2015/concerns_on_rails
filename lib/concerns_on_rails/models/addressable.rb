@@ -73,8 +73,13 @@ module ConcernsOnRails
         # a sibling concern's later before_validation (Normalizable, say) can
         # still rewrite a mapped column, and a fingerprint computed before that
         # would disagree with `address_fingerprint` -- leaving `with_address`
-        # unable to find the record itself. before_save also covers
-        # `save(validate: false)`.
+        # unable to find the record itself. A PREPENDED validate callback runs
+        # after every before_validation yet ahead of the app's own validations,
+        # so a dedupe check (`validates :address_fingerprint, uniqueness:
+        # true`) sees the digest of the address being saved, not nil or the
+        # stored one. before_save re-stamps for `save(validate: false)` and for
+        # a column changed after validation.
+        validate :stamp_address_fingerprint, prepend: true
         before_save :stamp_address_fingerprint
       end
 

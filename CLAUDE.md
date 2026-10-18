@@ -166,7 +166,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   converts). A separator equal to the delimiter, or empty with decimals, raises (macro and
   per-call override). An `encryptable` cents column is refused at macro time, either order.
 - **`Addressable`** — postal-address normalization + format validation across columns;
-  `full_address`, `address_complete?`, `verify_with:`.
+  `full_address`, `address_complete?`, `verify_with:`. `fingerprint:` is stamped in a
+  PREPENDED `validate` (after every before_validation, before app validations) + `before_save`.
 - **`Auditable`** — single-column JSON change history ("paper_trail-lite"). `auditable_by
   *fields, into:, actor:, max_entries:, max_value_length:`; `audit_trail` /
   `last_change_for` / `audited_changes_since` / `clear_audit_trail!`.
