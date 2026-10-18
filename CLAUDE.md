@@ -154,7 +154,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Monetizable`** — integer-cents money accessors via BigDecimal: `<name>`, `<name>=`,
   `formatted_<name>`; `unit:`, `precision:`, `delimiter:`, `separator:`, `subunit_to_unit:`.
   The writer reads its own formatted output back (unit at start/end only, grouped
-  delimiters, locale separator); garbage, non-finite and oversized input → nil (a Rational
+  delimiters — never a leading `0` group, locale separator); garbage, non-finite and oversized input → nil (a Rational
   converts). A separator equal to the delimiter, or empty with decimals, raises (macro and
   per-call override). An `encryptable` cents column is refused at macro time, either order.
 - **`Addressable`** — postal-address normalization + format validation across columns;
