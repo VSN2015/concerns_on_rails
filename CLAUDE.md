@@ -316,7 +316,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   its keywords would raise), the only form MemCacheStore on Rails 6.0–7.0 can `increment`.
 - **`Timezoneable`** — per-request `Time.zone` from params / header / cookie. The
   `available:` allow-list matches by canonical tzinfo identifier (exact name first, the
-  allow-listed zone returned); a value that is not valid UTF-8 is no match.
+  allow-listed zone returned); a value that is not valid UTF-8 is no match. The action always
+  runs inside `Time.use_zone` (also for the already-current zone), so an in-action
+  `Time.zone =` never leaks to the thread's next request.
 - **`Idempotentable`** — `Idempotency-Key` response replay with an injectable store
   (`idempotent_actions`); 409 on in-flight duplicates, 422 on payload mismatch, 503
   `idempotency_store_unavailable` when the store is down (both claims failed AND both reads

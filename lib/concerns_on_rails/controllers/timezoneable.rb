@@ -119,11 +119,11 @@ module ConcernsOnRails
         persist_time_zone(zone)
         apply_time_zone_response_header(zone)
         @timezoneable_active_zone = zone
-        # Skip the wrapper when it would be a no-op — with nothing configured
-        # (or the client asking for the current zone) every action used to run
-        # inside a pointless Time.use_zone block.
-        return yield if Time.zone && zone && zone.name == Time.zone.name
-
+        # ALWAYS through use_zone, even when the zone is already current: its
+        # ensure is what puts Time.zone back. Skipping it for that "no-op" case
+        # let a `Time.zone = …` inside the action (the per-user idiom this
+        # concern replaces, or a gem doing it) leak to the next request served
+        # by the thread — and whether it leaked depended on what the client sent.
         Time.use_zone(zone, &)
       end
 

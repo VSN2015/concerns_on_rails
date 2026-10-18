@@ -2440,6 +2440,7 @@ Resolution order: `params[param]` → `Time-Zone` header → cookie (if enabled)
 
 **Notes**
 - An unknown `available:` / `default:` zone raises `ArgumentError` at declaration time (fail-fast on misconfiguration); so does `persist:` without `cookie:`.
+- The action always runs inside `Time.use_zone` — also when the resolved zone is already the current one — so a `Time.zone = …` inside the action (or in a gem it calls) never outlives the request; it used to leak to the next request on the thread whenever the client asked for the current zone.
 - `rescue_from` handlers render under the resolved zone too (Rails runs them after the `around_action` has unwound), and the previous zone is always restored afterwards — even when the handler raises.
 - `time_zone_source` tells you which source won (`:param`, `:header`, `:cookie`, `:default`, `:current`) — handy for a "times shown in London (from your browser)" hint.
 - Pairs naturally with the model concerns that read the clock (`Schedulable`, `Publishable`, `Expirable`, `SoftDeletable`).
