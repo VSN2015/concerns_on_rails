@@ -319,12 +319,22 @@ module ConcernsOnRails
           next unless rule[:on] == :write && has_attribute?(field)
 
           value = self[field]
-          next if value.nil?
+          next if value.nil? || sanitizable_stored_unchanged?(field)
 
           yield field, rule[:writer], value
         end
       end
-      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_each_write_rule
+
+      # Persisted records: a field not part of this save went through the
+      # writer when it was stored (Normalizable's rule). Re-running it on
+      # every save compounded a non-idempotent writer ("&amp;" ->
+      # "&amp;amp;"); rows written around the callbacks are what
+      # sanitize_all! repairs.
+      def sanitizable_stored_unchanged?(field)
+        persisted? && respond_to?(:will_save_change_to_attribute?) && !will_save_change_to_attribute?(field)
+      end
+      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_each_write_rule,
+              :sanitizable_stored_unchanged?
 
       # { field => sanitized } for the fields whose stored value would change;
       # nil values are left alone (nothing to sanitize).

@@ -144,8 +144,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Taggable`** — delimiter-joined tags in one string column (no join table). `tagged_with`,
   `all_tags`, boundary-safe and LIKE-escaped (tag and delimiter); tags are stripped of
   Unicode whitespace.
-- **`Sanitizable`** — opt-in HTML sanitization (`on: :read` reader by default, or `:write`).
-  Write-mode `:strip` stores PLAIN TEXT: entities decoded except `&lt;`/`&gt;` and any `&`
+- **`Sanitizable`** — opt-in HTML sanitization (`on: :read` reader by default, or `:write`;
+  a persisted record's unchanged fields are never re-written). Write-mode `:strip` stores PLAIN TEXT: entities decoded except `&lt;`/`&gt;` and any `&`
   that would read back as a character reference (idempotent, never markup, linear time).
   `as_json(sanitized: true)` (and Maskable's `masked: true`) carry the flag through EVERY
   nested `include:` level, also past a model without the concern.
