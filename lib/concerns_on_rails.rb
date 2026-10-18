@@ -93,6 +93,7 @@ module ConcernsOnRails
     autoload :WriteBoundary,           "concerns_on_rails/support/write_boundary"
     autoload :EncryptedLookup,         "concerns_on_rails/support/encrypted_lookup"
     autoload :TransformBackstop,       "concerns_on_rails/support/transform_backstop"
+    autoload :ContextualDestroy,       "concerns_on_rails/support/contextual_destroy"
   end
 end
 
