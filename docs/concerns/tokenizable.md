@@ -193,4 +193,5 @@ device2.pin  # => "847203" (random 6-digit string)
 
 ## Changed in 1.22.0
 
+- A create that rolls back (a lost race on the unique index, a caller's transaction rolling back) puts the generated token and its expiry back, so re-saving the same new record draws a fresh token; a token you supplied is kept.
 - `regenerate_<field>!` routes through the same generate → uniqueness-precheck path as create-time assignment, with a bounded retry on `ActiveRecord::RecordNotUnique` from the real unique index.

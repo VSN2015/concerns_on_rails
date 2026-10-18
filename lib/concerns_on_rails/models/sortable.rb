@@ -30,6 +30,7 @@ module ConcernsOnRails
         class_attribute :sortable_field, instance_accessor: false
         class_attribute :sortable_direction, instance_accessor: false
         class_attribute :sortable_default_scope, instance_accessor: false
+        include ConcernsOnRails::Support::GeneratedValues::Revertible
 
         # set default values
         self.sortable_field ||= :position

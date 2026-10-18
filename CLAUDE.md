@@ -407,7 +407,10 @@ Anonymizable's `slug: :auto`), `GeneratedValues` (producers that assign in `befo
 Tokenizable, Hashable, Sequenceable — report the columns they changed from their create path ONLY
 (Hashable from its own callback after `assign_hashable_value`, never from the public method); the
 consumers' hooks run in a FIXED order — Sluggable's slug, Encryptable's blind index, Auditable's
-creation entry — so none depends on include order), `EncryptedLookup` (equality on a maybe-
+creation entry — so none depends on include order; each producer's before values are recorded on
+the record and `Revertible` (included by every producer, overrides `rolledback!(*, **, &)` → super)
+puts them back when a create rolls back, while the record is new again and the column still holds
+the generated value, so a retried `save!` of the same record draws afresh), `EncryptedLookup` (equality on a maybe-
 `encryptable` column: the blind index, or nil when there is none — Tokenizable's finders raise on
 nil, the uniqueness prechecks skip), `TimeValue` (verb time arguments via `cast_argument!` — a
 String must read as Time.zone.parse will: 4-digit year, no yday, date words or a resolved zone —

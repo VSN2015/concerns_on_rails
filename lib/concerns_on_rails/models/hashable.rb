@@ -29,6 +29,7 @@ module ConcernsOnRails
         class_attribute :hashable_unique, instance_accessor: false, default: false
         class_attribute :hashable_prefix, instance_accessor: false, default: nil
         class_attribute :hashable_to_param, instance_accessor: false, default: false
+        include ConcernsOnRails::Support::GeneratedValues::Revertible
       end
 
       class_methods do
@@ -197,12 +198,14 @@ module ConcernsOnRails
         @hashable_generated = false
         return if self[field].present?
 
+        blank = self[field]
         self[field] = if self.class.hashable_unique
                         unique_hashable_value(field)
                       else
                         self.class.generate_hashable_value
                       end
         @hashable_generated = true
+        @hashable_blank_value = blank
       end
 
       # The before_create that follows assign_hashable_value: a code generated
@@ -215,7 +218,9 @@ module ConcernsOnRails
         return unless @hashable_generated
 
         @hashable_generated = false
-        ConcernsOnRails::Support::GeneratedValues.assigned(self, [self.class.hashable_field])
+        field = self.class.hashable_field
+        ConcernsOnRails::Support::GeneratedValues.remember(self, field => @hashable_blank_value)
+        ConcernsOnRails::Support::GeneratedValues.assigned(self, [field])
       end
       private :hashable_report_generated_value
 
