@@ -310,6 +310,8 @@ module ConcernsOnRails
       # Check if the record is published
       # Example:
       #   record.published?
+      # On a date column the instant is cast through its type, as the scopes' binds
+      # are, so a date column compares against today in Time.zone.
       def published?
         publishable_published?
       end
@@ -326,7 +328,7 @@ module ConcernsOnRails
         value = self[self.class.publishable_field]
         return false if value.blank?
 
-        value.respond_to?(:>) ? value > Time.zone.now : false
+        value.respond_to?(:>) ? value > publishable_now : false
       end
 
       # Never set — a true draft.
@@ -358,6 +360,12 @@ module ConcernsOnRails
         publishable_write_with_hooks(time, :publish)
       end
 
+      # Time.zone.now as the publish column's type casts it (see published?).
+      def publishable_now
+        ConcernsOnRails::Support::TimeValue.predicate_bound(self.class, self.class.publishable_field, Time.zone.now)
+      end
+      private :publishable_now
+
       # Shared write path: hooks and the write in their own savepoint via
       # Support::HookedWrite, so a raising hook — or one vetoing with
       # ActiveRecord::Rollback, even inside a caller's transaction or
@@ -378,7 +386,7 @@ module ConcernsOnRails
         value = self[self.class.publishable_field]
         return false unless value.present?
 
-        value.respond_to?(:<=) ? value <= Time.zone.now : true
+        value.respond_to?(:<=) ? value <= publishable_now : true
       end
       private :publishable_write_with_hooks, :publishable_published?
     end

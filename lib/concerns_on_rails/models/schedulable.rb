@@ -234,6 +234,16 @@ module ConcernsOnRails
       end
       private :schedulable_cast_time
 
+      # The instant a check compares `field` against, cast through a date
+      # column's type as the scopes' binds are (Support::TimeValue
+      # .predicate_bound): on a date column, today in Time.zone — the raw Time
+      # put the stored Date at UTC midnight, so `current?` disagreed with
+      # `.current` for the zone's offset hours.
+      def schedulable_bound(field, time)
+        ConcernsOnRails::Support::TimeValue.predicate_bound(self.class, field, time)
+      end
+      private :schedulable_bound
+
       # Postfix private — the keyword form trips RuboCop's scope analysis
       # against the `private` inside the class_methods block (Publishable's
       # pattern).
@@ -258,7 +268,7 @@ module ConcernsOnRails
         value = field && self[field]
         return false unless value
 
-        value > Time.zone.now
+        value > schedulable_bound(field, Time.zone.now)
       end
       private :schedulable_upcoming?
 
@@ -267,7 +277,7 @@ module ConcernsOnRails
         value = field && self[field]
         return false unless value
 
-        value <= Time.zone.now
+        value <= schedulable_bound(field, Time.zone.now)
       end
       private :schedulable_expired?
 
@@ -276,7 +286,7 @@ module ConcernsOnRails
         return true unless field
 
         value = self[field]
-        !value.nil? && value <= time
+        !value.nil? && value <= schedulable_bound(field, time)
       end
       private :schedulable_started_by?
 
@@ -285,7 +295,7 @@ module ConcernsOnRails
         return true unless field
 
         value = self[field]
-        value.nil? || value > time
+        value.nil? || value > schedulable_bound(field, time)
       end
       private :schedulable_not_ended_at?
 
@@ -299,6 +309,7 @@ module ConcernsOnRails
         return false if value.nil?
         return true if to.nil?
 
+        to = schedulable_bound(field, to)
         inclusive_end ? value <= to : value < to
       end
       private :schedulable_starts_before?
@@ -309,7 +320,7 @@ module ConcernsOnRails
         return true unless field && from
 
         value = self[field]
-        value.nil? || value > from
+        value.nil? || value > schedulable_bound(field, from)
       end
       private :schedulable_ends_after?
     end
