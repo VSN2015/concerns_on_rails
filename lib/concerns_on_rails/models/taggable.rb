@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
   module Models
@@ -90,10 +91,12 @@ module ConcernsOnRails
           after_validation :taggable_record_validated
           # Backstop for the saves that skip validation — update_attribute,
           # save(validate: false) — which stored "ruby, rails" where
-          # tagged_with only matches "ruby,rails". PREPENDED (Normalizable's
-          # rule) so a sibling's earlier before_save sees the stored form.
-          # Re-declaring replaces, never stacks, a Symbol callback.
-          before_save :taggable_normalize_unvalidated, prepend: true
+          # tagged_with only matches "ruby,rails". Run by the shared
+          # PREPENDED dispatcher (Support::TransformBackstop) in
+          # before_validation order, so a sibling's earlier before_save sees
+          # the stored form. Re-declaring moves it to the end of that order,
+          # as re-registering the before_validation above moves that.
+          ConcernsOnRails::Support::TransformBackstop.install(self, :taggable_normalize_unvalidated)
         end
 
         # Records carrying the given tags. `any: true` matches ANY tag (OR);

@@ -6,6 +6,7 @@ require "active_support/core_ext/string/filters"
 require "active_support/core_ext/string/inflections"
 require "uri"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
   module Models
@@ -105,14 +106,19 @@ module ConcernsOnRails
       included do
         class_attribute :normalizable_rules, instance_accessor: false, default: {}
         before_validation :apply_normalizations
+        after_validation :normalizable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
-        # save(validate: false) — which otherwise stored the raw value.
-        # PREPENDED: callbacks run in registration order, and a sibling's
-        # earlier before_save (Encryptable's blind index, Auditable's entry,
-        # Addressable's fingerprint) must see the value that gets stored, not
-        # the raw one — whichever order the concerns were included in.
-        # Registered once, here; re-declaring `normalizable` only merges rules.
-        before_save :normalizable_apply_unvalidated, prepend: true
+        # save(validate: false) — which otherwise stored the raw value. Run
+        # by the shared PREPENDED dispatcher (Support::TransformBackstop), in
+        # the same order as the sibling transforms' before_validation passes,
+        # so a sibling's earlier before_save (Encryptable's blind index,
+        # Auditable's entry, Addressable's fingerprint) sees the value that
+        # gets stored. normalizable_settle runs after every sibling's
+        # backstop. Installed once, here; re-declaring `normalizable` only
+        # merges rules.
+        ConcernsOnRails::Support::TransformBackstop.install(
+          self, :normalizable_apply_unvalidated, settle: :normalizable_settle
+        )
       end
 
       class_methods do
@@ -175,9 +181,27 @@ module ConcernsOnRails
 
       def apply_normalizations
         # field => the value this pass left it holding, so the before_save
-        # backstop can tell "already normalized" from "changed since".
+        # backstop can tell "already normalized" from "changed since". A
+        # previous pass of the same save cycle (`save if valid?` validates
+        # twice) already normalized a field still holding what validation
+        # left it: running a non-idempotent Proc on it again compounded it.
+        previous = @normalizable_applied || {}
+        validated = @normalizable_validated || {}
         @normalizable_applied = {}
+        @normalizable_validated = nil
         normalizable_each_pending_rule do |field, normalizer, value|
+          # "Left it" is the value at the END of that validation, which a
+          # later transform's before_validation (Sanitizable on: :write
+          # escaping what we produced) may have rewritten; the value we
+          # PRODUCED is only the fallback, for a pass that never finished.
+          if previous.key?(field) && validated.fetch(field) { previous[field] } == value
+            # Skipped, but the record keeps what WE produced, so the
+            # before_save backstop still re-normalizes a field a later
+            # sibling rewrote (a slug friendly_id builds afterwards).
+            @normalizable_applied[field] = previous[field]
+            next
+          end
+
           normalized = normalizer.call(value)
           self[field] = normalized unless normalized == value
           # A copy: an in-place mutation after validation (`name << "  x"`)
@@ -186,16 +210,46 @@ module ConcernsOnRails
         end
       end
 
+      # A reload throws the unsaved state away, and the previous pass's
+      # record with it: a value assigned afterwards is new work for the rules.
+      def reload(*)
+        @normalizable_applied = @normalizable_validated = nil
+        super
+      end
+
       private
 
-      # Normalize only what before_validation did not: a field it already
-      # handled, still holding the value it produced, is skipped, so a
-      # non-idempotent Proc runs exactly once in a validated save. A field
-      # assigned after that validation (or never validated at all) is
-      # normalized here. The record is cleared for the next save.
+      # Re-recorded once validation is over: a later before_validation (a
+      # sibling's, the app's own) may have rewritten a field this pass
+      # handled, and the NEXT validation pass of the same save cycle
+      # (`save if valid?`) must recognize what validation left in it, or it
+      # would normalize that rewrite again and hand the sibling a changed value.
+      def normalizable_record_validated
+        @normalizable_validated = @normalizable_applied&.to_h { |field, _| [field, self[field].dup] }
+      end
+
+      # The pass a save that skipped validation never ran, at this concern's
+      # place in the before_validation order, recorded the same way so
+      # normalizable_settle can tell whether a later sibling rewrote the field.
+      # Unconditional: after a validation it is the same skip-what-validation-
+      # left pass (a field equal to the validation snapshot is not redone), and
+      # after a stray `valid?` that never reached a save, a later
+      # `update_attribute` is a fresh write that must be normalized HERE, before
+      # Sanitizable's backstop, not left for settle to run after it.
       def normalizable_apply_unvalidated
+        apply_normalizations
+      end
+
+      # Runs after every transform's backstop. Normalize only what the pass
+      # did not: a field it handled, still holding the value it produced, is
+      # skipped, so a non-idempotent Proc runs exactly once per save. A field
+      # assigned after the pass — or rewritten by a later sibling transform,
+      # since Normalizable compares against what IT produced, not what
+      # validation accepted — is normalized here, whether or not the save
+      # was validated. The record is cleared for the next save.
+      def normalizable_settle
         applied = @normalizable_applied || {}
-        @normalizable_applied = nil
+        @normalizable_applied = @normalizable_validated = nil
         normalizable_each_pending_rule do |field, normalizer, value|
           next if applied.key?(field) && applied[field] == value
 

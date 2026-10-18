@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/html_sanitizers"
+require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
   module Models
@@ -78,10 +79,11 @@ module ConcernsOnRails
         after_validation :sanitizable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
         # save(validate: false) — which otherwise stored the raw markup in a
-        # column declared sanitized on write. PREPENDED, like Normalizable's,
+        # column declared sanitized on write. Run by the shared PREPENDED
+        # dispatcher (Support::TransformBackstop) in before_validation order,
         # so a sibling's earlier before_save (Encryptable's blind index,
         # Auditable's entry) sees the value that gets stored.
-        before_save :sanitizable_apply_unvalidated, prepend: true
+        ConcernsOnRails::Support::TransformBackstop.install(self, :sanitizable_apply_unvalidated)
       end
 
       module ClassMethods
@@ -278,14 +280,27 @@ module ConcernsOnRails
       # their raw column value and are exposed through their sanitized_ reader.
       def apply_sanitizations
         # field => the value this pass left it holding, so the before_save
-        # backstop can tell "already sanitized" from "changed since".
+        # backstop can tell "already sanitized" from "changed since". A
+        # previous pass of the same save cycle (`save if valid?` validates
+        # twice) already sanitized a field still holding what that
+        # validation accepted: running a non-idempotent Proc on it again
+        # compounded it.
+        previous = @sanitizable_applied || {}
         @sanitizable_applied = {}
         sanitizable_each_write_rule do |field, writer, value|
-          self[field] = writer.call(value) # plain String, never a SafeBuffer
+          # A plain String, never a SafeBuffer.
+          self[field] = writer.call(value) unless previous.key?(field) && previous[field] == value
           # A copy: an in-place mutation after validation must not mutate the
           # recorded value too and look sanitized.
           @sanitizable_applied[field] = self[field].dup
         end
+      end
+
+      # A reload throws the unsaved state away, and the previous pass's record
+      # with it: a value assigned afterwards is new work for the rules.
+      def reload(*)
+        @sanitizable_applied = nil
+        super
       end
 
       # Re-recorded once validation is over: a later before_validation — a

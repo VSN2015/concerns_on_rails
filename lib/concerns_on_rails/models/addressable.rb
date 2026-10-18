@@ -2,6 +2,7 @@ require "active_support/concern"
 require "digest"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/address_data"
+require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
   module Models
@@ -63,10 +64,11 @@ module ConcernsOnRails
         before_validation :normalize_address
         after_validation :addressable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
-        # save(validate: false) — which otherwise stored the raw parts.
-        # PREPENDED (Normalizable's rule), so it runs ahead of the
-        # fingerprint stamp below and any sibling's earlier before_save.
-        before_save :addressable_normalize_unvalidated, prepend: true
+        # save(validate: false) — which otherwise stored the raw parts. Run
+        # by the shared PREPENDED dispatcher (Support::TransformBackstop) in
+        # before_validation order, so it runs ahead of the fingerprint stamp
+        # below and any sibling's earlier before_save.
+        ConcernsOnRails::Support::TransformBackstop.install(self, :addressable_normalize_unvalidated)
         # Stamping is its OWN callback, not a tail call inside normalize_address:
         # a sibling concern's later before_validation (Normalizable, say) can
         # still rewrite a mapped column, and a fingerprint computed before that
@@ -276,11 +278,17 @@ module ConcernsOnRails
 
       def normalize_address
         # column => the value this pass left it holding, so the before_save
-        # backstop can tell "already normalized" from "changed since".
+        # backstop can tell "already normalized" from "changed since". A
+        # column a previous pass of the same save cycle (`save if valid?`)
+        # already normalized, still holding what validation accepted, is
+        # not normalized again (Normalizable's rule).
+        previous = @addressable_normalized || {}
         @addressable_normalized = {}
         addressable_each_pending_part do |part, column, value, country|
-          normalized = normalize_part(part, country, value)
-          self[column] = normalized unless normalized == value
+          unless previous.key?(column) && previous[column] == value
+            normalized = normalize_part(part, country, value)
+            self[column] = normalized unless normalized == value
+          end
           # A copy: an in-place mutation after validation must not look normalized.
           @addressable_normalized[column] = self[column].dup
         end
@@ -360,6 +368,13 @@ module ConcernsOnRails
       # only aliases it where nothing would be shadowed.
       def address_parts_changed?
         self.class.addressable_fields.values.any? { |column| attribute_changed?(column) }
+      end
+
+      # A reload throws the unsaved state away, and the previous pass's record
+      # with it: a value assigned afterwards is new work for the rules.
+      def reload(*)
+        @addressable_normalized = nil
+        super
       end
 
       private

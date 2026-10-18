@@ -133,13 +133,19 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   validations via `update!` and `update_all` would skip them.
 - **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all`,
   `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only).
-- **`Normalizable`** — `before_validation` normalization + a PREPENDED `before_save` backstop
-  for saves that skip validation (so an earlier sibling `before_save` — Auditable,
+- **`Normalizable`** — `before_validation` normalization + a `before_save` backstop (run by the
+  prepended `Support::TransformBackstop` dispatcher, below) for saves that skip validation (so an earlier sibling `before_save` — Auditable,
   Addressable — sees the stored value; a field the validation pass already normalized is
-  skipped, so a Proc runs once per save). Sanitizable `on: :write`, Taggable and Addressable
-  copy the same prepended backstop, but re-record the values in `after_validation`, so a later
-  `before_validation`'s rewrite is never re-processed (Normalizable itself keeps comparing to
-  what IT produced — a slug friendly_id builds afterwards must still be normalized). Presets (`:email`, `:phone`,
+  skipped, so a Proc runs once per save — a repeat validation (`save if valid?`) skips it
+  too, and `reload` drops the record). Sanitizable `on: :write`, Taggable and Addressable
+  have the same backstop, but re-record the values in `after_validation`, so a later
+  `before_validation`'s rewrite is never re-processed (Normalizable's backstop keeps comparing to
+  what IT produced — a slug friendly_id builds afterwards must still be normalized — while its
+  repeat validation compares to the value it ALSO records in `after_validation`, so a later
+  transform's rewrite of the field, Sanitizable `on: :write` escaping it, is not normalized again).
+  All four backstops run in ONE prepended dispatcher (`Support::TransformBackstop`, an inheritable
+  list in `before_validation` order; Normalizable's re-check is a `settle:` step after all of
+  them), never one prepend each, which ran them in reverse. Presets (`:email`, `:phone`,
   `:squish`, …) or a Proc. (On Rails 7.1+, native `normalizes` is an alternative.)
 - **`Taggable`** — delimiter-joined tags in one string column (no join table). `tagged_with`,
   `all_tags`, boundary-safe and LIKE-escaped (tag and delimiter); tags are stripped of
@@ -403,7 +409,11 @@ its own savepoint so a retry works inside a caller's transaction on PostgreSQL),
 savepoint, true only once the after-hook returns, and on abort the WHOLE AttributeSet (a
 deep_dup, already-read mutable values deep-copied), the last save's mutations, forced changes
 and the record's identity are put back — unread attributes restored raw, never
-deserialized, so encrypted fields are never decrypted), `Locking` (keeping an instance in step with its
+deserialized, so encrypted fields are never decrypted), `TransformBackstop` (the ONE prepended
+`before_save` dispatcher for the validation-skipping backstops of Normalizable, Sanitizable `on: :write`,
+Taggable and Addressable, registered once per class hierarchy by `install`; runs them in
+`before_validation` order, then each `settle:` method — Normalizable's repeat-validation re-check — after
+all of them; its chain position is fixed at the FIRST transform concern's include), `Locking` (keeping an instance in step with its
 row around raw SQL: `mirror_bump!` copies Rails' `increment!` in-memory lock_version sync (+1, never
 adopting the row's value; `by: -1` undoes it), `pinned` keeps an `update_all` from bumping lock_version,
 `with_row_lock` reads named columns with SELECT … FOR UPDATE without reloading, and `with_locked_column`
