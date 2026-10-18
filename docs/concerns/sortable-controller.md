@@ -69,7 +69,7 @@ sortable_by(*allowed_fields, default: nil, direction: :asc, **rules)
 
 **`sorted(relation)`**
 
-Applies the requested joins and then `reorder`s the given `ActiveRecord::Relation` with one Arel ordering node per requested key. Because it uses `reorder` (not `order`), the requested columns **replace** any `ORDER BY` the relation already carried — including a model `default_scope` order. Returns the relation unchanged when nothing is requested and no default is configured (i.e. `sortable_by` was never called).
+Applies the requested joins and then `reorder`s the given `ActiveRecord::Relation` with one Arel ordering node per requested key. Because it uses `reorder` (not `order`), the requested columns **replace** any `ORDER BY` the relation already carried — including a model `default_scope` order. Returns the relation unchanged when nothing is requested and no default is configured (i.e. `sortable_by` was never called). Accepts a bare model class too (`sorted(Article)`, sorted through `Article.all`), as the paginators do; it used to be a `NoMethodError` 500 on every request.
 
 ```ruby
 def index

@@ -63,6 +63,8 @@ def index
 end
 ```
 
+Accepts a relation or a bare model class (`filtered(Article)`, filtered through `Article.all`), as Paginatable and CursorPaginatable do — so `paginated(sorted(filtered(Article)))` composes; a model class used to be a `NoMethodError` 500 as soon as a direct-where filter param was present.
+
 The method composes all active filters sequentially — each filter receives the relation returned by the previous one, so multiple params narrow the result set via `AND` semantics.
 
 ### Class methods

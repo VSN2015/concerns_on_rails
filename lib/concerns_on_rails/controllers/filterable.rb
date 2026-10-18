@@ -123,8 +123,12 @@ module ConcernsOnRails
       end
 
       # Apply all declared filters to a relation based on params. Unset values
-      # are skipped so absent filters don't narrow the relation.
+      # are skipped so absent filters don't narrow the relation. A bare model
+      # class is filtered through its default relation (`.all`), as the
+      # paginators take one: the filters ask `relation.model`, which a class
+      # does not answer, so `filtered(Article)` was a NoMethodError 500.
       def filtered(relation)
+        relation = relation.all if relation.is_a?(Class) && relation.respond_to?(:all)
         self.class.filterable_rules.each do |field, options|
           value = params[field]
           relation = apply_filter(relation, field, value, options) unless filterable_unset?(value)
