@@ -130,9 +130,12 @@ module ConcernsOnRails
 
       # The shape check and the size bounds, read off the string itself — the
       # exponent is compared as a (≤ 100-char) digit string's Integer, never
-      # by building the number it describes.
+      # by building the number it describes. A String with invalid bytes is no
+      # number, and has to be refused before the regexp: `match?` raises
+      # ArgumentError ("invalid byte sequence in UTF-8") on one, which no
+      # caller rescues — a 500 for a tampered cursor or a JSON-body operand.
       def numeric_string?(raw)
-        return false if raw.length > MAX_LENGTH || !NUMERIC_STRING.match?(raw)
+        return false if !raw.valid_encoding? || raw.length > MAX_LENGTH || !NUMERIC_STRING.match?(raw)
 
         exponent = raw[EXPONENT, 1]
         exponent.nil? || exponent.to_i.abs <= MAX_EXPONENT

@@ -372,7 +372,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   A non-finite float boundary is minted as `"Infinity"`/`"-Infinity"`/`"NaN"` and accepted
   back only where the adapter stores it (SQLite binds a `9e999` literal); a date/time
   boundary that doesn't decode to a date/time is an InvalidCursor, and so is a non-binary
-  String boundary that is invalid UTF-8 or (except on MySQL/Trilogy) carries a NUL byte. A binary
+  String boundary that is invalid UTF-8 or (except on MySQL/Trilogy) carries a NUL byte, and a plain
+  numeric boundary `Support::NumericOperand` does not read as :exact (precision, size). A binary
   boundary (binary PK tiebreaker / ordering column) travels as strict Base64 (not Base64 → InvalidCursor).
 - **`Deprecatable`** — standards-based endpoint deprecation. `deprecate_actions *actions,
   deprecated_at:, sunset_at:, link:, successor:, after_sunset:, header_format:, notify:`
