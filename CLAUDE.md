@@ -79,8 +79,14 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   rows (opt out with `default_scope: false`); scopes affixable via `prefix:`/`suffix:`.
   `soft_delete!`/`restore!`, batch `soft_delete_all`/`restore_all` (atomic, routed through
   `Support::BatchOps`), `really_destroy_all`/`really_delete!` for hard deletes. `destroy_all`
-  soft-deletes on the class (count), a relation and a non-`:through` association (the records;
-  prepended into the generated relation classes); `dependent: :destroy` still hard-deletes. Hooks:
+  is CONTEXTUAL: on the class it soft-deletes (count); on a relation / non-`:through` association
+  (records; prepended into the generated relation classes, `Support::ContextualDestroy`) a live
+  record is soft-deleted and an ALREADY soft-deleted one destroyed for real (`only_deleted.destroy_all`
+  purges); the association form rides Rails' own `delete_or_destroy` (before/after_remove, marks the
+  loaded instances), and Rails' OWN maintenance stays hard (HMT `delete_records(:destroy)` is wrapped
+  in a fiber-local hard context for the join model: owner `through:, dependent: :destroy`, link
+  removal); `relation_destroy_all: :hard` opts out; instance `destroy` and `dependent: :destroy`
+  are Rails' (a soft-deleted parent doesn't trigger them — use `cascade:`). Hooks:
   `before/after_soft_delete`, `before/after_restore`. The default scope's `deleted_at IS NULL`
   is its own Arel node (`DefaultScopePredicate`), so the batch verbs peel exactly it — never
   a caller's identical predicate (`without_deleted.really_destroy_all` keeps the trash).

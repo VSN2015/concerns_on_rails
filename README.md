@@ -529,6 +529,7 @@ User.soft_delete_all      # soft-deletes all matching records; returns the count
 User.destroy_all          # alias of soft_delete_all (kept for backwards compatibility; returns a count, not records)
 User.where(org_id: 7).destroy_all   # a relation's destroy_all soft-deletes too (returns the records)
 post.comments.destroy_all           # and so does an association's (comments include SoftDeletable)
+User.only_deleted.destroy_all       # ...but a row that is ALREADY soft-deleted is destroyed for real: this purges the trash
 User.really_destroy_all   # hard-deletes the records matching the CURRENT relation (soft-deleted included)
 User.restore_all          # restores the matching soft-deleted records; returns the count
 
@@ -537,13 +538,40 @@ User.deleted_within(30.days).really_destroy_all # purge recent trash; older rows
 User.only_deleted.really_destroy_all           # empty the trash can, nothing else
 ```
 
-`destroy_all` soft-deletes in every form: on the class, on a relation (`where(...)`, `destroy_by`,
-`in_batches`) and on an association (`post.comments.destroy_all`, `post.comments.where(...)`). The
-relation and association forms return the soft-deleted records, as ActiveRecord's do; only the class
-form returns a count. (Before this fix only `User.destroy_all` did: the scoped forms hard-deleted.)
-A `:through` association's `destroy_all` still removes the links, not the targets; a soft-deletable
-join model's rows are soft-deleted. `has_many ..., dependent: :destroy` is unchanged: Rails destroys
-each child, a hard delete. Use `really_destroy_all` to hard-delete on purpose.
+**`destroy_all` is contextual.** An app-initiated `destroy_all` on the class, on a relation (`where(...)`,
+`destroy_by`, `in_batches`) or on a non-`:through` association (`post.comments.destroy_all`,
+`post.comments.where(...)`) follows three rules:
+
+1. A **live** record is soft-deleted, through its own `soft_delete!` (hooks, `cascade:`), atomically
+   (`RecordNotSaved` + rollback on failure). The relation and association forms return the records they
+   acted on, as ActiveRecord's do; only the class form returns a count.
+2. A record that is **already soft-deleted** is destroyed for real (as `paranoia` does), so
+   `User.only_deleted.destroy_all` and `User.deleted_within(30.days).destroy_all` purge the trash instead of
+   doing nothing, and a mixed relation (`with_deleted.destroy_all`) soft-deletes its live rows and purges its
+   trashed ones. The real destroy is Rails' own: its callbacks and `dependent: :destroy` run, and a vetoed
+   destroy is skipped on a relation (an association raises `RecordNotDestroyed`, as Rails' does).
+3. **Rails' own association maintenance keeps Rails semantics.** `has_many :groups, through: :memberships,
+   dependent: :destroy` on a destroyed owner, `user.groups.destroy(group)` and `user.groups.destroy_all`
+   remove the join rows with a hard delete, even when the join model is soft-deletable (soft-deleting them
+   would leave rows pointing at a destroyed owner). A `:through` association's `destroy_all` removes the links,
+   never the targets. `has_many ..., dependent: :destroy` is Rails' too and hard-deletes the children.
+
+The association form goes through Rails' own remove path, so `before_remove` / `after_remove` run and the
+loaded instances are the ones marked deleted; a loaded relation acts on its loaded records. Instance
+`destroy` is unchanged: Rails' own hard delete.
+
+To get the pre-fix behavior (a relation's or association's `destroy_all` is ActiveRecord's own hard delete) declare
+`soft_deletable_by :deleted_at, relation_destroy_all: :hard` (default `:soft`; set by every macro call like the
+other options, inherited by subclasses that do not call it). `Model.destroy_all` / `soft_delete_all` always
+soft-delete. Use `really_destroy_all` to hard-delete on purpose.
+
+**Upgrading.** Code that called `Model.where(...).destroy_all` or `record.assoc.destroy_all` on a SoftDeletable
+model and relied on it hard-deleting now soft-deletes: switch to `really_destroy_all`, or set
+`relation_destroy_all: :hard`. Rows now stay in the table, so a **unique index that also covers soft-deleted
+rows blocks re-creating the record** (`email`, a join-table pair): use a partial index that ignores the trash,
+`CREATE UNIQUE INDEX ... WHERE deleted_at IS NULL` (`add_index :users, :email, unique: true, where: "deleted_at IS NULL"`).
+A soft-deleted **parent does not trigger `dependent: :destroy`** on its children (nothing is destroyed): list
+them in `cascade:` to send them to the trash with it.
 
 A record that fails to transition raises `ActiveRecord::RecordNotSaved` and rolls the whole
 batch back. With `touch: false` and no overridden hooks, `soft_delete_all` / `restore_all`
