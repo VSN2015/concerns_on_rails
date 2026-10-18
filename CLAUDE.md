@@ -300,7 +300,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (`ScalarParam.nul_free?`; binary columns exempt), an enum column compares by label (an
   integer-backed one reads any non-label as a NUMBER via `NumericOperand`, so `gte 2` is `>= 2`;
   an unknown non-numeric label → `none`; never `EnumType#cast` on the raw operand), an unknown
-  enum label drops out of equality/`in` (never `IS NULL`), blank values are skipped in both forms, and
+  enum label drops out of equality/`in` (never `IS NULL`), `type: :datetime` reads a zone-less
+  operand as the target column does (`Support::TimeValue.cast`: Time.zone on a zone-aware column,
+  else default_timezone; a `with:` lambda uses Time.zone while `time_zone_aware_attributes` is on;
+  never ENV["TZ"]), `:date`/`:time` are ActiveRecord's types, blank values are skipped in both forms, and
   `contains`/`starts_with` are case-insensitive (except under MySQL `_bin`/`_cs` collations)
   and fail closed on non-text and array columns. Numeric operands go through
   `Support::NumericOperand`: exact, never truncated (`gte 5.5` on an integer column is

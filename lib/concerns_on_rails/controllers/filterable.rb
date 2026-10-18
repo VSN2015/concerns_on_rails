@@ -25,6 +25,10 @@ module ConcernsOnRails
     # through `type:` (any ActiveModel type name: :integer, :decimal,
     # :boolean, :date, :datetime, ...) — except numbers, which are read
     # exactly rather than through ActiveModel's lossy numeric casts (below).
+    # A `type: :datetime` operand reads a zone-less String the way the target
+    # column does (Time.zone on a zone-aware column, else default_timezone;
+    # a `with:` lambda, which has no column, uses Time.zone while
+    # `time_zone_aware_attributes` is on).
     # `type:` also pre-casts the value handed to a `with:` lambda (a numeric
     # `type:` strictly: a value it cannot represent exactly fails the filter
     # closed without calling the lambda). Blank values are skipped,
@@ -70,6 +74,9 @@ module ConcernsOnRails
       # PostgreSQL (`integer ~~* unknown`), so contains/starts_with fail closed.
       LIKE_TYPES = %i[string text citext].freeze
       UNCASTABLE = Object.new.freeze
+      # `type:` names resolved to ActiveRecord's own types (see
+      # filterable_record_temporal_type).
+      RECORD_TEMPORAL_TYPES = { date: :Date, time: :Time }.freeze
 
       included do
         class_attribute :filterable_rules, default: {}
@@ -115,11 +122,32 @@ module ConcernsOnRails
         def filterable_normalize_type(type)
           return nil if type.nil?
 
-          ActiveModel::Type.lookup(type.to_sym)
+          filterable_record_temporal_type(type.to_sym) || ActiveModel::Type.lookup(type.to_sym)
         rescue ArgumentError
           raise ArgumentError, "#{LABEL}: type: #{type.inspect} is not an ActiveModel type (try :integer, :decimal, :date, ...)"
         end
-        private :filterable_normalize_operators, :filterable_operator_list, :filterable_normalize_type
+
+        # :date / :datetime / :time as ActiveRecord's own types, which read
+        # `ActiveRecord.default_timezone` (UTC unless :local) at cast time,
+        # exactly as a datetime column's type does. ActiveModel's guess the
+        # zone from Time.zone_default instead — `:local`, the server's
+        # ENV["TZ"], in every app that sets config.time_zone — so
+        # `?happened_at_gte=2026-01-01 10:00` under `type: :datetime` meant
+        # 10:00 in whatever zone the host ran in. Built directly:
+        # ActiveRecord::Type.lookup would need a connection at class load.
+        # :datetime is TimeValue's one shared instance; and a :datetime
+        # operand is not cast by the type alone (filterable_datetime_cast):
+        # a zone-aware column reads it in Time.zone.
+        def filterable_record_temporal_type(name)
+          return ConcernsOnRails::Support::TimeValue.datetime_type if name == :datetime
+
+          klass = RECORD_TEMPORAL_TYPES[name]
+          return nil unless klass && defined?(::ActiveRecord::Type::DateTime)
+
+          ::ActiveRecord::Type.const_get(klass).new
+        end
+        private :filterable_normalize_operators, :filterable_operator_list, :filterable_normalize_type,
+                :filterable_record_temporal_type
       end
 
       # Apply all declared filters to a relation based on params. Unset values
@@ -190,7 +218,7 @@ module ConcernsOnRails
         return options[:with].call(relation, type ? type.cast(value) : value) unless type
 
         operand = ConcernsOnRails::Support::NumericOperand.classify(value, type, column_type: nil)
-        return options[:with].call(relation, filterable_lambda_cast(type, value)) if operand.nil?
+        return options[:with].call(relation, filterable_lambda_cast(relation, type, value)) if operand.nil?
         return relation.none unless operand.status == :exact
 
         options[:with].call(relation, operand.value)
@@ -201,9 +229,40 @@ module ConcernsOnRails
       # A date/time `type:` hands over nil, too, for an operand that is no
       # date or time (a JSON body's Integer, which the date cast returns as
       # is): the lambda would bind it raw, exactly the comparison bug.
-      def filterable_lambda_cast(type, value)
+      #
+      # A `:datetime` value is read in Time.zone when the model's
+      # `time_zone_aware_attributes` is on (the Rails default), else in
+      # `ActiveRecord.default_timezone`: a lambda has no column to read the
+      # zone from, so this is the zone every datetime column of the model
+      # reads a zone-less String in.
+      def filterable_lambda_cast(relation, type, value)
+        if filterable_datetime?(type)
+          cast = filterable_datetime_cast(value, filterable_model_zone_aware?(relation.model))
+          return cast.equal?(UNCASTABLE) ? nil : cast
+        end
+
         cast = filterable_type_cast(type, value)
         filterable_uncastable?(type, value, cast) ? nil : cast
+      end
+
+      def filterable_datetime?(type)
+        !type.nil? && type.type == :datetime
+      end
+
+      def filterable_model_zone_aware?(model)
+        model.respond_to?(:time_zone_aware_attributes) && model.time_zone_aware_attributes ? true : false
+      end
+
+      # A zone-less `type: :datetime` operand read exactly as the TARGET column
+      # reads it (Support::TimeValue.cast, Storable's `write_datetime`): in
+      # Time.zone — the per-request zone included — when the column is zone
+      # aware, else in `ActiveRecord.default_timezone`. UNCASTABLE for a value
+      # that is no time (including a String Rails 6.0–7.0 cannot parse).
+      def filterable_datetime_cast(value, zone_aware)
+        cast = ConcernsOnRails::Support::TimeValue.cast(value, zone_aware: zone_aware)
+        cast.nil? ? UNCASTABLE : cast
+      rescue ArgumentError
+        UNCASTABLE
       end
 
       # ?price[gte]=10&price[lte]=50 — unknown keys are ignored.
@@ -570,6 +629,9 @@ module ConcernsOnRails
         type = options[:type] || filterable_column_type(relation, field)
         return value if type.nil?
         return UNCASTABLE if filterable_non_numeric?(type, value)
+        if options[:type] && filterable_datetime?(type)
+          return filterable_datetime_cast(value, ConcernsOnRails::Support::TimeValue.zone_aware?(relation.model, field))
+        end
 
         cast = filterable_type_cast(type, value)
         filterable_uncastable?(type, value, cast) ? UNCASTABLE : cast

@@ -1992,8 +1992,12 @@ accepted as a suffix `?price_gte=10` or in bracket form `?price[gte]=10&price[lt
 
 Comparison values are cast through the column's own type, or through `type:` (any ActiveModel type
 name) — except numbers, which are read exactly rather than through ActiveModel's lossy numeric casts
-(see below). `type:` also pre-casts the value handed to a `with:` lambda; a numeric `type:` does it with
-the same strict reader, so `?min_stock=1e1` hands the lambda `10` (not `1`), and a value the type cannot
+(see below). `type: :datetime` reads a zone-less operand the way the target column does: in `Time.zone` (the
+per-request zone included) on a zone-aware column — every Rails app's default — and in
+`ActiveRecord.default_timezone` (UTC by default) otherwise; `:date`/`:time` use ActiveRecord's own types.
+Never the server's system time zone. `type:` also pre-casts the value handed to a `with:` lambda (a `:datetime`
+one, which has no column, in `Time.zone` while the model's `time_zone_aware_attributes` is on — the Rails default — else
+in `default_timezone`); a numeric `type:` does it with the same strict reader, so `?min_stock=1e1` hands the lambda `10` (not `1`), and a value the type cannot
 represent exactly (`abc`, or `5.5` for `:integer`) fails the filter closed without calling the lambda.
 Range limits only ever come from a real numeric column, never from a declared `type:`. Blank values
 are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`/`lte` value the type
