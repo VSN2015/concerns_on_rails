@@ -274,7 +274,7 @@ module ConcernsOnRails
       # Check if the record is published
       # Example:
       #   record.published?
-      # The instant is cast through the column's type, as the scopes' binds
+      # On a date column the instant is cast through its type, as the scopes' binds
       # are, so a date column compares against today in Time.zone.
       def published?
         value = self[self.class.publishable_field]

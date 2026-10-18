@@ -229,7 +229,7 @@ module ConcernsOnRails
       end
       private :schedulable_cast_time
 
-      # The instant a check compares `field` against, cast through the
+      # The instant a check compares `field` against, cast through a date
       # column's type as the scopes' binds are (Support::TimeValue
       # .predicate_bound): on a date column, today in Time.zone — the raw Time
       # put the stored Date at UTC midnight, so `current?` disagreed with

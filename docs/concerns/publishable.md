@@ -165,7 +165,7 @@ Post.unscoped.count         # => 3
 
 - **`published?` on non-datetime columns.** When the field holds a value that does not respond to `<=` (for example a `boolean true`), `published?` returns `true` unconditionally. Similarly, `scheduled?` returns `false` for non-comparable types. This allows the concern to be used with boolean columns, though timestamp columns are strongly preferred.
 
-- **A `date` publish column compares dates in `Time.zone`.** `published?` / `scheduled?` cast `Time.zone.now` through the column's type, as the scopes' binds are, so they agree with `.published` / `.scheduled` outside UTC. They used to compare the stored Date at UTC midnight.
+- **A `date` publish column compares dates in `Time.zone`.** `published?` / `scheduled?` cast `Time.zone.now` through the `date` column's type, as the scopes' binds are, so they agree with `.published` / `.scheduled` outside UTC. They used to compare the stored Date at UTC midnight.
 
 - **A boolean column's `.published` is a grouped `(= TRUE)`.** Rails copies a top-level equality condition from a scope onto records built through it. So a `default_scope: true` built on `where(is_published: true)` made every new record start out published. Wrapping the equality in an Arel Grouping hides it from that copy while keeping the index-friendly `= TRUE` form, so new records start unpublished. That includes `Post.published.new`. Rails 6.0 cannot `unscope` a Grouping, so there the scope is `<> FALSE`, which selects the same rows (`NULL` stays out) and is never copied either.
 

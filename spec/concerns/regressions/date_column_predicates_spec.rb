@@ -141,6 +141,9 @@ describe "date-column predicates agree with their scopes outside UTC" do
     let(:slot_model) do
       Class.new(TestModel) do
         self.table_name = "dcp_slots"
+        # Every Rails app sets this: a datetime column casts a String/Date in
+        # Time.zone, which is what a re-cast bound would have picked up.
+        self.time_zone_aware_attributes = true
         include ConcernsOnRails::Schedulable
 
         schedulable_by
@@ -167,6 +170,24 @@ describe "date-column predicates agree with their scopes outside UTC" do
       expect(event.active_at?("2026-01-15")).to be(true)
       expect(event.overlaps?("2026-01-15", "2026-01-25")).to be(true)
       expect(slot_model.overlapping("2026-01-15", "2026-01-25").to_a).to eq([event])
+    end
+
+    # Review fix: only a DATE column casts the bound. A datetime column's
+    # caller-supplied String/Date bounds are read as they always were (UTC, by
+    # ActiveSupport's comparison coercion), not re-read in Time.zone.
+    it "reads String and Date bounds on a datetime column as UTC, not in Time.zone (Tokyo)" do
+      # 16:00 UTC Oct 9 - 02:00 UTC Oct 10 is 01:00 - 11:00 on Oct 10 in Tokyo.
+      slot = slot_model.create!(starts_at: Time.utc(2026, 10, 9, 16), ends_at: Time.utc(2026, 10, 10, 2))
+
+      expect(slot.active_at?("2026-10-09 20:00")).to be(true)   # 20:00 UTC; Tokyo-read would be 11:00 UTC
+      expect(slot.active_at?("2026-10-10 03:00")).to be(false)  # 03:00 UTC is past the end
+      expect(slot.active_at?("2026-10-09 10:00")).to be(false)  # 10:00 UTC is before the start
+
+      # A Date is UTC midnight: Oct 10 00:00 UTC is inside the window; Tokyo's
+      # midnight (Oct 9 15:00 UTC) is before it.
+      expect(slot.active_at?(Date.new(2026, 10, 10))).to be(true)
+      expect(slot.overlaps?(Date.new(2026, 10, 10), Date.new(2026, 10, 11))).to be(true)
+      expect(slot.overlaps?(Date.new(2026, 10, 9), Time.utc(2026, 10, 9, 16))).to be(false)
     end
   end
 end

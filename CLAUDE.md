@@ -106,7 +106,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `assign_<field>!` restores the field on a failed save so a UniqueRetry retry draws afresh.
 - **`Schedulable`** — start/end window (`starts_at`/`ends_at`); `current`/`upcoming`/`expired`
   scopes (affixable via `prefix:`/`suffix:`) + predicates. The predicates (and Expirable's/Publishable's)
-  cast the instant through the column type (`TimeValue.predicate_bound`), so a `date` column agrees with its scopes.
+  cast the instant through a `date` column's type (`TimeValue.predicate_bound`; any other column's bound is left
+  unchanged), so a `date` column agrees with its scopes.
 - **`Expirable`** — single expiry column (default `expires_at`); `active`/`expired`/
   `expiring_within` scopes (affixable via `prefix:`/`suffix:`). Batch `expire_all` (single-
   UPDATE fast path when `expire!` is unoverridden AND the model has no validators).

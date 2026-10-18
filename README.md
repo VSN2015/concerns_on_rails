@@ -739,7 +739,7 @@ Expirable also defines) belongs to whichever concern is included last.
 - A `nil` end means "never expires"; a `nil` start means "not yet started".
 - `start!` / `finish!` / `reschedule!` cast each time through its column's type. A value that is not a time raises `ArgumentError` and nothing is written (it used to clear the column): a String must name a year (ISO 8601, RFC 2822, `"Oct 1 2026"` and `"2026-10-01 10:30"` all do; `"junk"`, `"Monday"` and `"10:30"` do not, although `Time.zone.parse` reads them as June 1st and today), and `42` or `1.hour` never cast. `nil` still clears a side.
 - No `default_scope`; chain `.current` explicitly.
-- `date` columns work (`schedulable_by starts_at: :starts_on, ends_at: :ends_on`): the predicates cast the instant through the column's type, as the scopes' binds are, so `current?` / `upcoming?` / `expired?` / `active_at?` / `overlaps?` compare against the date in `Time.zone` and agree with `.current` / `.upcoming` / `.expired`. They used to compare the stored Date at UTC midnight, so outside UTC they disagreed with the scopes for part of every day. Expirable's and Publishable's predicates do the same.
+- `date` columns work (`schedulable_by starts_at: :starts_on, ends_at: :ends_on`): the predicates cast the instant through the `date` column's type, as the scopes' binds are, so `current?` / `upcoming?` / `expired?` / `active_at?` / `overlaps?` compare against the date in `Time.zone` and agree with `.current` / `.upcoming` / `.expired`. They used to compare the stored Date at UTC midnight, so outside UTC they disagreed with the scopes for part of every day. Expirable's and Publishable's predicates do the same. A `datetime` column is not touched: its String / Date bounds are read exactly as before.
 
 ---
 
