@@ -162,12 +162,14 @@ module ConcernsOnRails
       # (autosave) inside one transaction. Returns the saved copy, its counter
       # columns (and lock_version) re-read from the row the children's saves
       # incremented — inside that transaction, so the row read is the one this
-      # save produced and no other writer can have touched it yet.
+      # save produced and no other writer can have touched it yet. The same
+      # goes for every Duplicable child copied below it (see
+      # refresh_copied_records).
       def duplicate!(overrides = {}, **)
         copy = duplicate(overrides, **)
         transaction do
           copy.save!
-          Duplicable.refresh_counter_cache_columns(copy)
+          Duplicable.refresh_copied_records(copy)
         end
         copy
       end
@@ -322,6 +324,32 @@ module ConcernsOnRails
           before = counter_cache_columns(record.class).to_h { |column| [column, record[column]] }
           yield
           before.each { |column, value| record[column] = value }
+        end
+
+        # Refresh `record` and, recursively, every persisted Duplicable
+        # record copied below it. A child copied through its own rules is
+        # bumped exactly like the root: ITS copied children's counter UPDATEs
+        # raise its row's counters and lock_version, so a copy refreshed only
+        # at the top raised StaleObjectError one level down. Walks the copy's
+        # in-memory association targets (what `duplicate` attached — a
+        # `duplicate!(only:)` that left an association out has nothing there);
+        # plain children are skipped, since their own children are never copied.
+        def refresh_copied_records(record)
+          refresh_counter_cache_columns(record)
+          return unless record.class.include?(Duplicable)
+
+          copied_children(record).each { |child| refresh_copied_records(child) }
+        end
+
+        # The persisted Duplicable children `record` carries through its
+        # declared has_many / has_one associations.
+        def copied_children(record)
+          klass = record.class
+          klass.duplicable_config[:associations].flat_map do |name|
+            next [] unless %i[has_many has_one].include?(klass.reflect_on_association(name)&.macro)
+
+            Array.wrap(record.association(name).target).select { |child| child.persisted? && child.class.include?(Duplicable) }
+          end
         end
 
         # After the save the database holds the true counts (each child's

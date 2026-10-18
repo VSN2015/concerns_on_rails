@@ -113,3 +113,87 @@ describe "Duplicable: duplicate! of an optimistically locked record" do
     expect(copy.changed?).to be(false)
   end
 end
+
+# Review follow-up: only the ROOT copy was re-read. A Duplicable child copied
+# through its own rules is bumped the same way by ITS copied children (its
+# counter UPDATE also bumps its lock_version), so the nested copy raised
+# StaleObjectError on its next save one level down.
+describe "Duplicable: duplicate! of an optimistically locked graph, nested copies" do
+  before do
+    ActiveRecord::Schema.define do
+      create_table :dup_nest_posts, force: true do |t|
+        t.string :title
+      end
+      create_table :dup_nest_comments, force: true do |t|
+        t.integer :dup_nest_post_id
+        t.string :body
+        t.integer :replies_count, default: 0
+        t.integer :lock_version
+      end
+      create_table :dup_nest_replies, force: true do |t|
+        t.integer :dup_nest_comment_id
+        t.string :body
+      end
+    end
+    stub_const("DupNestReply", Class.new(TestModel) do
+      self.table_name = "dup_nest_replies"
+      include ConcernsOnRails::Models::CounterCacheable
+
+      belongs_to :dup_nest_comment
+      counter_cacheable_by :dup_nest_comment, count: :replies_count
+    end)
+    stub_const("DupNestComment", Class.new(TestModel) do
+      self.table_name = "dup_nest_comments"
+      include ConcernsOnRails::Models::Duplicable
+
+      belongs_to :dup_nest_post, optional: true
+      has_many :dup_nest_replies, -> { order(:id) } # a scope defeats inverse detection
+      duplicable_by associations: %i[dup_nest_replies]
+    end)
+    stub_const("DupNestPost", Class.new(TestModel) do
+      self.table_name = "dup_nest_posts"
+      include ConcernsOnRails::Models::Duplicable
+
+      has_many :dup_nest_comments, -> { order(:id) }
+      duplicable_by associations: %i[dup_nest_comments]
+    end)
+    post = DupNestPost.create!(title: "t")
+    2.times do |i|
+      comment = DupNestComment.create!(dup_nest_post: post, body: "c#{i}")
+      2.times { |j| DupNestReply.create!(dup_nest_comment: comment, body: "r#{j}") }
+    end
+    @post = DupNestPost.find(post.id)
+  end
+
+  after(:each) do
+    %i[dup_nest_posts dup_nest_comments dup_nest_replies].each do |table|
+      ActiveRecord::Base.connection.drop_table(table, if_exists: true)
+    end
+  end
+
+  it "returns nested copies whose lock_version and counters match their rows" do
+    copy = @post.duplicate!
+
+    expect(copy.dup_nest_comments.size).to eq(2)
+    copy.dup_nest_comments.each do |comment|
+      row = DupNestComment.find(comment.id)
+      expect(comment.replies_count).to eq(2)
+      expect(comment.lock_version).to eq(row.lock_version)
+      expect(comment.changed?).to be(false)
+    end
+  end
+
+  it "lets a nested copy save again without StaleObjectError" do
+    copy = @post.duplicate!
+
+    expect { copy.dup_nest_comments.first.update!(body: "x") }.not_to raise_error
+    expect(DupNestComment.find(copy.dup_nest_comments.first.id).body).to eq("x")
+  end
+
+  it "does not touch the original graph" do
+    versions = DupNestComment.where(dup_nest_post_id: @post.id).order(:id).pluck(:lock_version, :replies_count)
+    @post.duplicate!
+
+    expect(DupNestComment.where(dup_nest_post_id: @post.id).order(:id).pluck(:lock_version, :replies_count)).to eq(versions)
+  end
+end
