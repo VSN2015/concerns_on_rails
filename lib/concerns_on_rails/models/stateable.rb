@@ -180,6 +180,12 @@ module ConcernsOnRails
         # while every fast path in this gem uses `update_all`, which does not.
         # Collapsing would silently skip validations that `<event>!` runs.
         # Guard membership is still filtered DB-side, so the scan is cheap.
+        #
+        # Under `lock: true` each record's guard is checked with its row
+        # locked (see stateable_batch_transition), so a row another process
+        # moved after the batch loaded it is skipped like any other row the
+        # guard rejects — it used to raise InvalidTransition from <event>!'s
+        # locked re-check and roll back every row already transitioned.
         def transition_all(event)
           name = event.to_sym
           config = stateable_transitions[name] || stateable_transitions[event.to_s]
@@ -210,11 +216,25 @@ module ConcernsOnRails
             label: LABEL,
             message: "failed to transition record"
           ) do |record|
-            record.public_send(:"may_#{method_base}?") ? record.public_send(:"#{method_base}!") : :skip
+            stateable_batch_transition(record, method_base)
           end
         end
 
         private
+
+        # One record of transition_all: fire the event when its guard accepts
+        # the record, else :skip. With `lock: true` the guard is read under
+        # the row lock — Support::Locking.with_locked_column reloads the
+        # record under it — so it sees the row's committed state, and
+        # <event>!'s own locked re-check (which raises) can no longer fail:
+        # the lock is held until the batch's transaction ends. Hooks, the
+        # write and validation failures behave exactly as before.
+        def stateable_batch_transition(record, method_base)
+          fire = -> { record.public_send(:"may_#{method_base}?") ? record.public_send(:"#{method_base}!") : :skip }
+          return fire.call unless record.class.stateable_lock && record.persisted?
+
+          ConcernsOnRails::Support::Locking.with_locked_column(record, record.class.stateable_field, &fire)
+        end
 
         def stateable_configure!(field, states, options)
           unknown = options.keys - OPTIONS
