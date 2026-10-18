@@ -64,7 +64,8 @@ describe "SoftDeletable destroy_all on a relation or an association" do
   end
 
   after do
-    %i[srd_memberships srd_children srd_parents srd_nodes srd_posts srd_comments srd_users srd_groups].each do |table|
+    %i[srd_memberships srd_children srd_parents srd_nodes srd_posts srd_comments srd_users srd_groups
+       srd_cyc_users srd_cyc_teams].each do |table|
       ActiveRecord::Base.connection.drop_table(table, if_exists: true)
     end
   end
@@ -641,14 +642,62 @@ describe "SoftDeletable destroy_all on a relation or an association" do
       expect(SrdArchived.unscoped.pluck(:title)).to eq(["live"])
     end
 
+    # Review round 3: Relation#merge copies the OTHER relation's `extending`
+    # modules (Merger#merge_multi_values), so one global marker let
+    # `Post.joins(:comments).merge(Comment.only_deleted)` purge trashed POSTS.
+    # The tag is per model now: only this model's own trash scope counts.
     it "does not let the trash scope of ANOTHER model's relation mark this one" do
-      post = SrdOpenPost.create!(title: "p")
-      trash!(SrdOpenPost, title: "t")
+      live = SrdOpenPost.create!(title: "live")
+      trash!(SrdOpenComment, srd_post_id: live.id, body: "c1")
+      trashed = trash!(SrdOpenPost, title: "trashed")
+      trash!(SrdOpenComment, srd_post_id: trashed.id, body: "c2")
+      relation = SrdOpenPost.joins(:srd_comments).merge(SrdOpenComment.only_deleted)
+      expect(relation.pluck(:id)).to contain_exactly(live.id, trashed.id)
 
-      SrdOpenPost.where(title: "t").joins(:srd_comments).merge(SrdOpenComment.only_deleted).destroy_all
+      relation.destroy_all
 
-      expect(SrdOpenPost.unscoped.where(title: "t").count).to eq(1)
-      expect(post).to be_present
+      expect(SrdOpenPost.unscoped.pluck(:id)).to contain_exactly(live.id, trashed.id)
+      expect(SrdOpenPost.find(trashed.id).deleted_at).to be_within(1.minute).of(3.days.ago)
+      expect(SrdOpenPost.find(live.id)).to be_deleted
+      expect(SrdOpenComment.unscoped.count).to eq(2)
+    end
+
+    it "does not let this model's trash scope, merged into ANOTHER model's relation, purge that model's trash" do
+      post = trash!(SrdOpenPost, title: "trashed")
+      comment = trash!(SrdOpenComment, srd_post_id: post.id, body: "trashed")
+
+      SrdOpenComment.joins(:srd_open_post).merge(SrdOpenPost.only_deleted).destroy_all
+
+      expect(SrdOpenComment.unscoped.pluck(:id)).to eq([comment.id])
+      expect(SrdOpenPost.unscoped.pluck(:id)).to eq([post.id])
+    end
+
+    it "does not let another model's trash scope purge a default-scoped model's trash either" do
+      trashed = SrdPost.create!(title: "trashed")
+      SrdComment.create!(srd_post_id: trashed.id, body: "c")
+      trashed.soft_delete!
+      SrdComment.unscoped.update_all(deleted_at: Time.zone.now)
+
+      # A string join: `joins(:srd_comments)` puts the comments' default scope
+      # into the ON clause, which would leave the join empty.
+      relation = SrdPost.joins("INNER JOIN srd_comments ON srd_comments.srd_post_id = srd_posts.id")
+                        .merge(SrdComment.only_deleted)
+
+      relation.destroy_all
+
+      expect(SrdPost.unscoped.pluck(:id)).to eq([trashed.id])
+    end
+
+    it "still purges through a merge of THIS model's (or its STI base's) trash scope" do
+      trash!(SrdOpenPost, title: "trashed")
+      stub_const("SrdOpenPage", Class.new(SrdOpenPost))
+      page = SrdOpenPage.create!(title: "page").tap { |record| record.soft_delete!(at: 3.days.ago) }
+
+      SrdOpenPost.where(title: "trashed").merge(SrdOpenPost.only_deleted).destroy_all
+      expect(SrdOpenPost.unscoped.pluck(:id)).to eq([page.id])
+
+      SrdOpenPage.all.merge(SrdOpenPost.only_deleted).destroy_all
+      expect(SrdOpenPost.unscoped.count).to eq(0)
     end
   end
 
@@ -761,17 +810,149 @@ describe "SoftDeletable destroy_all on a relation or an association" do
       expect(SrdChild.unscoped.count).to eq(0)
     end
 
-    it "keeps a child that was trashed on its own (a different stamp) out of the purge" do
+    # Review round 3: a child trashed on its own (a different stamp) used to be
+    # left out of the purge, so the parent's DELETE hit the foreign key. The
+    # stamp only matters to restore!; a child of an erased parent cannot be
+    # restored meaningfully, so every TRASHED cascade child is purged. Live
+    # children stay Rails' `dependent:` business.
+    it "purges a child that was trashed on its own (a different stamp) too" do
       parent = SrdParent.create!
       lone = SrdChild.create!(srd_parent: parent)
       lone.soft_delete!(at: 5.days.ago)
-      cascaded = SrdChild.create!(srd_parent: parent)
+      SrdChild.create!(srd_parent: parent)
       parent.soft_delete!
 
-      expect { SrdParent.only_deleted.destroy_all }.to raise_error(ActiveRecord::InvalidForeignKey)
+      expect { SrdParent.only_deleted.destroy_all }.not_to raise_error
+
+      expect(SrdParent.unscoped.count).to eq(0)
+      expect(SrdChild.unscoped.count).to eq(0)
+    end
+
+    it "skips (and rolls back) a parent whose cascaded child vetoes its purge, and purges the rest" do
+      keep = SrdParent.create!
+      ok = SrdChild.create!(srd_parent: keep)
+      vetoer_id = SrdChild.create!(srd_parent: keep).id
+      SrdChild.class_eval { before_destroy { throw :abort if id == vetoer_id } }
+      keep.soft_delete!
+      gone = SrdParent.create!
+      SrdChild.create!(srd_parent: gone)
+      gone.soft_delete!
+
+      result = nil
+      expect { result = SrdParent.only_deleted.destroy_all }.not_to raise_error
+
+      expect(result.map(&:id)).to eq([gone.id])
+      expect(SrdParent.unscoped.pluck(:id)).to eq([keep.id])
+      expect(SrdChild.unscoped.where(srd_parent_id: keep.id).pluck(:id)).to include(ok.id)
+      expect(SrdChild.unscoped.where(srd_parent_id: keep.id).count).to eq(2)
+    end
+
+    it "raises RecordNotDestroyed on an association purge whose cascaded child vetoes, as Rails' destroy! does" do
+      stub_const("SrdParentHolder", Class.new(TestModel) do
+        self.table_name = "srd_children"
+        has_many :trashed_parents, -> { only_deleted }, class_name: "SrdParent", primary_key: :srd_parent_id,
+                                                        foreign_key: :id
+      end)
+      SrdChild.class_eval { before_destroy { throw :abort } }
+      parent = SrdParent.create!
+      child = SrdChild.create!(srd_parent: parent)
+      parent.soft_delete!
+
+      expect { SrdParentHolder.find(child.id).trashed_parents.destroy_all }
+        .to raise_error(ActiveRecord::RecordNotDestroyed)
 
       expect(SrdParent.unscoped.count).to eq(1)
-      expect(SrdChild.unscoped.pluck(:id)).to contain_exactly(lone.id, cascaded.id)
+      expect(SrdChild.unscoped.count).to eq(1)
+    end
+  end
+
+  # Review round 3: each child is a fresh instance and its parent's row still
+  # exists until the parent's own destroy, so a cascade cycle recursed until
+  # SystemStackError (which escapes every savepoint).
+  describe "purging through a cascade cycle" do
+    it "purges a self-parented tree row once" do
+      stub_const("SrdLoop", Class.new(TestModel) do
+        self.table_name = "srd_nodes"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :children, class_name: "SrdLoop", foreign_key: :parent_id
+        soft_deletable_by :deleted_at, cascade: [:children]
+      end)
+      node = SrdLoop.create!(title: "self")
+      node.update_column(:parent_id, node.id)
+      node.soft_delete!
+
+      expect { SrdLoop.only_deleted.destroy_all }.not_to raise_error
+
+      expect(SrdLoop.unscoped.count).to eq(0)
+    end
+
+    it "purges a two-model cycle (a user owning the team it is a member of)" do
+      ActiveRecord::Schema.define do
+        create_table :srd_cyc_users, force: true do |t|
+          t.integer :team_id
+          t.datetime :deleted_at
+        end
+        create_table :srd_cyc_teams, force: true do |t|
+          t.integer :owner_id
+          t.datetime :deleted_at
+        end
+      end
+      stub_const("SrdCycTeam", Class.new(TestModel) do
+        self.table_name = "srd_cyc_teams"
+        include ConcernsOnRails::SoftDeletable
+      end)
+      stub_const("SrdCycUser", Class.new(TestModel) do
+        self.table_name = "srd_cyc_users"
+        include ConcernsOnRails::SoftDeletable
+
+        has_many :owned_teams, class_name: "SrdCycTeam", foreign_key: :owner_id
+        soft_deletable_by :deleted_at, cascade: [:owned_teams]
+      end)
+      SrdCycTeam.class_eval do
+        has_many :members, class_name: "SrdCycUser", foreign_key: :team_id
+        soft_deletable_by :deleted_at, cascade: [:members]
+      end
+      user = SrdCycUser.create!
+      team = SrdCycTeam.create!(owner_id: user.id)
+      user.update_column(:team_id, team.id)
+      user.soft_delete!
+      expect(SrdCycTeam.only_deleted.count).to eq(1)
+
+      expect { SrdCycUser.only_deleted.destroy_all }.not_to raise_error
+
+      expect(SrdCycUser.unscoped.count).to eq(0)
+      expect(SrdCycTeam.unscoped.count).to eq(0)
+    end
+  end
+
+  # Review round 3: the trashed set is fixed at the start, but a row can be
+  # restored before its turn — a loaded relation's instances, or a stale copy
+  # in a find_each batch. Each purge re-checks the row is still trashed.
+  describe "a row restored before its purge" do
+    it "is left alone by a loaded relation" do
+      SrdPost.create!(title: "back").soft_delete!
+      relation = SrdPost.only_deleted.load
+      SrdPost.unscoped.update_all(deleted_at: nil)
+
+      expect(relation.destroy_all).to eq([])
+
+      expect(SrdPost.pluck(:title)).to eq(["back"])
+    end
+
+    it "is left alone by a streamed relation whose batch holds a stale copy" do
+      stub_const("SrdRestorer", Class.new(TestModel) do
+        self.table_name = "srd_posts"
+        include ConcernsOnRails::SoftDeletable
+
+        before_destroy { self.class.unscoped.where(title: "victim").update_all(deleted_at: nil) }
+      end)
+      SrdRestorer.create!(title: "a").soft_delete!
+      SrdRestorer.create!(title: "victim").soft_delete!
+
+      SrdRestorer.only_deleted.destroy_all
+
+      expect(SrdRestorer.pluck(:title)).to eq(["victim"])
     end
   end
 

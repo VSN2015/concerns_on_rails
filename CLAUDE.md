@@ -82,12 +82,16 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   is CONTEXTUAL: on the class it soft-deletes (count); on a relation / non-`:through` association
   (records; prepended into the generated relation classes, `Support::ContextualDestroy`) a live
   record is soft-deleted, and an ALREADY soft-deleted one is destroyed for real ONLY when the
-  relation came from a trash scope (`only_deleted`/`soft_deleted`/`deleted_within`/`with_deleted`,
-  affixed or not, tagged with an `extending(TrashScope)` marker that survives chain/merge/association
-  scopes) — every other relation, any `default_scope: false` one included, leaves the trash alone;
-  the trashed set is fixed at the START of the call (pluck/records), so a row the call itself trashes
-  is never purged, and a purged parent first purges its same-stamp cascaded children
-  (`soft_delete_purge!`). The association form rides Rails' own `delete_or_destroy` (before/after_remove,
+  relation came from THAT model's trash scope (`only_deleted`/`soft_deleted`/`deleted_within`/
+  `with_deleted`, affixed or not, tagged with a per-base-class `TrashScope` module via `extending` that
+  survives chain/merge/association scopes; merge also copies ANOTHER model's tag, so `trash_scope?`
+  requires the tag's model to share the relation's base_class) — every other relation, any
+  `default_scope: false` one included, leaves the trash alone; the trashed set is fixed at the START
+  of the call (pluck/records), so a row the call itself trashes is never purged, and each purge
+  re-checks the row is still trashed in the DB (`soft_delete_purge!`: true purged / false vetoed /
+  nil skipped). A purged parent first purges its TRASHED cascade children of any stamp, a visited
+  set of [base_class, id] stops cascade cycles, and a vetoed child rolls the parent back (relation:
+  skipped; association: RecordNotDestroyed). The association form rides Rails' own `delete_or_destroy` (before/after_remove,
   marks the loaded instances, nil on abort); a loaded / limited / composite-key / disable_joins relation
   acts on its records as loaded (deduped by id). Rails' OWN maintenance stays hard (HMT
   `delete_records(:destroy)` wrapped in a fiber-local ONE-SHOT hard context for the join model: owner
@@ -429,7 +433,7 @@ nil, the uniqueness prechecks skip), `TimeValue` (verb time arguments via `cast_
 String must read as Time.zone.parse will: 4-digit year, no yday, date words or a resolved zone —
 plus virtual-datetime cast/read, a non-mutating `utc`, and the portable 0001..9999 range for
 Filterable/CursorPaginatable), `SequenceCalculator`, `HtmlSanitizers`, `Masker`, `Money`, `AddressData`, `IncludeTree` (nested include
-allow-list trees + the includes/paths/as_json shapes for Includable), `ContextualDestroy` (SoftDeletable's relation/association `destroy_all`: the `TrashScope`
+allow-list trees + the includes/paths/as_json shapes for Includable), `ContextualDestroy` (SoftDeletable's relation/association `destroy_all`: the per-model `TrashScope`
 marker, the start-of-call trashed set, `destroy_relation`, the association `SoftDestroy` path and the
 one-shot hard context `ThroughMaintenance` sets around Rails' `HasManyThroughAssociation#delete_records`;
 prepends installed lazily by the first SoftDeletable include), `Affix` (affixed

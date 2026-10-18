@@ -547,24 +547,34 @@ User.only_deleted.really_destroy_all           # empty the trash can, nothing el
    acted on, as ActiveRecord's do (an association whose `before_remove` aborts answers `nil`); only the class
    form returns a count.
 2. A record that is **already soft-deleted** is destroyed for real (as `paranoia` does) ONLY when you reached
-   the trash on purpose, through one of the gem's trash scopes: `only_deleted`, `soft_deleted`,
+   the trash on purpose, through one of **that model's own** trash scopes: `only_deleted`, `soft_deleted`,
    `deleted_within(...)` or `with_deleted` (or their affixed / renamed variants; also inside an association
-   declared `-> { only_deleted }`). So `User.only_deleted.destroy_all` and
+   declared `-> { only_deleted }`, or merged in: `User.where(...).merge(User.only_deleted)`). Another model's
+   trash scope merged into the relation does not count: `Post.joins(:comments).merge(Comment.only_deleted)
+   .destroy_all` soft-deletes the live posts that have trashed comments and purges no post. So
+   `User.only_deleted.destroy_all` and
    `User.deleted_within(30.days).destroy_all` purge the trash, and a mixed relation (`with_deleted.destroy_all`)
    soft-deletes its live rows and purges its trashed ones. **Every other relation leaves the trash untouched**,
    including `where(...)`, `all`, `destroy_by`, `post.comments` and `unscoped` on a `default_scope: false` model,
    whose relations already contain the trashed rows. The trashed set is decided when the call **starts**: a row
    this call soft-deletes (a self-referential `cascade:`, an `after_soft_delete` hook) is never purged by a later
-   batch. The real destroy is Rails' own (callbacks and `dependent: :destroy` run); a trashed parent first
-   purges the children that were cascaded to the trash with it (they carry its timestamp), because
-   `dependent: :destroy` cannot see them through their default scope. A vetoed destroy is skipped on a relation
-   (an association raises `RecordNotDestroyed`, as Rails' does).
+   batch (it stays in the trash; as with `soft_delete_all`, a stale copy that a self-referential `cascade:`
+   already trashed can be re-stamped, so the parent's `restore!` may not bring it back). Each row is re-checked
+   right before its purge, so one restored in the meantime is skipped, never hard-deleted live. The real destroy
+   is Rails' own (callbacks and `dependent: :destroy` run); a trashed parent first purges its **trashed**
+   `cascade:` children, whatever their timestamp (live ones are left to `dependent:`), because
+   `dependent: :destroy` cannot see them through their default scope; a cascade cycle (a self-parented row, a
+   user owning the team it belongs to) purges each row once. A vetoed destroy (the record's own, or any trashed
+   child's, which rolls that record's whole purge back) is skipped on a relation; an association raises
+   `RecordNotDestroyed` for it, as Rails' `destroy!` does.
 3. **Rails' own association maintenance keeps Rails semantics.** `has_many :groups, through: :memberships,
    dependent: :destroy` on a destroyed owner, `user.groups.destroy(group)` and `user.groups.destroy_all`
    remove the join rows with a hard delete, even when the join model is soft-deletable (soft-deleting them
    would leave rows pointing at a destroyed owner). A `:through` association's `destroy_all` removes the links,
    never the targets. Only the ONE `destroy_all` Rails issues for that is hard: a destroy callback of the join
-   model that calls `destroy_all` itself is an app call again and soft-deletes.
+   model that calls `destroy_all` itself is an app call again and soft-deletes. (A join model with **no primary
+   key** is the exception: Rails then runs its destroy callbacks and a `delete_all` instead, so a `destroy_all`
+   on the join model from one of those callbacks is still hard.)
 
 The association form goes through Rails' own remove path, so `before_remove` / `after_remove` run and the
 loaded instances are the ones marked deleted; a loaded relation (or one with `limit` / `offset`, or a

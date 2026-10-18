@@ -35,9 +35,10 @@ module ConcernsOnRails
       # (ClassMethods#soft_delete_install_destroy_all!), it makes the app's
       # destroy_all CONTEXTUAL (Support::ContextualDestroy has the rules): a
       # live record is soft-deleted (hooks, cascade); an already-trashed one is
-      # destroyed for real ONLY when the relation was built by a trash scope
-      # (`only_deleted`, `soft_deleted`, `deleted_within`, `with_deleted`, affixed
-      # or not), and is otherwise left alone. Unlike the class-level form it keeps
+      # destroyed for real ONLY when the relation was built by one of THIS
+      # model's trash scopes (`only_deleted`, `soft_deleted`, `deleted_within`,
+      # `with_deleted`, affixed or not — another model's, merged in, does not
+      # count), and is otherwise left alone. Unlike the class-level form it keeps
       # Relation#destroy_all's return contract, the Array of records it acted on.
       # (ActiveRecord 7.2+ itself calls `relation.destroy_all.count(&:destroyed?)`
       # in `in_batches.destroy_all`, so there the count reads 0 for soft-deleted
@@ -141,8 +142,16 @@ module ConcernsOnRails
         # `relation_destroy_all:` (`:soft`, the default, or `:hard`) decides what
         # a relation's / association's `destroy_all` does (`Post.where(..)
         # .destroy_all`, `post.comments.destroy_all`): `:soft` soft-deletes live
-        # records and destroys already-soft-deleted ones, `:hard` is
-        # ActiveRecord's own hard delete again. Like the other options it is set
+        # records and leaves already-soft-deleted ones alone — unless the
+        # relation was built by one of THIS model's trash scopes
+        # (`only_deleted`, `soft_deleted`, `deleted_within`, `with_deleted`,
+        # affixed or not), which purges (really destroys) the rows that were
+        # trashed when the call started, their trashed `cascade:` children
+        # first; `:hard` is ActiveRecord's own hard delete again. A row this
+        # very call soft-deletes is never purged, but (as for soft_delete_all)
+        # a stale copy of one that a self-referential `cascade:` trashed
+        # earlier in the call can be re-stamped, so its parent's restore! may
+        # not bring it back. Like the other options it is set
         # by every call (a bare call restates `:soft`) and inherited by
         # subclasses that do not call the macro. `Model.destroy_all` itself
         # always soft-deletes.
@@ -188,7 +197,9 @@ module ConcernsOnRails
         # explicit `soft_delete_all` — silently redefining a standard AR method is a known footgun
         # (and unlike AR's destroy_all this returns a count, not the records). A relation's or an
         # association's destroy_all is contextual (RelationDestroyAll): it soft-deletes live records,
-        # destroys already-soft-deleted ones, and returns the records.
+        # destroys already-soft-deleted ones only when reached through one of this model's trash
+        # scopes (`only_deleted.destroy_all` purges; `where(...).destroy_all` leaves the trash
+        # alone), and returns the records.
         def destroy_all
           soft_delete_all
         end
@@ -301,17 +312,19 @@ module ConcernsOnRails
                 -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
           scope soft_delete_scope_names[:without_deleted],
                 -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
-          # The trash scopes tag their relation (TrashScope, an `extending` marker that
-          # survives chaining, merge and association scopes): reaching the trash through
-          # one is what lets a relation's destroy_all purge already-trashed rows.
-          trash = ConcernsOnRails::Support::ContextualDestroy::TrashScope
+          # The trash scopes tag their relation with the MODEL's own TrashScope (an
+          # `extending` marker that survives chaining, merge and association scopes):
+          # reaching the trash through one is what lets a relation's destroy_all purge
+          # already-trashed rows of that model — and only of that model, since merge
+          # also copies the tag into another model's relation (Support::ContextualDestroy).
+          tag = ->(relation) { ConcernsOnRails::Support::ContextualDestroy.trash_tag(relation.klass) }
           scope soft_delete_scope_names[:soft_deleted],
-                -> { unscope(where: soft_delete_field).where.not(soft_delete_field => nil).extending(trash) }
+                -> { unscope(where: soft_delete_field).where.not(soft_delete_field => nil).extending(tag.call(self)) }
           scope soft_delete_scope_names[:only_deleted],
                 -> { public_send(soft_deleted_name) }
           # `with_deleted` peels off the default scope so deleted + non-deleted are both returned.
           scope soft_delete_scope_names[:with_deleted],
-                -> { unscope(where: soft_delete_field).extending(trash) }
+                -> { unscope(where: soft_delete_field).extending(tag.call(self)) }
           # Records soft-deleted within the last `duration` (e.g. `deleted_within(7.days)`).
           # Arel `gteq` rather than an endless range (`x..`): AR only translates an
           # endless range to `>=` on Rails 6.0+, but this gem supports Rails >= 5.0.
@@ -453,27 +466,38 @@ module ConcernsOnRails
 
       # Destroys this soft-deleted record for real (Rails' own `destroy`:
       # callbacks, `dependent:`) — the purge of a trash-scope relation's
-      # destroy_all. The children cascaded to the trash WITH this record (the
-      # ones carrying its timestamp, as restore! recognizes them) are purged
-      # first, recursively: Rails' `dependent: :destroy` reaches children
-      # through their default scope, which hides exactly those, so the parent's
-      # DELETE hit the foreign key (or left orphans). All in one savepoint:
-      # returns true, or false when a callback vetoes the destroy (nothing is
-      # purged then). A vetoed child raises RecordNotDestroyed.
-      def soft_delete_purge!
+      # destroy_all. Its TRASHED `cascade:` children are purged first,
+      # recursively, whatever their stamp: Rails' `dependent: :destroy` reaches
+      # children through their default scope, which hides them, so the
+      # parent's DELETE hit the foreign key (or left orphans). The stamp only
+      # matters to restore!, and a child of an erased parent cannot be
+      # restored meaningfully. Live children stay Rails' `dependent:` business.
+      #
+      # Answers true (purged), false (vetoed: this record's destroy, or any
+      # trashed child's purge — the whole savepoint rolls back, so nothing of
+      # this record's tree is purged) or nil (skipped: the row is no longer
+      # trashed in the database — restored, or already gone — since the
+      # caller loaded it, or it is already being purged further up this call:
+      # `visited` holds every [base class, id] of the tree, so a cascade cycle
+      # — a self-parented row, a user owning the team it is a member of — does
+      # not recurse forever; each child is a fresh instance and the parent's
+      # row exists until its own destroy).
+      def soft_delete_purge!(visited = Set.new)
+        key = [self.class.base_class, id]
+        return if visited.include?(key) || !soft_delete_trashed_row?
+
+        visited << key
         self.class.transaction(requires_new: true) do
-          stamp = self[self.class.soft_delete_field]
-          soft_delete_each_dependent(deleted: stamp) { |child| soft_delete_purge_child!(child) } if stamp
+          soft_delete_each_dependent(deleted: true) do |child|
+            raise ActiveRecord::Rollback if child.send(:soft_delete_purge!, visited) == false
+          end
           destroy ? true : raise(ActiveRecord::Rollback)
         end || false
       end
 
-      def soft_delete_purge_child!(child)
-        return if child.send(:soft_delete_purge!)
-
-        raise ActiveRecord::RecordNotDestroyed.new(
-          "#{self.class.send(:soft_delete_label)}: failed to purge #{child.class.name}(id: #{child.id.inspect})", child
-        )
+      # The row is still soft-deleted in the database (the purge guard).
+      def soft_delete_trashed_row?
+        self.class.unscoped.where(self.class.primary_key => [id]).where.not(self.class.soft_delete_field => nil).exists?
       end
 
       # `touch: true` goes through `update` (validations, callbacks,
@@ -518,7 +542,8 @@ module ConcernsOnRails
       end
 
       # Yields the records of every cascade association matching `deleted:`
-      # (false → not deleted, a timestamp → deleted at exactly that time).
+      # (false → not deleted, true → deleted at any time, a timestamp →
+      # deleted at exactly that time).
       # Support::AssociationScope removes the gem's own hiding predicates on
       # the child's own table — its SoftDeletable one, so deleted rows are
       # reachable, and Publishable's `default_scope: true`, whose drafts the
@@ -539,7 +564,10 @@ module ConcernsOnRails
           relation = ConcernsOnRails::Support::AssociationScope.without(
             ConcernsOnRails::Support::AssociationScope.unfiltered(self, name), field
           )
-          relation = deleted ? relation.where(field => deleted) : relation.where(field => nil)
+          relation = if deleted == true then relation.where.not(field => nil)
+                     elsif deleted then relation.where(field => deleted)
+                     else relation.where(field => nil)
+                     end
           ConcernsOnRails::Support::BatchOps.each_record(relation, &block)
         end
       end

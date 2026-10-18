@@ -8,19 +8,29 @@ module ConcernsOnRails
     # 1. A live record is soft-deleted (`soft_delete!`: hooks, cascade).
     # 2. A record that is ALREADY soft-deleted is destroyed for real, but ONLY
     #    when the caller reached the trash on purpose: the relation was built by
-    #    one of the gem's trash scopes (`only_deleted`, `soft_deleted`,
+    #    one of THIS model's trash scopes (`only_deleted`, `soft_deleted`,
     #    `deleted_within`, `with_deleted`, affixed or renamed alike), which tag it
-    #    with TrashScope (an `extending` marker: it survives chaining, `merge` and
-    #    association scopes). Any other relation — including EVERY relation of a
-    #    `default_scope: false` model, which already contains the trash — leaves
-    #    the trashed rows untouched.
+    #    with the model's own TrashScope (an `extending` marker: it survives
+    #    chaining, `merge` and association scopes). The tag names its model (the
+    #    base class): Relation#merge copies the OTHER relation's `extending`
+    #    modules, so `Post.joins(:comments).merge(Comment.only_deleted)` carries
+    #    Comment's tag, which never lets it purge a post. Any other relation —
+    #    including EVERY relation of a `default_scope: false` model, which
+    #    already contains the trash — leaves the trashed rows untouched.
     # 3. Rails' own has_many :through maintenance stays hard (below).
     #
     # The trashed set is decided when the call STARTS (the primary keys, or the
     # loaded records' state), never per row while streaming: a row this very
     # call soft-deletes (a self-referential `cascade:`, an `after_soft_delete`
-    # hook) is never purged by a later batch, so `restore!` can always bring it
-    # back and the outcome does not depend on the batch size.
+    # hook) is never purged by a later batch — it stays in the trash, and the
+    # outcome does not depend on the batch size. (As for soft_delete_all, a
+    # stale copy of a row that a self-referential `cascade:` trashed earlier in
+    # the call can be re-stamped with the call's own later timestamp, so its
+    # parent's `restore!` may not bring it back; it is never purged.) Each row
+    # of that set is re-checked right before its purge (SoftDeletable's
+    # `soft_delete_purge!`): one restored meanwhile — a loaded relation's
+    # instance, a stale copy in a find_each batch, a row a hook brought back —
+    # is skipped, never hard-deleted live.
     #
     # Two places in ActiveRecord issue a relation-level `destroy_all` or a
     # per-record destroy that the concern must tell apart from the app's:
@@ -35,7 +45,12 @@ module ConcernsOnRails
     #   override CONSUMES (one shot: the first relation-level destroy_all on
     #   that model, which is the one Rails issues) by calling ActiveRecord's own
     #   destroy_all — so a destroy callback of the join model that itself calls
-    #   `destroy_all` on its class is an app call again and soft-deletes.
+    #   `destroy_all` on its class is an app call again and soft-deletes. A
+    #   join model WITHOUT a primary key is the exception: ActiveRecord then
+    #   runs its destroy callbacks and a `delete_all` instead of destroy_all, so
+    #   nothing consumes the context and it stays armed for the rest of that
+    #   `delete_records` call (a `destroy_all` on the join model from one of
+    #   those callbacks is hard); it is still cleared in `ensure`.
     #
     # * `HasManyAssociation#delete_records(records, method)` is where a
     #   non-through association destroys its records. The proxy's soft
@@ -56,18 +71,46 @@ module ConcernsOnRails
       HARD_KEY = :concerns_on_rails_soft_delete_hard_classes
       SOFT_DESTROY = :concerns_on_rails_soft_destroy
 
-      # Tags a relation built by one of the gem's trash scopes. Empty on
-      # purpose: only its presence in `extending_values` matters.
-      module TrashScope; end
+      # Tags a relation built by one of a model's trash scopes: one per
+      # SoftDeletable base class (trash_tag), naming that model. It defines no
+      # methods, so extending a relation with it changes nothing else.
+      class TrashScope < Module
+        attr_reader :model
+
+        def initialize(model)
+          super()
+          @model = model
+        end
+
+        def inspect
+          "#<#{self.class.name} #{model.name || model.inspect}>"
+        end
+        alias to_s inspect
+      end
+
+      TAG_IVAR = :@concerns_on_rails_trash_scope
+      private_constant :TAG_IVAR
 
       HardEntry = Struct.new(:klass, :used)
       private_constant :HardEntry
 
       module_function
 
-      # True when `relation` reached the trash through one of the trash scopes.
+      # The trash scopes' tag for `klass`: memoized per base class, so an STI
+      # subclass's trash scope and its base's are the same tag (and a relation
+      # extended twice keeps one copy). A lost memoization race only builds a
+      # second, equivalent tag: trash_scope? compares models, not identity.
+      def trash_tag(klass)
+        base = klass.base_class
+        base.instance_variable_get(TAG_IVAR) || base.instance_variable_set(TAG_IVAR, TrashScope.new(base))
+      end
+
+      # True when `relation` reached the trash through one of ITS OWN model's
+      # trash scopes (the same base class). A tag merged in from another
+      # model's relation does not count.
       def trash_scope?(relation)
-        relation.extending_values.include?(TrashScope)
+        base = relation.klass.base_class
+        relation.extending_values.any? { |mod| mod.is_a?(TrashScope) && mod.model.base_class == base }
       end
 
       # Runs the block with `klass`'s NEXT relation-level destroy_all forced
@@ -103,8 +146,10 @@ module ConcernsOnRails
       # purge the rows that were already trashed when the call started (only
       # for a trash-scope relation), soft-delete the live ones, in ONE
       # transaction with soft_delete_all's RecordNotSaved + rollback contract.
-      # Returns the records acted on. A vetoed purge is skipped, as
-      # Relation#destroy_all skips a vetoed destroy.
+      # Returns the records acted on. A vetoed purge (the record's own destroy,
+      # or a cascaded child's, which rolls that record's savepoint back) is
+      # skipped, as Relation#destroy_all skips a vetoed destroy; so is a row
+      # that is no longer trashed by the time its turn comes.
       def destroy_relation(relation)
         klass = relation.klass
         purge = trash_scope?(relation)
@@ -140,6 +185,8 @@ module ConcernsOnRails
         end
       end
 
+      # soft_delete_purge! answers true (purged), false (vetoed) or nil
+      # (skipped: no longer trashed in the database); only a purge is acted on.
       def purge_loaded(trashed, acted)
         trashed.each { |record| acted << record if record.send(:soft_delete_purge!) }
       end
@@ -152,8 +199,8 @@ module ConcernsOnRails
         klass = relation.klass
         trashed_keys(relation, klass, purge).each_slice(BatchOps::BATCH_SIZE) do |slice|
           BatchOps.each_record(relation.unscope(:order).where(klass.primary_key => slice)) do |record|
-            # A hook may have restored it since the call began: never purge a live row.
-            acted << record if record.deleted? && record.send(:soft_delete_purge!)
+            # soft_delete_purge! re-checks the row: the batch's copy may be stale.
+            acted << record if record.send(:soft_delete_purge!)
           end
         end
         BatchOps.run(relation.where(klass.soft_delete_field => nil), label: SOFT_DELETE_LABEL,
@@ -192,8 +239,11 @@ module ConcernsOnRails
       # was reached through a trash scope (`has_many :trash, -> { only_deleted }`)
       # and left alone otherwise. A record that cannot be soft-deleted raises
       # ActiveRecord::RecordNotSaved and rolls the batch back; a purge that is
-      # vetoed raises RecordNotDestroyed, as ActiveRecord's own association
-      # destroy_all does (`destroy!`).
+      # vetoed — by the record's own destroy callbacks, or by a cascaded child's
+      # (soft_delete_purge! then answers false for it) — raises
+      # RecordNotDestroyed, which is where ActiveRecord's own association
+      # destroy_all raises (`destroy!`). A record that is no longer trashed in
+      # the database when its turn comes is skipped (no raise).
       module SoftDestroy
         # Public on the association: the collection proxy's override calls it.
         # Acts on the loaded target (as ActiveRecord's destroy_all does), so
@@ -228,7 +278,7 @@ module ConcernsOnRails
 
         def soft_destroy_record!(record)
           if @concerns_on_rails_trashed&.key?(record)
-            return true if record.send(:soft_delete_purge!)
+            return true unless record.send(:soft_delete_purge!) == false
 
             raise ActiveRecord::RecordNotDestroyed.new("Failed to destroy the record", record)
           end
