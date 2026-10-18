@@ -456,7 +456,9 @@ module ConcernsOnRails
           "t" => model.table_name, # pin the table so cross-model replay is rejected
           "o" => pairs.map { |col, dir| "#{col}:#{dir}" },
           "d" => direction,
-          "v" => pairs.map { |col, _dir| serialize_cursor_value(cursor_boundary_value!(model, record, col)) }
+          "v" => pairs.map do |col, _dir|
+            serialize_cursor_value(cursor_boundary_value!(model, record, col), model.type_for_attribute(col.to_s))
+          end
         }
         token = cursor_base64_encode(JSON.generate(payload))
         cursor_signing_key ? "#{token}.#{cursor_signature(token)}" : token
@@ -563,12 +565,28 @@ module ConcernsOnRails
       # as the String ActiveModel's Float type casts back ("Infinity",
       # "-Infinity", "NaN"): JSON has no such number, and JSON.generate raised
       # on it, so one such row on a page boundary made that page a 500.
-      def serialize_cursor_value(value)
-        return ConcernsOnRails::Support::TimeValue.utc(value).iso8601(6) if value.is_a?(Time) || value.is_a?(DateTime)
+      def serialize_cursor_value(value, type)
+        return serialize_cursor_time(value, type) if value.is_a?(Time) || value.is_a?(DateTime)
         return value.iso8601 if value.is_a?(Date)
         return value.to_s if value.is_a?(BigDecimal) || (value.is_a?(Float) && !value.finite?)
 
         value
+      end
+
+      # A `time` column's boundary is its STORED form: the time of day as the
+      # database holds it, in ActiveRecord's default_timezone (UTC, or local
+      # time under :local), with microseconds and no date or zone
+      # ("10:30:15.500000"). cursor_type_cast reads it back with the type's
+      # deserialize — the very path that read the row — so every Rails line
+      # rebuilds the same value, time-zone-aware or not. The ISO 8601 form
+      # ("2000-01-01T10:30:15.500000Z") is misread by Rails 6.0/6.1's Time
+      # type, as 10:30:15.0000005: the boundary row sorted after its own
+      # cursor, and every next page returned that one row again, forever.
+      def serialize_cursor_time(value, type)
+        return ConcernsOnRails::Support::TimeValue.utc(value).iso8601(6) unless type.type == :time && value.is_a?(Time)
+
+        time = ConcernsOnRails::Support::TimeValue.default_timezone == :local ? value.getlocal : value.getutc
+        time.strftime("%H:%M:%S.%6N")
       end
 
       # nil → no cursor param (first page). Otherwise {values:, backward:}:
@@ -619,13 +637,22 @@ module ConcernsOnRails
       # Rails 6.0–7.0's date and time casts raise Date._parse's ArgumentError
       # for a String over 128 characters (7.1 casts it to nil): a tampered
       # date boundary was a 500 instead of the 400 below. Any other type's
-      # ArgumentError is left alone.
+      # ArgumentError is left alone. A `time` column's zone-less String
+      # boundary is the stored time of day (serialize_cursor_time), so it is
+      # read the way the database value was: `cast` would take it as user
+      # input, which a time-zone-aware attribute reads in Time.zone. A zoned
+      # one is a cursor minted in the ISO 8601 form before that, and is cast
+      # as it always was.
       def cursor_type_cast(type, raw)
-        type.cast(raw)
+        cursor_stored_time?(type, raw) ? type.deserialize(raw) : type.cast(raw)
       rescue ArgumentError
         raise unless ConcernsOnRails::Support::TimeValue.temporal_type?(type)
 
         raise InvalidCursor, "Invalid pagination cursor."
+      end
+
+      def cursor_stored_time?(type, raw)
+        type.type == :time && raw.is_a?(String) && !ConcernsOnRails::Support::TimeValue::ZONED.match?(raw)
       end
 
       # `serializable?` is the Rails 6.1+ range probe; on 6.0 only serialize

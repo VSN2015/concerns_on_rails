@@ -334,7 +334,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `predicate: :auto` (row-value tuple WHERE on PG/MySQL/SQLite, else OR-expansion).
   A nullable ordering column forces the OR-expansion and sorts NULLs LAST in both
   directions (PG `NULLS LAST`, else a `CASE` key); boundaries are the stored values of
-  columns selected UNALIASED (unselected → MissingAttributeError, nil-cast → ArgumentError).
+  columns selected UNALIASED (unselected → MissingAttributeError, nil-cast → ArgumentError);
+  a `time` column's is its stored time of day in default_timezone, read back via `deserialize`
+  (6.0/6.1 misread the ISO form's fraction, looping on the boundary row).
   A non-finite float boundary is minted as `"Infinity"`/`"-Infinity"`/`"NaN"` and accepted
   back only where the adapter stores it (SQLite binds a `9e999` literal); a date/time
   boundary that doesn't decode to a date/time is an InvalidCursor.
