@@ -70,7 +70,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   flag, an explicit `false` turns it off). Lifecycle hooks:
   `before/after_publish`, `before/after_unpublish`. Batch `publish_all`/`unpublish_all`
   (atomic; single-UPDATE fast path when the hooks/bang methods are unoverridden AND the
-  model has no validators — `update` in the per-record path runs them, `update_all` doesn't).
+  model has no validators — `update` in the per-record path runs them, `update_all` doesn't —
+  and never on an STI table: those always use the per-record path).
   Every hooked verb (here and in SoftDeletable/Expirable/Activatable/Stateable/Anonymizable)
   runs through `Support::HookedWrite`. The boolean `.published` predicate is an Arel
   Grouping (`= TRUE`) so `default_scope: true` never pre-sets new records (Rails 6.0 can't
@@ -78,7 +79,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`SoftDeletable`** — timestamp (default `deleted_at`) + `default_scope` hiding deleted
   rows (opt out with `default_scope: false`); scopes affixable via `prefix:`/`suffix:`.
   `soft_delete!`/`restore!`, batch `soft_delete_all`/`restore_all` (atomic, routed through
-  `Support::BatchOps`), `really_destroy_all`/`really_delete!` for hard deletes. Hooks:
+  `Support::BatchOps`; per-record on an STI table), `really_destroy_all`/`really_delete!` for hard deletes. Hooks:
   `before/after_soft_delete`, `before/after_restore`. The default scope's `deleted_at IS NULL`
   is its own Arel node (`DefaultScopePredicate`), so the batch verbs peel exactly it — never
   a caller's identical predicate (`without_deleted.really_destroy_all` keeps the trash).
@@ -108,14 +109,14 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   scopes (affixable via `prefix:`/`suffix:`) + predicates.
 - **`Expirable`** — single expiry column (default `expires_at`); `active`/`expired`/
   `expiring_within` scopes (affixable via `prefix:`/`suffix:`). Batch `expire_all` (single-
-  UPDATE fast path when `expire!` is unoverridden AND the model has no validators).
+  UPDATE fast path when `expire!` is unoverridden AND the model has no validators; never on STI).
   `expire!`/`expire_all` with nil/blank mean "now"; an unparseable time raises before hooks.
   When affixed, Expirable/Activatable/Schedulable also define AFFIXED predicates (plain
   ones kept; internal logic uses private checks, so sibling collisions can't flip
   `toggle_active!`); an affixed predicate shadowing a different column's query method raises.
 - **`Activatable`** — boolean active flag (default `active`); `active`/`inactive` scopes
   (affixable via `prefix:`/`suffix:`), `activate!`/`deactivate!`/`toggle_active!`. Batch
-  `activate_all`/`deactivate_all` (same validators-gated fast path as Publishable/Expirable).
+  `activate_all`/`deactivate_all` (same validators-gated, never-on-STI fast path as Publishable/Expirable).
 - **`Stateable`** — lightweight string-backed state machine: states, `default:`,
   `transitions:`, `prefix:`/`suffix:`, `lock:`, `timestamps:` (`<state>_at` stamped on entry;
   Rails-owned `created_at`/`updated_at` refused at macro time; NOT affixed). A generated
@@ -169,7 +170,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   preconditions replicated; `register_failed_attempt!`'s quiet lapsed-lock clear is conditional
   the same way) / `unlock_access!` (update_columns) + before/after hooks,
   `reset_failed_attempts!`; expiry-aware `.locked`/`.unlocked` scopes. Batch
-  `unlock_expired` (mirrors `unlock_access!`; no validators gate needed since
+  `unlock_expired` (mirrors `unlock_access!`; per-record on an STI table; no validators gate needed since
   `update_columns` already skips them; returns 0 without a query when `unlock_in` is nil).
   `unlock_token:` mints a self-service unlock link — timing-safe scoped finder, race-safe
   single-use consumption (one conditional UPDATE), TTL tied to `unlock_in`, claimed in its
@@ -424,12 +425,10 @@ fast-path predicate — every named instance method still owned by the concern, 
 unoverridden — plus the transactional `find_each` batch runner shared by every `*_all` verb:
 Integer count, DB-side filtering for idempotency, its own `requires_new` savepoint, rollback
 via `ActiveRecord::RecordNotSaved` on a failed record (inside a caller's transaction too); the fast-path
-checks (`unoverridden?`/`fast_path?` take the RELATION) cover every class whose rows it holds — on an STI
-table `row_classes` is the class of each stored `type` (one DISTINCT query, subclasses autoloaded as a
-read would; an unresolvable type refuses the fast path) so the answer never depends on `eager_load` —
-and each verb's `config:` readers (touch/cascade/field, timestamps, token column, `record_timestamps`)
-must equal the receiver's on all of them, since the single UPDATE is built from the receiver's config —
-and `each_record`, the ONLY way to `find_each` a relation: it strips the
+checks (`unoverridden?`/`fast_path?`) also refuse on an STI table — `sti_table?`: a present
+`inheritance_column` that is a real column — so a batch verb never takes the single UPDATE there, whether or
+not a subclass exists or is loaded (it could override a hook, declare validations or re-declare the macro;
+the per-record path is always correct, only slower) — and `each_record`, the ONLY way to `find_each` a relation: it strips the
 ORDER (error_on_ignored_order), resolves a LIMIT/OFFSET to plucked PKs first (bare `find_each`
 keeps the limit but pages by PK), and yields each record once even over a has_many join (a
 joined limited slice is re-plucked, then loaded unjoined — one instance per record)),

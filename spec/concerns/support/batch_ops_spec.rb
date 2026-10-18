@@ -29,24 +29,64 @@ describe ConcernsOnRails::Support::BatchOps do
   describe ".unoverridden?" do
     it "is true when no listed method is overridden" do
       owner = Module.new { def touched; end }
-      klass = Class.new(TestModel) do
-        self.table_name = "batch_items"
-        include(owner)
-      end
+      klass = Class.new { include(owner) }
 
-      expect(described_class.unoverridden?(klass.all, owner, :touched)).to be true
+      expect(described_class.unoverridden?(klass, owner, :touched)).to be true
     end
 
     it "is false when the host overrode a listed method" do
       owner = Module.new { def touched; end }
-      klass = Class.new(TestModel) do
-        self.table_name = "batch_items"
+      klass = Class.new do
         include(owner)
 
         def touched; end
       end
 
-      expect(described_class.unoverridden?(klass.all, owner, :touched)).to be false
+      expect(described_class.unoverridden?(klass, owner, :touched)).to be false
+    end
+
+    # An STI table's relation also holds subclass rows the receiver cannot
+    # vouch for, so it is never "unoverridden" (audit 2026-10-10, STATE-8).
+    context "on an STI table" do
+      let(:owner) { Module.new { def touched; end } }
+
+      before do
+        ActiveRecord::Schema.define do
+          create_table :batch_typed_items, force: true do |t|
+            t.string :type
+            t.string :state
+          end
+        end
+      end
+
+      def typed_model(&body)
+        owner = self.owner
+        Class.new(TestModel) do
+          self.table_name = "batch_typed_items"
+          include(owner)
+
+          class_eval(&body) if body
+        end
+      end
+
+      it "is false even with no subclass and nothing overridden" do
+        expect(described_class.sti_table?(typed_model)).to be true
+        expect(described_class.unoverridden?(typed_model, owner, :touched)).to be false
+        expect(described_class.fast_path?(typed_model, owner, :touched)).to be false
+      end
+
+      it "is true once the model turned STI off" do
+        klass = typed_model { self.inheritance_column = nil }
+
+        expect(described_class.sti_table?(klass)).to be false
+        expect(described_class.fast_path?(klass, owner, :touched)).to be true
+      end
+
+      it "is not STI when the inheritance column is not a column of the table" do
+        klass = typed_model { self.inheritance_column = "kind" }
+
+        expect(described_class.sti_table?(klass)).to be false
+      end
     end
   end
 
@@ -63,19 +103,19 @@ describe ConcernsOnRails::Support::BatchOps do
     end
 
     it "is true for a bare model with nothing overridden and no validations" do
-      expect(described_class.fast_path?(model_including(owner).all, owner, :touched)).to be true
+      expect(described_class.fast_path?(model_including(owner), owner, :touched)).to be true
     end
 
     it "is false when the host overrode a listed method" do
       klass = model_including(owner) { def touched; end }
 
-      expect(described_class.fast_path?(klass.all, owner, :touched)).to be false
+      expect(described_class.fast_path?(klass, owner, :touched)).to be false
     end
 
     it "is false when the model declares validates" do
       klass = model_including(owner) { validates :state, presence: true }
 
-      expect(described_class.fast_path?(klass.all, owner, :touched)).to be false
+      expect(described_class.fast_path?(klass, owner, :touched)).to be false
     end
 
     # Regression: `validate :method` populates only _validate_callbacks, so a
@@ -88,7 +128,7 @@ describe ConcernsOnRails::Support::BatchOps do
       end
 
       expect(klass.validators).to be_empty
-      expect(described_class.fast_path?(klass.all, owner, :touched)).to be false
+      expect(described_class.fast_path?(klass, owner, :touched)).to be false
     end
   end
 

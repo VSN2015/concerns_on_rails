@@ -100,7 +100,7 @@ module ConcernsOnRails
         # `touch: false` and no overridden hooks this is a single UPDATE.
         def soft_delete_all
           pending = all.where(soft_delete_field => nil)
-          return pending.update_all(soft_delete_field => Time.zone.now) if soft_delete_batch_fast_path?(pending, :soft_delete)
+          return pending.update_all(soft_delete_field => Time.zone.now) if soft_delete_batch_fast_path?(:soft_delete)
 
           ConcernsOnRails::Support::BatchOps.run(
             pending,
@@ -138,7 +138,7 @@ module ConcernsOnRails
         # whole trash can. (Same defect `publish_all` fixed in 1.27.)
         def restore_all
           deleted = soft_delete_without_default_scope.where.not(soft_delete_field => nil)
-          return deleted.update_all(soft_delete_field => nil) if soft_delete_batch_fast_path?(deleted, :restore)
+          return deleted.update_all(soft_delete_field => nil) if soft_delete_batch_fast_path?(:restore)
 
           ConcernsOnRails::Support::BatchOps.run(
             deleted,
@@ -213,17 +213,12 @@ module ConcernsOnRails
 
         # The single-UPDATE fast path is only safe when per-record behavior
         # cannot differ from update_all: `touch: false` (the per-record path is
-        # update_column — already no validations/callbacks/updated_at), no
-        # cascade, and none of the gem's hooks or bang methods overridden by
-        # the host model. Exempt from BatchOps.fast_path?'s validations gate for
-        # that first reason: under `touch: false` both paths skip validations
-        # already, so only the ownership half (`unoverridden?`) applies.
-        #
-        # touch/cascade/field are read from every class that has rows in the
-        # relation (`config:`), not just the receiver: an STI subclass may
-        # re-declare the macro with `cascade:` or `touch: true`, which a bulk
-        # UPDATE built from the parent's settings would silently ignore.
-        def soft_delete_batch_fast_path?(relation, kind)
+        # update_column — already no validations/callbacks/updated_at) and none
+        # of the gem's hooks or bang methods overridden by the host model.
+        # Exempt from BatchOps.fast_path?'s validations gate for that first
+        # reason: under `touch: false` both paths skip validations already, so
+        # only the ownership half (`unoverridden?`) applies.
+        def soft_delete_batch_fast_path?(kind)
           return false if soft_delete_touch || soft_delete_cascade.any?
 
           methods = if kind == :restore
@@ -231,10 +226,7 @@ module ConcernsOnRails
                     else
                       %i[before_soft_delete after_soft_delete soft_delete!]
                     end
-          ConcernsOnRails::Support::BatchOps.unoverridden?(
-            relation, ConcernsOnRails::Models::SoftDeletable, *methods,
-            config: %i[soft_delete_touch soft_delete_cascade soft_delete_field]
-          )
+          ConcernsOnRails::Support::BatchOps.unoverridden?(self, ConcernsOnRails::Models::SoftDeletable, *methods)
         end
 
         # Each cascade target must be a has_many / has_one (not through) whose

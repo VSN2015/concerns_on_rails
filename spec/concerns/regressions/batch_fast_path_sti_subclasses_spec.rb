@@ -5,13 +5,13 @@ require "spec_helper"
 # relation also holds every subclass's rows, so `Article.publish_all`
 # published Press rows without Press's overridden after_publish and without
 # Press's validations (the same for soft_delete_all, expire_all,
-# activate_all/deactivate_all and Lockable's unlock_expired). The decision
-# now covers every class whose rows the relation holds (classes of the stored
-# `type` values, so it never depends on which subclasses happen to be loaded).
+# activate_all/deactivate_all and Lockable's unlock_expired), and applied the
+# receiver's configuration (`cascade:`, `touch:`, `timestamps:`, the column,
+# the token column) to rows whose class re-declared the macro.
 #
-# The fast path also applied the RECEIVER's configuration to subclass rows:
-# a subclass re-declaring the macro (`cascade:`, `touch:`, `timestamps:`, the
-# column, the token column) was written as if it had the parent's settings.
+# The fast path is only an optimisation and the per-record path is always
+# correct, so the rule is simply: a batch verb never takes the single UPDATE
+# on an STI table (a present `inheritance_column` that is a real column).
 describe "batch fast paths and STI subclasses" do
   after do
     %i[bfs_articles bfs_memos bfs_users bfs_things bfs_tokens].each { |table| ActiveRecord::Base.connection.drop_table(table, if_exists: true) }
@@ -79,18 +79,24 @@ describe "batch fast paths and STI subclasses" do
       expect(BfsPress.deleted_hooks).to eq(1)
     end
 
-    it "keeps the single UPDATE when no class in the hierarchy overrides anything" do
+    it "streams on an STI table even when no class in the hierarchy overrides anything" do
       stub_const("BfsNote", Class.new(BfsArticle))
       BfsArticle.create!
       BfsNote.create!
 
-      expect(update_statements { expect(BfsArticle.publish_all).to eq(2) }.size).to eq(1)
-      expect(update_statements { expect(BfsArticle.soft_delete_all).to eq(2) }.size).to eq(1)
+      expect(update_statements { expect(BfsArticle.publish_all).to eq(2) }.size).to eq(2)
+      expect(update_statements { expect(BfsArticle.soft_delete_all).to eq(2) }.size).to eq(2)
     end
 
-    # The rows' own classes decide, not the loaded ones: a Press that has not
-    # been autoloaded yet (development, test without eager_load) still gets its
-    # hook, and whether the single UPDATE runs never depends on config.eager_load.
+    # The conservative rule: the table is STI, whether or not a subclass exists
+    # (or is loaded yet), so the answer never depends on config.eager_load.
+    it "streams on an STI table that has no subclasses at all" do
+      2.times { BfsArticle.create! }
+
+      expect(BfsArticle.descendants).to be_empty
+      expect(update_statements { expect(BfsArticle.publish_all).to eq(2) }.size).to eq(2)
+    end
+
     it "runs the hook of a subclass that is only autoloaded when its rows are read" do
       Tempfile.create(["bfs_lazy_press", ".rb"]) do |file|
         file.write(<<~RUBY)
@@ -112,13 +118,6 @@ describe "batch fast paths and STI subclasses" do
           Object.send(:remove_const, :BfsLazyPress) if Object.const_defined?(:BfsLazyPress, false)
         end
       end
-    end
-
-    it "keeps the single UPDATE on an STI table whose rows are all the receiver's own class" do
-      stub_const("BfsPress", Class.new(BfsArticle) { def after_publish = nil })
-      2.times { BfsArticle.create! }
-
-      expect(update_statements { expect(BfsArticle.publish_all).to eq(2) }.size).to eq(1)
     end
 
     it "lets the per-record path raise for a row whose stored type names no class, as a read does" do
@@ -185,14 +184,6 @@ describe "batch fast paths and STI subclasses" do
         expect(BfsArticle.soft_delete_all).to eq(1)
         expect(BfsPress.unscoped.find(press.id).updated_at).to be > 1.hour.ago
       end
-
-      it "keeps the single UPDATE when every class shares the receiver's configuration" do
-        stub_const("BfsPress", Class.new(BfsArticle))
-        BfsPress.create!
-        BfsArticle.create!
-
-        expect(update_statements { expect(BfsArticle.soft_delete_all).to eq(2) }.size).to eq(1)
-      end
     end
 
     describe "Activatable" do
@@ -223,14 +214,6 @@ describe "batch fast paths and STI subclasses" do
 
         expect(BfsThing.deactivate_all).to eq(1)
         expect(BfsGadget.find(gadget.id).deactivated_at).to be_present
-      end
-
-      it "keeps the single UPDATE when every class shares the receiver's configuration" do
-        stub_const("BfsGadget", Class.new(BfsThing))
-        BfsGadget.create!
-        BfsThing.create!
-
-        expect(update_statements { expect(BfsThing.activate_all).to eq(2) }.size).to eq(1)
       end
     end
 
@@ -291,26 +274,66 @@ describe "batch fast paths and STI subclasses" do
     end
   end
 
-  describe "a subclass of a non-STI model" do
-    before do
+  describe "a table that is not STI" do
+    def expirable_model(table_setup: nil)
+      Class.new(TestModel) do
+        self.table_name = "bfs_tokens"
+        include ConcernsOnRails::Expirable
+
+        table_setup&.call(self)
+        expirable_by
+      end
+    end
+
+    it "still takes the single UPDATE without a type column, subclass or not" do
       ActiveRecord::Schema.define do
         create_table :bfs_tokens, force: true do |t|
           t.datetime :expires_at
         end
       end
-    end
-
-    it "does not move its parent off the single UPDATE (the parent's rows are never instances of it)" do
-      parent = Class.new(TestModel) do
-        self.table_name = "bfs_tokens"
-        include ConcernsOnRails::Expirable
-
-        expirable_by
-      end
-      Class.new(parent) { def after_expire = nil }
+      parent = expirable_model
+      Class.new(parent) { def after_expire = nil } # the parent's rows are never instances of it
       2.times { parent.create! }
 
       expect(update_statements { expect(parent.expire_all).to eq(2) }.size).to eq(1)
+    end
+
+    it "still takes the single UPDATE when STI is switched off on a table with a type column" do
+      ActiveRecord::Schema.define do
+        create_table :bfs_tokens, force: true do |t|
+          t.string :type
+          t.datetime :expires_at
+        end
+      end
+      model = expirable_model(table_setup: ->(klass) { klass.inheritance_column = nil })
+      2.times { model.create! }
+
+      expect(update_statements { expect(model.expire_all).to eq(2) }.size).to eq(1)
+    end
+
+    it "still takes the single UPDATE when the inheritance column names no real column" do
+      ActiveRecord::Schema.define do
+        create_table :bfs_tokens, force: true do |t|
+          t.datetime :expires_at
+        end
+      end
+      model = expirable_model(table_setup: ->(klass) { klass.inheritance_column = "kind" })
+      2.times { model.create! }
+
+      expect(update_statements { expect(model.expire_all).to eq(2) }.size).to eq(1)
+    end
+
+    it "streams on an STI table that has a type column" do
+      ActiveRecord::Schema.define do
+        create_table :bfs_tokens, force: true do |t|
+          t.string :type
+          t.datetime :expires_at
+        end
+      end
+      model = expirable_model
+      2.times { model.create! }
+
+      expect(update_statements { expect(model.expire_all).to eq(2) }.size).to eq(2)
     end
   end
 end

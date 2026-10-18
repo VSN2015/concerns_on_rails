@@ -14,93 +14,46 @@ module ConcernsOnRails
       module_function
 
       # True when every named instance method is still the concern's own — the
-      # host model overrode none of them — and every `config:` reader answers
-      # the receiver's value on every class that has rows in the relation.
+      # host model overrode none of them — and the model is not an STI table.
       # This is the ownership half of the fast-path decision on its own, for
       # the two concerns whose per-record path already skips validations
       # (SoftDeletable under `touch: false` and Lockable, both of which write
       # via update_column(s)) and so are exempt from the validations half.
       #
-      # Checked on every class whose rows the relation holds (see row_classes):
-      # on an STI table `Article.publish_all` also writes the Press rows, so a
-      # Press override must move it off the fast path too.
-      #
-      # `config:` names class-level readers (class_attributes) that decide what
-      # the verb WRITES or which per-record work runs: the single UPDATE is
-      # built from the RECEIVER's configuration, so a subclass that
-      # re-declared the macro (`cascade:`, `touch:`, `timestamps:`, another
-      # column) would be written as if it had the parent's settings. A class
-      # whose reader differs makes the verb stream, where each record's own
-      # class applies its own configuration.
-      def unoverridden?(relation, owner, *methods, config: [])
-        classes = fast_path_classes(relation, owner, methods, config)
-        !classes.nil?
+      # An STI table never takes the single UPDATE (see sti_table?): the
+      # relation also holds every subclass's rows, and a subclass may override a
+      # hook, declare validations or re-declare the macro with other options —
+      # none of which the receiver can see, and a bulk UPDATE built from the
+      # receiver's configuration would skip all of it. The per-record path is
+      # always correct (each record applies its own class's hooks, validations
+      # and configuration); the fast path is only an optimisation.
+      def unoverridden?(klass, owner, *methods)
+        !sti_table?(klass) && methods.all? { |name| klass.instance_method(name).owner == owner }
       end
 
       # The whole safety decision for a single-UPDATE fast path: it is only
       # taken when per-record behavior cannot differ from `update_all` —
-      # the host model overrode none of the concern's hooks or bang methods,
-      # AND it declares no validations (update_all skips validations
-      # entirely, so an unguarded fast path would silently write invalid
-      # records instead of honoring the batch contract: RecordNotSaved +
-      # rollback on a record that can't save), AND (`config:`, see
-      # unoverridden?) every class agrees on what gets written.
+      # the table is not STI, the host model overrode none of the concern's
+      # hooks or bang methods, AND it declares no validations (update_all skips
+      # validations entirely, so an unguarded fast path would silently write
+      # invalid records instead of honoring the batch contract: RecordNotSaved +
+      # rollback on a record that can't save).
       #
       # Save callbacks are deliberately NOT gated on: update_all skipping
       # callbacks is documented Rails behavior shared by every *_all method.
-      def fast_path?(relation, owner, *methods, config: [])
-        classes = fast_path_classes(relation, owner, methods, config)
-        !classes.nil? && classes.none? { |row_class| validations?(row_class) }
+      def fast_path?(klass, owner, *methods)
+        !validations?(klass) && unoverridden?(klass, owner, *methods)
       end
 
-      # The classes the relation's rows are instances of: on an STI table, the
-      # class of every stored `type` (one DISTINCT query over the relation —
-      # the very rows the verb writes, never the loaded subclasses, so the
-      # answer doesn't depend on eager loading: a subclass is autoloaded here
-      # exactly as reading its rows would); otherwise the receiver alone (a
-      # subclass of a non-STI model shares the table, but its parent's rows
-      # are never instances of it). nil when a stored type names no class —
-      # the per-record path then raises SubclassNotFound as a read would.
-      def row_classes(relation)
-        klass = relation.klass
-        return [klass] unless sti_table?(klass)
-
-        stored_types(relation).map { |type| type.blank? ? klass : klass.send(:find_sti_class, type) }.uniq
-      rescue ActiveRecord::SubclassNotFound
-        nil
-      end
-
-      # The classes to hold to the decision, or nil when the single UPDATE must
-      # not run. The receiver is checked first, without a query.
-      def fast_path_classes(relation, owner, methods, config)
-        klass = relation.klass
-        return nil unless agrees?([klass], klass, owner, methods, config)
-
-        classes = row_classes(relation)
-        classes if classes && agrees?(classes, klass, owner, methods, config)
-      end
-
-      def agrees?(classes, klass, owner, methods, config)
-        classes.all? do |row_class|
-          methods.all? { |name| row_class.instance_method(name).owner == owner } &&
-            config.all? { |reader| row_class.public_send(reader) == klass.public_send(reader) }
-        end
-      end
-
+      # True when the model's table is single-table inheritance: it has a
+      # present `inheritance_column` that is a real column. A model that turned
+      # STI off (`self.inheritance_column = nil`, or a name the table lacks) is
+      # not STI, so its rows are only ever instances of the class itself.
       def sti_table?(klass)
         return false unless klass.respond_to?(:inheritance_column)
 
         column = klass.inheritance_column
         column.present? && klass.column_names.include?(column.to_s)
-      end
-
-      # Every stored `type` among the rows the relation selects — a superset
-      # when it is limited (the limit/order/select/lock are dropped so DISTINCT
-      # sees every candidate row), never a subset.
-      def stored_types(relation)
-        klass = relation.klass
-        relation.unscope(:order, :limit, :offset, :select, :group, :having, :lock)
-                .distinct.pluck(klass.arel_table[klass.inheritance_column])
       end
 
       # True when the host model declares anything that runs at validation time.
@@ -243,7 +196,7 @@ module ConcernsOnRails
 
         relation.klass.unscoped.from(relation, relation.klass.quoted_table_name).pluck(key)
       end
-      private_class_method :each_row, :joined?, :unjoined, :limited_keys, :sti_table?, :stored_types, :fast_path_classes, :agrees?
+      private_class_method :each_row, :joined?, :unjoined, :limited_keys
 
       # The validate callbacks every ActiveRecord model carries out of the box
       # (Rails 7.1 registers :cant_modify_encrypted_attributes_when_frozen on
