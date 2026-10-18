@@ -271,6 +271,35 @@ module ConcernsOnRails
           ::ActiveRecord::AttributeMethods::TimeZoneConversion::ClassMethods.private_method_defined?(:hook_attribute_type)
       end
 
+      # The type decorations `encryptable`'s `attribute` call would REPLACE
+      # when declared after them: ActiveRecord's `serialize` (from Rails 6.1;
+      # 6.0 applies it after every attribute at schema load, so it composes)
+      # and Rails 7.1+ `normalizes` (ActiveRecord::Normalization up to 8.0,
+      # ActiveModel's from 8.1). Names, so an absent constant costs nothing.
+      def self.replaced_decorations
+        @replaced_decorations ||= begin
+          serialize = ("ActiveRecord::Type::Serialized" unless defined?(::ActiveRecord::AttributeDecorators))
+          { "serialize" => [serialize].compact,
+            "normalizes" => %w[ActiveRecord::Normalization::NormalizedValueType
+                               ActiveModel::Attributes::Normalization::NormalizedValueType] }
+        end
+      end
+
+      # The first replaceable decoration (see replaced_decorations) in a
+      # (possibly nested) attribute type, by the macro that adds it, or nil.
+      def self.replaced_decoration(type)
+        8.times do
+          name = replaced_decorations.find do |_macro, classes|
+            classes.any? { |klass| (const = klass.safe_constantize) && type.is_a?(const) }
+          end&.first
+          return name if name
+          return nil unless type.respond_to?(:__getobj__)
+
+          type = type.__getobj__
+        end
+        nil
+      end
+
       # A per-field key is one key; gem-keyed fields fingerprint under the
       # current key and every previous one.
       def self.blind_index_materials(rule, config, current)
@@ -491,6 +520,7 @@ module ConcernsOnRails
           fields.each do |field|
             field = field.to_sym
             encryptable_guard_column_default!(field) if schema_reachable
+            encryptable_guard_replaced_decoration!(field) if schema_reachable
             encryptable_guard_auditable!(field)
             encryptable_guard_sluggable!(field)
             encryptable_guard_queryable!(field)
@@ -794,6 +824,24 @@ module ConcernsOnRails
                 "decrypt, so every new record would raise DecryptionError. An encrypted column must default to " \
                 "NULL (or \"\"). Drop it with: change_column_default :#{table_name}, :#{field}, " \
                 "from: #{default.inspect}, to: nil"
+        end
+
+        # `encryptable` attaches its type with `attribute`, which REPLACES a
+        # `serialize` or `normalizes` already declared on the field: a Hash was
+        # then stored as its Ruby `to_s`, or a normalization silently stopped.
+        # Declared the other way round they wrap the encrypted type and
+        # compose, so that order is what the error asks for. A re-declaration
+        # after such a macro (`encryptable`, `serialize`, `encryptable`) would
+        # drop it the same way and is refused too.
+        def encryptable_guard_replaced_decoration!(field)
+          macro = ConcernsOnRails::Models::Encryptable.replaced_decoration(type_for_attribute(field.to_s))
+          return unless macro
+
+          effect = macro == "serialize" ? "storing the value as its Ruby to_s" : "silently dropping the normalization"
+          raise ArgumentError,
+                "#{LABEL}: ':#{field}' already has a `#{macro}` declared before `encryptable`, which " \
+                "`encryptable` would replace (#{effect}). Swap the two lines: declare `encryptable :#{field}` " \
+                "first, then `#{macro}` — it then wraps the encrypted type and both apply."
         end
 
         # Macro-time guard for the common order (Encryptable declared after
