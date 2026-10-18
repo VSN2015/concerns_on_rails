@@ -295,6 +295,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   case-insensitively). `respondable_by error_format: :problem_details` switches every
   error-rendering concern to RFC 9457 app-wide.
 - **`ErrorHandleable`** — `rescue_from` for RecordNotFound / ParameterMissing / RecordInvalid.
+  `handled_error.concerns_on_rails` / `on_handled_error` report the exception the handler was
+  invoked with (the `#cause` when Rescuable matched through a wrapper), nil for a direct call.
 - **`Includable`** — allow-listed association sideloading (nested include trees via `Support::IncludeTree`,
   `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets.
 - **`SecureHeadable`** — security response headers + native CSP DSL passthrough.
