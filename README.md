@@ -556,7 +556,10 @@ default scope's own** `deleted_at IS NULL`: a predicate *you* put on the column 
 declares. (Previously they unscoped the column outright, so `deleted_within(1.hour).restore_all`
 restored the whole trash can and `only_deleted.really_destroy_all` widened to the whole relation.)
 The *scopes* still unscope the column, so chain them first: `soft_deleted.where(...)`, not
-`where(...).soft_deleted`.
+`where(...).soft_deleted`. They unscope it on the model's own table only (Rails 6.1+), and the
+default scope records no unscope at all. So merging a soft-deletable model's relation into another
+model's (`Comment.joins(:post).merge(Post.where(...))`, `.merge(Post.with_deleted)`) keeps the
+other model's own `deleted_at` filter. It used to bring that model's soft-deleted rows back.
 
 **Scope-name collisions**
 

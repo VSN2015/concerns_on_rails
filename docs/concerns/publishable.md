@@ -177,7 +177,7 @@ Post.unscoped.count         # => 3
 
 - **`default_scope: true` interacts with ActiveRecord joins and `uniq`.** The `default_scope` macro inside Rails can produce unexpected `JOIN` conditions when associations eager-load. If a model is frequently used through `has_many` associations, prefer omitting `default_scope: true` and chaining `.published` explicitly at the call site.
 
-- **`unpublished`, `scheduled`, and `draft` scopes call `unscope(where: publishable_field)`.** This is intentional: it ensures these scopes work correctly even when `default_scope: true` is active, allowing the admin-facing scopes to bypass the default filter without calling `.unscoped` (which would strip all other conditions).
+- **`unpublished`, `scheduled`, and `draft` scopes unscope the publish column on the model's own table** (`unscope(where: arel_table[publishable_field])`). This is intentional: it ensures these scopes work correctly even when `default_scope: true` is active, allowing the admin-facing scopes to bypass the default filter without calling `.unscoped` (which would strip all other conditions), and lets an association scope such as `has_many :drafts, -> { draft }` reach hidden drafts. Because the unscope is table-qualified, merging one of these scopes into another model's relation (`Comment.published.joins(:post).merge(Post.draft)`) leaves that model's own `published_at` predicates alone. Rails 6.0 can unscope by column name only, so there such a merge still strips them.
 
 - **`publish!` and `publish_at!` delegate to `update`.** Any `before_validation` or `before_save` callbacks on the model run normally. If those callbacks halt the chain, the timestamp is not persisted and the method returns `false`.
 

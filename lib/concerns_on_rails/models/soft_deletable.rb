@@ -51,10 +51,14 @@ module ConcernsOnRails
         # evaluated lazily, so toggling `soft_delete_default_scope` via the macro takes effect.
         # It builds the `without_deleted` predicate itself, tagged (DefaultScopePredicate),
         # rather than calling that scope — so it needs no scope name, affixed or not.
+        # It records no `unscope`: it is applied to a fresh relation, so there is
+        # nothing to peel, and Relation#merge replays a recorded unscope on the
+        # RECEIVING relation by column name — `Comment.joins(:post).merge(Post.where(...))`
+        # stripped the comments' own `deleted_at IS NULL`, and their trash came back.
         default_scope do
           next all unless soft_delete_default_scope
 
-          unscope(where: soft_delete_field).where(DefaultScopePredicate.new(arel_table[soft_delete_field], nil))
+          where(DefaultScopePredicate.new(arel_table[soft_delete_field], nil))
         end
       end
 
@@ -152,7 +156,7 @@ module ConcernsOnRails
 
         # The current relation with the DEFAULT SCOPE's soft-delete predicate
         # peeled off — and nothing else. `unscope(where: field)` (what the
-        # scopes do) strips every predicate on the column, the caller's
+        # scopes do, on this table) strips every predicate on the column, the caller's
         # included, so only the DefaultScopePredicate nodes are dropped. Until
         # this fix the caller's predicates were "the where clause minus the
         # default scope's" — structural arithmetic that also subtracted a
@@ -194,17 +198,21 @@ module ConcernsOnRails
           soft_deleted_name = soft_delete_scope_names.fetch(:soft_deleted)
           ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, soft_delete_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::SoftDeletable")
 
+          # Each scope peels the column on this model's OWN table only
+          # (Support::AssociationScope.unscope_own), so merging one into another
+          # model's relation never strips that model's own `deleted_at`.
+          peel = ->(relation) { ConcernsOnRails::Support::AssociationScope.unscope_own(relation, relation.klass.soft_delete_field) }
           scope soft_delete_scope_names[:active],
-                -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
+                -> { peel.call(self).where(soft_delete_field => nil) }
           scope soft_delete_scope_names[:without_deleted],
-                -> { unscope(where: soft_delete_field).where(soft_delete_field => nil) }
+                -> { peel.call(self).where(soft_delete_field => nil) }
           scope soft_delete_scope_names[:soft_deleted],
-                -> { unscope(where: soft_delete_field).where.not(soft_delete_field => nil) }
+                -> { peel.call(self).where.not(soft_delete_field => nil) }
           scope soft_delete_scope_names[:only_deleted],
                 -> { public_send(soft_deleted_name) }
           # `with_deleted` peels off the default scope so deleted + non-deleted are both returned.
           scope soft_delete_scope_names[:with_deleted],
-                -> { unscope(where: soft_delete_field) }
+                -> { peel.call(self) }
           # Records soft-deleted within the last `duration` (e.g. `deleted_within(7.days)`).
           # Arel `gteq` rather than an endless range (`x..`): AR only translates an
           # endless range to `>=` on Rails 6.0+, but this gem supports Rails >= 5.0.
