@@ -319,9 +319,14 @@ module ConcernsOnRails
         end
       end
 
-      # bypasses AR callbacks and validations — use when you want a true hard delete
+      # bypasses AR callbacks and validations — use when you want a true hard delete.
+      # Marks the instance destroyed (destroyed? true, persisted? false) before
+      # freezing it, as ActiveRecord's own `delete` does; it used to only
+      # freeze, so the gone record still read as persisted.
       def really_delete!
         self.class.unscoped.where(self.class.primary_key => id).delete_all
+        @destroyed = true
+        @previously_new_record = false
         freeze
       end
 
