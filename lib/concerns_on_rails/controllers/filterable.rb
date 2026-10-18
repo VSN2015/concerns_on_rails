@@ -254,6 +254,9 @@ module ConcernsOnRails
         return relation unless ConcernsOnRails::Support::ScalarParam.scalar?(raw)
         return relation.none if filterable_nul?(relation, field, [raw])
 
+        enum = apply_filter_enum_comparison(relation, field, operator, raw, options)
+        return enum if enum
+
         column_type = filterable_column_type(relation, field)
         operand = ConcernsOnRails::Support::NumericOperand.classify(raw, options[:type] || column_type, column_type: column_type)
         return apply_filter_numeric_comparison(relation, field, operator, operand) if operand
@@ -271,6 +274,48 @@ module ConcernsOnRails
 
         column = relation.model.arel_table[field]
         relation.where(column.public_send(COMPARISONS.fetch(operator), value))
+      end
+
+      # An enum column, unless a `type:` is declared (which then reads the
+      # operand); nil for any other field. EnumType reports its subtype's
+      # `type` (:integer), so a LABEL operand was judged non-numeric garbage
+      # and `?status_gte=review` always came back empty; on Rails 6.0/6.1 a
+      # numeric one (`?status_gte=1`) reached EnumType#cast, which raises
+      # ArgumentError for anything that is neither a label nor a mapped
+      # Integer — a 500. The raw operand therefore NEVER reaches EnumType#cast:
+      #
+      #   * a label, or the value a label stores (filterable_enum_label), is
+      #     compared as that label: Arel serializes it through the enum's own
+      #     type (`status >= 1`; a String-backed enum compares its stored
+      #     String);
+      #   * on an INTEGER-backed enum anything else is a number, read exactly
+      #     like an integer column's operand (Support::NumericOperand against
+      #     the enum's subtype) and compared as such. A threshold need not be
+      #     a mapped value: with { low: 0, medium: 5, high: 10 },
+      #     `?priority_gte=2` is `priority >= 2` and `?priority_lt=1.5` is
+      #     `priority <= 1`;
+      #   * otherwise (an unknown non-numeric label, a number NumericOperand
+      #     rejects, any non-label on a String-backed enum) matches nothing.
+      def apply_filter_enum_comparison(relation, field, operator, raw, options)
+        mapping = options[:type] ? nil : filterable_enum_mapping(relation, field)
+        return nil unless mapping
+
+        label = filterable_enum_label(mapping, raw)
+        return relation.where(relation.model.arel_table[field].public_send(COMPARISONS.fetch(operator), label)) if label
+
+        subtype = filterable_enum_integer_subtype(relation, field)
+        return relation.none unless subtype
+
+        operand = ConcernsOnRails::Support::NumericOperand.classify(raw, subtype, column_type: subtype)
+        apply_filter_numeric_comparison(relation, field, operator, operand)
+      end
+
+      # The enum's subtype when it is a plain integer type, else nil. The
+      # reader is private on Rails 6.0 (public from 6.1), hence `send`.
+      def filterable_enum_integer_subtype(relation, field)
+        type = filterable_column_type(relation, field)
+        subtype = type.send(:subtype) if type.respond_to?(:subtype, true)
+        subtype if ConcernsOnRails::Support::NumericOperand.kind(subtype) == :integer
       end
 
       # A date or time outside Support::TimeValue::YEARS (0001-01-01 ..
@@ -538,6 +583,23 @@ module ConcernsOnRails
         return true if column.respond_to?(:array) && column.array
 
         column.respond_to?(:sql_type) && column.sql_type.to_s.end_with?("[]")
+      end
+
+      # An enum attribute's label => stored-value mapping; nil for any other
+      # field.
+      def filterable_enum_mapping(relation, field)
+        model = relation.model
+        model.respond_to?(:defined_enums) ? model.defined_enums[field.to_s] : nil
+      end
+
+      # The label an enum operand names: the label itself, or the label that
+      # stores the value (in its String form: "1", a JSON body's 1). nil for
+      # anything else — an unknown label, or a value the enum does not map.
+      def filterable_enum_label(mapping, raw)
+        operand = raw.to_s
+        return operand if mapping.key?(operand)
+
+        mapping.find { |_label, stored| stored.to_s == operand }&.first
       end
 
       def filterable_column_type(relation, field)

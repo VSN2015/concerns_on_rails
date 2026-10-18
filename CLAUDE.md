@@ -297,7 +297,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `with:` lambda) + comparison operators (`?price_gte=` suffix or `?price[gte]=` bracket form,
   from a frozen allow-list mapped to fixed Arel nodes) and type coercion; an uncastable
   comparison value returns `none` (fail-closed), as does any operand with a NUL byte
-  (`ScalarParam.nul_free?`; binary columns exempt), blank values are skipped in both forms, and
+  (`ScalarParam.nul_free?`; binary columns exempt), an enum column compares by label (an
+  integer-backed one reads any non-label as a NUMBER via `NumericOperand`, so `gte 2` is `>= 2`;
+  an unknown non-numeric label → `none`; never `EnumType#cast` on the raw operand), blank values are skipped in both forms, and
   `contains`/`starts_with` are case-insensitive (except under MySQL `_bin`/`_cs` collations)
   and fail closed on non-text and array columns. Numeric operands go through
   `Support::NumericOperand`: exact, never truncated (`gte 5.5` on an integer column is
