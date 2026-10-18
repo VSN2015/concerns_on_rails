@@ -262,9 +262,15 @@ end
 # assign_<field>! already saves in its own savepoint and puts the number back
 # on failure, so it can be retried directly:
 UniqueRetry.with_retries { invoice.assign_sequence! }
+
+# Re-saving the SAME new record also works: a create that rolls back puts the
+# number, the into: string and any other generated column back, so the next
+# attempt draws afresh.
+invoice = Invoice.new(attrs)
+UniqueRetry.with_retries { invoice.save! }
 ```
 
-The block must draw a fresh value on every attempt; re-saving a record whose number is already set just fails `limit` times. `RecordNotUnique` does not say which index was violated, so a clash on an unrelated unique index also triggers a retry. Those retries are wasted, but bounded by `limit:`.
+The block must draw a fresh value on every attempt; re-saving a record whose number is *kept* (one you assigned yourself) just fails `limit` times. `RecordNotUnique` does not say which index was violated, so a clash on an unrelated unique index also triggers a retry. Those retries are wasted, but bounded by `limit:`.
 
 **Caller-supplied values are not overwritten.** Passing an explicit integer (e.g. `Invoice.create!(sequence: 99)`) bypasses auto-assignment entirely. The `into:` column is still populated from the supplied integer, so the formatted string is always consistent.
 

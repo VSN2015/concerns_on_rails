@@ -33,6 +33,7 @@ module ConcernsOnRails
         # The columns acts_as_list's `scope:` queries (resolved like acts_as_list
         # does), so Encryptable can refuse an encrypted one declared later.
         class_attribute :sortable_scope_columns, instance_accessor: false
+        include ConcernsOnRails::Support::GeneratedValues::Revertible
 
         # set default values
         self.sortable_field ||= :position

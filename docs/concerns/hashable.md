@@ -180,5 +180,6 @@ integer, which `find_by!(public_id:)` will not resolve. Accept both while you ba
 
 ## Changed in 1.22.0
 
+- A create that rolls back (a lost race on the unique index, a caller's transaction rolling back) puts the generated value back, so re-saving the same new record draws a fresh one; a value you supplied is kept.
 - `regenerate_<field>!` goes through the same uniqueness handling as create-time assignment (`unique:` precheck + bounded retry on `ActiveRecord::RecordNotUnique`).
 - `type: :integer` now generates fixed-width codes: `length: 6` is always 6 digits.

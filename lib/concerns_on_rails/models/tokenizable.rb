@@ -56,6 +56,7 @@ module ConcernsOnRails
 
       included do
         class_attribute :tokenizable_fields, instance_accessor: false, default: {}
+        include ConcernsOnRails::Support::GeneratedValues::Revertible
       end
 
       module ClassMethods

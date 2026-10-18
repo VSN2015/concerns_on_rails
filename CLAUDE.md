@@ -473,7 +473,10 @@ Anonymizable's `slug: :auto`), `GeneratedValues` (producers that assign in `befo
 Tokenizable, Hashable, Sequenceable — report the columns they changed from their create path ONLY
 (Hashable from its own callback after `assign_hashable_value`, never from the public method) to
 Sluggable's slug hook; Encryptable's blind index and Auditable's entry derive later, at the write
-boundary), `WriteBoundary` (overrides the private `attributes_for_create`/`_for_update`, which
+boundary; each producer's before values are recorded on the record and `Revertible` (included by
+every producer, overrides `rolledback!(*, **, &)` → super) puts them back when a create rolls back,
+while the record is new again and the column still holds the generated value, so a retried `save!`
+of the same record draws afresh), `WriteBoundary` (overrides the private `attributes_for_create`/`_for_update`, which
 Persistence calls after every `before_*` callback on 6.0–8.1; runs consumers in a FIXED order —
 blind index, then audit — and adds only the columns they changed to the written list),
 `EncryptedLookup` (equality on a maybe-

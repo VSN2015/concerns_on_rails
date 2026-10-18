@@ -65,6 +65,7 @@ module ConcernsOnRails
         class_attribute :sequenceable_config, instance_accessor: false, default: {}
         # Fields whose before_create is already registered in this class chain.
         class_attribute :sequenceable_callback_fields, instance_accessor: false, default: [].freeze
+        include ConcernsOnRails::Support::GeneratedValues::Revertible
       end
 
       class_methods do
