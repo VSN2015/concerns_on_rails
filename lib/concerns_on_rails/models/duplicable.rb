@@ -37,8 +37,13 @@ module ConcernsOnRails
     #   * Lockable attempts (0) / locked_at (nil) — a copy starts unlocked
     #   * Sortable's acts_as_list position — on the TOP-LEVEL copy only, so
     #     acts_as_list places it per `add_new_at:` instead of inserting it at
-    #     the original's slot and pushing the original down. Deep-copied
-    #     children keep theirs: the copied list keeps its order. (Sortable
+    #     the original's slot and pushing the original down. A deep-copied
+    #     child keeps its position only when its list is scoped by the copied
+    #     association's foreign key (the copy then goes into the NEW parent's
+    #     own list, so the copied list keeps its order — children are saved
+    #     in position order); a child in any other list (another column, no
+    #     scope, an opaque String scope) is blanked like the top-level copy,
+    #     or it would take the original child's slot. (Sortable
     #     with `use_acts_as_list: false` has nothing to regenerate it: kept.
     #     Under `add_new_at: nil` the copy, like any new row, starts outside
     #     the list.)
@@ -220,9 +225,11 @@ module ConcernsOnRails
           children = duplicable_source_records(name)
           case reflection.macro
           when :has_many
-            children.each { |child| copy.public_send(name) << duplicable_child_copy(child) }
+            Duplicable.in_list_order(children, reflection).each do |child|
+              copy.public_send(name) << duplicable_child_copy(child, reflection)
+            end
           when :has_one
-            copy.public_send("#{name}=", duplicable_child_copy(children.first)) if children.first
+            copy.public_send("#{name}=", duplicable_child_copy(children.first, reflection)) if children.first
           when :has_and_belongs_to_many
             copy.public_send("#{name}=", children)
           end
@@ -294,14 +301,22 @@ module ConcernsOnRails
       # regenerates them on save instead of sharing a credential with the
       # original or colliding with its unique index.
       #
-      # A child keeps its list position either way (a Duplicable child's own
-      # `duplicate` blanked it as if it were a top-level copy), so the copied
-      # children keep their order in the new parent's list.
-      def duplicable_child_copy(child)
-        return Duplicable.keep_list_position(child, child.duplicate) if child.class.include?(Duplicable)
+      # A child keeps its acts_as_list position only when its list is scoped
+      # by the copied association's foreign key — the copy then lands in the
+      # NEW parent's own list, so the copied children keep their order there.
+      # Any other list (scoped by another column, or unscoped) is shared with
+      # the original child, so the copy is blanked like a top-level copy and
+      # acts_as_list appends it instead of pushing the originals down. (A
+      # Duplicable child's own `duplicate` blanked it already.)
+      def duplicable_child_copy(child, reflection)
+        if child.class.include?(Duplicable)
+          copy = child.duplicate
+          return Duplicable.keeps_list_position?(copy, reflection) ? Duplicable.keep_list_position(child, copy) : copy
+        end
 
         plain = child.dup
         Duplicable.reset_identity_columns(plain)
+        Duplicable.reset_list_position(plain) unless Duplicable.keeps_list_position?(plain, reflection)
         plain
       end
 
@@ -325,6 +340,52 @@ module ConcernsOnRails
         def reset_list_position(record)
           column = list_position_column(record)
           record[column] = nil if column
+        end
+
+        # Whether a deep-copied child's acts_as_list list is scoped by the
+        # association's foreign key (so the copy goes into the new parent's own
+        # list). acts_as_list's `scope_name` is a Symbol (already `_id`-ified),
+        # an Array (columns, or Hashes of fixed values — their keys are the
+        # columns) or an opaque SQL String, which is never trusted to name it.
+        def keeps_list_position?(record, reflection)
+          return false unless list_position_column(record)
+
+          foreign_keys = Array(reflection.foreign_key).map(&:to_s)
+          list_scope_columns(record).intersect?(foreign_keys)
+        end
+
+        def list_scope_columns(record)
+          case (scope = record.scope_name)
+          when Symbol then [scope.to_s]
+          when Array then scope.flat_map { |entry| entry.is_a?(Hash) ? entry.keys : entry }.map(&:to_s)
+          else []
+          end
+        end
+
+        # The source children in the order acts_as_list should receive them: by
+        # position (blank last), so keeping 20, 10, 30 never shifts the first
+        # one on its way in (children are otherwise read in id order under
+        # Sortable `default_scope: false`); reversed when the positions are
+        # blanked on a list that adds new rows at the top, so the copies end
+        # up in the original order.
+        def in_list_order(children, reflection)
+          first = children.first
+          column = children.size > 1 && list_position_column(first)
+          return children unless column
+
+          ordered = by_position(children, column)
+          list_adds_on_top?(first, reflection) ? ordered.reverse : ordered
+        end
+
+        def by_position(children, column)
+          children.each_with_index.sort_by do |child, index|
+            [child[column].nil? ? 1 : 0, child[column] || 0, index]
+          end.map(&:first)
+        end
+
+        # Blanked copies of a top-adding list reach acts_as_list in reverse.
+        def list_adds_on_top?(record, reflection)
+          !keeps_list_position?(record, reflection) && record.send(:add_new_at) == :top
         end
 
         # A deep-copied Duplicable child keeps the original child's position
