@@ -282,8 +282,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Filterable`** — declarative URL-param filtering (`filter_by`: direct-where / `scope:` /
   `with:` lambda) + comparison operators (`?price_gte=` suffix or `?price[gte]=` bracket form,
   from a frozen allow-list mapped to fixed Arel nodes) and type coercion; an uncastable
-  comparison value returns `none` (fail-closed), `type: :datetime`/`:time`/`:date` are
-  ActiveRecord's types (default_timezone, never ENV["TZ"]), blank values are skipped in both forms, and
+  comparison value returns `none` (fail-closed), `type: :datetime` reads a zone-less
+  operand as the target column does (`Support::TimeValue.cast`: Time.zone on a zone-aware column,
+  else default_timezone; a `with:` lambda uses Time.zone while `time_zone_aware_attributes` is on;
+  never ENV["TZ"]), `:date`/`:time` are ActiveRecord's types, blank values are skipped in both forms, and
   `contains`/`starts_with` are case-insensitive (except under MySQL `_bin`/`_cs` collations)
   and fail closed on non-text and array columns. Numeric operands go through
   `Support::NumericOperand`: exact, never truncated (`gte 5.5` on an integer column is
