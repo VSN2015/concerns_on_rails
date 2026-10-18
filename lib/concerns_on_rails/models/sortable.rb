@@ -30,11 +30,15 @@ module ConcernsOnRails
         class_attribute :sortable_field, instance_accessor: false
         class_attribute :sortable_direction, instance_accessor: false
         class_attribute :sortable_default_scope, instance_accessor: false
+        # The columns acts_as_list's `scope:` queries (resolved like acts_as_list
+        # does), so Encryptable can refuse an encrypted one declared later.
+        class_attribute :sortable_scope_columns, instance_accessor: false
 
         # set default values
         self.sortable_field ||= :position
         self.sortable_direction ||= :asc
         self.sortable_default_scope = true if sortable_default_scope.nil?
+        self.sortable_scope_columns ||= [].freeze
 
         # Explicit ordering that works regardless of the default_scope setting.
         scope :sorted, -> { order(sortable_field => sortable_direction) }
@@ -88,6 +92,8 @@ module ConcernsOnRails
         def sortable_by(field_config = nil, use_acts_as_list: true, scope: nil, add_new_at: nil,
                         default_scope: true, **field_options)
           field, direction = resolve_sortable_config(field_config, field_options)
+          scope_columns = use_acts_as_list ? sortable_resolve_scope_columns(scope) : []
+          sortable_guard_encryptable_scope!(scope_columns)
 
           # set class attributes
           self.sortable_default_scope = default_scope ? true : false
@@ -104,6 +110,7 @@ module ConcernsOnRails
           list_options[:scope] = scope unless scope.nil?
           list_options[:add_new_at] = add_new_at unless add_new_at.nil?
           acts_as_list(list_options)
+          self.sortable_scope_columns = scope_columns.freeze
           prepend GeneratedPosition unless ancestors.include?(GeneratedPosition)
         end
 
@@ -132,6 +139,42 @@ module ConcernsOnRails
         end
 
         private
+
+        # The columns acts_as_list will query for `scope:`, resolved as it does:
+        # a Symbol gets `_id` appended unless it already ends in it or names an
+        # association (then its foreign key); an Array's entries are column
+        # names, a Hash entry's keys are columns held at fixed values. A String
+        # is raw interpolated SQL — opaque here, so not inspected.
+        def sortable_resolve_scope_columns(scope)
+          case scope
+          when Symbol then Array(sortable_scope_foreign_key(scope)).map(&:to_sym)
+          when Array then scope.flat_map { |entry| entry.is_a?(Hash) ? entry.keys.map(&:to_sym) : [entry.to_sym] }
+          else []
+          end
+        end
+
+        def sortable_scope_foreign_key(name)
+          return name if name.to_s.end_with?("_id")
+
+          reflect_on_association(name)&.foreign_key || ActiveSupport::Inflector.foreign_key(name)
+        end
+
+        # acts_as_list's scope query is `where(column => value)`; on an
+        # `encryptable` column that serializes a fresh envelope (random IV)
+        # matching no stored row, so every record is alone in its list (each new
+        # one gets position 1) and move/reorder touches nothing. Encryptable
+        # mirrors this for the reverse order.
+        def sortable_guard_encryptable_scope!(scope_columns)
+          return unless respond_to?(:encryptable_rules)
+
+          overlap = scope_columns & encryptable_rules.keys
+          return if overlap.empty?
+
+          raise ArgumentError,
+                "#{LABEL}: scope: #{overlap.map { |f| ":#{f}" }.join(', ')} is an `encryptable` column; " \
+                "acts_as_list's scope query would compare ciphertext (a fresh random IV per query), match no " \
+                "row and treat every record as alone in its list. Scope by a non-encrypted column instead."
+        end
 
         # Params arrive as Strings; compare on the primary key's own type.
         def sortable_cast_ids(ids)

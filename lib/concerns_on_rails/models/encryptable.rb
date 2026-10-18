@@ -768,17 +768,23 @@ module ConcernsOnRails
           raise ArgumentError, ConcernsOnRails::Models::Encryptable.lockable_token_message(field)
         end
 
-        # A Sequenceable `scope:` column or a friendly_id scope column is
+        # A Sequenceable / Sortable `scope:` column or a friendly_id scope column is
         # queried with `where(column => value)`, which on ciphertext (random
         # IV) matches no row: the counter issues the same number twice,
-        # friendly_id the same slug. Refused here for the order
-        # sequenceable_by / sluggable_by / friendly_id first; Sequenceable and
-        # Sluggable refuse the reverse order, and the save-time slug guard
-        # covers a bare friendly_id declared after `encryptable`.
+        # friendly_id the same slug, acts_as_list position 1 for every record.
+        # Refused here for the order sequenceable_by / sortable_by /
+        # sluggable_by / friendly_id first; Sequenceable, Sortable and Sluggable
+        # refuse the reverse order, and the save-time slug guard covers a bare
+        # friendly_id declared after `encryptable`.
         def encryptable_guard_scope_column!(field)
           if respond_to?(:sequenceable_config) && sequenceable_config.values.any? { |cfg| cfg[:scope].include?(field) }
             raise ArgumentError, encryptable_scope_column_message(field, "a Sequenceable scope: column",
                                                                   "counter's MAX", "issue the same number twice")
+          end
+          if respond_to?(:sortable_scope_columns) && sortable_scope_columns.include?(field)
+            raise ArgumentError, encryptable_scope_column_message(field, "a Sortable scope: column",
+                                                                  "acts_as_list scope query",
+                                                                  "treat every record as alone in its list")
           end
           return unless ConcernsOnRails::Models::Encryptable.friendly_id_scope_columns(self).include?(field)
 
