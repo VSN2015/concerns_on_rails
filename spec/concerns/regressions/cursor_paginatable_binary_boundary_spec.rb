@@ -1,4 +1,5 @@
 require "spec_helper"
+require "base64"
 require "securerandom"
 
 # Audit 2026-10-10 PARAM-3. The primary key is always appended as the keyset
