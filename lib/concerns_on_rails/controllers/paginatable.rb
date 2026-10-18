@@ -54,6 +54,10 @@ module ConcernsOnRails
       PAGINATABLE_TRAILING_ALIAS = /\s+AS\s+(?:`[^`]*`|"[^"]*"|\[[^\]]*\]|\w+)\s*\z/i
       PAGINATABLE_SELECT_TOKEN = /'(?:[^']|'')*'|"[^"]*"|`[^`]*`|[(),?]|[^'"`(),?]+|./m
       PAGINATABLE_PAREN_DEPTH = { "(" => 1, ")" => -1 }.freeze
+      # A select list that opens with DISTINCT (`select("DISTINCT category")`,
+      # PostgreSQL's `DISTINCT ON (...)`): distinct rows, though
+      # `distinct_value` is false.
+      PAGINATABLE_DISTINCT_SELECT = /\A\s*DISTINCT\b/i
 
       included do
         class_attribute :paginatable_per_page, default: DEFAULT_PER_PAGE
@@ -272,7 +276,16 @@ module ConcernsOnRails
       def paginatable_distinct_select?(relation)
         return false unless %i[distinct_value select_values group_values].all? { |reader| relation.respond_to?(reader) }
 
-        relation.distinct_value && relation.select_values.any? && relation.group_values.empty?
+        paginatable_distinct?(relation) && relation.select_values.any? && relation.group_values.empty?
+      end
+
+      # `.distinct`, or DISTINCT spelled inside the select list itself:
+      # `select("DISTINCT category")` leaves distinct_value false, so its
+      # select list was stripped and every underlying row COUNTed (6 rows over
+      # 3 categories reported X-Total-Count 6), where ActiveRecord's own
+      # `count` answers 3.
+      def paginatable_distinct?(relation)
+        relation.distinct_value || relation.select_values.first.to_s.match?(PAGINATABLE_DISTINCT_SELECT)
       end
 
       # The relation's own SQL, unchanged, on every adapter. Rails 6.x's
