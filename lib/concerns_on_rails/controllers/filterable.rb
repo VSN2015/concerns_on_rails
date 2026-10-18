@@ -429,13 +429,29 @@ module ConcernsOnRails
         operands.select { |operand| operand.status == :exact }.map(&:value)
       end
 
-      # The members to keep on a numeric or date/time column, or nil to keep
-      # the raw value unchanged. A NUL member fails the filter closed.
+      # The members to keep on a numeric, enum or date/time column, or nil to
+      # keep the raw value unchanged. A NUL member fails the filter closed.
       def filterable_equality_values(relation, field, values, negate: false)
         return :uncastable if filterable_nul?(relation, field, values)
 
         filterable_numeric_equality_values(relation, field, values) ||
+          filterable_enum_equality_values(relation, field, values) ||
           filterable_time_equality_values(relation, field, values, negate)
+      end
+
+      # An enum member that is neither a label nor a value a label stores
+      # (filterable_enum_label) equals nothing, so it drops out of the list,
+      # like an out-of-range number. On Rails 7.0+ such a label serializes to
+      # nil, and EnumType has a subtype, so ActiveRecord's QueryAttribute
+      # reports nil? and `where` emitted `status IS NULL`: `?status=drfat`
+      # returned exactly the rows with NO status. An explicit nil member keeps
+      # its IS NULL meaning. nil when the field is no enum or nothing drops.
+      def filterable_enum_equality_values(relation, field, values)
+        mapping = filterable_enum_mapping(relation, field)
+        return nil unless mapping
+
+        kept = values.select { |member| member.nil? || filterable_enum_label(mapping, member) }
+        kept.size == values.size ? nil : kept
       end
 
       # A date or time no stored value can equal drops out of the list, like
