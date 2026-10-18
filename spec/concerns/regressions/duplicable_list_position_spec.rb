@@ -204,6 +204,54 @@ RSpec.describe "Duplicable with a Sortable (acts_as_list) position" do
       expect(copied.map { |item| [item.name, item.position] }).to eq([["c", 1], ["b", 2], ["a", 3]])
     end
 
+    # Review follow-up: acts_as_list 0.7.x (the gemspec floor allows it)
+    # answers `scope_name` with a String ("dup_list_id", "[:a, :b]") and
+    # `add_new_at` with the String "top". The suite's acts_as_list is newer, so
+    # the 0.7 answers are stubbed in.
+    context "with acts_as_list 0.7-style String answers" do
+      let(:reflection) { DupList.reflect_on_association(:dup_items) }
+      let(:item) { DupItem.new }
+
+      before { define_models(child_duplicable: false, scope: :account_id, add_new_at: :top, default_scope: false) }
+
+      it "reads a bare-identifier String scope_name as the one column" do
+        allow(item).to receive(:scope_name).and_return("dup_list_id")
+        expect(ConcernsOnRails::Models::Duplicable.keeps_list_position?(item, reflection)).to be(true)
+
+        allow(item).to receive(:scope_name).and_return("account_id")
+        expect(ConcernsOnRails::Models::Duplicable.keeps_list_position?(item, reflection)).to be(false)
+      end
+
+      it "keeps blanking any other String scope_name (an array dump, SQL)" do
+        ["[:dup_list_id, :account_id]", "dup_list_id = 1", "1 = 1", ""].each do |name|
+          allow(item).to receive(:scope_name).and_return(name)
+          expect(ConcernsOnRails::Models::Duplicable.keeps_list_position?(item, reflection)).to be(false), name.inspect
+        end
+      end
+
+      it "keeps a deep-copied child's positions when scope_name is the FK as a String" do
+        define_models(child_duplicable: false)
+        allow_any_instance_of(DupItem).to receive(:scope_name).and_return("dup_list_id")
+        list = DupList.create!(name: "list")
+        list.dup_items.create!(name: "first").update_columns(position: 20)
+        list.dup_items.create!(name: "second").update_columns(position: 10)
+
+        copy = list.duplicate!
+
+        expect(copy.dup_items.sort_by(&:position).map { |row| [row.name, row.reload.position] })
+          .to eq([["second", 10], ["first", 20]])
+      end
+
+      it "reverses the children for a String add_new_at of 'top'" do
+        children = %w[a b c].each_with_index.map { |name, index| DupItem.new(name: name, position: index + 1) }
+        allow(children.first).to receive(:add_new_at).and_return("top")
+
+        ordered = ConcernsOnRails::Models::Duplicable.in_list_order(children, reflection)
+
+        expect(ordered.map(&:name)).to eq(%w[c b a])
+      end
+    end
+
     it "keeps every position in order under default_scope: false, whatever the id order" do
       define_models(child_duplicable: false, default_scope: false)
       list = DupList.create!(name: "list")

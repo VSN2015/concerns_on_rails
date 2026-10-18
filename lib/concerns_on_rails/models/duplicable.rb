@@ -346,7 +346,10 @@ module ConcernsOnRails
         # association's foreign key (so the copy goes into the new parent's own
         # list). acts_as_list's `scope_name` is a Symbol (already `_id`-ified),
         # an Array (columns, or Hashes of fixed values — their keys are the
-        # columns) or an opaque SQL String, which is never trusted to name it.
+        # columns) or a String: acts_as_list 0.7.x (the gemspec floor) answers
+        # every scope as a String, so a bare identifier is one column name
+        # ("account_id"); any other String (an array dump, SQL) is opaque and
+        # never trusted to name it.
         def keeps_list_position?(record, reflection)
           return false unless list_position_column(record)
 
@@ -358,8 +361,13 @@ module ConcernsOnRails
           case (scope = record.scope_name)
           when Symbol then [scope.to_s]
           when Array then scope.flat_map { |entry| entry.is_a?(Hash) ? entry.keys : entry }.map(&:to_s)
+          when String then string_scope_columns(scope)
           else []
           end
+        end
+
+        def string_scope_columns(scope)
+          scope.match?(/\A\w+\z/) ? [scope] : []
         end
 
         # The source children in the order acts_as_list should receive them: by
@@ -384,8 +392,9 @@ module ConcernsOnRails
         end
 
         # Blanked copies of a top-adding list reach acts_as_list in reverse.
+        # (acts_as_list 0.7.x answers `add_new_at` as the String "top".)
         def list_adds_on_top?(record, reflection)
-          !keeps_list_position?(record, reflection) && record.send(:add_new_at) == :top
+          !keeps_list_position?(record, reflection) && record.send(:add_new_at).to_s == "top"
         end
 
         # A deep-copied Duplicable child keeps the original child's position
