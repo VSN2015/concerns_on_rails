@@ -453,10 +453,11 @@ module ConcernsOnRails
           @encryptable_declaring = true # see _default_attributes
           type = type.to_sym
           encryptable_validate!(fields, type, blind_index)
-          ensure_columns!(LABEL, *fields, types: :text)
+          schema_reachable = ensure_columns!(LABEL, *fields, types: :text)
 
           fields.each do |field|
             field = field.to_sym
+            encryptable_guard_column_default!(field) if schema_reachable
             encryptable_guard_auditable!(field)
             encryptable_guard_sluggable!(field)
             encryptable_guard_queryable!(field)
@@ -720,6 +721,26 @@ module ConcernsOnRails
 
             find_by(column => ConcernsOnRails::Models::Encryptable.blind_index_predicate(fingerprints))
           end
+        end
+
+        # A database default is plaintext the column hands every new record
+        # (and every INSERT that omits the field), and plaintext is never a
+        # valid envelope: `Model.new.notes` — and every `create!`, whose dirty
+        # tracking reads the default — raised DecryptionError. `""` is the one
+        # default read as plaintext (see EncryptedType#deserialize); anything
+        # else is refused here. Decrypting a non-envelope as plaintext instead
+        # would let anyone who can write the column plant a value that reads
+        # back as authentic. Skipped (like the column check) while the schema
+        # is unreachable.
+        def encryptable_guard_column_default!(field)
+          default = columns_hash[field.to_s]&.default
+          return if default.nil? || default == ""
+
+          raise ArgumentError,
+                "#{LABEL}: ':#{field}' has a database default (#{default.inspect}), which is plaintext and can never " \
+                "decrypt, so every new record would raise DecryptionError. An encrypted column must default to " \
+                "NULL (or \"\"). Drop it with: change_column_default :#{table_name}, :#{field}, " \
+                "from: #{default.inspect}, to: nil"
         end
 
         # Macro-time guard for the common order (Encryptable declared after
