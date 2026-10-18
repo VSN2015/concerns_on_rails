@@ -3,6 +3,7 @@ require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/callable"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/association_scope"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
 require "concerns_on_rails/support/locking"
@@ -219,8 +220,19 @@ module ConcernsOnRails
         # an erasure batch maximises progress. Each record runs in its own
         # savepoint, so one whose hook vetoes (a legal hold) is skipped
         # without undoing the others, and only records actually erased count.
+        #
+        # SCOPE: called on the model itself (`User.anonymize_all!`) it also
+        # erases the rows the gem's own default scopes hide — SoftDeletable's
+        # trash, Publishable's drafts under `default_scope: true` — since a
+        # soft-deleted account is the typical erasure subject; an
+        # application's own default scopes (a tenant, a discriminator) still
+        # apply. Called on a relation (`User.where(org_id: 1).anonymize_all!`,
+        # an association, a `scoping` block) it erases exactly that relation,
+        # default scope included like any other chain — start from
+        # `unscoped`/`with_deleted` to reach hidden rows in a subset.
         def anonymize_all!
-          relation = anonymizable_stamp ? all.where(anonymizable_stamp => nil) : all
+          base = anonymizable_sweep_base
+          relation = anonymizable_stamp ? base.where(anonymizable_stamp => nil) : base
           transaction do
             count = 0
             ConcernsOnRails::Support::BatchOps.each_record(relation) do |record|
@@ -233,6 +245,16 @@ module ConcernsOnRails
         end
 
         private
+
+        # The relation a sweep starts from (see anonymize_all!'s SCOPE): the
+        # caller's explicit relation when there is one (relation delegation and
+        # `scoping` set current_scope), otherwise the model's default-scoped
+        # relation minus only the gem's hiding predicates on its own table.
+        def anonymizable_sweep_base
+          return all if current_scope
+
+          ConcernsOnRails::Support::AssociationScope.without(all, ConcernsOnRails::Support::AssociationScope.hiding_columns(self))
+        end
 
         # nil is rejected rather than read as :auto — omit the option for the
         # default. Explicit values persist across later calls that omit it.
