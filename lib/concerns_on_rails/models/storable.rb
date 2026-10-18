@@ -327,6 +327,7 @@ module ConcernsOnRails
                   "with a digit (a key names both the generated methods and the JSON path the query scopes address)"
           end
 
+          typed = !raw_spec[:type].nil?
           type = (raw_spec[:type] || :string).to_sym
           unless VALID_TYPES.include?(type)
             raise ArgumentError, "#{LABEL}: unknown type ':#{type}' for ':#{key}' (valid: #{VALID_TYPES.join(', ')})"
@@ -337,7 +338,7 @@ module ConcernsOnRails
             raise ArgumentError, "#{LABEL}: in: for ':#{key}' must be enumerable (respond to #include?)"
           end
 
-          { type: type, default: raw_spec[:default], in: inclusion,
+          { type: type, typed: typed, default: raw_spec[:default], in: inclusion,
             query: raw_spec.fetch(:query, query),
             accessor: ConcernsOnRails::Support::Affix.name(key, prefix: prefix, suffix: suffix) }
         end
@@ -520,12 +521,15 @@ module ConcernsOnRails
       # a Time. deep_dup leaves non-duplicable values (nil, Integers,
       # Symbols, true/false) as they are. A Class/Module is an identity, not
       # a value — Rails 6.0's deep_dup would hand back an anonymous copy.
-      # The result then reads back exactly as the same value stored under the
-      # key would (only :json stays uncast): a `default: "false"` on a
-      # :boolean key used to come back as the truthy String "false".
+      # A key that declared an explicit `type:` then reads its default back
+      # exactly as the same value stored under the key would (:json stays
+      # uncast; a default that cannot be cast reads nil): a `default: "false"`
+      # on a :boolean key used to come back as the truthy String "false". A key
+      # WITHOUT `type:` is only the implicit :string — its default is returned
+      # as declared (`default: false`, `25`, `:light` stay as they are).
       def storable_default(spec)
         value = storable_raw_default(spec[:default])
-        return value if value.nil? || spec[:type] == :json
+        return value if value.nil? || !spec[:typed] || spec[:type] == :json
 
         storable_as_stored(spec, value)
       end
@@ -682,7 +686,8 @@ module ConcernsOnRails
         end
 
         def write_date(value)
-          CASTERS[:date].cast(value)&.iso8601
+          date = CASTERS[:date].cast(value)
+          date.iso8601 if date.respond_to?(:iso8601)
         end
 
         # UTC iso8601(6): microsecond precision, the lesson CursorPaginatable

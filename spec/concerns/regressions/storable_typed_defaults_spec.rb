@@ -86,4 +86,41 @@ describe "Storable: a typed default reads back as the same value stored under th
 
     expect(klass.new.theme).to eq("light")
   end
+
+  # Review follow-up: a key without `type:` is the implicit :string, and casting
+  # its default to a String flipped existing hosts (`default: false` read "f").
+  describe "a key declared without type:" do
+    it "returns a non-String default exactly as declared" do
+      klass = model_class do
+        storable_by :settings,
+                    beta: { default: false },
+                    seats: { default: 25 },
+                    theme: { default: :light, in: %i[light dark] }
+      end
+      record = klass.new
+
+      expect(record.beta).to be(false)
+      expect(record.seats).to eq(25)
+      expect(record.theme).to eq(:light)
+      expect(record).to be_valid
+    end
+
+    it "treats an explicit type: :string as typed, casting its default" do
+      klass = model_class { storable_by :settings, seats: { type: :string, default: 25 } }
+
+      expect(klass.new.seats).to eq("25")
+    end
+  end
+
+  describe "a default that cannot be cast" do
+    it "reads nil instead of raising on a :date key" do
+      klass = model_class do
+        storable_by :settings, a: { type: :date, default: :today }, b: { type: :date, default: 0 }
+      end
+      record = klass.new
+
+      expect(record.a).to be_nil
+      expect(record.b).to be_nil
+    end
+  end
 end
