@@ -41,14 +41,17 @@ module ConcernsOnRails
       # options it names (see #sequenceable_merged_config).
       UNSET = Object.new.freeze
       DEFAULTS = { into: nil, prefix: "", padding: 0, separator: "-", start_at: 1, scope: [],
-                   reset: :never, template: nil, assign: :create, time_zone: nil }.freeze
+                   reset: :never, template: nil, assign: :create, time_zone: nil,
+                   period_column: :created_at }.freeze
       # The options that shape the NUMBER — its format and the rows it counts
       # over (see #sequenceable_owner). A re-declaration passing any of them,
       # or no option at all, restates the format from DEFAULTS; one passing
       # only assign: and/or time_zone: keeps the current config. time_zone:
       # must match an owner it shares a counter with (see
       # #sequenceable_zone_matches!).
-      FORMAT_KEYS = %i[prefix template padding reset scope into separator start_at].freeze
+      FORMAT_KEYS = %i[prefix template padding reset scope into separator start_at period_column].freeze
+      # Column types a reset: period can be cut from.
+      PERIOD_COLUMN_TYPES = %i[datetime timestamp timestamptz date].freeze
       # Two zones cut the same periods when their UTC offsets agree over this
       # window (see #sequenceable_same_zone?).
       ZONE_PROBE_FROM = Time.utc(1970)
@@ -58,7 +61,8 @@ module ConcernsOnRails
         prefix: :to_s.to_proc, separator: :to_s.to_proc,
         padding: :to_i.to_proc, start_at: :to_i.to_proc,
         scope: ->(value) { Array(value).map(&:to_sym) },
-        reset: :to_sym.to_proc, assign: :to_sym.to_proc
+        reset: :to_sym.to_proc, assign: :to_sym.to_proc,
+        period_column: ->(value) { value.nil? ? :created_at : value.to_sym }
       }.freeze
 
       included do
@@ -82,6 +86,11 @@ module ConcernsOnRails
         #   start_at:  first value per scope/period when no rows exist yet (default 1)
         #   scope:     column or array of columns the counter is scoped to (default nil)
         #   reset:     :never (default) | :year | :month | :day — restart per period (needs created_at)
+        #   period_column: datetime column the reset: period is cut from (default :created_at, the
+        #              row's creation time). With assign: :manual a draft numbers into the period it
+        #              was DRAFTED in unless this names a stamp set when it is finalized (e.g.
+        #              :finalized_at): assign_<field>! stamps it when blank. Needs a real column,
+        #              never updated_at
         #   time_zone: zone the reset: periods are cut in (name or ActiveSupport::TimeZone). Default:
         #              the app's config.time_zone (Time.zone_default), else UTC — never the
         #              per-request Time.zone, so every request agrees on which day/month/year it is
@@ -98,16 +107,17 @@ module ConcernsOnRails
         #   option it omits takes its default, as in a first declaration.
         def sequenceable_by(field = :sequence, into: UNSET, prefix: UNSET, padding: UNSET,
                             separator: UNSET, start_at: UNSET, scope: UNSET, reset: UNSET,
-                            template: UNSET, assign: UNSET, time_zone: UNSET)
+                            template: UNSET, assign: UNSET, time_zone: UNSET, period_column: UNSET)
           field = field.to_sym
-          given = { into:, prefix:, padding:, separator:, start_at:, scope:, reset:, template:, assign:, time_zone: }
+          given = { into:, prefix:, padding:, separator:, start_at:, scope:, reset:, template:, assign:, time_zone:,
+                    period_column: }
           cfg = sequenceable_merged_config(field, given.reject { |_, value| value.equal?(UNSET) })
 
           ensure_columns!(NAME, field, types: :integer)
           ensure_columns!(NAME, cfg[:into], types: :string) if cfg[:into]
           ensure_columns!(NAME, *cfg[:scope]) unless cfg[:scope].empty?
-          ensure_columns!(NAME, :created_at, types: :datetime) unless cfg[:reset] == :never
-          validate_sequenceable_options!(cfg[:reset], cfg[:template], cfg[:assign])
+          ensure_sequenceable_period_column!(cfg) unless cfg[:reset] == :never
+          validate_sequenceable_options!(cfg[:reset], cfg[:template], cfg[:assign], cfg[:period_column])
           sequenceable_guard_encryptable_scope!(cfg[:scope])
 
           self.sequenceable_config = sequenceable_config.merge(field => cfg)
@@ -187,13 +197,47 @@ module ConcernsOnRails
           while klass.respond_to?(:sequenceable_config) && (inherited = klass.sequenceable_config[field])
             owner = inherited[:owner]
             ref = owner.sequenceable_config.fetch(field)
-            if FORMAT_KEYS.all? { |key| ref[key] == cfg[key] }
+            keys = sequenceable_owner_keys(cfg)
+            if keys.all? { |key| ref[key] == cfg[key] }
               sequenceable_zone_matches!(field, klass, inherited, cfg.merge(owner: owner))
               return owner
             end
+            sequenceable_period_column_matches!(field, klass, inherited, cfg)
             klass = owner.superclass
           end
           self
+        end
+
+        # The tuple that decides whether two declarations share a counter.
+        # period_column: only cuts periods under reset:, so with :never it is
+        # not part of it: the two would count the same rows.
+        def sequenceable_owner_keys(cfg)
+          cfg[:reset] == :never ? FORMAT_KEYS - [:period_column] : FORMAT_KEYS
+        end
+
+        # An inherited owner that prints exactly this declaration's numbers but
+        # cuts its periods from another column is a series of its own (its MAX
+        # reads other rows), so both would issue "INV-2026-1". Refused at macro
+        # time, like a zone mismatch: put period_column: on the DECLARING class,
+        # or re-declare with ONLY assign: so it is inherited. Classes numbering
+        # over different relations never share a MAX, so they may differ.
+        def sequenceable_period_column_matches!(field, peer, peer_cfg, cfg)
+          owner = peer_cfg[:owner]
+          ref = owner.sequenceable_config.fetch(field)
+          return unless sequenceable_period_column_clash?(ref, cfg)
+          return unless sequence_numbering_class(cfg.merge(owner: owner)) == peer.send(:sequence_numbering_class, peer_cfg)
+
+          raise ArgumentError, "#{NAME}: #{name || inspect}##{field} renders the same format as " \
+                               "#{owner.name || owner.inspect} but cuts its reset: periods from period_column: " \
+                               ":#{cfg[:period_column]} instead of :#{ref[:period_column]}, so the two series would " \
+                               "issue the same number. Declare period_column: on the class that declares the " \
+                               "format, or re-declare with ONLY assign:/time_zone: to inherit it, or use a " \
+                               "different prefix:/template:"
+        end
+
+        def sequenceable_period_column_clash?(ref, cfg)
+          cfg[:reset] != :never && ref[:period_column] != cfg[:period_column] &&
+            (FORMAT_KEYS - [:period_column]).all? { |key| ref[key] == cfg[key] }
         end
 
         # Sharing a counter (same format) with `peer`, whose config is
@@ -292,12 +336,32 @@ module ConcernsOnRails
                 "the same number twice. Scope by a non-encrypted column instead."
         end
 
-        def validate_sequenceable_options!(reset, template, assign = :create)
+        # The period column must exist and hold a date or time: a string or an
+        # integer would number every row into a nonsense period.
+        def ensure_sequenceable_period_column!(cfg)
+          column = cfg[:period_column]
+          return unless ensure_columns!(NAME, column, types: :datetime)
+
+          # The default created_at keeps whatever type its adapter reports.
+          return if column == :created_at
+
+          type = columns_hash[column.to_s].type
+          return if PERIOD_COLUMN_TYPES.include?(type)
+
+          raise ArgumentError, "#{NAME}: period_column: :#{column} is a #{type} column. The reset: period is cut " \
+                               "from a datetime (or date) column"
+        end
+
+        def validate_sequenceable_options!(reset, template, assign = :create, period_column = :created_at)
           unless RESET_PERIODS.include?(reset)
             raise ArgumentError, "#{NAME}: unknown reset '#{reset}'. Valid values: #{RESET_PERIODS.join(', ')}"
           end
           unless ASSIGN_MODES.include?(assign)
             raise ArgumentError, "#{NAME}: unknown assign ':#{assign}'. Valid values: #{ASSIGN_MODES.join(', ')}"
+          end
+          if period_column == :updated_at
+            raise ArgumentError, "#{NAME}: period_column: :updated_at is rewritten on every save, so a row would " \
+                                 "drift between periods. Use :created_at or a column stamped once (e.g. :finalized_at)"
           end
           return if template.nil? || template.respond_to?(:call)
 
@@ -305,10 +369,20 @@ module ConcernsOnRails
         end
       end
 
-      # The anchor instant of this record's reset: period, in the field's FIXED
-      # zone — what the MAX range and the default period token use. A
-      # template: that renders a date should read this rather than
-      # created_at, which tz-aware attributes present in the request's zone.
+      # `dup` copies instance variables, including the "now" memoized for an
+      # earlier create (SequenceCalculator#base_time): a duplicated record
+      # (Duplicable) blanks its period column and would be numbered into the
+      # ORIGINAL's period. Every copy reads its own clock.
+      def initialize_dup(other)
+        super
+        @_sequenceable_now = nil
+      end
+
+      # The anchor instant of this record's reset: period (its period_column),
+      # in the field's FIXED zone — what the MAX range and the default period
+      # token use. A template: that renders a date should read this rather
+      # than the column itself, which tz-aware attributes present in the
+      # request's zone.
       def sequenceable_period_time(field)
         self.class.send(:period_time, self.class.sequenceable_config.fetch(field.to_sym), self)
       end
@@ -336,7 +410,7 @@ module ConcernsOnRails
       # job (pair with Support::UniqueRetry around the create).
       def assign_sequenceable_value(field)
         cfg = self.class.sequenceable_config.fetch(field)
-        sequenceable_pin_created_at(cfg)
+        sequenceable_pin_period_column(cfg)
 
         self[field] = self.class.send(:sequence_base_value, field, self, {}) if self[field].blank?
 
@@ -369,10 +443,10 @@ module ConcernsOnRails
       private :sequenceable_assign!
 
       # The columns assign_sequenceable_value may write: the field, into:, and
-      # created_at (sequenceable_pin_created_at stamps it under reset:).
+      # the period column (sequenceable_pin_period_column stamps it under reset:).
       def sequenceable_written_columns(field)
         cfg = self.class.sequenceable_config.fetch(field)
-        [field, cfg[:into], (:created_at unless cfg[:reset] == :never)].compact
+        [field, cfg[:into], (cfg[:period_column] unless cfg[:reset] == :never)].compact
       end
       private :sequenceable_written_columns
 
@@ -382,7 +456,12 @@ module ConcernsOnRails
           self.class.transaction(requires_new: true) { saved = save! }
         ensure
           # Also covers an ActiveRecord::Rollback the savepoint swallowed.
-          previous.each { |column, value| self[column] = value } unless saved
+          unless saved
+            previous.each { |column, value| self[column] = value }
+            # The failed attempt's memoized "now" (SequenceCalculator#base_time)
+            # must not outlive it: a retry after midnight would reuse its period.
+            @_sequenceable_now = nil
+          end
         end
         saved ? true : false
       end
@@ -392,13 +471,17 @@ module ConcernsOnRails
       # enabled the period is computed from "now" during before_create, but
       # created_at is stamped later, at INSERT time — across a year/month/day
       # boundary the row would carry a number from the old period with a
-      # timestamp in the new one. AR honors a pre-set created_at.
-      def sequenceable_pin_created_at(cfg)
-        return if cfg[:reset] == :never || !created_at.nil?
+      # timestamp in the new one. AR honors a pre-set created_at. The same
+      # goes for a custom period_column (assign: :manual numbers a draft when
+      # it is finalized, so that is the instant its period is read from — and
+      # the stored stamp the next MAX range finds the row by).
+      def sequenceable_pin_period_column(cfg)
+        column = cfg[:period_column]
+        return if cfg[:reset] == :never || !self[column].nil?
 
-        self.created_at = self.class.send(:base_time, self)
+        self[column] = self.class.send(:period_stamp, cfg, self)
       end
-      private :sequenceable_pin_created_at
+      private :sequenceable_pin_period_column
     end
   end
 end

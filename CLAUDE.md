@@ -91,7 +91,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `authenticate_by_`/`consume_` look up only a String or Integer (a Hash/Array/Parameters param → nil).
 - **`Sequenceable`** — ordered reference numbers (invoice/order numbers). `into:`, `prefix:`,
   `padding:`, `scope:`, `reset:` (`:year`/`:month`/`:day`), `template:`, `assign:`
-  (`:create`/`:manual`), `time_zone:` (`reset:` periods — MAX range AND token — are cut in ONE
+  (`:create`/`:manual`), `period_column:` (default `created_at`; the datetime column the `reset:` MAX range, token and `sequenceable_period_time` read — `assign_<field>!`/the create path stamp it when blank; part of the format tuple, so a different one under an identical printed format is refused at macro time (declare it on the declaring class or an `assign:`-only re-declaration; ignored under `reset: :never`); refuses `updated_at`/non-date types (`created_at` unchecked); rows numbered before a switch, NULL there, still count by `created_at`; a `date` column is stamped in the field's zone; a Duplicable copy blanks it), `time_zone:` (`reset:` periods — MAX range AND token — are cut in ONE
   fixed zone, default `Time.zone_default` resolved at use time, never the request's `Time.zone`;
   `sequenceable_period_time(field)` hands that instant to templates). Under STI the
   series is MAX over the DECLARING class's relation (an abstract declarer falls back to the
