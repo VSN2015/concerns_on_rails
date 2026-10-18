@@ -68,6 +68,15 @@ module ConcernsOnRails
           generated_values_revert!
         end
 
+        # `dup` copies instance variables, including the record of what the
+        # ORIGINAL's create generated. The copy keeps the original's
+        # number/token/position on purpose and never generated them, so a failed
+        # save of it must not blank them as "generated".
+        def initialize_dup(other)
+          super
+          @_generated_values = nil
+        end
+
         private
 
         def generated_values_enrolled; end

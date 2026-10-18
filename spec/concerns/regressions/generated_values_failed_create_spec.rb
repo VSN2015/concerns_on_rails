@@ -97,6 +97,33 @@ RSpec.describe "Generated values after a failed INSERT" do
       expect(invoice.reload.number).to eq("INV-1")
     end
 
+    # LOW-1 of the SCOPE-2 review: what a create generated must not outlive
+    # that create, or a dup of the saved record inherits the record of it.
+    it "keeps the number a dup carries when the dup's own INSERT fails" do
+      invoice = GvInvoice.create!
+      copy = invoice.dup
+
+      expect { copy.save! }.to raise_error(ActiveRecord::RecordNotUnique)
+
+      expect(copy).to be_new_record
+      expect(copy.sequence).to eq(invoice.sequence)
+      expect(copy.number).to eq(invoice.number)
+    end
+
+    it "reverts nothing when a later UPDATE of a created record rolls back" do
+      invoice = GvInvoice.create!
+      stored = invoice.sequence
+
+      GvInvoice.transaction do
+        invoice.update!(number: "INV-X")
+        raise ActiveRecord::Rollback
+      end
+
+      expect(invoice).to be_persisted
+      expect(invoice.sequence).to eq(stored)
+      expect(invoice.reload.sequence).to eq(stored)
+    end
+
     it "leaves a persisted record's number alone" do
       invoice = GvInvoice.create!
       expect { invoice.update!(sequence: 1) }.not_to raise_error
@@ -157,6 +184,15 @@ RSpec.describe "Generated values after a failed INSERT" do
 
       expect { user.save! }.to raise_error(ActiveRecord::RecordNotUnique)
       expect(user.invite_code).to eq("1111")
+    end
+
+    it "keeps the token a dup carries when the dup's own INSERT fails" do
+      user = GvUser.create!
+      copy = user.dup
+
+      expect { copy.save! }.to raise_error(ActiveRecord::RecordNotUnique)
+
+      expect(copy.invite_code).to eq(user.invite_code)
     end
 
     it "does not overwrite a token the caller assigned after the failure" do
@@ -268,6 +304,32 @@ RSpec.describe "Generated values after a failed INSERT" do
       expect(task.position).to be_nil
       task.save!
       expect(task.reload.position).to eq(2)
+    end
+
+    # LOW-1 of the SCOPE-2 review: the dup carries the position on purpose.
+    it "keeps the position a dup carries when the dup's own create fails" do
+      GvTask.create!
+      task = GvTask.create!
+      copy = task.dup
+      GvTask.before_create { throw :abort }
+
+      expect(copy.save).to be(false)
+
+      expect(copy).to be_new_record
+      expect(copy.position).to eq(task.position)
+    end
+    it "keeps the position a dup carries when the dup is taken inside the creating transaction" do
+      GvTask.create!
+      GvTask.before_create { raise "boom" if @abort_create }
+
+      GvTask.transaction do
+        task = GvTask.create!
+        copy = task.dup
+        copy.instance_variable_set(:@abort_create, true)
+
+        expect { GvTask.transaction(requires_new: true) { copy.save! } }.to raise_error("boom")
+        expect(copy.position).to eq(task.position)
+      end
     end
   end
 end
