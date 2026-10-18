@@ -300,7 +300,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets.
 - **`SecureHeadable`** — security response headers + native CSP DSL passthrough.
 - **`Localizable`** — per-request `I18n.locale` from params / `Accept-Language` (strict
-  RFC 9110 q-values, stable order on ties; `-` and `_` match each other, case-insensitively,
+  RFC 9110 q-values, stable order on ties; RFC 4647 Lookup truncation one subtag at a time,
+  `zh-Hant-TW` → `zh-Hant` → `zh`; `-` and `_` match each other, case-insensitively,
   returning the app's own symbol). Like Timezoneable's zone, the locale stays
   active for `rescue_from` handlers and is always restored afterwards.
 - **`Authorizable`** — declarative per-action authorization (`authorize_by`, `require_role`); the
