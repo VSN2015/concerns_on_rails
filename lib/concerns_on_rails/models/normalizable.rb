@@ -228,13 +228,16 @@ module ConcernsOnRails
         @normalizable_validated = @normalizable_applied&.to_h { |field, _| [field, self[field].dup] }
       end
 
-      # A save that skipped validation gets, at this concern's place in the
-      # before_validation order, the pass validation would have run —
-      # recorded the same way, so normalizable_settle can tell whether a
-      # later sibling rewrote the field. After a validation it does nothing:
-      # the pass already ran there.
+      # The pass a save that skipped validation never ran, at this concern's
+      # place in the before_validation order, recorded the same way so
+      # normalizable_settle can tell whether a later sibling rewrote the field.
+      # Unconditional: after a validation it is the same skip-what-validation-
+      # left pass (a field equal to the validation snapshot is not redone), and
+      # after a stray `valid?` that never reached a save, a later
+      # `update_attribute` is a fresh write that must be normalized HERE, before
+      # Sanitizable's backstop, not left for settle to run after it.
       def normalizable_apply_unvalidated
-        apply_normalizations if @normalizable_applied.nil?
+        apply_normalizations
       end
 
       # Runs after every transform's backstop. Normalize only what the pass
