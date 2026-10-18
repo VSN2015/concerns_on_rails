@@ -137,6 +137,26 @@ module ConcernsOnRails
         blind_fingerprints(rule, value, zone_aware: zone_aware, legacy: false).first
       end
 
+      # Shared by both declaration orders of the uniqueness guard. `scope:`
+      # says whether the field was the validated attribute or a `scope:`.
+      def self.uniqueness_message(field, blind_index, scope:)
+        role = scope ? "the `scope:` of a uniqueness validation" : "validated with `uniqueness:`"
+        fix = if blind_index
+                "Check it through the blind index instead (`self.class.where_#{field}(#{field})" \
+                  ".where.not(id: id).exists?` in a `validate` block) and add a unique index on " \
+                  "#{blind_index[:column]}."
+              else
+                "Declare it with `blind_index: true` and check it through `where_#{field}` (plus a unique " \
+                  "index on the blind-index column)."
+              end
+        "#{LABEL}: ':#{field}' is encrypted and #{role}. UniquenessValidator compares the column with a fresh " \
+          "ciphertext (random IV), which matches no row, so the check always passes and duplicates are saved. #{fix}"
+      end
+
+      def self.uniqueness_validator?(validator)
+        validator.is_a?(Class) && validator <= ::ActiveRecord::Validations::UniquenessValidator
+      end
+
       # Shared by both declaration orders of the Lockable unlock-token guard.
       def self.lockable_token_message(field)
         "#{LABEL}: ':#{field}' is Lockable's unlock_token. The token is written and looked up by " \
@@ -476,6 +496,7 @@ module ConcernsOnRails
             encryptable_guard_queryable!(field)
             encryptable_guard_lockable_token!(field)
             bi = encryptable_normalize_blind_index(field, blind_index)
+            encryptable_guard_declared_uniqueness!(field, bi)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
             attribute field, EncryptedType.new(type: type, key: key)
@@ -598,6 +619,18 @@ module ConcernsOnRails
             raise ArgumentError, "#{LABEL}: #{field} is not an encryptable field (declared: #{encryptable_rules.keys.join(', ')})"
           end
           fields.map(&:to_sym) & rotatable
+        end
+
+        # A uniqueness validation declared AFTER `encryptable` (`validates
+        # :email, uniqueness: true` and validates_uniqueness_of both arrive
+        # here) is refused before it is registered; encryptable_guard_
+        # declared_uniqueness! covers the other order.
+        def validates_with(*args, &)
+          if args.any? { |arg| ConcernsOnRails::Models::Encryptable.uniqueness_validator?(arg) }
+            options = args.last.is_a?(Hash) ? args.last : {}
+            encryptable_guard_uniqueness!(Array(options[:attributes]), Array(options[:scope]))
+          end
+          super
         end
 
         private
@@ -787,6 +820,31 @@ module ConcernsOnRails
           return unless ConcernsOnRails::Support::SlugSources.names(self).include?(field.to_sym)
 
           raise ArgumentError, encryptable_slug_source_message(field)
+        end
+
+        # A uniqueness validation declared BEFORE `encryptable :field`, on the
+        # field or with it in `scope:`, can never find the existing row
+        # (see uniqueness_message).
+        def encryptable_guard_declared_uniqueness!(field, blind_index)
+          validators.each do |validator|
+            next unless ConcernsOnRails::Models::Encryptable.uniqueness_validator?(validator.class)
+
+            scope = Array(validator.options[:scope]).map(&:to_sym).include?(field)
+            next unless scope || validator.attributes.map(&:to_sym).include?(field)
+
+            raise ArgumentError, ConcernsOnRails::Models::Encryptable.uniqueness_message(field, blind_index, scope: scope)
+          end
+        end
+
+        def encryptable_guard_uniqueness!(attributes, scope)
+          rules = encryptable_rules
+          [[attributes, false], [scope, true]].each do |names, as_scope|
+            field = names.map(&:to_sym).find { |name| rules.key?(name) }
+            next unless field
+
+            raise ArgumentError,
+                  ConcernsOnRails::Models::Encryptable.uniqueness_message(field, rules[field][:blind_index], scope: as_scope)
+          end
         end
 
         # Lockable's unlock token is minted, claimed and retired by
