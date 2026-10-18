@@ -74,6 +74,9 @@ module ConcernsOnRails
       UNSET = Object.new.freeze
       # Adapters whose SQL supports row-value (tuple) comparison: (a, b) > (x, y).
       ROW_PREDICATE_ADAPTERS = /postgres|mysql|trilogy|sqlite/i
+      # Adapters that store a NUL byte in a text column AND escape it in a
+      # quoted literal, so a String boundary carrying one can have been minted.
+      NUL_LITERAL_ADAPTERS = /mysql|trilogy/i
       # Deliberately mutable: memoizes adapter row-predicate support per model
       # class — stable for the life of the process, benign write race.
       ROW_PREDICATE_SUPPORT_CACHE = {} # rubocop:disable Style/MutableConstant
@@ -610,10 +613,28 @@ module ConcernsOnRails
         return nil if raw.nil? # a NULL boundary; valid_cursor_values? only admits it on a nullable column
 
         type = model.type_for_attribute(col.to_s)
+        raise InvalidCursor, "Invalid pagination cursor." unless cursor_text_minted?(model, type, raw)
+
         value = cursor_type_cast(type, raw)
         raise InvalidCursor, "Invalid pagination cursor." unless cursor_bindable?(model, type, value)
 
         value
+      end
+
+      # JSON.parse admits raw invalid UTF-8 and "\u0000" inside a JSON string,
+      # so a hand-made cursor could carry either; the boundary is then inlined
+      # into the keyset WHERE as a quoted literal. Invalid UTF-8 is never
+      # minted (JSON.generate raises on it) and raised ArgumentError on Rails
+      # 7.0 / an encoding error on PostgreSQL. A NUL byte cut the statement
+      # short on SQLite (a StatementInvalid 500), and PostgreSQL cannot store
+      # one; only the MySQL adapters (which escape it) can hold and quote a row
+      # value carrying one, so only there is it a boundary we may have minted.
+      # A binary column's boundary is raw bytes, not text, and is left alone.
+      def cursor_text_minted?(model, type, raw)
+        return true unless raw.is_a?(String) && type.type != :binary
+        return false unless raw.valid_encoding?
+
+        !raw.include?("\u0000") || model.connection.adapter_name.match?(NUL_LITERAL_ADAPTERS)
       end
 
       # Rails 6.0–7.0's date and time casts raise Date._parse's ArgumentError
