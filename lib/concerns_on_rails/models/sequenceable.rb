@@ -195,13 +195,47 @@ module ConcernsOnRails
           while klass.respond_to?(:sequenceable_config) && (inherited = klass.sequenceable_config[field])
             owner = inherited[:owner]
             ref = owner.sequenceable_config.fetch(field)
-            if FORMAT_KEYS.all? { |key| ref[key] == cfg[key] }
+            keys = sequenceable_owner_keys(cfg)
+            if keys.all? { |key| ref[key] == cfg[key] }
               sequenceable_zone_matches!(field, klass, inherited, cfg.merge(owner: owner))
               return owner
             end
+            sequenceable_period_column_matches!(field, klass, inherited, cfg)
             klass = owner.superclass
           end
           self
+        end
+
+        # The tuple that decides whether two declarations share a counter.
+        # period_column: only cuts periods under reset:, so with :never it is
+        # not part of it: the two would count the same rows.
+        def sequenceable_owner_keys(cfg)
+          cfg[:reset] == :never ? FORMAT_KEYS - [:period_column] : FORMAT_KEYS
+        end
+
+        # An inherited owner that prints exactly this declaration's numbers but
+        # cuts its periods from another column is a series of its own (its MAX
+        # reads other rows), so both would issue "INV-2026-1". Refused at macro
+        # time, like a zone mismatch: put period_column: on the DECLARING class,
+        # or re-declare with ONLY assign: so it is inherited. Classes numbering
+        # over different relations never share a MAX, so they may differ.
+        def sequenceable_period_column_matches!(field, peer, peer_cfg, cfg)
+          owner = peer_cfg[:owner]
+          ref = owner.sequenceable_config.fetch(field)
+          return unless sequenceable_period_column_clash?(ref, cfg)
+          return unless sequence_numbering_class(cfg.merge(owner: owner)) == peer.send(:sequence_numbering_class, peer_cfg)
+
+          raise ArgumentError, "#{NAME}: #{name || inspect}##{field} renders the same format as " \
+                               "#{owner.name || owner.inspect} but cuts its reset: periods from period_column: " \
+                               ":#{cfg[:period_column]} instead of :#{ref[:period_column]}, so the two series would " \
+                               "issue the same number. Declare period_column: on the class that declares the " \
+                               "format, or re-declare with ONLY assign:/time_zone: to inherit it, or use a " \
+                               "different prefix:/template:"
+        end
+
+        def sequenceable_period_column_clash?(ref, cfg)
+          cfg[:reset] != :never && ref[:period_column] != cfg[:period_column] &&
+            (FORMAT_KEYS - [:period_column]).all? { |key| ref[key] == cfg[key] }
         end
 
         # Sharing a counter (same format) with `peer`, whose config is
@@ -287,6 +321,9 @@ module ConcernsOnRails
         def ensure_sequenceable_period_column!(cfg)
           column = cfg[:period_column]
           return unless ensure_columns!(NAME, column, types: :datetime)
+
+          # The default created_at keeps whatever type its adapter reports.
+          return if column == :created_at
 
           type = columns_hash[column.to_s].type
           return if PERIOD_COLUMN_TYPES.include?(type)
@@ -399,7 +436,12 @@ module ConcernsOnRails
           self.class.transaction(requires_new: true) { saved = save! }
         ensure
           # Also covers an ActiveRecord::Rollback the savepoint swallowed.
-          previous.each { |column, value| self[column] = value } unless saved
+          unless saved
+            previous.each { |column, value| self[column] = value }
+            # The failed attempt's memoized "now" (SequenceCalculator#base_time)
+            # must not outlive it: a retry after midnight would reuse its period.
+            @_sequenceable_now = nil
+          end
         end
         saved ? true : false
       end
@@ -417,7 +459,7 @@ module ConcernsOnRails
         column = cfg[:period_column]
         return if cfg[:reset] == :never || !self[column].nil?
 
-        self[column] = self.class.send(:base_time, self, column)
+        self[column] = self.class.send(:period_stamp, cfg, self)
       end
       private :sequenceable_pin_period_column
     end

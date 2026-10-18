@@ -40,9 +40,23 @@ module ConcernsOnRails
 
         time = period_time(cfg, record)
         in_period = rel.where(cfg[:period_column] => period_range(cfg[:reset], time))
+        in_period = in_period.or(sequence_unstamped_in_period(rel, cfg, time)) if sequence_legacy_rows?(cfg)
         return in_period unless cfg[:into] && cfg[:template].nil?
 
         in_period.or(rel.where(sequence_stored_token_match(cfg, time)))
+      end
+
+      # A custom period_column only exists from the switch on: rows numbered
+      # before it carry NULL there and sit in their period by created_at (the
+      # column they were counted by). Without them the first number after the
+      # switch would repeat one already issued. An unnumbered draft (also NULL
+      # there) never matters: MAX ignores a NULL field.
+      def sequence_legacy_rows?(cfg)
+        cfg[:period_column] != :created_at && sequence_numbering_class(cfg).column_names.include?("created_at")
+      end
+
+      def sequence_unstamped_in_period(rel, cfg, time)
+        rel.where(cfg[:period_column] => nil, created_at: period_range(cfg[:reset], time))
       end
 
       # Rows whose STORED into: value already carries this period's
@@ -109,8 +123,22 @@ module ConcernsOnRails
       # is resolved here, not at macro time, because config.time_zone is
       # applied by an initializer that may run after the model is loaded.
       def period_time(cfg, record)
-        zone = cfg[:time_zone] || Time.zone_default || ActiveSupport::TimeZone["UTC"]
-        base_time(record, cfg[:period_column]).in_time_zone(zone)
+        base_time(record, cfg[:period_column]).in_time_zone(period_zone(cfg))
+      end
+
+      def period_zone(cfg)
+        cfg[:time_zone] || Time.zone_default || ActiveSupport::TimeZone["UTC"]
+      end
+
+      # What the period column is stamped with: the anchor instant, or for a
+      # date column its calendar day IN THE FIELD'S ZONE — casting the instant
+      # as is would take the day in the request's Time.zone, and the stored
+      # date could fall in another period than the number's token.
+      def period_stamp(cfg, record)
+        time = base_time(record, cfg[:period_column])
+        return time unless columns_hash[cfg[:period_column].to_s]&.type == :date
+
+        time.in_time_zone(period_zone(cfg)).to_date
       end
 
       # nil (the option omitted) stays nil: the app default is resolved at use.

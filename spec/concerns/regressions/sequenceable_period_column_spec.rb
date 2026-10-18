@@ -11,6 +11,7 @@ RSpec.describe "Sequenceable period_column:" do
         t.integer :sequence
         t.string :number
         t.datetime :finalized_at
+        t.date :finalized_on
         t.string :type
         t.timestamps null: true
       end
@@ -183,14 +184,74 @@ RSpec.describe "Sequenceable period_column:" do
       expect(config).to include(period_column: :finalized_at, assign: :manual, owner: parent)
     end
 
-    it "treats period_column as part of the format: a different one starts its own series" do
+    # Review of SCOPE-5: a different period_column under an otherwise identical
+    # visible format would be its own owner (MAX over its own type-filtered
+    # rows) and print the parent's numbers again (INV-2026-1 twice).
+    it "refuses a re-declaration that restates the parent's visible format with a different period_column" do
+      parent = Class.new(TestModel) do
+        self.table_name = "pc_invoices"
+        include ConcernsOnRails::Models::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", reset: :year, time_zone: "UTC"
+      end
+      stub_const("PcInvoice", parent)
+
+      expect do
+        Class.new(parent) do
+          sequenceable_by :sequence, into: :number, prefix: "INV-", reset: :year, time_zone: "UTC",
+                                     assign: :manual, period_column: :finalized_at
+        end
+      end.to raise_error(ArgumentError, /period_column.*finalized_at.*created_at|created_at.*finalized_at/m)
+    end
+
+    it "refuses the reverse too (the parent anchors on a stamp, the subclass restates on created_at)" do
+      parent = build_class(period_column: :finalized_at)
+      stub_const("PcInvoice", parent)
+
+      expect do
+        Class.new(parent) do
+          sequenceable_by :sequence, into: :number, prefix: "INV-", reset: :year, time_zone: "UTC"
+        end
+      end.to raise_error(ArgumentError, /period_column/)
+    end
+
+    it "refuses it past an intermediate subclass that numbers its own series" do
+      parent = build_class
+      stub_const("PcInvoice", parent)
+      middle = Class.new(parent) { sequenceable_by :sequence, prefix: "CN-" }
+      stub_const("PcCredit", middle)
+
+      expect do
+        Class.new(middle) do
+          sequenceable_by :sequence, into: :number, prefix: "INV-", reset: :year, time_zone: "UTC",
+                                     assign: :manual, period_column: :finalized_at
+        end
+      end.to raise_error(ArgumentError, /period_column/)
+    end
+
+    it "lets a different period_column start its own series when the visible format differs" do
       parent = build_class(period_column: :finalized_at)
       stub_const("PcInvoice", parent)
       sibling = Class.new(parent) do
-        sequenceable_by :sequence, into: :number, prefix: "INV-", reset: :year, time_zone: "UTC"
+        sequenceable_by :sequence, into: :number, prefix: "CN-", reset: :year, time_zone: "UTC"
       end
 
       expect(sibling.sequenceable_config[:sequence]).to include(period_column: :created_at, owner: sibling)
+    end
+
+    it "does not refuse a different period_column under reset: :never, and keeps the shared counter" do
+      parent = Class.new(TestModel) do
+        self.table_name = "pc_invoices"
+        include ConcernsOnRails::Models::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-"
+      end
+      stub_const("PcInvoice", parent)
+      child = Class.new(parent) do
+        sequenceable_by :sequence, into: :number, prefix: "INV-", period_column: :finalized_at
+      end
+
+      expect(child.sequenceable_config[:sequence][:owner]).to eq(parent)
     end
 
     it "restates the format (period_column back to created_at) on a call without it" do
@@ -199,6 +260,171 @@ RSpec.describe "Sequenceable period_column:" do
       other = Class.new(parent) { sequenceable_by :sequence, prefix: "CN-" }
 
       expect(other.sequenceable_config[:sequence][:period_column]).to eq(:created_at)
+    end
+  end
+
+  # Review of SCOPE-5, MEDIUM-2: rows numbered BEFORE the switch have a NULL
+  # period column; they must keep counting by their created_at.
+  describe "switching an existing series to a period_column" do
+    def legacy_class(**options)
+      Class.new(TestModel) do
+        self.table_name = "pc_invoices"
+        include ConcernsOnRails::Models::Sequenceable
+
+        sequenceable_by :sequence, prefix: "INV-", reset: :year, time_zone: "UTC", **options
+      end
+    end
+
+    it "counts rows numbered before the switch (NULL period column) by their created_at" do
+      legacy = legacy_class
+      travel_to(Time.utc(2025, 6, 1)) { legacy.create! }
+      travel_to(Time.utc(2026, 2, 1)) { legacy.create! }
+
+      switched = legacy_class(assign: :manual, period_column: :finalized_at)
+      draft = travel_to(Time.utc(2026, 3, 1)) { switched.create! }
+      travel_to(Time.utc(2026, 3, 2)) { draft.assign_sequence! }
+
+      expect(draft.sequence).to eq(2)
+      expect(draft.formatted_sequence).to eq("INV-2026-2")
+    end
+
+    it "counts them too under a template:" do
+      legacy = legacy_class(template: ->(seq, _record) { "N#{seq}" })
+      travel_to(Time.utc(2026, 2, 1)) { legacy.create! }
+
+      switched = legacy_class(template: legacy.sequenceable_config[:sequence][:template],
+                              assign: :manual, period_column: :finalized_at)
+      draft = travel_to(Time.utc(2026, 3, 1)) { switched.create! }
+      travel_to(Time.utc(2026, 3, 2)) { draft.assign_sequence! }
+
+      expect(draft.sequence).to eq(2)
+    end
+
+    it "does not count a pre-switch row of an earlier period, nor an unnumbered draft" do
+      legacy = legacy_class
+      travel_to(Time.utc(2025, 6, 1)) { legacy.create! }
+
+      switched = legacy_class(assign: :manual, period_column: :finalized_at)
+      travel_to(Time.utc(2026, 2, 1)) { switched.create! } # a draft: no number, NULL stamp
+      draft = travel_to(Time.utc(2026, 3, 1)) { switched.create! }
+      travel_to(Time.utc(2026, 3, 2)) { draft.assign_sequence! }
+
+      expect(draft.sequence).to eq(1)
+    end
+
+    it "keeps counting by the stamp where one is set (a row created in 2025, finalized in 2026)" do
+      switched = legacy_class(assign: :manual, period_column: :finalized_at)
+      early = travel_to(Time.utc(2025, 12, 20)) { switched.create! }
+      travel_to(Time.utc(2026, 1, 3)) { early.assign_sequence! }
+      late = travel_to(Time.utc(2026, 1, 4)) { switched.create! }
+      travel_to(Time.utc(2026, 1, 5)) { late.assign_sequence! }
+
+      expect([early.sequence, late.sequence]).to eq([1, 2])
+    end
+
+    it "works on a table without created_at" do
+      ActiveRecord::Schema.define do
+        create_table :pc_stamped, force: true do |t|
+          t.integer :sequence
+          t.datetime :finalized_at
+        end
+      end
+      klass = Class.new(TestModel) do
+        self.table_name = "pc_stamped"
+        include ConcernsOnRails::Models::Sequenceable
+
+        sequenceable_by :sequence, reset: :year, time_zone: "UTC", assign: :manual, period_column: :finalized_at
+      end
+      first = travel_to(Time.utc(2026, 1, 3)) { klass.create!.tap(&:assign_sequence!) }
+      second = travel_to(Time.utc(2026, 1, 4)) { klass.create!.tap(&:assign_sequence!) }
+
+      expect([first.sequence, second.sequence]).to eq([1, 2])
+    ensure
+      ActiveRecord::Base.connection.drop_table(:pc_stamped, if_exists: true)
+    end
+  end
+
+  # Review of SCOPE-5, LOW-1: a date column is stamped in the field's fixed
+  # zone, never the request's Time.zone.
+  describe "a date period column" do
+    let(:klass) do
+      Class.new(TestModel) do
+        self.table_name = "pc_invoices"
+        include ConcernsOnRails::Models::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", reset: :year, assign: :manual,
+                                   time_zone: "UTC", period_column: :finalized_on
+      end
+    end
+
+    it "stamps the date in the field's zone even while a request zone is active" do
+      draft = travel_to(Time.utc(2025, 12, 20)) { klass.create! }
+
+      # 2025-12-31 20:00 UTC is already 2026-01-01 in Auckland
+      travel_to(Time.utc(2025, 12, 31, 20)) do
+        Time.use_zone("Auckland") { draft.assign_sequence! }
+      end
+
+      expect(draft.reload.finalized_on).to eq(Date.new(2025, 12, 31))
+      expect(draft.number).to eq("INV-2025-1")
+    end
+
+    it "keeps the same period on the next number (the stored date is found in the range)" do
+      first = travel_to(Time.utc(2025, 12, 20)) { klass.create! }
+      travel_to(Time.utc(2025, 12, 31, 20)) { Time.use_zone("Auckland") { first.assign_sequence! } }
+      second = travel_to(Time.utc(2025, 12, 31, 21)) { klass.create! }
+      travel_to(Time.utc(2025, 12, 31, 21)) { second.assign_sequence! }
+
+      expect(second.number).to eq("INV-2025-2")
+    end
+  end
+
+  # Review of SCOPE-5, LOW-2: the type allow-list is for a CUSTOM column; the
+  # default created_at keeps whatever the adapter reports.
+  describe "the default created_at column" do
+    it "is not held to the period-column type allow-list" do
+      expect do
+        Class.new(TestModel) do
+          self.table_name = "pc_invoices"
+          include ConcernsOnRails::Models::Sequenceable
+
+          # an adapter reporting its own name for the timestamp type
+          def self.columns_hash
+            column = Class.new(SimpleDelegator) { def type = :datetimeoffset }.new(super["created_at"])
+            super.merge("created_at" => column)
+          end
+
+          sequenceable_by :sequence, prefix: "INV-", reset: :year, time_zone: "UTC"
+        end
+      end.not_to raise_error
+    end
+
+    it "still refuses a custom column of an unlisted type" do
+      expect { build_class(period_column: :number) }.to raise_error(ArgumentError, /string column/)
+    end
+  end
+
+  # Review of SCOPE-5, LOW-3: the memoized "now" must not outlive a failed
+  # assign_<field>!, or a retry after midnight reuses the old instant.
+  describe "a retried assign_<field>! after a failed save" do
+    it "reads a fresh clock instead of the instant memoized by the failed attempt" do
+      klass = build_class(period_column: :finalized_at)
+      draft = travel_to(Time.utc(2025, 12, 20)) { klass.create! }
+      calls = 0
+      allow(draft).to receive(:save!).and_wrap_original do |original, *args|
+        calls += 1
+        raise ActiveRecord::RecordNotUnique if calls == 1
+
+        original.call(*args)
+      end
+
+      travel_to(Time.utc(2025, 12, 31, 23, 59)) do
+        expect { draft.assign_sequence! }.to raise_error(ActiveRecord::RecordNotUnique)
+      end
+      travel_to(Time.utc(2026, 1, 1, 0, 1)) { draft.assign_sequence! }
+
+      expect(draft.number).to eq("INV-2026-1")
+      expect(draft.reload.finalized_at).to eq(Time.utc(2026, 1, 1, 0, 1))
     end
   end
 
