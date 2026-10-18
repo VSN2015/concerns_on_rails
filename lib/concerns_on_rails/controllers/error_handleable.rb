@@ -159,51 +159,51 @@ module ConcernsOnRails
         @error_handleable_exception = nil
       end
 
-      def handle_record_not_found(_error)
+      def handle_record_not_found(error)
         # Use a generic message: the raw RecordNotFound message leaks the model
         # class name and the queried attribute/value to API clients. Subclasses
         # can override this method to surface detail in non-production envs.
-        render_handled_error(:not_found, message: "Resource not found")
+        render_handled_error(:not_found, message: "Resource not found", error: error)
       end
 
       def handle_parameter_missing(error)
-        render_handled_error(:parameter_missing, message: "Parameter missing: #{error.param}")
+        render_handled_error(:parameter_missing, message: "Parameter missing: #{error.param}", error: error)
       end
 
       def handle_record_invalid(error)
-        render_handled_error(:record_invalid, message: error.message, errors: record_error_details(error))
+        render_handled_error(:record_invalid, message: error.message, errors: record_error_details(error), error: error)
       end
 
       # `validate!` on a plain ActiveModel::Model (form objects, service inputs).
       def handle_validation_error(error)
         model = error.respond_to?(:model) ? error.model : nil
-        render_handled_error(:validation_error, message: error.message, errors: error_messages_of(model))
+        render_handled_error(:validation_error, message: error.message, errors: error_messages_of(model), error: error)
       end
 
       # `save!` refused by a callback abort (`throw :abort`) — the record may or
       # may not carry errors, so details are attached only when it does.
       def handle_record_not_saved(error)
-        render_handled_error(:record_not_saved, message: error.message, errors: record_error_details(error))
+        render_handled_error(:record_not_saved, message: error.message, errors: record_error_details(error), error: error)
       end
 
       def handle_record_not_destroyed(error)
-        render_handled_error(:record_not_destroyed, message: error.message, errors: record_error_details(error))
+        render_handled_error(:record_not_destroyed, message: error.message, errors: record_error_details(error), error: error)
       end
 
       # Optimistic locking (`lock_version`) lost the race. The raw message names
       # the model class; the client only needs to know to reload and retry.
-      def handle_stale_object(_error)
-        render_handled_error(:stale_object, message: "Resource was modified by another request; reload and retry")
+      def handle_stale_object(error)
+        render_handled_error(:stale_object, message: "Resource was modified by another request; reload and retry", error: error)
       end
 
       # A unique index caught what a uniqueness validation raced past. The raw
       # message is the adapter's SQL error — table and column included.
-      def handle_record_not_unique(_error)
-        render_handled_error(:record_not_unique, message: "Resource already exists")
+      def handle_record_not_unique(error)
+        render_handled_error(:record_not_unique, message: "Resource already exists", error: error)
       end
 
-      def handle_invalid_foreign_key(_error)
-        render_handled_error(:foreign_key_violation, message: "Resource is referenced by other records")
+      def handle_invalid_foreign_key(error)
+        render_handled_error(:foreign_key_violation, message: "Resource is referenced by other records", error: error)
       end
 
       # Only raised with `config.action_controller.action_on_unpermitted_parameters = :raise`.
@@ -211,28 +211,28 @@ module ConcernsOnRails
         names = error.respond_to?(:params) ? Array(error.params).map(&:to_s) : []
         render_handled_error(:unpermitted_parameters,
                              message: "Unpermitted parameters: #{names.join(', ')}",
-                             errors: names.empty? ? nil : names)
+                             errors: names.empty? ? nil : names, error: error)
       end
 
-      def handle_invalid_authenticity_token(_error)
-        render_handled_error(:invalid_authenticity_token, message: "Invalid authenticity token")
+      def handle_invalid_authenticity_token(error)
+        render_handled_error(:invalid_authenticity_token, message: "Invalid authenticity token", error: error)
       end
 
       # Malformed query string / form body (bad %-encoding, invalid UTF-8). The
       # raw message echoes the offending input — never reflect it back.
-      def handle_bad_request(_error)
-        render_handled_error(:bad_request, message: "Bad request")
+      def handle_bad_request(error)
+        render_handled_error(:bad_request, message: "Bad request", error: error)
       end
 
       # Unparseable JSON/XML request body. The raw message carries the parser's
       # excerpt of the body.
-      def handle_parse_error(_error)
-        render_handled_error(:parse_error, message: "Malformed request body")
+      def handle_parse_error(error)
+        render_handled_error(:parse_error, message: "Malformed request body", error: error)
       end
 
       # `respond_to` had no block for the requested format.
-      def handle_unknown_format(_error)
-        render_handled_error(:unknown_format, message: "Requested format is not supported")
+      def handle_unknown_format(error)
+        render_handled_error(:unknown_format, message: "Requested format is not supported", error: error)
       end
 
       private
@@ -264,9 +264,15 @@ module ConcernsOnRails
       end
 
       # Renders the envelope for a HANDLERS key: code = key, status from the table.
-      def render_handled_error(key, message:, errors: nil)
+      # `error:` is the exception the handler was invoked with. Rescuable walks
+      # `#cause`, so when a wrapper (ActionView::Template::Error, an app's
+      # `raise ServiceError`) was rescued, that is the cause the key was matched
+      # on, not the wrapper `rescue_with_handler` saw first. A handler called
+      # outside a rescue still reports nil.
+      def render_handled_error(key, message:, errors: nil, error: nil)
         status = HANDLERS.fetch(key)[:status]
-        on_handled_error(key, @error_handleable_exception, status: status, message: message)
+        rescued = @error_handleable_exception
+        on_handled_error(key, rescued && (error || rescued), status: status, message: message)
         render_error_envelope(message: message, code: key.to_s, status: status, errors: errors)
       end
 

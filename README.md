@@ -2213,7 +2213,7 @@ handle_errors only: %i[not_found parameter_missing record_invalid] # just the or
 declarations keep precedence. Unknown keys raise `ArgumentError` listing the valid ones;
 `error_handleable_keys` returns the keys still active on a controller.
 
-**Reporting** — every handled error instruments `handled_error.concerns_on_rails` (`controller`, `action`, `code`, `status`, `message`, `exception`, `exception_class`) via the public `on_handled_error(key, error, status:, message:)` override point, so the 409s reach your error tracker while the 404s stay quiet:
+**Reporting** — every handled error instruments `handled_error.concerns_on_rails` (`controller`, `action`, `code`, `status`, `message`, `exception`, `exception_class`) via the public `on_handled_error(key, error, status:, message:)` override point, so the 409s reach your error tracker while the 404s stay quiet. `error` is the exception the handler actually matched — the `#cause` when a wrapper (`ActionView::Template::Error`, your own `raise ServiceError`) was rescued — and `nil` for a handler called directly:
 
 ```ruby
 def on_handled_error(key, error, **)
