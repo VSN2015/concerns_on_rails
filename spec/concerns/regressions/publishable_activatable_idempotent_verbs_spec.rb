@@ -262,6 +262,29 @@ describe "Publishable / Activatable verbs on an already-transitioned record" do
     end
   end
 
+  # Review follow-up: the guards asked persisted?, which a DESTROYED record
+  # fails, so an already-published / active one ran the transition and hit the
+  # frozen record where it used to return true. They ask !new_record?, like
+  # the sibling guards.
+  describe "a destroyed record already in the target state" do
+    it "publish! stays a no-op" do
+      post = model.create!(published_at: earlier)
+      post.destroy
+
+      expect(post.publish!).to be(true)
+    end
+
+    it "activate! and deactivate! stay no-ops" do
+      active = model.create!(active: true)
+      active.destroy
+      inactive = model.create!(active: false)
+      inactive.destroy
+
+      expect(active.activate!).to be(true)
+      expect(inactive.deactivate!).to be(true)
+    end
+  end
+
   describe "#toggle_active!" do
     it "still flips both ways and fires the hooks each time" do
       post = model.create!(active: false)

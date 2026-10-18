@@ -264,14 +264,14 @@ module ConcernsOnRails
       # skips) — nothing is stamped and no hook fires, where it used to
       # rewrite the "published on" time to now and fire after_publish again on
       # every call (a double-submitted button, a retried job). "Already" means
-      # the SAVED state: a persisted record, no unsaved change to the column,
+      # the SAVED state: a stored record (destroyed included), no unsaved change to the column,
       # a saved value that reads as published. Anything else — a new record, an
       # unsaved flip of the column, a draft or scheduled row — publishes now.
       # A no-op that finds OTHER pending changes saves them (no re-stamp, no
       # hooks) rather than dropping them. Read through the private check, not
       # the overridable published?. publish_at! still writes any time.
       def publish!
-        if persisted? && !will_save_change_to_attribute?(self.class.publishable_field) && publishable_published?
+        if !new_record? && !will_save_change_to_attribute?(self.class.publishable_field) && publishable_published?
           return has_changes_to_save? ? save : true
         end
 

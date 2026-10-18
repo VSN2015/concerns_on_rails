@@ -192,7 +192,7 @@ module ConcernsOnRails
       # (true, nothing stamped, no hook) — the rows activate_all /
       # deactivate_all skip. They used to rewrite activated_at /
       # deactivated_at and fire the hooks again. "Already" means the SAVED
-      # state: a persisted record, no unsaved change to the flag, a saved value
+      # state: a stored record (destroyed included), no unsaved change to the flag, a saved value
       # in the target state (deactivate! still writes false over a NULL flag).
       # A new record or an unsaved flip of the flag runs the transition; a
       # no-op that finds OTHER pending changes saves them (no stamp, no hooks)
@@ -251,7 +251,7 @@ module ConcernsOnRails
       # `false`, so deactivate! still writes it).
       def activatable_settled?(target)
         field = self.class.activatable_field
-        persisted? && !will_save_change_to_attribute?(field) && self[field] == target
+        !new_record? && !will_save_change_to_attribute?(field) && self[field] == target
       end
 
       def activatable_settle

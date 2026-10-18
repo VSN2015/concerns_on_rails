@@ -68,7 +68,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   the column type. `default_scope: true` hides unpublished (ONE flag-driven default_scope,
   registered only once a class first asks; an omitted `default_scope:` keeps the inherited
   flag, an explicit `false` turns it off). Lifecycle hooks:
-  `before/after_publish`, `before/after_unpublish` (`publish!` is a no-op on a persisted record whose SAVED state is published and whose column has no unsaved change, saving any other pending changes; read through the private `publishable_published?`). Batch `publish_all`/`unpublish_all`
+  `before/after_publish`, `before/after_unpublish` (`publish!` is a no-op on a stored (not new, destroyed included) record whose SAVED state is published and whose column has no unsaved change, saving any other pending changes; read through the private `publishable_published?`). Batch `publish_all`/`unpublish_all`
   (atomic; single-UPDATE fast path when the hooks/bang methods are unoverridden AND the
   model has no validators — `update` in the per-record path runs them, `update_all` doesn't).
   Every hooked verb (here and in SoftDeletable/Expirable/Activatable/Stateable/Anonymizable)
@@ -114,7 +114,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   ones kept; internal logic uses private checks, so sibling collisions can't flip
   `toggle_active!`); an affixed predicate shadowing a different column's query method raises.
 - **`Activatable`** — boolean active flag (default `active`); `active`/`inactive` scopes
-  (affixable via `prefix:`/`suffix:`), `activate!`/`deactivate!` (no-ops, saving other pending changes, on a persisted record whose SAVED flag is already in the target state; a new record or an unsaved flip transitions)/`toggle_active!`. Batch
+  (affixable via `prefix:`/`suffix:`), `activate!`/`deactivate!` (no-ops, saving other pending changes, on a stored (not new) record whose SAVED flag is already in the target state; a new record or an unsaved flip transitions)/`toggle_active!`. Batch
   `activate_all`/`deactivate_all` (same validators-gated fast path as Publishable/Expirable).
 - **`Stateable`** — lightweight string-backed state machine: states, `default:`,
   `transitions:`, `prefix:`/`suffix:`, `lock:`, `timestamps:` (`<state>_at` stamped on entry;
