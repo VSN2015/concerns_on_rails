@@ -89,6 +89,7 @@ module ConcernsOnRails
     autoload :Callable,                "concerns_on_rails/support/callable"
     autoload :SlugSources,             "concerns_on_rails/support/slug_sources"
     autoload :GeneratedValues,         "concerns_on_rails/support/generated_values"
+    autoload :WriteBoundary,           "concerns_on_rails/support/write_boundary"
     autoload :EncryptedLookup,         "concerns_on_rails/support/encrypted_lookup"
   end
 end

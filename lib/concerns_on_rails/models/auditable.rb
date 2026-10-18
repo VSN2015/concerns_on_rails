@@ -3,6 +3,7 @@ require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/callable"
 require "concerns_on_rails/support/time_value"
+require "concerns_on_rails/support/write_boundary"
 require "bigdecimal"
 require "json"
 
@@ -42,9 +43,11 @@ module ConcernsOnRails
     # Notes:
     #   * One entry per changed field per save; creates record `"from" => nil`.
     #     "by" is omitted entirely when no actor is configured (or it returns nil).
-    #   * Entries are appended in the same INSERT/UPDATE via before_save — no
-    #     extra queries. Writes that skip callbacks (update_column(s), touch,
-    #     increment!) are NOT audited.
+    #   * Entries are appended in the same INSERT/UPDATE, captured at the write
+    #     boundary (Support::WriteBoundary) after every before_* callback, so
+    #     they record the values actually written — no extra queries. Writes
+    #     that skip callbacks (update_column(s), touch, increment!) are NOT
+    #     audited.
     #   * Values are JSON-coerced: times → ISO8601 UTC strings, BigDecimal →
     #     plain numeric string, symbols → strings. With `max_value_length:`,
     #     String values longer than the limit are stored as the first N
@@ -74,6 +77,8 @@ module ConcernsOnRails
         class_attribute :auditable_actor_set, instance_accessor: false, default: false
         class_attribute :auditable_max_entries, instance_accessor: false, default: DEFAULT_MAX_ENTRIES
         class_attribute :auditable_max_value_length, instance_accessor: false, default: nil
+
+        include ConcernsOnRails::Support::WriteBoundary
       end
 
       module ClassMethods
@@ -95,8 +100,6 @@ module ConcernsOnRails
           self.auditable_max_value_length = max_value_length
           ensure_columns!(LABEL, into, *fields, types: { into => :text })
           auditable_guard_encryptable!(fields)
-
-          before_save :auditable_capture_changes
         end
 
         private
@@ -192,12 +195,21 @@ module ConcernsOnRails
 
       private
 
-      # before_save hook — appends one entry per changed tracked field so the
-      # audit column rides the same INSERT/UPDATE statement. Remembers what it
-      # captured, so a column generated later in the same create can be folded
-      # in (see #auditable_generated_values_assigned).
+      # Support::WriteBoundary consumer, run after every before_* callback (and
+      # after Encryptable's blind-index refresh): the entries describe the
+      # values actually written — a tracked column the app's own later
+      # callback rewrote, or one a sibling generated in before_create (a
+      # Sequenceable number, a Tokenizable/Hashable value, a slug built from
+      # one). A save a callback aborts never gets here. Returns the audit
+      # column, for the boundary to add to the written column list.
+      def auditable_before_write(_create)
+        auditable_capture_changes
+        [self.class.auditable_into]
+      end
+
+      # Appends one entry per changed tracked field so the audit column rides
+      # the same INSERT/UPDATE statement.
       def auditable_capture_changes
-        @_auditable_captured = nil
         fields = self.class.auditable_fields
         return if fields.blank?
         return unless auditable_any_tracked_change?(fields)
@@ -205,25 +217,10 @@ module ConcernsOnRails
         tracked = auditable_tracked_changes(fields)
         return if tracked.empty?
 
-        @_auditable_captured = tracked
         entries = auditable_persisted_trail + auditable_build_entries(tracked)
         max = self.class.auditable_max_entries
         entries = entries.last(max) if max
         self[self.class.auditable_into] = auditable_encode(entries)
-      end
-
-      # Support::GeneratedValues consumer. A tracked column generated in
-      # before_create (a Sequenceable number, a Tokenizable/Hashable value, a
-      # slug built from one) did not exist yet when the before_save capture
-      # ran, so the creation entry left it out. Re-capture when the tracked
-      # changes now differ: the trail is rebuilt from the PERSISTED column, so
-      # this replaces the entries of this save instead of duplicating them.
-      def auditable_generated_values_assigned(_columns)
-        fields = self.class.auditable_fields
-        return if fields.blank?
-        return if auditable_tracked_changes(fields) == (@_auditable_captured || {})
-
-        auditable_capture_changes
       end
 
       def auditable_tracked_changes(fields)

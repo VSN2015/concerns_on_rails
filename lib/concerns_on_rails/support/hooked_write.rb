@@ -27,7 +27,7 @@ module ConcernsOnRails
     #   guards (`return true if deleted?`) would otherwise turn every retry
     #   into a silent no-op. Restoring only the verb's own column was not
     #   enough: whatever else the write changed in memory — the entry
-    #   Auditable's before_save appended to the trail, a before-hook's
+    #   Auditable appended to the trail, a before-hook's
     #   assignment — stayed behind, clean or dirty, and the next unrelated
     #   save persisted it (a phantom "draft -> published" audit entry for a
     #   vetoed transition). An attribute that was already dirty before the
