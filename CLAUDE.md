@@ -304,7 +304,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   automatically (timestamps, Sluggable slug, Tokenizable/Hashable tokens,
   Sequenceable numbers, Auditable trail, SoftDeletable stamp, Lockable
   attempts/locked_at, counter columns kept by children's CounterCacheable rules or native
-  `counter_cache:`) so sibling concerns regenerate on save; a Duplicable
+  `counter_cache:`, and the TOP-LEVEL copy's acts_as_list position; a deep-copied child keeps its
+  position only when its acts_as_list scope names the copied association's foreign key — the
+  copy goes into the new parent's own list — else it is blanked too, an opaque String scope
+  included; children are fed to acts_as_list in position order) so sibling concerns regenerate on save; a Duplicable
   child copies via its OWN rules (recursive graphs); `on_duplicate(copy)`
   hook. `duplicate!` re-reads the counters + `lock_version` of the copy and of every nested Duplicable copy inside its save transaction, with one SELECT per class in the copied graph (never per record).
 
