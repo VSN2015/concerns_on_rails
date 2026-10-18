@@ -138,27 +138,47 @@ module ConcernsOnRails
 
         # Thin pass-through to Rails' native CSP DSL — never re-implement CSP.
         # Forwards per-action conditions (only: / except: / if: / unless:) and
-        # the policy block straight through. Every call also sets the mode for
-        # the actions it covers: report_only: false (the default) ENFORCES, even
-        # over a report-only flag a parent controller or the app config set.
-        def content_security_policy_for(report_only: false, **action_opts, &block)
+        # the policy block straight through.
+        #
+        # report_only: is three-state. Omitted (or :inherit) leaves the flag
+        # exactly as inherited — a parent controller's or
+        # `config.content_security_policy_report_only`'s — so a controller that
+        # only adds a CDN to img_src never flips a report-only rollout to
+        # enforcing. `false` ENFORCES, even over an inherited report-only flag;
+        # `true` reports only. An explicit value sets the mode for the actions
+        # the call covers.
+        def content_security_policy_for(report_only: :inherit, **action_opts, &block)
           unless respond_to?(:content_security_policy)
             raise ArgumentError,
                   "ConcernsOnRails::Controllers::SecureHeadable: CSP requires " \
                   "ActionController::ContentSecurityPolicy (Rails 5.2+)"
           end
 
+          SecureHeadable.validate_report_only!(report_only)
+
           # The policy block is ONLY accepted by content_security_policy; the
           # report-only variant is a flag toggle that takes no block. So always
           # define the policy via content_security_policy, then set the flag —
           # otherwise a report-only rollout would silently register no policy at
-          # all (the block would be dropped). The flag is forwarded BOTH ways:
-          # Rails keeps it in its own inherited before_action, not in the policy,
-          # so only an explicit `false` turns an inherited (or app-wide)
-          # report-only policy into an enforced one.
+          # all (the block would be dropped). Rails keeps the flag in its own
+          # inherited before_action, not in the policy, so only an explicit
+          # `false` turns an inherited (or app-wide) report-only policy into an
+          # enforced one. (An explicit flag is a second before_action, so a
+          # Proc `if:`/`unless:` is evaluated once per before_action.)
           content_security_policy(**action_opts, &block)
-          content_security_policy_report_only(report_only ? true : false, **action_opts)
+          content_security_policy_report_only(report_only, **action_opts) unless report_only == :inherit
         end
+      end
+
+      REPORT_ONLY_MODES = [true, false, :inherit].freeze
+
+      # Module-level (not a class method) so the macro stays under the block cap.
+      def self.validate_report_only!(value)
+        return if REPORT_ONLY_MODES.include?(value)
+
+        raise ArgumentError,
+              "ConcernsOnRails::Controllers::SecureHeadable: report_only: must be " \
+              "true, false or :inherit, got #{value.inspect}"
       end
 
       # Public so subclasses can override; guarded exactly like Paginatable so

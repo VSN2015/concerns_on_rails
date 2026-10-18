@@ -121,27 +121,57 @@ describe ConcernsOnRails::Controllers::SecureHeadable do
       expect(report[3]).to be_nil
     end
 
-    it "delegates to content_security_policy and clears report-only by default, forwarding per-action options to both" do
+    def recording_class
       calls = []
       base = Class.new(base_class) do
         define_singleton_method(:content_security_policy) { |*a, **k, &b| calls << [:enforce, a, k, b] }
         define_singleton_method(:content_security_policy_report_only) { |*a, **k, &b| calls << [:report, a, k, b] }
       end
-      klass = controller_class(base)
+      [controller_class(base), calls]
+    end
+
+    it "delegates to content_security_policy (enforcing) by default, leaves the report-only flag alone and forwards per-action options" do
+      klass, calls = recording_class
       block = ->(policy) { policy }
 
       klass.content_security_policy_for(only: :show, &block)
 
-      expect(calls.size).to eq(2)
+      expect(calls.size).to eq(1)
       kind, args, opts, forwarded = calls.first
       expect(kind).to eq(:enforce)
       expect(args).to eq([])
       expect(opts).to eq(only: :show)
       expect(forwarded).to eq(block)
-      # The flag is forwarded as `false`, not skipped: Rails keeps report-only
-      # in its own inherited before_action, so skipping it left an inherited
-      # (or app-wide) report-only policy reporting instead of enforcing.
+    end
+
+    it "leaves the report-only flag alone for report_only: :inherit" do
+      klass, calls = recording_class
+
+      klass.content_security_policy_for(report_only: :inherit) { |policy| policy }
+
+      expect(calls.map(&:first)).to eq([:enforce])
+    end
+
+    it "forwards report_only: false as an explicit enforce, with the per-action options" do
+      klass, calls = recording_class
+      block = ->(policy) { policy }
+
+      klass.content_security_policy_for(report_only: false, only: :show, &block)
+
+      expect(calls.size).to eq(2)
+      expect(calls.first).to eq([:enforce, [], { only: :show }, block])
+      # Not skipped: Rails keeps report-only in its own inherited before_action,
+      # so skipping `false` left an inherited policy reporting.
       expect(calls.last).to eq([:report, [false], { only: :show }, nil])
+    end
+
+    it "raises on a report_only: that is not true, false or :inherit" do
+      klass, calls = recording_class
+
+      expect do
+        klass.content_security_policy_for(report_only: nil) { |policy| policy }
+      end.to raise_error(ArgumentError, /report_only: must be true, false or :inherit/)
+      expect(calls).to be_empty
     end
   end
   describe "modern presets and bundles" do
