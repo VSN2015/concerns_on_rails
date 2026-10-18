@@ -320,6 +320,10 @@ module ConcernsOnRails
         operand = ConcernsOnRails::Support::NumericOperand.classify(raw, options[:type] || column_type, column_type: column_type)
         return apply_filter_numeric_comparison(relation, field, operator, operand) if operand
 
+        apply_filter_cast_comparison(relation, field, operator, raw, options)
+      end
+
+      def apply_filter_cast_comparison(relation, field, operator, raw, options)
         value = filter_cast(relation, field, raw, options)
         # A value the column's type cannot represent matches nothing. Casting it
         # anyway is worse than useless: `?stock_gt=twelve` becomes `stock > 0`
