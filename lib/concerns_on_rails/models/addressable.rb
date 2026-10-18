@@ -374,15 +374,18 @@ module ConcernsOnRails
         Digest::SHA256.hexdigest(parts.join("\n"))
       end
 
-      # Equal fingerprints — never true for two blank addresses.
+      # Equal fingerprints — never true for two blank addresses. `other` is a
+      # record or a digest String, like the sibling `with_address` accepts;
+      # nil or anything else is never the same address. (A bare
+      # `other.address_fingerprint` turned `same_address_as?(nil)` into a
+      # NoMethodError, and answering false for every non-record made a
+      # digest String never match, not even the record's own.)
       def same_address_as?(other)
-        # Tolerant like the sibling `with_address`, which accepts a record, a
-        # digest String or nil: a bare `other.address_fingerprint` turned
-        # `same_address_as?(nil)` into a NoMethodError.
-        return false unless other.respond_to?(:address_fingerprint)
+        theirs = other.respond_to?(:address_fingerprint) ? other.address_fingerprint : other
+        return false unless theirs.is_a?(String)
 
         fingerprint = address_fingerprint
-        !fingerprint.nil? && fingerprint == other.address_fingerprint
+        !fingerprint.nil? && fingerprint == theirs
       end
 
       # Any mapped address column has an unsaved change. `address_changed?` is

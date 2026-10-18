@@ -126,7 +126,7 @@ The macro `addressable_by` accepts any combination of column-override keyword pa
 | `address_complete?` | Returns `true` if every `required:` part has a value (presence check only; no format validation). |
 | `address_attributes` | Returns a Hash of `{ canonical_part => value }` for every present part. Useful for passing to serializers or external verifiers. |
 | `address_fingerprint` | SHA-256 hex digest of the normalized address: every canonical part downcased and squished, the postal code with its spaces removed, the country resolved the way validation resolves it (a blank country becomes `default_country`, a name/alpha-3 becomes alpha-2 under `normalize_country: true`). Two rows that differ only in case, whitespace, postal formatting or an omitted default country hash the same; a change to any part (including `line2`) changes it. `nil` when no address part is present (a country alone does not count). |
-| `same_address_as?(other)` | `true` when both records have a fingerprint and they are equal. Two blank addresses are never "the same". |
+| `same_address_as?(other)` | `true` when this record has a fingerprint equal to `other`'s. `other` is a record or a stored digest String (what `with_address` also accepts); `nil` or any other object is never the same address, and two blank addresses are never "the same". |
 | `address_parts_changed?` | `true` when any mapped address column has an unsaved change. |
 | `address_changed?` | The same predicate under its documented name. Defined only when the model has no `address` column of its own, so it never shadows ActiveModel's dirty predicate for such a column; use `address_parts_changed?` when it does. |
 
