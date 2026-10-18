@@ -58,7 +58,7 @@ soft_deletable_by(field = nil, touch: true, default_scope: true)
 
 ## Scopes
 
-All scopes use `unscope(where: soft_delete_field)` before applying their own condition, so they work correctly whether `default_scope` is enabled or not.
+All scopes peel the soft-delete column on the model's **own table** (`unscope(where: arel_table[soft_delete_field])`) before applying their own condition, so they work correctly whether `default_scope` is enabled or not, and an association scope such as `has_many :all_comments, -> { with_deleted }` reaches the deleted children. Because the peel is table-qualified, a scope merged into another model's relation (`Comment.joins(:post).merge(Post.with_deleted)`) leaves that model's own `deleted_at` predicates alone. Rails 6.0 can unscope by column name only, so there the scopes still unscope by name, and such a merge also strips the outer model's `deleted_at` predicates.
 
 | Scope | Description | Example |
 |---|---|---|
@@ -183,6 +183,7 @@ order.restore!       # raises if fulfilled?, deleted_at stays set
 - **Declare the `cascade:` associations before the macro.** `soft_deletable_by` resolves each name with `reflect_on_association` at class load, so a `has_many` written *below* the macro does not exist yet and you get `cascade: 'comments' is not an association of Post`. Same rule as CounterCacheable's `belongs_to`.
 - **A dependent that fails to save aborts the whole cascade.** With the default `touch: true` a dependent's write runs validations; if one fails, the cascade raises `ActiveRecord::RecordNotSaved` and the transaction rolls back the parent too, rather than leaving the parent deleted and the dependent live.
 - **Cascade targets resolve lazily when they must.** The association shape is validated at class load; the target model's SoftDeletable check runs at class load when the class already resolves and otherwise on the first cascade (a not-yet-loaded model cannot be resolved from inside a class body).
+- **Merging keeps the outer model's soft-delete filter.** The default scope records no `unscope`, so `Comment.joins(:post).merge(Post.where(title: "x"))` keeps hiding deleted comments, on every Rails version. It used to bring them back: ActiveRecord replays a merged relation's `unscope(where: :deleted_at)` on the receiving relation, where a column name matches every table. The named scopes unscope by table (Rails 6.1+; see Scopes).
 - **`default_scope` is sticky.** When `default_scope: true` (the default), every query — including joins, `includes`, and uniqueness validations — silently excludes soft-deleted rows. Uniqueness validators on other columns will not see deleted records, potentially allowing duplicates. For new models, prefer `default_scope: false` and chain `.without_deleted` explicitly.
 
 - **`destroy_all` is silently overridden.** Calling `Article.destroy_all` soft-deletes records instead of hard-deleting them. This can surprise code that expects standard ActiveRecord behavior. Prefer the explicit `.soft_delete_all` to make the intent clear.

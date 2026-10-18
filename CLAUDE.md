@@ -81,7 +81,10 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `Support::BatchOps`), `really_destroy_all`/`really_delete!` for hard deletes. Hooks:
   `before/after_soft_delete`, `before/after_restore`. The default scope's `deleted_at IS NULL`
   is its own Arel node (`DefaultScopePredicate`), so the batch verbs peel exactly it — never
-  a caller's identical predicate (`without_deleted.really_destroy_all` keeps the trash).
+  a caller's identical predicate (`without_deleted.really_destroy_all` keeps the trash). The
+  default scope records no `unscope`, and the named scopes (and Publishable's negative ones) peel via
+  `Support::AssociationScope.unscope_own` (by Arel attribute; by name on 6.0) — recorded, so
+  `has_many -> { with_deleted }` still works, but a `merge` never strips another table's column.
 - **`Hashable`** — one random identifier column. `type:` `:hex`/`:uuid`/`:integer`/`:custom`,
   `length:`, `alphabet:`, `unique:` (retry on collision).
 - **`Tokenizable`** — multiple security-token columns. `type:` `:urlsafe`/`:hex`/

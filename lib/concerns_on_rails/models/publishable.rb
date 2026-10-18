@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/association_scope"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
 require "concerns_on_rails/support/time_value"
@@ -202,26 +203,31 @@ module ConcernsOnRails
               where(arel_table[publishable_field].lteq(Time.zone.now))
             end
           }
+          # The negative scopes peel the column on this model's OWN table only
+          # (Support::AssociationScope.unscope_own), so merging one into another
+          # model's relation never strips that model's own predicate on a
+          # same-named column.
+          peel = ->(relation) { ConcernsOnRails::Support::AssociationScope.unscope_own(relation, relation.klass.publishable_field) }
           scope publishable_scope_names[:unpublished], lambda {
             if publishable_boolean_column?
-              unscope(where: publishable_field).where(publishable_field => [nil, false])
+              peel.call(self).where(publishable_field => [nil, false])
             else
               column = arel_table[publishable_field]
-              unscope(where: publishable_field).where(column.eq(nil).or(column.gt(Time.zone.now)))
+              peel.call(self).where(column.eq(nil).or(column.gt(Time.zone.now)))
             end
           }
           # Set, but the publish time is still in the future (timestamp columns only).
           scope publishable_scope_names[:scheduled], lambda {
             next none if publishable_boolean_column?
 
-            unscope(where: publishable_field).where(arel_table[publishable_field].gt(Time.zone.now))
+            peel.call(self).where(arel_table[publishable_field].gt(Time.zone.now))
           }
           # Never published — a true draft.
           scope publishable_scope_names[:draft], lambda {
             if publishable_boolean_column?
-              unscope(where: publishable_field).where(publishable_field => [nil, false])
+              peel.call(self).where(publishable_field => [nil, false])
             else
-              unscope(where: publishable_field).where(publishable_field => nil)
+              peel.call(self).where(publishable_field => nil)
             end
           }
         end
