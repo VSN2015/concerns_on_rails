@@ -168,10 +168,13 @@ module ConcernsOnRails
       # nothing, firing no hook — the same rows expire_all skips. It used to
       # rewrite an already-expired record's expiry to now (later) and fire
       # after_expire again on every call. To set a later expiry, use
-      # expire_in! (an absolute lifetime) or extend_expiry!.
+      # expire_in! (an absolute lifetime) or extend_expiry!. A no-op that
+      # finds OTHER pending changes saves them (no expiry write, no hook)
+      # rather than dropping them: `token.note = "revoked"; token.expire!`
+      # on an expired token still stores the note.
       def expire!(time = Time.zone.now)
         time = self.class.expirable_cast_time(time)
-        return true if expirable_expires_by?(time)
+        return expirable_settle if expirable_expires_by?(time)
 
         expirable_write_expiry(time)
       end
@@ -239,6 +242,12 @@ module ConcernsOnRails
         !value.nil? && value <= time
       end
 
+      # expire!'s no-op answer: true, or the `save` result when the record
+      # carries other pending changes (the expiry itself is never among them).
+      def expirable_settle
+        has_changes_to_save? ? save : true
+      end
+
       # The write behind expire! and expire_in!. Hooks fire only when the
       # time is not in the future: a future time schedules, it doesn't expire.
       def expirable_write_expiry(time)
@@ -272,7 +281,7 @@ module ConcernsOnRails
       end
 
       private :expiry_extension_base, :expirable_expired?, :expirable_live?,
-              :expirable_expires_by?, :expirable_write_expiry
+              :expirable_expires_by?, :expirable_write_expiry, :expirable_settle
     end
   end
 end

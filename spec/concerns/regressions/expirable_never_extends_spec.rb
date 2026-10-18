@@ -12,6 +12,7 @@ describe "Expirable never pushes an existing expiry later" do
     ActiveRecord::Schema.define do
       create_table :ene_tokens, force: true do |t|
         t.string :value
+        t.string :note
         t.datetime :expires_at
       end
     end
@@ -117,6 +118,47 @@ describe "Expirable never pushes an existing expiry later" do
         expect(token.reload.expires_at).to eq(now)
         expect(token.log).to eq(%i[before_expire after_expire])
       end
+    end
+
+    # Review follow-up: the no-op used to swallow the record's OTHER unsaved
+    # changes. It now saves them (no re-write of the expiry, no hook).
+    it "saves the other pending changes of an already-expired record without a hook" do
+      token = hooked.create!(expires_at: now - 1.day)
+      token.note = "revoked"
+
+      travel_to(now) do
+        expect(token.expire!).to be(true)
+        expect(token.log).to be_nil
+      end
+      expect(token.reload.note).to eq("revoked")
+      expect(token.expires_at).to eq(now - 1.day)
+    end
+
+    it "saves the other pending changes when the requested time is later than a scheduled expiry" do
+      travel_to(now) do
+        token = model.create!(expires_at: now + 1.hour)
+        token.note = "revoked"
+
+        expect(token.expire!(now + 1.week)).to be(true)
+        expect(token.reload.note).to eq("revoked")
+        expect(token.expires_at).to eq(now + 1.hour)
+      end
+    end
+
+    it "returns false when those pending changes fail validation" do
+      invalid = Class.new(model) { validates :note, length: { maximum: 3 } }
+      token = invalid.create!(expires_at: now - 1.day)
+      token.note = "too long"
+
+      expect(token.expire!).to be(false)
+      expect(token.reload.note).to be_nil
+    end
+
+    it "returns true without a write when nothing is pending" do
+      token = model.create!(expires_at: now - 1.day)
+
+      expect { token.expire! }.not_to(change { token.reload.attributes })
+      expect(token.expire!).to be(true)
     end
 
     it "still writes an expiry assigned but not yet saved" do

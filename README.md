@@ -777,7 +777,7 @@ Expiring only ever brings an expiry **forward**. When the saved expiry is alread
 requested time, `expire!` returns `true` and writes nothing, and no hook fires: calling `expire!` on an
 already-expired token keeps its expiry, and `expire!(1.week.from_now)` on a token expiring in an hour keeps
 the hour. Until this fix it rewrote the expiry (to a later time) and fired `after_expire` again. To set a
-later expiry, use `expire_in!` (an absolute lifetime, whatever the current expiry) or `extend_expiry!`.
+later expiry, use `expire_in!` (an absolute lifetime, whatever the current expiry) or `extend_expiry!`. A no-op `expire!` still saves the record's other unsaved changes (`token.note = "revoked"; token.expire!`). The guard reads the instance's saved expiry, so a stale instance cannot revoke an expiry another process pushed later (reload first, or use `expire_all`); and `expire_in!` writes through a private writer, so an `expire!` override does not see it.
 
 `extend_expiry!` is smart about the base:
 - If `expires_at` is `nil` or in the past → new value is `now + by`
