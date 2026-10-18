@@ -104,9 +104,14 @@ module ConcernsOnRails
           default_field = schedulable_starts_at_field || schedulable_ends_at_field
           prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: default_field)
           suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: default_field)
-          self.schedulable_scope_names = SCOPE_BASES.to_h do |base|
+          names = SCOPE_BASES.to_h do |base|
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
+          ConcernsOnRails::Support::Affix.refuse_sibling_names!(
+            self, label: "ConcernsOnRails::Models::Schedulable", scopes: names.values,
+                  predicates: %i[active_at current upcoming expired overlaps], prefix: prefix, suffix: suffix
+          )
+          self.schedulable_scope_names = names
 
           active_at_name = schedulable_scope_names.fetch(:active_at)
           ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, schedulable_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::Schedulable")

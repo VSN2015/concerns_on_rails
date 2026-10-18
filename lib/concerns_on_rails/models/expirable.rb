@@ -43,7 +43,7 @@ module ConcernsOnRails
         # per record so the hooks run.
         def expire_all(time = Time.zone.now)
           time = expirable_cast_time(time)
-          active = all.public_send(expirable_scope_names.fetch(:active))
+          active = expirable_live_relation
           if expirable_batch_fast_path?
             return active.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, expirable_field => time)
@@ -76,6 +76,17 @@ module ConcernsOnRails
 
         private
 
+        # The rows expire_all targets — not expired now — built inline, never
+        # through the public `.active` scope: Activatable and SoftDeletable
+        # define `.active` too, and the concern declared last owns it, so
+        # with Activatable after Expirable expire_all iterated `active =
+        # TRUE` rows, overwrote long-past expiries and skipped live rows
+        # whose flag was off.
+        def expirable_live_relation
+          column = arel_table[expirable_field]
+          all.where(column.eq(nil).or(column.gt(Time.zone.now)))
+        end
+
         # Whether the single-UPDATE fast path is safe — the whole decision
         # (bang method and hooks unoverridden AND the model declares no
         # validations, plus why) lives in Support::BatchOps.fast_path?.
@@ -90,9 +101,14 @@ module ConcernsOnRails
         def define_expirable_scopes(prefix, suffix)
           prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: expirable_field)
           suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: expirable_field)
-          self.expirable_scope_names = %i[active expired expiring_within].to_h do |base|
+          names = %i[active expired expiring_within].to_h do |base|
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
+          ConcernsOnRails::Support::Affix.refuse_sibling_names!(
+            self, label: "ConcernsOnRails::Models::Expirable", scopes: names.values,
+                  predicates: %i[active expired], prefix: prefix, suffix: suffix
+          )
+          self.expirable_scope_names = names
           ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, expirable_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::Expirable")
 
           scope expirable_scope_names[:active], lambda {
