@@ -67,19 +67,21 @@ Passing an unrecognized symbol raises `ArgumentError` immediately at class load 
 
 ---
 
-### `content_security_policy_for(report_only: false, **action_opts, &block)`
+### `content_security_policy_for(report_only: :inherit, **action_opts, &block)`
 
 A thin pass-through to Rails' native CSP class methods. It never reimplements CSP logic.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `report_only` | Boolean | `false` | When `true`, delegates to `content_security_policy_report_only(true, ...)`. When `false`, delegates to `content_security_policy(...)`. |
+| `report_only` | `true` / `false` / `:inherit` | `:inherit` | The policy is always defined through `content_security_policy(...)`. Omitted or `:inherit` leaves the report-only flag exactly as inherited from a parent controller or `config.content_security_policy_report_only`. `true` reports only. `false` **enforces**, even over an inherited report-only flag; it is forwarded as `content_security_policy_report_only(false, ...)` for the same actions. Anything else raises `ArgumentError`. |
 | `only` | Symbol / Array | — | Forwarded to Rails as a per-action condition. |
 | `except` | Symbol / Array | — | Forwarded to Rails as a per-action condition. |
 | `if` | Symbol / Proc | — | Forwarded to Rails as a per-action condition. |
 | `unless` | Symbol / Proc | — | Forwarded to Rails as a per-action condition. |
 
-All `**action_opts` not listed above are forwarded unchanged to the underlying Rails method. The policy block receives the Rails `ActionDispatch::ContentSecurityPolicy` object.
+All `**action_opts` not listed above are forwarded unchanged to both underlying Rails methods.
+
+Rails keeps the report-only flag in its own inherited `before_action`, not in the policy, so only an explicit `report_only: false` can switch an inherited or app-wide report-only policy to enforcing. A call that omits `report_only:` only adds directives (say, a CDN in `img_src`) and keeps the mode it inherited, so it never flips a report-only rollout to enforcing. An explicit `true` / `false` sets the mode for the actions the call covers, and a later call in the same class overrides an earlier one. An explicit value registers a second `before_action`, so a Proc `if:` / `unless:` is evaluated once for each. The policy block receives the Rails `ActionDispatch::ContentSecurityPolicy` object.
 
 Calling this method when `ActionController::ContentSecurityPolicy` is not available (i.e., Rails < 5.2 or a non-standard controller base) raises `ArgumentError`.
 
@@ -96,7 +98,7 @@ Calling this method when `ActionController::ContentSecurityPolicy` is not availa
 | Signature | Description |
 |---|---|
 | `secure_headers(*presets, **custom)` | Registers preset and/or custom headers. Merges into the inherited `secure_headable_headers` hash; later calls win on collision. |
-| `content_security_policy_for(report_only: false, **action_opts, &block)` | Delegates to Rails' native `content_security_policy` or `content_security_policy_report_only` class methods with the supplied block and per-action options. |
+| `content_security_policy_for(report_only: :inherit, **action_opts, &block)` | Delegates to Rails' native `content_security_policy` (with the block) and, for an explicit `report_only: true` / `false`, `content_security_policy_report_only(report_only, ...)`, with the same per-action options. Omitted / `:inherit` keeps the inherited report-only flag. |
 
 ## Examples
 
@@ -116,7 +118,7 @@ end
 ```ruby
 class Admin::BaseController < ApplicationController
   # Override the app-wide report-only policy with an enforcing policy for admin:
-  content_security_policy_for do |policy|
+  content_security_policy_for(report_only: false) do |policy|
     policy.default_src :self
     policy.script_src  :self
     policy.img_src     :self, :data

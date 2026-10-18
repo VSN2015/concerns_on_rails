@@ -302,7 +302,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   invoked with (the `#cause` when Rescuable matched through a wrapper), nil for a direct call.
 - **`Includable`** — allow-listed association sideloading (nested include trees via `Support::IncludeTree`,
   `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets.
-- **`SecureHeadable`** — security response headers + native CSP DSL passthrough.
+- **`SecureHeadable`** — security response headers + native CSP DSL passthrough
+  (`content_security_policy_for report_only:` is `true`/`false`/`:inherit` — omitted keeps the
+  inherited or app-wide report-only flag, an explicit `false` enforces over it).
 - **`Localizable`** — per-request `I18n.locale` from params / `Accept-Language` (strict
   RFC 9110 q-values, stable order on ties; RFC 4647 Lookup truncation one subtag at a time,
   `zh-Hant-TW` → `zh-Hant` → `zh`; `-` and `_` match each other, case-insensitively,
