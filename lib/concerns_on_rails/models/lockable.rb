@@ -186,8 +186,13 @@ module ConcernsOnRails
           # Ownership-only check (no validations gate, and no updated_at on the
           # bulk write): `unlock_access!` writes via update_columns, which
           # already skips validations and timestamps, so the two paths agree.
-          if ConcernsOnRails::Support::BatchOps.unoverridden?(self, ConcernsOnRails::Models::Lockable,
-                                                              :before_unlock, :after_unlock, :unlock_access!)
+          #
+          # The columns the UPDATE writes (and the token it clears) come from
+          # the receiver, so every class with rows in the relation must agree.
+          if ConcernsOnRails::Support::BatchOps.unoverridden?(
+            expired, ConcernsOnRails::Models::Lockable, :before_unlock, :after_unlock, :unlock_access!,
+            config: %i[lockable_locked_at_field lockable_attempts_field lockable_unlock_token_field]
+          )
             return expired.update_all({ locked_field => nil, attempts_field => 0 }.merge(lockable_token_attributes(nil)))
           end
 

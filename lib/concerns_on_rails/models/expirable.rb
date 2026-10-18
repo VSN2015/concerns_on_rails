@@ -44,7 +44,7 @@ module ConcernsOnRails
         def expire_all(time = Time.zone.now)
           time = expirable_cast_time(time)
           active = all.public_send(expirable_scope_names.fetch(:active))
-          if expirable_batch_fast_path?
+          if expirable_batch_fast_path?(active)
             return active.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, expirable_field => time)
             )
@@ -79,9 +79,11 @@ module ConcernsOnRails
         # Whether the single-UPDATE fast path is safe — the whole decision
         # (bang method and hooks unoverridden AND the model declares no
         # validations, plus why) lives in Support::BatchOps.fast_path?.
-        def expirable_batch_fast_path?
-          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Expirable,
-                                                        :expire!, :before_expire, :after_expire)
+        def expirable_batch_fast_path?(relation)
+          ConcernsOnRails::Support::BatchOps.fast_path?(
+            relation, ConcernsOnRails::Models::Expirable, :expire!, :before_expire, :after_expire,
+            config: %i[expirable_field record_timestamps]
+          )
         end
 
         # Scopes live here (not in `included do`) so their names can be affixed —

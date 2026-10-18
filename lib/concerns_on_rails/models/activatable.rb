@@ -85,7 +85,7 @@ module ConcernsOnRails
         # Activate every inactive record in the relation; returns the count.
         def activate_all
           inactive = all.public_send(activatable_scope_names.fetch(:inactive))
-          if activatable_batch_fast_path?(:activate)
+          if activatable_batch_fast_path?(inactive, :activate)
             return inactive.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, activatable_attributes(true, :activate))
             )
@@ -102,7 +102,7 @@ module ConcernsOnRails
         # Deactivate every active record in the relation; returns the count.
         def deactivate_all
           active = all.public_send(activatable_scope_names.fetch(:active))
-          if activatable_batch_fast_path?(:deactivate)
+          if activatable_batch_fast_path?(active, :deactivate)
             return active.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, activatable_attributes(false, :deactivate))
             )
@@ -131,9 +131,15 @@ module ConcernsOnRails
         # Whether the single-UPDATE fast path is safe — the whole decision
         # (bang method AND its two hooks unoverridden, AND the model declares
         # no validations, plus why) lives in Support::BatchOps.fast_path?.
-        def activatable_batch_fast_path?(kind)
-          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Activatable,
-                                                        :"#{kind}!", *HOOKS.fetch(kind))
+        #
+        # The column, the stamps and timestamp handling must agree on every
+        # class with rows in the relation: the UPDATE is built from the
+        # receiver's `activatable_attributes`.
+        def activatable_batch_fast_path?(relation, kind)
+          ConcernsOnRails::Support::BatchOps.fast_path?(
+            relation, ConcernsOnRails::Models::Activatable, :"#{kind}!", *HOOKS.fetch(kind),
+            config: %i[activatable_field activatable_timestamps record_timestamps]
+          )
         end
 
         # true -> both default columns; a Hash renames a side or drops it with

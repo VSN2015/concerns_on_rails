@@ -29,20 +29,24 @@ describe ConcernsOnRails::Support::BatchOps do
   describe ".unoverridden?" do
     it "is true when no listed method is overridden" do
       owner = Module.new { def touched; end }
-      klass = Class.new { include(owner) }
+      klass = Class.new(TestModel) do
+        self.table_name = "batch_items"
+        include(owner)
+      end
 
-      expect(described_class.unoverridden?(klass, owner, :touched)).to be true
+      expect(described_class.unoverridden?(klass.all, owner, :touched)).to be true
     end
 
     it "is false when the host overrode a listed method" do
       owner = Module.new { def touched; end }
-      klass = Class.new do
+      klass = Class.new(TestModel) do
+        self.table_name = "batch_items"
         include(owner)
 
         def touched; end
       end
 
-      expect(described_class.unoverridden?(klass, owner, :touched)).to be false
+      expect(described_class.unoverridden?(klass.all, owner, :touched)).to be false
     end
   end
 
@@ -59,19 +63,19 @@ describe ConcernsOnRails::Support::BatchOps do
     end
 
     it "is true for a bare model with nothing overridden and no validations" do
-      expect(described_class.fast_path?(model_including(owner), owner, :touched)).to be true
+      expect(described_class.fast_path?(model_including(owner).all, owner, :touched)).to be true
     end
 
     it "is false when the host overrode a listed method" do
       klass = model_including(owner) { def touched; end }
 
-      expect(described_class.fast_path?(klass, owner, :touched)).to be false
+      expect(described_class.fast_path?(klass.all, owner, :touched)).to be false
     end
 
     it "is false when the model declares validates" do
       klass = model_including(owner) { validates :state, presence: true }
 
-      expect(described_class.fast_path?(klass, owner, :touched)).to be false
+      expect(described_class.fast_path?(klass.all, owner, :touched)).to be false
     end
 
     # Regression: `validate :method` populates only _validate_callbacks, so a
@@ -84,7 +88,7 @@ describe ConcernsOnRails::Support::BatchOps do
       end
 
       expect(klass.validators).to be_empty
-      expect(described_class.fast_path?(klass, owner, :touched)).to be false
+      expect(described_class.fast_path?(klass.all, owner, :touched)).to be false
     end
   end
 

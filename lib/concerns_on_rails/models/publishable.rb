@@ -125,7 +125,7 @@ module ConcernsOnRails
         # themselves, so the chain resolves to the rows you mean.
         def publish_all
           pending = publishable_pending_relation
-          if publishable_batch_fast_path?(:publish)
+          if publishable_batch_fast_path?(pending, :publish)
             value = publishable_boolean_column? || Time.zone.now
             return pending.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, publishable_field => value)
@@ -146,7 +146,7 @@ module ConcernsOnRails
         # publish column composes here as it should.
         def unpublish_all
           live = all.public_send(publishable_scope_names.fetch(:published))
-          if publishable_batch_fast_path?(:unpublish)
+          if publishable_batch_fast_path?(live, :unpublish)
             return live.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, publishable_field => nil)
             )
@@ -240,13 +240,16 @@ module ConcernsOnRails
         # Whether the single-UPDATE fast path is safe — hooks/bang methods
         # unoverridden AND the model declares no validations. The whole
         # decision, including why, lives in Support::BatchOps.fast_path?.
-        def publishable_batch_fast_path?(kind)
+        def publishable_batch_fast_path?(relation, kind)
           methods = if kind == :publish
                       %i[before_publish after_publish publish!]
                     else
                       %i[before_unpublish after_unpublish unpublish!]
                     end
-          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Publishable, *methods)
+          ConcernsOnRails::Support::BatchOps.fast_path?(
+            relation, ConcernsOnRails::Models::Publishable, *methods,
+            config: %i[publishable_field record_timestamps]
+          )
         end
       end
 
