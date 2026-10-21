@@ -64,16 +64,28 @@ module ConcernsOnRails
         def sortable_by(*allowed_fields, default: nil, direction: :asc, **rules)
           raise ArgumentError, "#{LABEL}: at least one field is required" if allowed_fields.empty? && rules.empty?
 
+          direction = sortable_normalize_direction!(direction)
           declared = allowed_fields.flatten.to_h { |field| [field.to_sym, sortable_plain_rule(field)] }
           rules.each { |key, options| declared[key.to_sym] = sortable_normalize_rule!(key, options) }
 
           self.sortable_allowed_fields = declared.keys
           self.sortable_default_field = sortable_register_default!(default, declared)
           self.sortable_rules = declared
-          self.sortable_default_direction = VALID_DIRECTIONS.include?(direction.to_sym) ? direction.to_sym : :asc
+          self.sortable_default_direction = direction
         end
 
         private
+
+        # Case-insensitive, as `?direction=` is: `direction: "DESC"` (or
+        # `:DESC`) used to fall back to :asc silently, so every default listing
+        # came out the wrong way round. Anything but asc/desc — a typo like
+        # `:dsc` included — now raises at class load, as CursorPaginatable does.
+        def sortable_normalize_direction!(direction)
+          normalized = direction.to_s.downcase.to_sym
+          return normalized if VALID_DIRECTIONS.include?(normalized)
+
+          raise ArgumentError, "#{LABEL}: direction: must be :asc or :desc (got #{direction.inspect})"
+        end
 
         # A default: that clients cannot select is legitimate and worked before
         # this concern grew rules (`sortable_by :title, default: :created_at`).
@@ -154,10 +166,15 @@ module ConcernsOnRails
       end
 
       # Apply ordering to a relation based on params[:sort] / params[:direction].
-      # Falls back to defaults; never orders by a non-allow-listed key.
+      # Falls back to defaults; never orders by a non-allow-listed key. A bare
+      # model class is sorted through its default relation (`.all`), as the
+      # paginators take one: the orderings ask `relation.model`, which a class
+      # does not answer, so `sorted(Article)` was a NoMethodError 500.
       def sorted(relation)
         requested = sort_requests
         return relation if requested.empty?
+
+        relation = relation.all if relation.is_a?(Class) && relation.respond_to?(:all)
 
         # reorder (not order) so the requested columns REPLACE any prior
         # ORDER BY — including a model default_scope order.

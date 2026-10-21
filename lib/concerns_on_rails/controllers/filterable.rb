@@ -25,6 +25,10 @@ module ConcernsOnRails
     # through `type:` (any ActiveModel type name: :integer, :decimal,
     # :boolean, :date, :datetime, ...) — except numbers, which are read
     # exactly rather than through ActiveModel's lossy numeric casts (below).
+    # A `type: :datetime` operand reads a zone-less String the way the target
+    # column does (Time.zone on a zone-aware column, else default_timezone;
+    # a `with:` lambda, which has no column, uses Time.zone while
+    # `time_zone_aware_attributes` is on).
     # `type:` also pre-casts the value handed to a `with:` lambda (a numeric
     # `type:` strictly: a value it cannot represent exactly fails the filter
     # closed without calling the lambda). Blank values are skipped,
@@ -70,6 +74,9 @@ module ConcernsOnRails
       # PostgreSQL (`integer ~~* unknown`), so contains/starts_with fail closed.
       LIKE_TYPES = %i[string text citext].freeze
       UNCASTABLE = Object.new.freeze
+      # `type:` names resolved to ActiveRecord's own types (see
+      # filterable_record_temporal_type).
+      RECORD_TEMPORAL_TYPES = { date: :Date, time: :Time }.freeze
 
       included do
         class_attribute :filterable_rules, default: {}
@@ -115,16 +122,41 @@ module ConcernsOnRails
         def filterable_normalize_type(type)
           return nil if type.nil?
 
-          ActiveModel::Type.lookup(type.to_sym)
+          filterable_record_temporal_type(type.to_sym) || ActiveModel::Type.lookup(type.to_sym)
         rescue ArgumentError
           raise ArgumentError, "#{LABEL}: type: #{type.inspect} is not an ActiveModel type (try :integer, :decimal, :date, ...)"
         end
-        private :filterable_normalize_operators, :filterable_operator_list, :filterable_normalize_type
+
+        # :date / :datetime / :time as ActiveRecord's own types, which read
+        # `ActiveRecord.default_timezone` (UTC unless :local) at cast time,
+        # exactly as a datetime column's type does. ActiveModel's guess the
+        # zone from Time.zone_default instead — `:local`, the server's
+        # ENV["TZ"], in every app that sets config.time_zone — so
+        # `?happened_at_gte=2026-01-01 10:00` under `type: :datetime` meant
+        # 10:00 in whatever zone the host ran in. Built directly:
+        # ActiveRecord::Type.lookup would need a connection at class load.
+        # :datetime is TimeValue's one shared instance; and a :datetime
+        # operand is not cast by the type alone (filterable_datetime_cast):
+        # a zone-aware column reads it in Time.zone.
+        def filterable_record_temporal_type(name)
+          return ConcernsOnRails::Support::TimeValue.datetime_type if name == :datetime
+
+          klass = RECORD_TEMPORAL_TYPES[name]
+          return nil unless klass && defined?(::ActiveRecord::Type::DateTime)
+
+          ::ActiveRecord::Type.const_get(klass).new
+        end
+        private :filterable_normalize_operators, :filterable_operator_list, :filterable_normalize_type,
+                :filterable_record_temporal_type
       end
 
       # Apply all declared filters to a relation based on params. Unset values
-      # are skipped so absent filters don't narrow the relation.
+      # are skipped so absent filters don't narrow the relation. A bare model
+      # class is filtered through its default relation (`.all`), as the
+      # paginators take one: the filters ask `relation.model`, which a class
+      # does not answer, so `filtered(Article)` was a NoMethodError 500.
       def filtered(relation)
+        relation = relation.all if relation.is_a?(Class) && relation.respond_to?(:all)
         self.class.filterable_rules.each do |field, options|
           value = params[field]
           relation = apply_filter(relation, field, value, options) unless filterable_unset?(value)
@@ -186,7 +218,7 @@ module ConcernsOnRails
         return options[:with].call(relation, type ? type.cast(value) : value) unless type
 
         operand = ConcernsOnRails::Support::NumericOperand.classify(value, type, column_type: nil)
-        return options[:with].call(relation, filterable_lambda_cast(type, value)) if operand.nil?
+        return options[:with].call(relation, filterable_lambda_cast(relation, type, value)) if operand.nil?
         return relation.none unless operand.status == :exact
 
         options[:with].call(relation, operand.value)
@@ -197,9 +229,40 @@ module ConcernsOnRails
       # A date/time `type:` hands over nil, too, for an operand that is no
       # date or time (a JSON body's Integer, which the date cast returns as
       # is): the lambda would bind it raw, exactly the comparison bug.
-      def filterable_lambda_cast(type, value)
+      #
+      # A `:datetime` value is read in Time.zone when the model's
+      # `time_zone_aware_attributes` is on (the Rails default), else in
+      # `ActiveRecord.default_timezone`: a lambda has no column to read the
+      # zone from, so this is the zone every datetime column of the model
+      # reads a zone-less String in.
+      def filterable_lambda_cast(relation, type, value)
+        if filterable_datetime?(type)
+          cast = filterable_datetime_cast(value, filterable_model_zone_aware?(relation.model))
+          return cast.equal?(UNCASTABLE) ? nil : cast
+        end
+
         cast = filterable_type_cast(type, value)
         filterable_uncastable?(type, value, cast) ? nil : cast
+      end
+
+      def filterable_datetime?(type)
+        !type.nil? && type.type == :datetime
+      end
+
+      def filterable_model_zone_aware?(model)
+        model.respond_to?(:time_zone_aware_attributes) && model.time_zone_aware_attributes ? true : false
+      end
+
+      # A zone-less `type: :datetime` operand read exactly as the TARGET column
+      # reads it (Support::TimeValue.cast, Storable's `write_datetime`): in
+      # Time.zone — the per-request zone included — when the column is zone
+      # aware, else in `ActiveRecord.default_timezone`. UNCASTABLE for a value
+      # that is no time (including a String Rails 6.0–7.0 cannot parse).
+      def filterable_datetime_cast(value, zone_aware)
+        cast = ConcernsOnRails::Support::TimeValue.cast(value, zone_aware: zone_aware)
+        cast.nil? ? UNCASTABLE : cast
+      rescue ArgumentError
+        UNCASTABLE
       end
 
       # ?price[gte]=10&price[lte]=50 — unknown keys are ignored.
@@ -248,11 +311,19 @@ module ConcernsOnRails
 
       def apply_filter_comparison(relation, field, operator, raw, options)
         return relation unless ConcernsOnRails::Support::ScalarParam.scalar?(raw)
+        return relation.none if filterable_nul?(relation, field, [raw])
+
+        enum = apply_filter_enum_comparison(relation, field, operator, raw, options)
+        return enum if enum
 
         column_type = filterable_column_type(relation, field)
         operand = ConcernsOnRails::Support::NumericOperand.classify(raw, options[:type] || column_type, column_type: column_type)
         return apply_filter_numeric_comparison(relation, field, operator, operand) if operand
 
+        apply_filter_cast_comparison(relation, field, operator, raw, options)
+      end
+
+      def apply_filter_cast_comparison(relation, field, operator, raw, options)
         value = filter_cast(relation, field, raw, options)
         # A value the column's type cannot represent matches nothing. Casting it
         # anyway is worse than useless: `?stock_gt=twelve` becomes `stock > 0`
@@ -266,6 +337,48 @@ module ConcernsOnRails
 
         column = relation.model.arel_table[field]
         relation.where(column.public_send(COMPARISONS.fetch(operator), value))
+      end
+
+      # An enum column, unless a `type:` is declared (which then reads the
+      # operand); nil for any other field. EnumType reports its subtype's
+      # `type` (:integer), so a LABEL operand was judged non-numeric garbage
+      # and `?status_gte=review` always came back empty; on Rails 6.0/6.1 a
+      # numeric one (`?status_gte=1`) reached EnumType#cast, which raises
+      # ArgumentError for anything that is neither a label nor a mapped
+      # Integer — a 500. The raw operand therefore NEVER reaches EnumType#cast:
+      #
+      #   * a label, or the value a label stores (filterable_enum_label), is
+      #     compared as that label: Arel serializes it through the enum's own
+      #     type (`status >= 1`; a String-backed enum compares its stored
+      #     String);
+      #   * on an INTEGER-backed enum anything else is a number, read exactly
+      #     like an integer column's operand (Support::NumericOperand against
+      #     the enum's subtype) and compared as such. A threshold need not be
+      #     a mapped value: with { low: 0, medium: 5, high: 10 },
+      #     `?priority_gte=2` is `priority >= 2` and `?priority_lt=1.5` is
+      #     `priority <= 1`;
+      #   * otherwise (an unknown non-numeric label, a number NumericOperand
+      #     rejects, any non-label on a String-backed enum) matches nothing.
+      def apply_filter_enum_comparison(relation, field, operator, raw, options)
+        mapping = options[:type] ? nil : filterable_enum_mapping(relation, field)
+        return nil unless mapping
+
+        label = filterable_enum_label(mapping, raw)
+        return relation.where(relation.model.arel_table[field].public_send(COMPARISONS.fetch(operator), label)) if label
+
+        subtype = filterable_enum_integer_subtype(relation, field)
+        return relation.none unless subtype
+
+        operand = ConcernsOnRails::Support::NumericOperand.classify(raw, subtype, column_type: subtype)
+        apply_filter_numeric_comparison(relation, field, operator, operand)
+      end
+
+      # The enum's subtype when it is a plain integer type, else nil. The
+      # reader is private on Rails 6.0 (public from 6.1), hence `send`.
+      def filterable_enum_integer_subtype(relation, field)
+        type = filterable_column_type(relation, field)
+        subtype = type.send(:subtype) if type.respond_to?(:subtype, true)
+        subtype if ConcernsOnRails::Support::NumericOperand.kind(subtype) == :integer
       end
 
       # A date or time outside Support::TimeValue::YEARS (0001-01-01 ..
@@ -351,6 +464,16 @@ module ConcernsOnRails
         filterable_where(relation, field, value.is_a?(Array) ? kept : kept.first, negate)
       end
 
+      # A String operand carrying a NUL byte (Support::ScalarParam.nul_free?)
+      # fails the whole filter closed — `not`/`not_in` included, as an
+      # uncastable number does — where it used to be a 500. Not on a binary
+      # column: there NUL is an ordinary byte, quoted and bound as a blob.
+      def filterable_nul?(relation, field, values)
+        return false if values.all? { |member| ConcernsOnRails::Support::ScalarParam.nul_free?(member) }
+
+        filterable_column_type(relation, field)&.type != :binary
+      end
+
       def filterable_where(relation, field, value, negate)
         negate ? relation.where.not(field => value) : relation.where(field => value)
       end
@@ -369,11 +492,29 @@ module ConcernsOnRails
         operands.select { |operand| operand.status == :exact }.map(&:value)
       end
 
-      # The members to keep on a numeric or date/time column, or nil to keep
-      # the raw value unchanged.
+      # The members to keep on a numeric, enum or date/time column, or nil to
+      # keep the raw value unchanged. A NUL member fails the filter closed.
       def filterable_equality_values(relation, field, values, negate: false)
+        return :uncastable if filterable_nul?(relation, field, values)
+
         filterable_numeric_equality_values(relation, field, values) ||
+          filterable_enum_equality_values(relation, field, values) ||
           filterable_time_equality_values(relation, field, values, negate)
+      end
+
+      # An enum member that is neither a label nor a value a label stores
+      # (filterable_enum_label) equals nothing, so it drops out of the list,
+      # like an out-of-range number. On Rails 7.0+ such a label serializes to
+      # nil, and EnumType has a subtype, so ActiveRecord's QueryAttribute
+      # reports nil? and `where` emitted `status IS NULL`: `?status=drfat`
+      # returned exactly the rows with NO status. An explicit nil member keeps
+      # its IS NULL meaning. nil when the field is no enum or nothing drops.
+      def filterable_enum_equality_values(relation, field, values)
+        mapping = filterable_enum_mapping(relation, field)
+        return nil unless mapping
+
+        kept = values.select { |member| member.nil? || filterable_enum_label(mapping, member) }
+        kept.size == values.size ? nil : kept
       end
 
       # A date or time no stored value can equal drops out of the list, like
@@ -474,6 +615,7 @@ module ConcernsOnRails
       # so it is refused on the column itself: `varchar[] ILIKE` is an error.
       def apply_filter_like(relation, field, operator, raw)
         return relation unless ConcernsOnRails::Support::ScalarParam.scalar?(raw)
+        return relation.none if filterable_nul?(relation, field, [raw])
 
         column_type = filterable_column_type(relation, field)
         return relation.none if column_type && !LIKE_TYPES.include?(column_type.type)
@@ -491,6 +633,9 @@ module ConcernsOnRails
         type = options[:type] || filterable_column_type(relation, field)
         return value if type.nil?
         return UNCASTABLE if filterable_non_numeric?(type, value)
+        if options[:type] && filterable_datetime?(type)
+          return filterable_datetime_cast(value, ConcernsOnRails::Support::TimeValue.zone_aware?(relation.model, field))
+        end
 
         cast = filterable_type_cast(type, value)
         filterable_uncastable?(type, value, cast) ? UNCASTABLE : cast
@@ -520,6 +665,23 @@ module ConcernsOnRails
         return true if column.respond_to?(:array) && column.array
 
         column.respond_to?(:sql_type) && column.sql_type.to_s.end_with?("[]")
+      end
+
+      # An enum attribute's label => stored-value mapping; nil for any other
+      # field.
+      def filterable_enum_mapping(relation, field)
+        model = relation.model
+        model.respond_to?(:defined_enums) ? model.defined_enums[field.to_s] : nil
+      end
+
+      # The label an enum operand names: the label itself, or the label that
+      # stores the value (in its String form: "1", a JSON body's 1). nil for
+      # anything else — an unknown label, or a value the enum does not map.
+      def filterable_enum_label(mapping, raw)
+        operand = raw.to_s
+        return operand if mapping.key?(operand)
+
+        mapping.find { |_label, stored| stored.to_s == operand }&.first
       end
 
       def filterable_column_type(relation, field)

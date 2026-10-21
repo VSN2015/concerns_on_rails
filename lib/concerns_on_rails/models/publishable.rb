@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/association_scope"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
 require "concerns_on_rails/support/time_value"
@@ -106,6 +107,15 @@ module ConcernsOnRails
           Arel::Nodes::Grouping.new(column.eq(true))
         end
 
+        # What unpublishing writes: NULL on a timestamp column, false on a
+        # boolean one. Writing NULL into a boolean raised NotNullViolation on
+        # the usual `t.boolean :published, null: false, default: false` (so a
+        # record could never be unpublished) and left a third state on a
+        # nullable one. (Public only because the instance verb reads it.)
+        def publishable_cleared_value
+          publishable_boolean_column? ? false : nil
+        end
+
         # Publish every not-currently-published record in the relation.
         # Returns the Integer count. NOTE this includes *scheduled* rows,
         # whose future timestamp is overwritten with now — chain the draft
@@ -140,15 +150,18 @@ module ConcernsOnRails
           )
         end
 
-        # Unpublish every published record in the relation. Writes nil on both
-        # column types, exactly as `unpublish!` does. The `published` scope
+        # Unpublish every published record in the relation. Writes exactly
+        # what `unpublish!` does (publishable_cleared_value: NULL on a
+        # timestamp column, false on a boolean one). The `published` scope
         # does NOT unscope the field, so a caller's own constraint on the
-        # publish column composes here as it should.
+        # publish column composes here as it should. The rows are selected
+        # with the `published` predicate built inline, never through the
+        # public scope name.
         def unpublish_all
-          live = all.public_send(publishable_scope_names.fetch(:published))
+          live = publishable_live_relation
           if publishable_batch_fast_path?(:unpublish)
             return live.update_all(
-              ConcernsOnRails::Support::BatchOps.with_timestamps(self, publishable_field => nil)
+              ConcernsOnRails::Support::BatchOps.with_timestamps(self, publishable_field => publishable_cleared_value)
             )
           end
 
@@ -187,9 +200,13 @@ module ConcernsOnRails
         def define_publishable_scopes(prefix, suffix) # rubocop:disable Metrics/PerceivedComplexity
           prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: publishable_field)
           suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: publishable_field)
-          self.publishable_scope_names = SCOPE_BASES.to_h do |base|
+          names = SCOPE_BASES.to_h do |base|
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
+          ConcernsOnRails::Support::Affix.refuse_sibling_names!(
+            self, label: "ConcernsOnRails::Models::Publishable", scopes: names.values, prefix: prefix, suffix: suffix
+          )
+          self.publishable_scope_names = names
           ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, publishable_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::Publishable")
 
           # See publishable_true_predicate for why the boolean branch is not
@@ -202,28 +219,41 @@ module ConcernsOnRails
               where(arel_table[publishable_field].lteq(Time.zone.now))
             end
           }
+          # The negative scopes peel the column on this model's OWN table only
+          # (Support::AssociationScope.unscope_own), so merging one into another
+          # model's relation never strips that model's own predicate on a
+          # same-named column.
+          peel = ->(relation) { ConcernsOnRails::Support::AssociationScope.unscope_own(relation, relation.klass.publishable_field) }
           scope publishable_scope_names[:unpublished], lambda {
             if publishable_boolean_column?
-              unscope(where: publishable_field).where(publishable_field => [nil, false])
+              peel.call(self).where(publishable_field => [nil, false])
             else
               column = arel_table[publishable_field]
-              unscope(where: publishable_field).where(column.eq(nil).or(column.gt(Time.zone.now)))
+              peel.call(self).where(column.eq(nil).or(column.gt(Time.zone.now)))
             end
           }
           # Set, but the publish time is still in the future (timestamp columns only).
           scope publishable_scope_names[:scheduled], lambda {
             next none if publishable_boolean_column?
 
-            unscope(where: publishable_field).where(arel_table[publishable_field].gt(Time.zone.now))
+            peel.call(self).where(arel_table[publishable_field].gt(Time.zone.now))
           }
           # Never published — a true draft.
           scope publishable_scope_names[:draft], lambda {
             if publishable_boolean_column?
-              unscope(where: publishable_field).where(publishable_field => [nil, false])
+              peel.call(self).where(publishable_field => [nil, false])
             else
-              unscope(where: publishable_field).where(publishable_field => nil)
+              peel.call(self).where(publishable_field => nil)
             end
           }
+        end
+
+        # "Currently published", built against the CURRENT relation: the
+        # `published` scope's predicate (see unpublish_all).
+        def publishable_live_relation
+          return all.where(publishable_true_predicate) if publishable_boolean_column?
+
+          all.where(arel_table[publishable_field].lteq(Time.zone.now))
         end
 
         # "Not currently published", built against the CURRENT relation: the
@@ -246,7 +276,8 @@ module ConcernsOnRails
                     else
                       %i[before_unpublish after_unpublish unpublish!]
                     end
-          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Publishable, *methods)
+          ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Publishable, *methods,
+                                                        writes: [publishable_field])
         end
       end
 
@@ -260,7 +291,21 @@ module ConcernsOnRails
       def before_unpublish; end
       def after_unpublish; end
 
+      # A no-op on a record that is ALREADY published (the rows publish_all
+      # skips) — nothing is stamped and no hook fires, where it used to
+      # rewrite the "published on" time to now and fire after_publish again on
+      # every call (a double-submitted button, a retried job). "Already" means
+      # the SAVED state: a stored record (destroyed included), no unsaved change to the column,
+      # a saved value that reads as published. Anything else — a new record, an
+      # unsaved flip of the column, a draft or scheduled row — publishes now.
+      # A no-op that finds OTHER pending changes saves them (no re-stamp, no
+      # hooks) rather than dropping them. Read through the private check, not
+      # the overridable published?. publish_at! still writes any time.
       def publish!
+        if !new_record? && !will_save_change_to_attribute?(self.class.publishable_field) && publishable_published?
+          return has_changes_to_save? ? save : true
+        end
+
         publishable_write_with_hooks(Time.zone.now, :publish)
       end
 
@@ -268,17 +313,16 @@ module ConcernsOnRails
       # Example:
       #   record.unpublish!
       def unpublish!
-        publishable_write_with_hooks(nil, :unpublish)
+        publishable_write_with_hooks(self.class.publishable_cleared_value, :unpublish)
       end
 
       # Check if the record is published
       # Example:
       #   record.published?
+      # On a date column the instant is cast through its type, as the scopes' binds
+      # are, so a date column compares against today in Time.zone.
       def published?
-        value = self[self.class.publishable_field]
-        return false unless value.present?
-
-        value.respond_to?(:<=) ? value <= Time.zone.now : true
+        publishable_published?
       end
 
       # Check if the record is unpublished
@@ -293,7 +337,7 @@ module ConcernsOnRails
         value = self[self.class.publishable_field]
         return false if value.blank?
 
-        value.respond_to?(:>) ? value > Time.zone.now : false
+        value.respond_to?(:>) ? value > publishable_now : false
       end
 
       # Never set — a true draft.
@@ -325,6 +369,12 @@ module ConcernsOnRails
         publishable_write_with_hooks(time, :publish)
       end
 
+      # Time.zone.now as the publish column's type casts it (see published?).
+      def publishable_now
+        ConcernsOnRails::Support::TimeValue.predicate_bound(self.class, self.class.publishable_field, Time.zone.now)
+      end
+      private :publishable_now
+
       # Shared write path: hooks and the write in their own savepoint via
       # Support::HookedWrite, so a raising hook — or one vetoing with
       # ActiveRecord::Rollback, even inside a caller's transaction or
@@ -339,7 +389,15 @@ module ConcernsOnRails
           update(field => value)
         end
       end
-      private :publishable_write_with_hooks
+
+      # The unaffixed, non-overridable read behind published? and publish!.
+      def publishable_published?
+        value = self[self.class.publishable_field]
+        return false unless value.present?
+
+        value.respond_to?(:<=) ? value <= publishable_now : true
+      end
+      private :publishable_write_with_hooks, :publishable_published?
     end
   end
 end

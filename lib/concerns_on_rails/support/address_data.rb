@@ -1,3 +1,8 @@
+# String#squish (normalize_postal, normalize_country_code, and country_key,
+# which builds FOLDED_NAME_TO_ALPHA2 at load time) is core_ext, not part of
+# active_support/concern, so a direct require must load it itself.
+require "active_support/core_ext/string/filters"
+
 module ConcernsOnRails
   module Support
     # Reference data + lookups for Models::Addressable. Kept here (mirroring
@@ -274,6 +279,63 @@ module ConcernsOnRails
       NAME_TO_ALPHA2 = COUNTRY_DATA.to_h { |code, (name, _a3)| [name.downcase, code] }.freeze
       ALPHA3_TO_ALPHA2 = COUNTRY_DATA.to_h { |code, (_name, a3)| [a3, code] }.freeze
 
+      # What people type that is not COUNTRY_DATA's English short name: the
+      # ISO-reserved "UK", ISO's official short names ("Viet Nam", "Russian
+      # Federation", "Korea, Republic of"), long forms ("United States of
+      # America") and former names ("Czech Republic", "Swaziland"). Kept
+      # apart from NAME_TO_ALPHA2, which stays exactly one name per country.
+      # Keys are in country_key form (downcased, squished, diacritics
+      # folded); none is an alpha-2 or alpha-3 code.
+      COUNTRY_ALIASES = {
+        # United Kingdom
+        "uk" => "GB", "u.k." => "GB", "great britain" => "GB", "britain" => "GB", "england" => "GB",
+        "scotland" => "GB", "wales" => "GB", "northern ireland" => "GB",
+        "united kingdom of great britain and northern ireland" => "GB",
+        # United States
+        "united states of america" => "US", "u.s.a." => "US", "u.s." => "US",
+        "virgin islands (u.s.)" => "VI", "us virgin islands" => "VI", "virgin islands (british)" => "VG",
+        # ISO official short names and their "Name, qualifier" / "qualifier Name" spellings
+        "viet nam" => "VN", "russian federation" => "RU",
+        "korea, republic of" => "KR", "korea (republic of)" => "KR", "republic of korea" => "KR",
+        "korea, democratic people's republic of" => "KP", "korea (democratic people's republic of)" => "KP",
+        "democratic people's republic of korea" => "KP",
+        "iran, islamic republic of" => "IR", "iran (islamic republic of)" => "IR", "islamic republic of iran" => "IR",
+        "bolivia (plurinational state of)" => "BO", "bolivia, plurinational state of" => "BO",
+        "plurinational state of bolivia" => "BO",
+        "venezuela (bolivarian republic of)" => "VE", "venezuela, bolivarian republic of" => "VE",
+        "bolivarian republic of venezuela" => "VE",
+        "moldova, republic of" => "MD", "moldova (republic of)" => "MD", "republic of moldova" => "MD",
+        "tanzania, united republic of" => "TZ", "united republic of tanzania" => "TZ",
+        "micronesia (federated states of)" => "FM", "micronesia, federated states of" => "FM",
+        "federated states of micronesia" => "FM",
+        "congo, the democratic republic of the" => "CD", "congo (the democratic republic of the)" => "CD",
+        "dr congo" => "CD", "congo-kinshasa" => "CD", "congo" => "CG", "congo-brazzaville" => "CG",
+        "lao people's democratic republic" => "LA", "syrian arab republic" => "SY", "brunei darussalam" => "BN",
+        "cabo verde" => "CV", "palestine, state of" => "PS", "state of palestine" => "PS",
+        "taiwan, province of china" => "TW", "taiwan (province of china)" => "TW",
+        "holy see" => "VA", "falkland islands (malvinas)" => "FK", "pitcairn" => "PN",
+        "saint helena, ascension and tristan da cunha" => "SH", "sint maarten (dutch part)" => "SX",
+        "saint martin (french part)" => "MF", "bonaire, sint eustatius and saba" => "BQ",
+        "republic of north macedonia" => "MK", "netherlands (kingdom of the)" => "NL",
+        # Former and common alternative names
+        "czech republic" => "CZ", "swaziland" => "SZ", "macedonia" => "MK", "burma" => "MM",
+        "ivory coast" => "CI", "holland" => "NL", "the netherlands" => "NL", "turkiye" => "TR",
+        "east timor" => "TL", "macau" => "MO", "the bahamas" => "BS", "the gambia" => "GM",
+        "republic of ireland" => "IE", "vatican" => "VA"
+      }.freeze
+
+      # A name as a lookup key: downcased and squished, with diacritics
+      # folded and typographic apostrophes straightened, so "Côte d’Ivoire",
+      # "Cote d'Ivoire" and "Türkiye" / "Turkiye" are one key each.
+      def country_key(name)
+        name.unicode_normalize(:nfkd).gsub(/\p{Mn}/, "").tr("\u2018\u2019", "''").downcase.squish
+      end
+
+      # country_key => alpha-2 over every COUNTRY_DATA name and every alias —
+      # the lookup normalize_country_code falls back to.
+      FOLDED_NAME_TO_ALPHA2 = COUNTRY_DATA.to_h { |code, (name, _a3)| [country_key(name), code] }
+                                          .merge(COUNTRY_ALIASES).freeze
+
       # Per-country postal-code patterns (matched against the *normalized*,
       # upcased value). `:default` is a permissive fallback for everything else.
       POSTAL_FORMATS = {
@@ -334,9 +396,11 @@ module ConcernsOnRails
       end
 
       # Canonicalize a country value to its ISO 3166-1 alpha-2 code: an existing
-      # alpha-2 is upcased; a 3-letter alpha-3 (e.g. "USA") and a recognized
-      # English name (e.g. "Canada") map to the alpha-2. Unrecognized values are
-      # returned unchanged, and non-strings pass through.
+      # alpha-2 is upcased; a 3-letter alpha-3 (e.g. "USA"), a recognized
+      # English name (e.g. "Canada", diacritics optional) and a COUNTRY_ALIASES
+      # spelling ("UK", "Viet Nam", "United States of America") map to the
+      # alpha-2. Unrecognized values are returned unchanged, and non-strings
+      # pass through.
       def normalize_country_code(value)
         return value unless value.is_a?(String)
 
@@ -347,7 +411,15 @@ module ConcernsOnRails
         return upper if ISO_COUNTRY_CODES.include?(upper)
         return ALPHA3_TO_ALPHA2[upper] if ALPHA3_TO_ALPHA2.key?(upper)
 
-        NAME_TO_ALPHA2[trimmed.downcase] || value
+        NAME_TO_ALPHA2[trimmed.downcase] || folded_country_code(trimmed) || value
+      end
+
+      # A string that cannot be Unicode-normalized (a binary or invalid
+      # encoding) simply has no folded match.
+      def folded_country_code(name)
+        FOLDED_NAME_TO_ALPHA2[country_key(name)]
+      rescue ArgumentError, Encoding::CompatibilityError
+        nil
       end
     end
   end

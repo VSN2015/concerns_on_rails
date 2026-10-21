@@ -62,10 +62,14 @@ module ConcernsOnRails
 
           prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: activatable_field)
           suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: activatable_field)
-          self.activatable_scope_names = {
+          names = {
             active: ConcernsOnRails::Support::Affix.name(:active, prefix: prefix, suffix: suffix),
             inactive: ConcernsOnRails::Support::Affix.name(:inactive, prefix: prefix, suffix: suffix)
           }.freeze
+          ConcernsOnRails::Support::Affix.refuse_sibling_names!(
+            self, label: LABEL, scopes: names.values, predicates: %i[active inactive], prefix: prefix, suffix: suffix
+          )
+          self.activatable_scope_names = names
 
           # Affix the scope names so two concerns that each define `.active`
           # (e.g. SoftDeletable / Expirable) can coexist on one model.
@@ -83,8 +87,14 @@ module ConcernsOnRails
         end
 
         # Activate every inactive record in the relation; returns the count.
+        # The rows each verb targets are selected inline (NULL counts as
+        # inactive), never through the public `.active` / `.inactive`
+        # scopes: Expirable and SoftDeletable define `.active` too, and the
+        # concern declared last owns it, so with Expirable after Activatable
+        # deactivate_all iterated the not-expired rows instead of the active
+        # ones.
         def activate_all
-          inactive = all.public_send(activatable_scope_names.fetch(:inactive))
+          inactive = all.where(activatable_field => [false, nil])
           if activatable_batch_fast_path?(:activate)
             return inactive.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, activatable_attributes(true, :activate))
@@ -101,7 +111,7 @@ module ConcernsOnRails
 
         # Deactivate every active record in the relation; returns the count.
         def deactivate_all
-          active = all.public_send(activatable_scope_names.fetch(:active))
+          active = all.where(activatable_field => true)
           if activatable_batch_fast_path?(:deactivate)
             return active.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, activatable_attributes(false, :deactivate))
@@ -133,7 +143,8 @@ module ConcernsOnRails
         # no validations, plus why) lives in Support::BatchOps.fast_path?.
         def activatable_batch_fast_path?(kind)
           ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Activatable,
-                                                        :"#{kind}!", *HOOKS.fetch(kind))
+                                                        :"#{kind}!", *HOOKS.fetch(kind),
+                                                        writes: activatable_attributes(kind == :activate, kind).keys)
         end
 
         # true -> both default columns; a Hash renames a side or drops it with
@@ -188,11 +199,24 @@ module ConcernsOnRails
       def before_deactivate; end
       def after_deactivate; end
 
+      # activate! / deactivate! are no-ops on a record ALREADY in that state
+      # (true, nothing stamped, no hook) — the rows activate_all /
+      # deactivate_all skip. They used to rewrite activated_at /
+      # deactivated_at and fire the hooks again. "Already" means the SAVED
+      # state: a stored record (destroyed included), no unsaved change to the flag, a saved value
+      # in the target state (deactivate! still writes false over a NULL flag).
+      # A new record or an unsaved flip of the flag runs the transition; a
+      # no-op that finds OTHER pending changes saves them (no stamp, no hooks)
+      # rather than dropping them. toggle_active! always flips.
       def activate!
+        return activatable_settle if activatable_settled?(true)
+
         activatable_transition(true, :activate)
       end
 
       def deactivate!
+        return activatable_settle if activatable_settled?(false)
+
         activatable_transition(false, :deactivate)
       end
 
@@ -233,7 +257,19 @@ module ConcernsOnRails
       def activatable_off?
         !activatable_on?
       end
-      private :activatable_transition, :activatable_on?, :activatable_off?
+
+      # The flag's SAVED value already is `target` (a NULL flag is never
+      # `false`, so deactivate! still writes it).
+      def activatable_settled?(target)
+        field = self.class.activatable_field
+        !new_record? && !will_save_change_to_attribute?(field) && self[field] == target
+      end
+
+      def activatable_settle
+        has_changes_to_save? ? save : true
+      end
+      private :activatable_transition, :activatable_on?, :activatable_off?,
+              :activatable_settled?, :activatable_settle
     end
   end
 end

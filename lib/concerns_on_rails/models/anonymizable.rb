@@ -3,9 +3,11 @@ require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/callable"
 require "concerns_on_rails/support/affix"
+require "concerns_on_rails/support/association_scope"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/hooked_write"
 require "concerns_on_rails/support/locking"
+require "concerns_on_rails/support/primary_key"
 require "concerns_on_rails/support/slug_sources"
 require "concerns_on_rails/support/unique_retry"
 require "digest"
@@ -218,8 +220,19 @@ module ConcernsOnRails
         # an erasure batch maximises progress. Each record runs in its own
         # savepoint, so one whose hook vetoes (a legal hold) is skipped
         # without undoing the others, and only records actually erased count.
+        #
+        # SCOPE: called on the model itself (`User.anonymize_all!`) it also
+        # erases the rows the gem's own default scopes hide — SoftDeletable's
+        # trash, Publishable's drafts under `default_scope: true` — since a
+        # soft-deleted account is the typical erasure subject; an
+        # application's own default scopes (a tenant, a discriminator) still
+        # apply. Called on a relation (`User.where(org_id: 1).anonymize_all!`,
+        # an association, a `scoping` block) it erases exactly that relation,
+        # default scope included like any other chain — start from
+        # `unscoped`/`with_deleted` to reach hidden rows in a subset.
         def anonymize_all!
-          relation = anonymizable_stamp ? all.where(anonymizable_stamp => nil) : all
+          base = anonymizable_sweep_base
+          relation = anonymizable_stamp ? base.where(anonymizable_stamp => nil) : base
           transaction do
             count = 0
             ConcernsOnRails::Support::BatchOps.each_record(relation) do |record|
@@ -232,6 +245,16 @@ module ConcernsOnRails
         end
 
         private
+
+        # The relation a sweep starts from (see anonymize_all!'s SCOPE): the
+        # caller's explicit relation when there is one (relation delegation and
+        # `scoping` set current_scope), otherwise the model's default-scoped
+        # relation minus only the gem's hiding predicates on its own table.
+        def anonymizable_sweep_base
+          return all if current_scope
+
+          ConcernsOnRails::Support::AssociationScope.without(all, ConcernsOnRails::Support::AssociationScope.hiding_columns(self))
+        end
 
         # nil is rejected rather than read as :auto — omit the option for the
         # default. Explicit values persist across later calls that omit it.
@@ -399,7 +422,8 @@ module ConcernsOnRails
 
         columns = anonymizable_column_payload(payload)
         # A copy: update_all adds its lock_version increment to the Hash it is given.
-        written = klass.unscoped.where(klass.primary_key => id_in_database).update_all(columns.dup) == 1
+        row = ConcernsOnRails::Support::PrimaryKey.condition(klass, id_in_database)
+        written = klass.unscoped.where(row).update_all(columns.dup) == 1
         columns.each do |name, value|
           @attributes.write_cast_value(name, value)
           clear_attribute_change(name)
@@ -522,11 +546,14 @@ module ConcernsOnRails
 
       # Whether an encrypted field holds a value, without decrypting it: a
       # pending assignment is in-memory plaintext (no crypto to read it);
-      # otherwise the column's stored ciphertext is either there or NULL.
+      # otherwise the column's stored ciphertext is either there or NULL —
+      # read from the attribute that came from the database, as Encryptable's
+      # own readers do (an unchanged re-assignment holds plaintext as its raw
+      # value). Only asked of an encryptable field, so the reader exists.
       def anonymizable_stored_value?(field)
         return !public_send(field).nil? if public_send("#{field}_changed?")
 
-        !read_attribute_before_type_cast(field.to_s).nil?
+        !encryptable_stored_value(field).nil?
       end
 
       def anonymizable_encrypted_field?(field)

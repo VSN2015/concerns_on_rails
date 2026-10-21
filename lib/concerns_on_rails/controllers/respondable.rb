@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "rack/utils"
 require "concerns_on_rails/support/error_envelope"
+require "concerns_on_rails/support/vary_header"
 
 module ConcernsOnRails
   module Controllers
@@ -177,19 +178,40 @@ module ConcernsOnRails
 
       # Link is additive by definition (RFC 8288) and Paginatable /
       # Deprecatable may already have written entries, so append to it rather
-      # than dropping theirs. Everything else is a plain set. A name or value
+      # than dropping theirs. Vary is just as additive (RFC 9110 §12.5.5):
+      # Localizable / Timezoneable write theirs BEFORE the action, so a plain
+      # set dropped Accept-Language / Time-Zone (and, Vary being non-blank,
+      # Rails' own `Vary: Accept`) and let a shared cache serve one locale's
+      # body to another. Everything else is a plain set. A name or value
       # that sanitized down to nothing is dropped: an empty `Location:` is
       # meaningless, and a nameless header is not a header.
       def respondable_write_header(name, value)
         return if name.empty? || value.empty?
+        return respondable_append_vary(value) if name.casecmp("Vary").zero?
+        return respondable_append_link(name, value) if name.casecmp("Link").zero?
 
-        if name.casecmp("Link").zero? && (found = respondable_existing_header(name))
-          key, existing = found
-          name = key
+        response.set_header(name, value)
+      end
+
+      def respondable_append_link(name, value)
+        if (found = respondable_existing_header(name))
+          name, existing = found
           value = [existing, value].reject { |part| part.nil? || part.to_s.empty? }.join(", ")
         end
 
         response.set_header(name, value)
+      end
+
+      # Through the shared appender: de-duplicated case-insensitively, an
+      # existing `Vary: *` left alone, and Rails' `Accept` seeded whenever its
+      # own _set_vary_header would have added it. A caller's `*` outranks
+      # every named dimension, so it replaces the header outright.
+      def respondable_append_vary(value)
+        dimensions = ConcernsOnRails::Support::VaryHeader.dimensions_in(value)
+        return if dimensions.empty?
+        return response.set_header("Vary", "*") if dimensions.include?("*")
+
+        ConcernsOnRails::Support::VaryHeader.append(self, *dimensions)
       end
 
       # `response.headers` is case-SENSITIVE before Rails 7.1 and

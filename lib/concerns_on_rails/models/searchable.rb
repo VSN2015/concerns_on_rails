@@ -36,7 +36,7 @@ module ConcernsOnRails
     #                   the relation's existing ORDER BY becomes the tiebreaker.
     #                   `search(q, ranked: true/false)` overrides per call and
     #                   `search_rank(q)` exposes the expression for select/pluck.
-    #                   A grouped relation is returned unranked.
+    #                   A grouped or DISTINCT relation is returned unranked.
     #
     # Uses Arel's `matches`. The query is escaped before interpolation, so
     # `%` / `_` / `\` from user input are treated as literals.
@@ -149,8 +149,11 @@ module ConcernsOnRails
         # back untouched: the rank columns are not in the GROUP BY, so ordering
         # by them is a hard error on Postgres and on MySQL under
         # ONLY_FULL_GROUP_BY — and ranking aggregated rows means nothing anyway.
+        # A DISTINCT relation likewise: the rank expression is not in its
+        # SELECT list, which Postgres ("for SELECT DISTINCT, ORDER BY
+        # expressions must appear in select list") and MySQL 5.7.5+ reject.
         def search_apply_rank(relation, terms)
-          return relation if relation.group_values.any?
+          return relation if relation.group_values.any? || relation.distinct_value
 
           relation.reorder(search_rank_expression(terms).asc, *relation.order_values)
         end

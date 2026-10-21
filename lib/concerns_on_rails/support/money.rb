@@ -13,12 +13,14 @@ module ConcernsOnRails
       # format(199999) => "$1,999.99"
       # format(-500, unit: "£") => "-£5.00"
       # format(1234, unit: "¥", precision: 0, subunit_to_unit: 1) => "¥1,234"
+      # format(1999, unit: "KD", subunit_to_unit: 1000) => "KD1.999"
       def format(cents, options = {})
         unit      = options.fetch(:unit, "$")
-        precision = options.fetch(:precision, 2)
         delimiter = options.fetch(:delimiter, ",")
         separator = options.fetch(:separator, ".")
         subunit   = options.fetch(:subunit_to_unit, 100)
+        precision = options[:precision]
+        precision = default_precision(subunit) if precision.nil?
 
         decimal = BigDecimal(cents.to_s) / subunit
         # BigDecimal#round returns an Integer for precision <= 0, so re-wrap it
@@ -44,7 +46,7 @@ module ConcernsOnRails
         unknown = overrides.keys - FORMAT_OPTIONS
         raise ArgumentError, "#{label}: unknown formatting option(s): #{unknown.join(', ')}" if unknown.any?
 
-        coerce_numeric_options(config.merge(overrides), label)
+        coerce_numeric_options(config.merge(overrides), label).tap { |options| validate_marks!(options, label) }
       end
 
       # A unit that contains the delimiter or the separator (",", "Fr." with
@@ -57,14 +59,48 @@ module ConcernsOnRails
         raise ArgumentError, "#{label}: :unit must not contain the :delimiter or :separator (unit: #{unit.inspect})"
       end
 
+      # A separator equal to the delimiter ("," with the default ",") prints
+      # "1,234,56", and an empty one with decimals to show prints "1,23456":
+      # neither reads back (the writer stored nil), so neither is accepted.
+      # Expects coerced options; a nil :precision is a default, which always
+      # shows decimals.
+      def validate_marks!(options, label)
+        delimiter = options.fetch(:delimiter, ",").to_s
+        separator = options.fetch(:separator, ".").to_s
+        if separator.empty?
+          precision = options.fetch(:precision, nil)
+          return unless precision.nil? || precision.positive?
+
+          raise ArgumentError, "#{label}: :separator must not be empty while :precision is positive " \
+                               "(formatted output could not be read back)"
+        end
+        return unless separator == delimiter
+
+        raise ArgumentError, "#{label}: :separator must differ from the :delimiter (both #{separator.inspect}); " \
+                             "formatted output could not be read back"
+      end
+
       # :subunit_to_unit to a positive Integer, :precision to an Integer
-      # (a String "2" is fine; "two" or 1.5 raises). Returns a new Hash.
+      # (a String "2" is fine; "two" or 1.5 raises). Returns a new Hash. A
+      # nil (or absent) :precision stays nil, which #format reads as
+      # default_precision of whatever subunit it formats with — so a
+      # per-call subunit_to_unit: override gets its own default too.
       def coerce_numeric_options(options, label)
         subunit = options.key?(:subunit_to_unit) ? options[:subunit_to_unit].to_i : 100
         raise ArgumentError, "#{label}: :subunit_to_unit must be a positive integer" unless subunit.positive?
 
-        precision = options.key?(:precision) ? coerce_precision(options[:precision], label) : 2
+        precision = options[:precision].nil? ? nil : coerce_precision(options[:precision], label)
         options.merge(subunit_to_unit: subunit, precision: precision)
+      end
+
+      # Decimal places shown when :precision is not given: every place a
+      # power-of-ten subunit carries (1000 fils -> 3: "KD1.999", which reads
+      # back as 1999, where "KD2.00" read back as 2000), and never fewer
+      # than 2 — the long-standing default for cents, and for 1-, 10- and
+      # non-power-of-ten subunits.
+      def default_precision(subunit)
+        places = subunit.to_s.length - 1
+        subunit == 10**places ? [places, 2].max : 2
       end
 
       def coerce_precision(value, label)
@@ -85,8 +121,9 @@ module ConcernsOnRails
       # It must follow a digit, and is checked only once the unit is gone, so
       # a unit ending in e/E ("Le100.00", "CHE100.00") is not mistaken for one.
       OVERSIZED_EXPONENT = /\d[eE][+-]?\d{3}/
-      # "1.234" / "-1.234.567": "."-grouped thousands.
-      DOTTED_THOUSANDS = /\A[+-]?\d{1,3}(?:\.\d{3})+\z/
+      # "1.234" / "-1.234.567": "."-grouped thousands. Digit grouping never
+      # leads with a "0" group, so "0.500" is the decimal 0.5, never 500.
+      DOTTED_THOUSANDS = /\A[+-]?[1-9]\d{0,2}(?:\.\d{3})+\z/
       # The only shape handed to BigDecimal(): sign, digits with an optional
       # "." fraction, optional exponent. BigDecimal() itself also accepts
       # Ruby-literal underscores, so "5_5" read as 55 while the equally
@@ -178,9 +215,11 @@ module ConcernsOnRails
         whole && "#{sign}#{whole}#{'.' unless sep.empty?}#{frac}"
       end
 
+      # A leading "0" group is not grouping: "0,500" (a wrong-locale 0.5) is
+      # garbage (nil), not 500.
       def ungroup(whole, delimiter)
         return whole if delimiter.empty? || !whole.include?(delimiter)
-        return nil unless whole.match?(/\A\d{1,3}(?:#{Regexp.escape(delimiter)}\d{3})+\z/)
+        return nil unless whole.match?(/\A[1-9]\d{0,2}(?:#{Regexp.escape(delimiter)}\d{3})+\z/)
 
         whole.gsub(delimiter, "")
       end

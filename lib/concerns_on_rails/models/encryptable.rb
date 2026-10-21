@@ -4,6 +4,8 @@ require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/slug_sources"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/locking"
+require "concerns_on_rails/support/primary_key"
+require "concerns_on_rails/support/write_boundary"
 require "active_model/type"
 require "bigdecimal"
 require "time"
@@ -93,18 +95,17 @@ module ConcernsOnRails
         # { field => { type:, key:, blind_index: } }. Subclasses inherit and may
         # add fields.
         class_attribute :encryptable_rules, instance_accessor: false, default: {}
+        # Blind indexes are refreshed at the write boundary
+        # (Support::WriteBoundary, see #encryptable_before_write), after EVERY
+        # before_* callback — the app's own `before_update { self.email =
+        # email.downcase }` included, whatever its declaration order — so the
+        # digest is taken from the value actually written.
+        include ConcernsOnRails::Support::WriteBoundary
+
         # (The audited-plaintext overlap is guarded at macro time from BOTH
         # declaration orders — here and in Auditable#auditable_by — so no
         # per-save backstop is needed.)
         #
-        # Blind indexes are refreshed in before_create/before_update, which run
-        # after EVERY before_save — the app's own `before_save { self.email =
-        # email.downcase }` included, whatever its declaration order — so the
-        # digest is taken from the value actually written. A new row refreshes
-        # every indexed field, changed or not: a copy (dup, Duplicable's reset)
-        # arrives carrying its original's digest for a field it no longer has.
-        before_create :encryptable_refresh_all_blind_indexes
-        before_update :encryptable_refresh_blind_indexes
         # The slug guard DOES need one: a slug is plaintext of its source, and
         # the macro-time checks cannot see every shape — Sluggable included
         # without sluggable_by (it slugs the implicit :name), or friendly_id
@@ -134,6 +135,34 @@ module ConcernsOnRails
       # (Infinity, garbage) is stored as NULL, so its fingerprint is nil too.
       def self.blind_fingerprint(rule, value, zone_aware: false)
         blind_fingerprints(rule, value, zone_aware: zone_aware, legacy: false).first
+      end
+
+      # Shared by both declaration orders of the uniqueness guard. `scope:`
+      # says whether the field was the validated attribute or a `scope:`.
+      def self.uniqueness_message(field, blind_index, scope:)
+        role = scope ? "the `scope:` of a uniqueness validation" : "validated with `uniqueness:`"
+        fix = if blind_index
+                "Check it through the blind index instead (`self.class.where_#{field}(#{field})" \
+                  ".where.not(id: id).exists?` in a `validate` block) and add a unique index on " \
+                  "#{blind_index[:column]}."
+              else
+                "Declare it with `blind_index: true` and check it through `where_#{field}` (plus a unique " \
+                  "index on the blind-index column)."
+              end
+        "#{LABEL}: ':#{field}' is encrypted and #{role}. UniquenessValidator compares the column with a fresh " \
+          "ciphertext (random IV), which matches no row, so the check always passes and duplicates are saved. #{fix}"
+      end
+
+      def self.uniqueness_validator?(validator)
+        validator.is_a?(Class) && validator <= ::ActiveRecord::Validations::UniquenessValidator
+      end
+
+      # The friendly_id scope columns of a `:scoped` model, as Symbols
+      # (friendly_id resolves an association to its foreign key), else [].
+      def self.friendly_id_scope_columns(klass)
+        return [] unless klass.respond_to?(:friendly_id_config) && klass.friendly_id_config.uses?(:scoped)
+
+        klass.friendly_id_config.scope_columns.map(&:to_sym)
       end
 
       # Shared by both declaration orders of the Lockable unlock-token guard.
@@ -250,6 +279,35 @@ module ConcernsOnRails
           ::ActiveRecord::AttributeMethods::TimeZoneConversion::ClassMethods.private_method_defined?(:hook_attribute_type)
       end
 
+      # The type decorations `encryptable`'s `attribute` call would REPLACE
+      # when declared after them: ActiveRecord's `serialize` (from Rails 6.1;
+      # 6.0 applies it after every attribute at schema load, so it composes)
+      # and Rails 7.1+ `normalizes` (ActiveRecord::Normalization up to 8.0,
+      # ActiveModel's from 8.1). Names, so an absent constant costs nothing.
+      def self.replaced_decorations
+        @replaced_decorations ||= begin
+          serialize = ("ActiveRecord::Type::Serialized" unless defined?(::ActiveRecord::AttributeDecorators))
+          { "serialize" => [serialize].compact,
+            "normalizes" => %w[ActiveRecord::Normalization::NormalizedValueType
+                               ActiveModel::Attributes::Normalization::NormalizedValueType] }
+        end
+      end
+
+      # The first replaceable decoration (see replaced_decorations) in a
+      # (possibly nested) attribute type, by the macro that adds it, or nil.
+      def self.replaced_decoration(type)
+        8.times do
+          name = replaced_decorations.find do |_macro, classes|
+            classes.any? { |klass| (const = klass.safe_constantize) && type.is_a?(const) }
+          end&.first
+          return name if name
+          return nil unless type.respond_to?(:__getobj__)
+
+          type = type.__getobj__
+        end
+        nil
+      end
+
       # A per-field key is one key; gem-keyed fields fingerprint under the
       # current key and every previous one.
       def self.blind_index_materials(rule, config, current)
@@ -265,9 +323,9 @@ module ConcernsOnRails
 
       # Custom type registered on each encrypted column. cast handles user input
       # (plaintext in memory), serialize encrypts on the write-to-DB path, and
-      # deserialize decrypts on the read-from-DB path. An immutable value type,
-      # so dirty tracking compares the cast plaintext — a re-save of unchanged
-      # data is not dirtied by GCM's random IV.
+      # deserialize decrypts on the read-from-DB path. Dirty tracking compares
+      # the cast plaintext (an in-place String edit too, see changed_in_place?)
+      # — a re-save of unchanged data is not dirtied by GCM's random IV.
       #
       # A :datetime field reports the :datetime type, so ActiveRecord gives it
       # the time-zone handling it gives any `attribute :name, :datetime`: under
@@ -320,6 +378,18 @@ module ConcernsOnRails
           return nil if plaintext.nil?
 
           @type == :datetime ? read_time(plaintext) : cast_typed(plaintext)
+        end
+
+        # An in-place edit of a decrypted String (`notes << "x"`, `gsub!`,
+        # `squish!`) is a change, as it is for a plain string column — the
+        # base Value type answers false, so such an edit was silently lost on
+        # save. ActiveModel asks only for an attribute that has been read, and
+        # hands over the value AT REST, so the comparison is on PLAINTEXT:
+        # comparing envelopes would dirty every read field, since GCM's random
+        # IV never re-encrypts to the same bytes. Only a String can be edited
+        # in place (the other types cast to immutable values).
+        def changed_in_place?(raw_old_value, new_value)
+          new_value.is_a?(::String) && deserialize(raw_old_value) != new_value
         end
 
         # The typed value a blind index is computed from: the cast value, a
@@ -453,15 +523,19 @@ module ConcernsOnRails
           @encryptable_declaring = true # see _default_attributes
           type = type.to_sym
           encryptable_validate!(fields, type, blind_index)
-          ensure_columns!(LABEL, *fields, types: :text)
+          schema_reachable = ensure_columns!(LABEL, *fields, types: :text)
 
           fields.each do |field|
             field = field.to_sym
+            encryptable_guard_column_default!(field) if schema_reachable
+            encryptable_guard_replaced_decoration!(field) if schema_reachable
             encryptable_guard_auditable!(field)
             encryptable_guard_sluggable!(field)
             encryptable_guard_queryable!(field)
             encryptable_guard_lockable_token!(field)
+            encryptable_guard_scope_column!(field)
             bi = encryptable_normalize_blind_index(field, blind_index)
+            encryptable_guard_declared_uniqueness!(field, bi)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
             self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
             attribute field, EncryptedType.new(type: type, key: key)
@@ -586,6 +660,18 @@ module ConcernsOnRails
           fields.map(&:to_sym) & rotatable
         end
 
+        # A uniqueness validation declared AFTER `encryptable` (`validates
+        # :email, uniqueness: true` and validates_uniqueness_of both arrive
+        # here) is refused before it is registered; encryptable_guard_
+        # declared_uniqueness! covers the other order.
+        def validates_with(*args, &)
+          if args.any? { |arg| ConcernsOnRails::Models::Encryptable.uniqueness_validator?(arg) }
+            options = args.last.is_a?(Hash) ? args.last : {}
+            encryptable_guard_uniqueness!(Array(options[:attributes]), Array(options[:scope]))
+          end
+          super
+        end
+
         private
 
         # The relation a rotation sweeps: the caller's explicit relation when
@@ -630,10 +716,17 @@ module ConcernsOnRails
           # reader named `_ciphertext`, documented for "asserting no plaintext
           # is at rest", handed back the SSN, so `log.info(user.ssn_ciphertext)`
           # wrote it straight to the log.
+          #
+          # And "not changed" is not "the attribute is the database value": an
+          # assignment that leaves the value equal (an edit form re-submitting
+          # the same SSN, an assign-then-revert, CounterCacheable restoring an
+          # old value to judge `if:`) still holds the PLAINTEXT as its raw
+          # value. So the envelope is read from the attribute that came from
+          # the database (encryptable_stored_value).
           define_method("#{field}_ciphertext") do
             next nil if new_record? || public_send("#{field}_changed?")
 
-            read_attribute_before_type_cast(field)
+            encryptable_stored_value(field)
           end
 
           # True only when what is stored really is an encryption envelope. The
@@ -722,6 +815,44 @@ module ConcernsOnRails
           end
         end
 
+        # A database default is plaintext the column hands every new record
+        # (and every INSERT that omits the field), and plaintext is never a
+        # valid envelope: `Model.new.notes` — and every `create!`, whose dirty
+        # tracking reads the default — raised DecryptionError. `""` is the one
+        # default read as plaintext (see EncryptedType#deserialize); anything
+        # else is refused here. Decrypting a non-envelope as plaintext instead
+        # would let anyone who can write the column plant a value that reads
+        # back as authentic. Skipped (like the column check) while the schema
+        # is unreachable.
+        def encryptable_guard_column_default!(field)
+          default = columns_hash[field.to_s]&.default
+          return if default.nil? || default == ""
+
+          raise ArgumentError,
+                "#{LABEL}: ':#{field}' has a database default (#{default.inspect}), which is plaintext and can never " \
+                "decrypt, so every new record would raise DecryptionError. An encrypted column must default to " \
+                "NULL (or \"\"). Drop it with: change_column_default :#{table_name}, :#{field}, " \
+                "from: #{default.inspect}, to: nil"
+        end
+
+        # `encryptable` attaches its type with `attribute`, which REPLACES a
+        # `serialize` or `normalizes` already declared on the field: a Hash was
+        # then stored as its Ruby `to_s`, or a normalization silently stopped.
+        # Declared the other way round they wrap the encrypted type and
+        # compose, so that order is what the error asks for. A re-declaration
+        # after such a macro (`encryptable`, `serialize`, `encryptable`) would
+        # drop it the same way and is refused too.
+        def encryptable_guard_replaced_decoration!(field)
+          macro = ConcernsOnRails::Models::Encryptable.replaced_decoration(type_for_attribute(field.to_s))
+          return unless macro
+
+          effect = macro == "serialize" ? "storing the value as its Ruby to_s" : "silently dropping the normalization"
+          raise ArgumentError,
+                "#{LABEL}: ':#{field}' already has a `#{macro}` declared before `encryptable`, which " \
+                "`encryptable` would replace (#{effect}). Swap the two lines: declare `encryptable :#{field}` " \
+                "first, then `#{macro}` — it then wraps the encrypted type and both apply."
+        end
+
         # Macro-time guard for the common order (Encryptable declared after
         # Auditable): a field must not be both encrypted and audited.
         def encryptable_guard_auditable!(field)
@@ -748,6 +879,31 @@ module ConcernsOnRails
           raise ArgumentError, encryptable_slug_source_message(field)
         end
 
+        # A uniqueness validation declared BEFORE `encryptable :field`, on the
+        # field or with it in `scope:`, can never find the existing row
+        # (see uniqueness_message).
+        def encryptable_guard_declared_uniqueness!(field, blind_index)
+          validators.each do |validator|
+            next unless ConcernsOnRails::Models::Encryptable.uniqueness_validator?(validator.class)
+
+            scope = Array(validator.options[:scope]).map(&:to_sym).include?(field)
+            next unless scope || validator.attributes.map(&:to_sym).include?(field)
+
+            raise ArgumentError, ConcernsOnRails::Models::Encryptable.uniqueness_message(field, blind_index, scope: scope)
+          end
+        end
+
+        def encryptable_guard_uniqueness!(attributes, scope)
+          rules = encryptable_rules
+          [[attributes, false], [scope, true]].each do |names, as_scope|
+            field = names.map(&:to_sym).find { |name| rules.key?(name) }
+            next unless field
+
+            raise ArgumentError,
+                  ConcernsOnRails::Models::Encryptable.uniqueness_message(field, rules[field][:blind_index], scope: as_scope)
+          end
+        end
+
         # Lockable's unlock token is minted, claimed and retired by
         # callback-skipping SQL writes keyed on the column's value — no blind
         # index is ever computed, and ciphertext never equals the mailed
@@ -757,6 +913,35 @@ module ConcernsOnRails
           return unless respond_to?(:lockable_unlock_token_field) && lockable_unlock_token_field == field
 
           raise ArgumentError, ConcernsOnRails::Models::Encryptable.lockable_token_message(field)
+        end
+
+        # A Sequenceable / Sortable `scope:` column or a friendly_id scope column is
+        # queried with `where(column => value)`, which on ciphertext (random
+        # IV) matches no row: the counter issues the same number twice,
+        # friendly_id the same slug, acts_as_list position 1 for every record.
+        # Refused here for the order sequenceable_by / sortable_by /
+        # sluggable_by / friendly_id first; Sequenceable, Sortable and Sluggable
+        # refuse the reverse order, and the save-time slug guard covers a bare
+        # friendly_id declared after `encryptable`.
+        def encryptable_guard_scope_column!(field)
+          if respond_to?(:sequenceable_config) && sequenceable_config.values.any? { |cfg| cfg[:scope].include?(field) }
+            raise ArgumentError, encryptable_scope_column_message(field, "a Sequenceable scope: column",
+                                                                  "counter's MAX", "issue the same number twice")
+          end
+          if respond_to?(:sortable_scope_columns) && sortable_scope_columns.include?(field)
+            raise ArgumentError, encryptable_scope_column_message(field, "a Sortable scope: column",
+                                                                  "acts_as_list scope query",
+                                                                  "treat every record as alone in its list")
+          end
+          return unless ConcernsOnRails::Models::Encryptable.friendly_id_scope_columns(self).include?(field)
+
+          raise ArgumentError, encryptable_scope_column_message(field, "a friendly_id scope column",
+                                                                "slug uniqueness check", "give two records the same slug")
+        end
+
+        def encryptable_scope_column_message(field, role, query, outcome)
+          "#{LABEL}: ':#{field}' is #{role}; its #{query} would compare ciphertext (a fresh random IV per " \
+            "query), match no row and #{outcome}. Keep scope columns unencrypted."
         end
 
         def encryptable_slug_source_message(field)
@@ -888,7 +1073,8 @@ module ConcernsOnRails
         names = encryptable_stored_field_names(fields)
         return if names.empty?
 
-        sql = self.class.unscoped.where(self.class.primary_key => id_in_database).select(*names).to_sql
+        condition = ConcernsOnRails::Support::PrimaryKey.condition(self.class, id_in_database)
+        sql = self.class.unscoped.where(condition).select(*names).to_sql
         row = self.class.connection.select_rows(sql).first
         names.each_with_index { |name, index| @attributes.write_from_database(name, row[index]) } if row
       end
@@ -900,8 +1086,24 @@ module ConcernsOnRails
 
       def encryptable_stored_field_names(fields)
         (fields || self.class.encryptable_rules.keys.map(&:to_s)).select do |name|
-          has_attribute?(name) && !read_attribute_before_type_cast(name).nil?
+          has_attribute?(name) && !encryptable_stored_value(name).nil?
         end
+      end
+
+      # The column's raw value as this record last read or wrote it: the
+      # value_before_type_cast of the attribute that came from the database.
+      # Any assignment — also one that leaves the value unchanged — wraps that
+      # attribute in a user-assigned one whose raw value is the caller's
+      # PLAINTEXT, holding the database attribute as its original; this walks
+      # back to it. An attribute written with its cast value (update_columns)
+      # has no original and is returned as it is. (ActiveModel::Attribute's
+      # original_attribute is private on every supported line, 6.0-8.1.)
+      def encryptable_stored_value(field)
+        attribute = @attributes[field.to_s]
+        while (original = attribute.send(:original_attribute))
+          attribute = original
+        end
+        attribute.value_before_type_cast
       end
 
       # What reencrypt! would write: the new values (plus their refreshed blind
@@ -911,7 +1113,7 @@ module ConcernsOnRails
         guards = []
         binds = []
         self.class.encryptable_rotatable_fields(fields).each do |field|
-          stored = read_attribute_before_type_cast(field)
+          stored = encryptable_stored_value(field)
           next if stored.nil? || public_send("#{field}_changed?")
 
           value = public_send(field)
@@ -941,32 +1143,25 @@ module ConcernsOnRails
       # into a StaleObjectError. (A write the app makes meanwhile still bumps
       # it as usual; the ciphertext guard is what keeps the two apart.)
       def encryptable_rotate_row!(updates, guards, binds)
-        primary_key = self.class.primary_key
-        # id_in_database is Rails 5.2+; for a persisted row whose primary key
-        # has not been reassigned in memory the attribute is the same value.
-        pk_value = respond_to?(:id_in_database) ? id_in_database : self[primary_key]
         self.class.unscoped
-            .where(primary_key => pk_value)
+            .where(ConcernsOnRails::Support::PrimaryKey.condition(self.class, id_in_database))
             .where(guards.join(" AND "), *binds)
             .update_all(updates.merge(ConcernsOnRails::Support::Locking.pinned(self.class)))
       end
 
-      # Recompute each blind-index column from the (changed) plaintext just
-      # before the row is written, so the fingerprint always matches the value.
-      def encryptable_refresh_blind_indexes
-        encryptable_refresh_blind_indexes_for(self.class.encryptable_rules.keys)
-      end
-
-      def encryptable_refresh_all_blind_indexes
-        encryptable_refresh_blind_indexes_for(self.class.encryptable_rules.keys, all: true)
-      end
-
-      # Support::GeneratedValues consumer. A token / code / number generated in
-      # before_create arrives AFTER the before_save refresh above, so without
-      # this the row was INSERTed with a NULL fingerprint and find_by_<field>
-      # never found a freshly created record.
-      def encryptable_generated_values_assigned(columns)
-        encryptable_refresh_blind_indexes_for(columns)
+      # Support::WriteBoundary consumer: recompute each blind-index column from
+      # the plaintext about to be written — after every before_* callback, so
+      # neither the app's own later before_update/before_create rewrite nor a
+      # value a sibling generates in before_create (a Tokenizable token, a
+      # Hashable code, a Sequenceable number) is missed. On update only a
+      # changed field is refreshed; a new row refreshes every indexed field,
+      # changed or not: a copy (dup, Duplicable's reset) arrives carrying its
+      # original's digest for a field it no longer has. Returns the index
+      # columns, for the boundary to add to the written column list.
+      def encryptable_before_write(create)
+        rules = self.class.encryptable_rules
+        encryptable_refresh_blind_indexes_for(rules.keys, all: create)
+        rules.values.filter_map { |rule| rule[:blind_index] && rule[:blind_index][:column] }
       end
 
       def encryptable_refresh_blind_indexes_for(fields, all: false)
@@ -997,9 +1192,12 @@ module ConcernsOnRails
       def encryptable_guard_slug_source!
         klass = self.class
         overlap = ConcernsOnRails::Support::SlugSources.names(klass) & klass.encryptable_rules.keys
-        return if overlap.empty?
+        raise ArgumentError, klass.send(:encryptable_slug_source_message, overlap.first) unless overlap.empty?
 
-        raise ArgumentError, klass.send(:encryptable_slug_source_message, overlap.first)
+        # A bare friendly_id scoped by a column encrypted earlier (the
+        # macro-time scope guards cannot see friendly_id's own macro).
+        scoped = ConcernsOnRails::Models::Encryptable.friendly_id_scope_columns(klass) & klass.encryptable_rules.keys
+        klass.send(:encryptable_guard_scope_column!, scoped.first) unless scoped.empty?
       end
     end
   end

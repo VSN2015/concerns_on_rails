@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
 require "concerns_on_rails/support/scalar_param"
+require "concerns_on_rails/support/numeric_operand"
 require "concerns_on_rails/support/time_value"
 require "json"
 require "concerns_on_rails/support/link_header"
@@ -72,8 +73,14 @@ module ConcernsOnRails
       # "Option not passed" for cursor_paginate_by, so a re-declaration keeps
       # (inherits) what it omits — see the macro.
       UNSET = Object.new.freeze
+      # The Strings ActiveModel's Float type reads as a non-finite number — the
+      # form a stored ±Infinity / NaN boundary is minted in.
+      NON_FINITE_FLOATS = %w[Infinity -Infinity NaN].freeze
       # Adapters whose SQL supports row-value (tuple) comparison: (a, b) > (x, y).
       ROW_PREDICATE_ADAPTERS = /postgres|mysql|trilogy|sqlite/i
+      # Adapters that store a NUL byte in a text column AND escape it in a
+      # quoted literal, so a String boundary carrying one can have been minted.
+      NUL_LITERAL_ADAPTERS = /mysql|trilogy/i
       # Deliberately mutable: memoizes adapter row-predicate support per model
       # class — stable for the life of the process, benign write race.
       ROW_PREDICATE_SUPPORT_CACHE = {} # rubocop:disable Style/MutableConstant
@@ -456,7 +463,7 @@ module ConcernsOnRails
           "t" => model.table_name, # pin the table so cross-model replay is rejected
           "o" => pairs.map { |col, dir| "#{col}:#{dir}" },
           "d" => direction,
-          "v" => pairs.map { |col, _dir| serialize_cursor_value(cursor_boundary_value!(model, record, col)) }
+          "v" => pairs.map { |col, _dir| cursor_minted_value(model, record, col) }
         }
         token = cursor_base64_encode(JSON.generate(payload))
         cursor_signing_key ? "#{token}.#{cursor_signature(token)}" : token
@@ -553,6 +560,18 @@ module ConcernsOnRails
         [record.read_attribute(name), record.read_attribute_before_type_cast(name).nil?]
       end
 
+      # A binary column's bytes (a binary(16) UUID primary key — the
+      # ever-present tiebreaker — or a binary ordering column) are not UTF-8
+      # text: JSON.generate raised on them, so such an endpoint could not
+      # paginate at all. They travel as strict Base64, decoded by
+      # cast_cursor_value!.
+      def cursor_minted_value(model, record, col)
+        value = cursor_boundary_value!(model, record, col)
+        return [value.to_s].pack("m0") if !value.nil? && model.type_for_attribute(col.to_s).type == :binary
+
+        serialize_cursor_value(value, model.type_for_attribute(col.to_s))
+      end
+
       # Explicit is_a? checks (NOT acts_like?, which needs an un-required
       # core_ext; NOT case/when, whose Module#=== misses TimeWithZone — its
       # redefined #is_a? returns true for Time). iso8601(6) keeps microsecond
@@ -563,12 +582,28 @@ module ConcernsOnRails
       # as the String ActiveModel's Float type casts back ("Infinity",
       # "-Infinity", "NaN"): JSON has no such number, and JSON.generate raised
       # on it, so one such row on a page boundary made that page a 500.
-      def serialize_cursor_value(value)
-        return ConcernsOnRails::Support::TimeValue.utc(value).iso8601(6) if value.is_a?(Time) || value.is_a?(DateTime)
+      def serialize_cursor_value(value, type)
+        return serialize_cursor_time(value, type) if value.is_a?(Time) || value.is_a?(DateTime)
         return value.iso8601 if value.is_a?(Date)
         return value.to_s if value.is_a?(BigDecimal) || (value.is_a?(Float) && !value.finite?)
 
         value
+      end
+
+      # A `time` column's boundary is its STORED form: the time of day as the
+      # database holds it, in ActiveRecord's default_timezone (UTC, or local
+      # time under :local), with microseconds and no date or zone
+      # ("10:30:15.500000"). cursor_type_cast reads it back with the type's
+      # deserialize — the very path that read the row — so every Rails line
+      # rebuilds the same value, time-zone-aware or not. The ISO 8601 form
+      # ("2000-01-01T10:30:15.500000Z") is misread by Rails 6.0/6.1's Time
+      # type, as 10:30:15.0000005: the boundary row sorted after its own
+      # cursor, and every next page returned that one row again, forever.
+      def serialize_cursor_time(value, type)
+        return ConcernsOnRails::Support::TimeValue.utc(value).iso8601(6) unless type.type == :time && value.is_a?(Time)
+
+        time = ConcernsOnRails::Support::TimeValue.default_timezone == :local ? value.getlocal : value.getutc
+        time.strftime("%H:%M:%S.%6N")
       end
 
       # nil → no cursor param (first page). Otherwise {values:, backward:}:
@@ -610,22 +645,86 @@ module ConcernsOnRails
         return nil if raw.nil? # a NULL boundary; valid_cursor_values? only admits it on a nullable column
 
         type = model.type_for_attribute(col.to_s)
+        raw = cursor_binary_boundary!(raw) if type.type == :binary
+        raise InvalidCursor, "Invalid pagination cursor." unless cursor_text_minted?(model, type, raw)
+        raise InvalidCursor, "Invalid pagination cursor." unless cursor_numeric_minted?(type, raw)
+
         value = cursor_type_cast(type, raw)
         raise InvalidCursor, "Invalid pagination cursor." unless cursor_bindable?(model, type, value)
 
         value
       end
 
+      # JSON.parse admits raw invalid UTF-8 and "\u0000" inside a JSON string,
+      # so a hand-made cursor could carry either; the boundary is then inlined
+      # into the keyset WHERE as a quoted literal. Invalid UTF-8 is never
+      # minted (JSON.generate raises on it) and raised ArgumentError on Rails
+      # 7.0 / an encoding error on PostgreSQL. A NUL byte cut the statement
+      # short on SQLite (a StatementInvalid 500), and PostgreSQL cannot store
+      # one; only the MySQL adapters (which escape it) can hold and quote a row
+      # value carrying one, so only there is it a boundary we may have minted.
+      # A binary column's boundary is raw bytes, not text, and is left alone.
+      def cursor_text_minted?(model, type, raw)
+        return true unless raw.is_a?(String) && type.type != :binary
+        return false unless raw.valid_encoding?
+
+        !raw.include?("\u0000") || model.connection.adapter_name.match?(NUL_LITERAL_ADAPTERS)
+      end
+
+      # A binary column's boundary is minted as strict Base64 (see
+      # cursor_minted_value); anything else — not a String, or not Base64 —
+      # is tampering.
+      def cursor_binary_boundary!(raw)
+        raise InvalidCursor, "Invalid pagination cursor." unless raw.is_a?(String)
+
+        raw.unpack1("m0")
+      rescue ArgumentError
+        raise InvalidCursor, "Invalid pagination cursor."
+      end
+
+      # A plain numeric column's boundary is read the way Filterable reads an
+      # operand (Support::NumericOperand) and must be :exact — a value the
+      # column holds as-is. Nothing else checked a DECIMAL against the
+      # column's precision: `1e20` on a decimal(10,2) column (never minted)
+      # was bound and silently ended the walk with an empty 200. Nor its
+      # size: BigDecimal#to_s("F") expanded `"1e5000000"` into a
+      # 5,000,060-character SQL literal (`"1e99999999"`, 12 bytes, ~100 MB).
+      # NumericOperand's length / exponent bounds stop that before any
+      # BigDecimal is built. Minted boundaries are always exact (an Integer,
+      # a finite Float, a decimal's `to_s`). A float column's non-finite
+      # forms are left to cursor_bindable?, which knows where they are minted.
+      def cursor_numeric_minted?(type, raw)
+        return true unless ConcernsOnRails::Support::NumericOperand.kind(type)
+        return true if cursor_non_finite_float?(type, raw)
+
+        ConcernsOnRails::Support::NumericOperand.classify(raw, type)&.status == :exact
+      end
+
+      def cursor_non_finite_float?(type, raw)
+        return false unless type.type == :float
+
+        raw.is_a?(Float) ? !raw.finite? : NON_FINITE_FLOATS.include?(raw)
+      end
+
       # Rails 6.0–7.0's date and time casts raise Date._parse's ArgumentError
       # for a String over 128 characters (7.1 casts it to nil): a tampered
       # date boundary was a 500 instead of the 400 below. Any other type's
-      # ArgumentError is left alone.
+      # ArgumentError is left alone. A `time` column's zone-less String
+      # boundary is the stored time of day (serialize_cursor_time), so it is
+      # read the way the database value was: `cast` would take it as user
+      # input, which a time-zone-aware attribute reads in Time.zone. A zoned
+      # one is a cursor minted in the ISO 8601 form before that, and is cast
+      # as it always was.
       def cursor_type_cast(type, raw)
-        type.cast(raw)
+        cursor_stored_time?(type, raw) ? type.deserialize(raw) : type.cast(raw)
       rescue ArgumentError
         raise unless ConcernsOnRails::Support::TimeValue.temporal_type?(type)
 
         raise InvalidCursor, "Invalid pagination cursor."
+      end
+
+      def cursor_stored_time?(type, raw)
+        type.type == :time && raw.is_a?(String) && !ConcernsOnRails::Support::TimeValue::ZONED.match?(raw)
       end
 
       # `serializable?` is the Rails 6.1+ range probe; on 6.0 only serialize

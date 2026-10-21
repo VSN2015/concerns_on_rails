@@ -56,7 +56,7 @@ The `timezoneable` class macro accepts the following keyword options.
 ### Instance methods
 
 **`switch_time_zone(&block) → Object`**
-An `around_action` registered automatically on include. Calls `Time.use_zone(resolved_time_zone, &block)`, running the action body under the resolved zone and restoring the previous `Time.zone` after the block exits — even if an exception is raised. Declared `public` so that subclasses can override it.
+An `around_action` registered automatically on include. Calls `Time.use_zone(resolved_time_zone, &block)`, running the action body under the resolved zone and restoring the previous `Time.zone` after the block exits — even if an exception is raised. It does so on every request, also when the resolved zone is already the current one, so a `Time.zone = …` inside the action (the per-user idiom this concern replaces, or a gem doing it) never leaks to the next request served by the thread. Declared `public` so that subclasses can override it.
 
 **`resolved_time_zone → ActiveSupport::TimeZone`**
 Returns the `ActiveSupport::TimeZone` chosen for the current request. Evaluates sources in order — param, header, cookie, configured default — and returns the first that produces a valid zone matching the allow-list. Falls back to the current `Time.zone` if nothing resolves. Exposed as a public method so controllers or views can reference the selected zone directly (e.g., to render a timezone indicator).
@@ -164,4 +164,4 @@ end
 
 ## Changed in 1.22.0
 
-- `resolved_time_zone` is memoized per request, and the `Time.use_zone` wrapper is skipped when it would be a no-op (resolved zone equals the current `Time.zone`).
+- `resolved_time_zone` is memoized per request, and the `Time.use_zone` wrapper is skipped when it would be a no-op (resolved zone equals the current `Time.zone`). *(Reverted later: skipping it left a `Time.zone =` made inside the action unrestored, so the wrapper now always runs.)*

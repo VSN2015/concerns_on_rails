@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/html_sanitizers"
+require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
   module Models
@@ -78,10 +79,11 @@ module ConcernsOnRails
         after_validation :sanitizable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
         # save(validate: false) — which otherwise stored the raw markup in a
-        # column declared sanitized on write. PREPENDED, like Normalizable's,
+        # column declared sanitized on write. Run by the shared PREPENDED
+        # dispatcher (Support::TransformBackstop) in before_validation order,
         # so a sibling's earlier before_save (Encryptable's blind index,
         # Auditable's entry) sees the value that gets stored.
-        before_save :sanitizable_apply_unvalidated, prepend: true
+        ConcernsOnRails::Support::TransformBackstop.install(self, :sanitizable_apply_unvalidated)
       end
 
       module ClassMethods
@@ -210,8 +212,12 @@ module ConcernsOnRails
       # Every declared field (read- and write-mode alike) run through its
       # sanitizer against the current value, keyed like `attributes`:
       #   article.sanitized_attributes  # => { "body" => "<b>Hi</b>", "summary" => "sum" }
+      # A column a partial `select` did not load is left out, as `attributes`
+      # leaves it out (reading it raised MissingAttributeError).
       def sanitized_attributes
-        self.class.sanitizable_rules.to_h { |field, rule| [field.to_s, rule[:sanitizer].call(self[field])] }
+        self.class.sanitizable_rules.each_with_object({}) do |(field, rule), sanitized|
+          sanitized[field.to_s] = rule[:sanitizer].call(self[field]) if has_attribute?(field)
+        end
       end
 
       # `sanitized: true` (all declared fields) or `sanitized: [:body, ...]`
@@ -278,14 +284,27 @@ module ConcernsOnRails
       # their raw column value and are exposed through their sanitized_ reader.
       def apply_sanitizations
         # field => the value this pass left it holding, so the before_save
-        # backstop can tell "already sanitized" from "changed since".
+        # backstop can tell "already sanitized" from "changed since". A
+        # previous pass of the same save cycle (`save if valid?` validates
+        # twice) already sanitized a field still holding what that
+        # validation accepted: running a non-idempotent Proc on it again
+        # compounded it.
+        previous = @sanitizable_applied || {}
         @sanitizable_applied = {}
         sanitizable_each_write_rule do |field, writer, value|
-          self[field] = writer.call(value) # plain String, never a SafeBuffer
+          # A plain String, never a SafeBuffer.
+          self[field] = writer.call(value) unless previous.key?(field) && previous[field] == value
           # A copy: an in-place mutation after validation must not mutate the
           # recorded value too and look sanitized.
           @sanitizable_applied[field] = self[field].dup
         end
+      end
+
+      # A reload throws the unsaved state away, and the previous pass's record
+      # with it: a value assigned afterwards is new work for the rules.
+      def reload(*)
+        @sanitizable_applied = nil
+        super
       end
 
       # Re-recorded once validation is over: a later before_validation — a
@@ -319,12 +338,22 @@ module ConcernsOnRails
           next unless rule[:on] == :write && has_attribute?(field)
 
           value = self[field]
-          next if value.nil?
+          next if value.nil? || sanitizable_stored_unchanged?(field)
 
           yield field, rule[:writer], value
         end
       end
-      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_each_write_rule
+
+      # Persisted records: a field not part of this save went through the
+      # writer when it was stored (Normalizable's rule). Re-running it on
+      # every save compounded a non-idempotent writer ("&amp;" ->
+      # "&amp;amp;"); rows written around the callbacks are what
+      # sanitize_all! repairs.
+      def sanitizable_stored_unchanged?(field)
+        persisted? && respond_to?(:will_save_change_to_attribute?) && !will_save_change_to_attribute?(field)
+      end
+      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_each_write_rule,
+              :sanitizable_stored_unchanged?
 
       # { field => sanitized } for the fields whose stored value would change;
       # nil values are left alone (nothing to sanitize).

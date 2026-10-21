@@ -26,8 +26,9 @@ module ConcernsOnRails
     #   product.formatted_price # => "$19.99"
     #
     # Options: `as:` (explicit method name — required when the column does not
-    # end in `_cents`), `unit:` ("$"), `precision:` (2), `delimiter:` (","),
-    # `separator:` ("."), `subunit_to_unit:` (100).
+    # end in `_cents`), `unit:` ("$"), `precision:` (2, or more for a
+    # power-of-ten subunit: 3 for 1000), `delimiter:` (","), `separator:`
+    # ("."), `subunit_to_unit:` (100).
     #
     # Class-level aggregates come for free and follow the current scope:
     #   Product.sum_price                        # => BigDecimal, SUM(price_cents) / 100
@@ -47,7 +48,10 @@ module ConcernsOnRails
       class_methods do
         include ConcernsOnRails::Support::ColumnGuard
 
-        def monetizable(*fields, as: nil, unit: "$", precision: 2, delimiter: ",", separator: ".", subunit_to_unit: 100)
+        # `precision: nil` (the default) shows every decimal place a
+        # power-of-ten subunit_to_unit carries, and at least 2 (see
+        # Support::Money.default_precision).
+        def monetizable(*fields, as: nil, unit: "$", precision: nil, delimiter: ",", separator: ".", subunit_to_unit: 100)
           raise ArgumentError, "ConcernsOnRails::Models::Monetizable: at least one field is required" if fields.empty?
 
           raise ArgumentError, "ConcernsOnRails::Models::Monetizable: :as cannot be combined with multiple fields" if as && fields.size > 1
@@ -63,6 +67,7 @@ module ConcernsOnRails
             LABEL
           ).freeze
           ConcernsOnRails::Support::Money.validate_unit!(config, LABEL)
+          ConcernsOnRails::Support::Money.validate_marks!(config, LABEL)
 
           ensure_columns!("ConcernsOnRails::Models::Monetizable", fields, types: :integer)
           monetizable_guard_encryptable!(fields)

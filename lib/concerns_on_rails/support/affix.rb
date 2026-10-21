@@ -161,6 +161,74 @@ module ConcernsOnRails
               "macro) to rename one of them"
       end
 
+      # Every concern that generates affixable scopes, and the class-level
+      # reader of its CURRENT name map (label => reader).
+      SCOPE_NAME_MAPS = {
+        "ConcernsOnRails::Models::Publishable" => :publishable_scope_names,
+        "ConcernsOnRails::Models::SoftDeletable" => :soft_delete_scope_names,
+        "ConcernsOnRails::Models::Schedulable" => :schedulable_scope_names,
+        "ConcernsOnRails::Models::Expirable" => :expirable_scope_names,
+        "ConcernsOnRails::Models::Activatable" => :activatable_scope_names,
+        "ConcernsOnRails::Models::Lockable" => :lockable_scope_names
+      }.freeze
+
+      # prefix:/suffix: is the escape hatch from a name collision, so an
+      # AFFIXED name must not land on one another gem concern already
+      # generates on `klass` — `expirable_by prefix: :term` then
+      # `activatable_by prefix: :term` silently replaced Expirable's
+      # `term_active?` and `.term_active`, and the batch verbs and callers
+      # that relied on them got Activatable's answer. Checked before the
+      # macro defines anything; raises ArgumentError naming the owner.
+      #
+      # `scopes:` are the full scope names the macro is about to define,
+      # `predicates:` the predicate BASES it affixes (`%i[active expired]`).
+      # Without an affix this is a no-op: unaffixed concerns keep sharing the
+      # plain names (the concern declared last owns them), as documented.
+      # The calling concern's own names (`label`) never count: re-declaring
+      # it, on the class or a subclass, replaces its own.
+      def refuse_sibling_names!(klass, label:, scopes: [], predicates: [], prefix: nil, suffix: nil)
+        return unless prefix || suffix
+
+        taken = sibling_predicates(klass, label, predicates, prefix, suffix) + sibling_scopes(klass, label, scopes)
+        return if taken.empty?
+
+        what = taken.map { |kind, name, _| "#{kind} '#{name}'" }.uniq.join(" and ")
+        owners = taken.map(&:last).uniq.join(", ")
+        raise ArgumentError,
+              "#{label}: prefix:/suffix: would define #{what}, which #{owners} already generates on " \
+              "#{klass.name || klass}; choose a different prefix:/suffix:"
+      end
+
+      # [["predicate", name?, owner label], ...] for the affixed predicates
+      # another concern's registry entry (the nearest one per concern, on
+      # klass or an ancestor) already defines.
+      def sibling_predicates(klass, label, bases, prefix, suffix)
+        names = bases.map { |base| :"#{name(base, prefix: prefix, suffix: suffix)}?" }
+        sibling_predicate_entries(klass, label).flat_map do |owner, defined|
+          (names & defined).map { |predicate| ["predicate", predicate, owner] }
+        end
+      end
+
+      def sibling_predicate_entries(klass, label)
+        klass.ancestors.grep(Class).each_with_object({}) do |ancestor, entries|
+          registry = ancestor.instance_variable_get(:@concerns_on_rails_affixed_predicates) || {}
+          registry.each do |owner, entry|
+            entries[owner] ||= entry[:names] unless owner == label
+          end
+        end
+      end
+
+      # [["scope", name, owner label], ...] for the scope names another
+      # concern's current name map yields on klass.
+      def sibling_scopes(klass, label, scopes)
+        names = scopes.map(&:to_sym)
+        SCOPE_NAME_MAPS.flat_map do |owner, reader|
+          next [] if owner == label || !klass.respond_to?(reader)
+
+          (names & klass.public_send(reader).values.map(&:to_sym)).map { |scope| ["scope", scope, owner] }
+        end
+      end
+
       # The concerns whose default-named scopes exist from INCLUDE time,
       # before their own macro can rename them with prefix:/suffix::
       # label => [captured-scopes reader, current scope-names reader].
@@ -255,6 +323,7 @@ module ConcernsOnRails
               "Declare the prefix:/suffix: option on #{owner} itself — affixing here would leave " \
               "#{owner}'s unaffixed scopes in place and the collision unresolved."
       end
+      private_class_method :sibling_predicates, :sibling_predicate_entries, :sibling_scopes
       private_class_method :retire_guard_owner!, :predicate_registry, :retire_predicates!,
                            :check_predicate_collisions!, :predicate_schema_reachable?,
                            :affixed_predicates, :predicate_module, :remove_own_predicates!,

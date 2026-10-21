@@ -85,7 +85,7 @@ All option errors raise `ArgumentError` at declaration time (bad `:visibility`, 
 ## Conditional-GET correctness
 
 - **ETag** is a WEAK validator `W/"<md5>"` derived from the resource's cache key (`cache_key_with_version` → `cache_key` → a manual key; a relation/array folds its members' keys plus size). `If-None-Match` is matched with **weak comparison**, honours `*`, and accepts a comma-separated list.
-- **`Last-Modified`** is an IMF-fixdate via `Time#httpdate` (not the hand-rolled ISO 8601 bug); `If-Modified-Since` is compared at **whole-second** granularity (HTTP dates carry no sub-second part).
+- **`Last-Modified`** is an IMF-fixdate via `Time#httpdate` (not the hand-rolled ISO 8601 bug); `If-Modified-Since` is compared at **whole-second** granularity (HTTP dates carry no sub-second part). It is derived from `updated_at`: an ActiveRecord relation runs SQL `MAX(updated_at)`; an Array (or any other collection) takes its newest member timestamp, skipping members without `updated_at` or with a nil one — a collection with none gets no `Last-Modified`, only the ETag.
 - When BOTH `If-None-Match` and `If-Modified-Since` are sent, the **ETag wins** and the date is ignored (RFC 7232 §3.3).
 - A 304 is only sent for **safe** requests (GET/HEAD), and still carries the validators **and** the `Cache-Control`/`Vary` policy (the after_action rides the 304).
 

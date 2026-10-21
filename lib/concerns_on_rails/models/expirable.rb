@@ -36,14 +36,24 @@ module ConcernsOnRails
           define_expirable_scopes(prefix, suffix)
         end
 
-        # Expire every currently-active record in the relation. Returns the
-        # Integer count. A single UPDATE unless the model overrode `expire!`
+        # Expire every currently-active record in the relation whose expiry
+        # is still later than `time` (or unset). Returns the Integer count of
+        # rows written. A single UPDATE unless the model overrode `expire!`
         # or a lifecycle hook (before_expire / after_expire), or declares
         # validations (see Support::BatchOps.fast_path?) — then it streams
         # per record so the hooks run.
+        #
+        # Expiring never pushes an expiry LATER: with a future `time`
+        # (`expire_all(1.hour.from_now)`, "everything expires within the
+        # hour") a row already due to expire before then keeps its earlier
+        # expiry. It used to be written `time` like every other live row, so
+        # a mass revocation extended the credentials it meant to cut short.
+        # For `time <= now` the extra condition selects nothing new: every
+        # live row expires after now.
         def expire_all(time = Time.zone.now)
           time = expirable_cast_time(time)
-          active = all.public_send(expirable_scope_names.fetch(:active))
+          column = arel_table[expirable_field]
+          active = expirable_live_relation.where(column.eq(nil).or(column.gt(time)))
           if expirable_batch_fast_path?
             return active.update_all(
               ConcernsOnRails::Support::BatchOps.with_timestamps(self, expirable_field => time)
@@ -76,12 +86,24 @@ module ConcernsOnRails
 
         private
 
+        # The rows expire_all targets — not expired now — built inline, never
+        # through the public `.active` scope: Activatable and SoftDeletable
+        # define `.active` too, and the concern declared last owns it, so
+        # with Activatable after Expirable expire_all iterated `active =
+        # TRUE` rows, overwrote long-past expiries and skipped live rows
+        # whose flag was off.
+        def expirable_live_relation
+          column = arel_table[expirable_field]
+          all.where(column.eq(nil).or(column.gt(Time.zone.now)))
+        end
+
         # Whether the single-UPDATE fast path is safe — the whole decision
         # (bang method and hooks unoverridden AND the model declares no
         # validations, plus why) lives in Support::BatchOps.fast_path?.
         def expirable_batch_fast_path?
           ConcernsOnRails::Support::BatchOps.fast_path?(self, ConcernsOnRails::Models::Expirable,
-                                                        :expire!, :before_expire, :after_expire)
+                                                        :expire!, :before_expire, :after_expire,
+                                                        writes: [expirable_field])
         end
 
         # Scopes live here (not in `included do`) so their names can be affixed —
@@ -90,9 +112,14 @@ module ConcernsOnRails
         def define_expirable_scopes(prefix, suffix)
           prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: expirable_field)
           suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: expirable_field)
-          self.expirable_scope_names = %i[active expired expiring_within].to_h do |base|
+          names = %i[active expired expiring_within].to_h do |base|
             [base, ConcernsOnRails::Support::Affix.name(base, prefix: prefix, suffix: suffix)]
           end.freeze
+          ConcernsOnRails::Support::Affix.refuse_sibling_names!(
+            self, label: "ConcernsOnRails::Models::Expirable", scopes: names.values,
+                  predicates: %i[active expired], prefix: prefix, suffix: suffix
+          )
+          self.expirable_scope_names = names
           ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, expirable_scope_names.values, kind: :scope, label: "ConcernsOnRails::Models::Expirable")
 
           scope expirable_scope_names[:active], lambda {
@@ -151,18 +178,27 @@ module ConcernsOnRails
       # expire_all — rolls the expiry back and returns false. A failed write
       # (validation) returns false, skips after_expire, and rolls back
       # before_expire's own side effects.
+      #
+      # An expiry is only ever brought FORWARD: when the record's saved
+      # expiry is already at or before `time`, this returns true and writes
+      # nothing, firing no hook — the same rows expire_all skips. It used to
+      # rewrite an already-expired record's expiry to now (later) and fire
+      # after_expire again on every call. To set a later expiry, use
+      # expire_in! (an absolute lifetime) or extend_expiry!. A no-op that
+      # finds OTHER pending changes saves them (no expiry write, no hook)
+      # rather than dropping them: `token.note = "revoked"; token.expire!`
+      # on an expired token still stores the note.
       def expire!(time = Time.zone.now)
         time = self.class.expirable_cast_time(time)
-        hooks = time.to_time > Time.zone.now ? {} : { before: :before_expire, after: :after_expire }
-        field = self.class.expirable_field
-        ConcernsOnRails::Support::HookedWrite.run(self, **hooks) do
-          update(field => time)
-        end
+        return expirable_settle if expirable_expires_by?(time)
+
+        expirable_write_expiry(time)
       end
 
       # Set an absolute lifetime from now — `token.expire_in!(15.minutes)` —
-      # whatever the current expiry. Sugar for `expire!(now + duration)`, so a
-      # positive duration schedules expiry and fires no hooks.
+      # whatever the current expiry (unlike expire!, which never pushes an
+      # expiry later). A positive duration schedules expiry and fires no
+      # hooks; zero or less expires the record now, with the hooks.
       def expire_in!(duration)
         unless duration.respond_to?(:to_i) && !duration.is_a?(String)
           raise ArgumentError,
@@ -170,7 +206,7 @@ module ConcernsOnRails
                 "(e.g. 15.minutes), got #{duration.class}"
         end
 
-        expire!(Time.zone.now + duration)
+        expirable_write_expiry(self.class.expirable_cast_time(Time.zone.now + duration))
       end
 
       # Make the record never expire (nil expiry). No hooks: nothing expired.
@@ -211,6 +247,33 @@ module ConcernsOnRails
         (value - now).seconds
       end
 
+      # Whether the saved expiry already falls at or before `time`, so
+      # expire!(time) has nothing to do. Only a saved value counts: an expiry
+      # assigned but not yet saved (or a new record's) is written as asked.
+      def expirable_expires_by?(time)
+        field = self.class.expirable_field
+        return false if new_record? || will_save_change_to_attribute?(field)
+
+        value = self[field]
+        !value.nil? && value <= time
+      end
+
+      # expire!'s no-op answer: true, or the `save` result when the record
+      # carries other pending changes (the expiry itself is never among them).
+      def expirable_settle
+        has_changes_to_save? ? save : true
+      end
+
+      # The write behind expire! and expire_in!. Hooks fire only when the
+      # time is not in the future: a future time schedules, it doesn't expire.
+      def expirable_write_expiry(time)
+        hooks = time.to_time > Time.zone.now ? {} : { before: :before_expire, after: :after_expire }
+        field = self.class.expirable_field
+        ConcernsOnRails::Support::HookedWrite.run(self, **hooks) do
+          update(field => time)
+        end
+      end
+
       # Internal helper for extend_expiry! — not part of the public API
       # (postfix private: the keyword form trips RuboCop's scope analysis
       # against the `private` inside the class_methods block).
@@ -222,18 +285,23 @@ module ConcernsOnRails
       # The unaffixed checks behind the public predicates. Internal logic and
       # the affixed predicates call these, never `active?` / `expired?`,
       # which a sibling concern may own.
+      # On a date column the instant is cast through its type, as the `.expired`
+      # scope's bind is, so a date column compares against today in
+      # Time.zone (Support::TimeValue.predicate_bound).
       def expirable_expired?
-        value = self[self.class.expirable_field]
+        field = self.class.expirable_field
+        value = self[field]
         return false if value.nil?
 
-        value <= Time.zone.now
+        value <= ConcernsOnRails::Support::TimeValue.predicate_bound(self.class, field, Time.zone.now)
       end
 
       def expirable_live?
         !expirable_expired?
       end
 
-      private :expiry_extension_base, :expirable_expired?, :expirable_live?
+      private :expiry_extension_base, :expirable_expired?, :expirable_live?,
+              :expirable_expires_by?, :expirable_write_expiry, :expirable_settle
     end
   end
 end

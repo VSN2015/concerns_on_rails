@@ -2,6 +2,7 @@ require "active_support/concern"
 require "digest"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/address_data"
+require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
   module Models
@@ -63,16 +64,22 @@ module ConcernsOnRails
         before_validation :normalize_address
         after_validation :addressable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
-        # save(validate: false) — which otherwise stored the raw parts.
-        # PREPENDED (Normalizable's rule), so it runs ahead of the
-        # fingerprint stamp below and any sibling's earlier before_save.
-        before_save :addressable_normalize_unvalidated, prepend: true
+        # save(validate: false) — which otherwise stored the raw parts. Run
+        # by the shared PREPENDED dispatcher (Support::TransformBackstop) in
+        # before_validation order, so it runs ahead of the fingerprint stamp
+        # below and any sibling's earlier before_save.
+        ConcernsOnRails::Support::TransformBackstop.install(self, :addressable_normalize_unvalidated)
         # Stamping is its OWN callback, not a tail call inside normalize_address:
         # a sibling concern's later before_validation (Normalizable, say) can
         # still rewrite a mapped column, and a fingerprint computed before that
         # would disagree with `address_fingerprint` -- leaving `with_address`
-        # unable to find the record itself. before_save also covers
-        # `save(validate: false)`.
+        # unable to find the record itself. A PREPENDED validate callback runs
+        # after every before_validation yet ahead of the app's own validations,
+        # so a dedupe check (`validates :address_fingerprint, uniqueness:
+        # true`) sees the digest of the address being saved, not nil or the
+        # stored one. before_save re-stamps for `save(validate: false)` and for
+        # a column changed after validation.
+        validate :stamp_address_fingerprint, prepend: true
         before_save :stamp_address_fingerprint
       end
 
@@ -87,10 +94,11 @@ module ConcernsOnRails
         def addressable_by(required: DEFAULT_REQUIRED, default_country: "US",
                            validate_state: false, verify_with: nil,
                            lengths: {}, allow_blank: false, normalize_country: false, fingerprint: nil, **mapping)
+          country = resolve_default_country(default_country)
           condition = extract_validation_condition!(mapping)
           overrides = normalize_address_overrides(mapping)
           self.addressable_required = Array(required).map(&:to_sym)
-          self.addressable_default_country = default_country.to_s.upcase
+          self.addressable_default_country = country
           self.addressable_validate_state = validate_state
           self.addressable_verifier = verify_with
           self.addressable_lengths = resolve_lengths(lengths)
@@ -147,6 +155,23 @@ module ConcernsOnRails
           return if has_address_column
 
           alias_method :address_changed?, :address_parts_changed?
+        end
+
+        # The default as an ISO alpha-2 code, canonicalized like a country
+        # value ("Canada" / "CAN" / " ca " -> "CA") whether or not
+        # normalize_country: is on. Stored verbatim, a name or a typo made
+        # every blank-country record an unknown country: permissive postal
+        # rules, no state check, and a fingerprint that missed the same
+        # address with the country spelled out. nil / blank: no default.
+        def resolve_default_country(value)
+          return nil if value.nil? || value.to_s.strip.empty?
+
+          code = ConcernsOnRails::Support::AddressData.normalize_country_code(value.to_s).to_s.upcase
+          return code if ConcernsOnRails::Support::AddressData.valid_country?(code)
+
+          raise ArgumentError,
+                "#{LABEL}: default_country must be an ISO 3166-1 alpha-2 code (or a country name / alpha-3 code " \
+                "that maps to one), got #{value.inspect}"
         end
 
         def resolve_fingerprint_column(fingerprint)
@@ -276,11 +301,17 @@ module ConcernsOnRails
 
       def normalize_address
         # column => the value this pass left it holding, so the before_save
-        # backstop can tell "already normalized" from "changed since".
+        # backstop can tell "already normalized" from "changed since". A
+        # column a previous pass of the same save cycle (`save if valid?`)
+        # already normalized, still holding what validation accepted, is
+        # not normalized again (Normalizable's rule).
+        previous = @addressable_normalized || {}
         @addressable_normalized = {}
         addressable_each_pending_part do |part, column, value, country|
-          normalized = normalize_part(part, country, value)
-          self[column] = normalized unless normalized == value
+          unless previous.key?(column) && previous[column] == value
+            normalized = normalize_part(part, country, value)
+            self[column] = normalized unless normalized == value
+          end
           # A copy: an in-place mutation after validation must not look normalized.
           @addressable_normalized[column] = self[column].dup
         end
@@ -343,15 +374,18 @@ module ConcernsOnRails
         Digest::SHA256.hexdigest(parts.join("\n"))
       end
 
-      # Equal fingerprints — never true for two blank addresses.
+      # Equal fingerprints — never true for two blank addresses. `other` is a
+      # record or a digest String, like the sibling `with_address` accepts;
+      # nil or anything else is never the same address. (A bare
+      # `other.address_fingerprint` turned `same_address_as?(nil)` into a
+      # NoMethodError, and answering false for every non-record made a
+      # digest String never match, not even the record's own.)
       def same_address_as?(other)
-        # Tolerant like the sibling `with_address`, which accepts a record, a
-        # digest String or nil: a bare `other.address_fingerprint` turned
-        # `same_address_as?(nil)` into a NoMethodError.
-        return false unless other.respond_to?(:address_fingerprint)
+        theirs = other.respond_to?(:address_fingerprint) ? other.address_fingerprint : other
+        return false unless theirs.is_a?(String)
 
         fingerprint = address_fingerprint
-        !fingerprint.nil? && fingerprint == other.address_fingerprint
+        !fingerprint.nil? && fingerprint == theirs
       end
 
       # Any mapped address column has an unsaved change. `address_changed?` is
@@ -360,6 +394,13 @@ module ConcernsOnRails
       # only aliases it where nothing would be shadowed.
       def address_parts_changed?
         self.class.addressable_fields.values.any? { |column| attribute_changed?(column) }
+      end
+
+      # A reload throws the unsaved state away, and the previous pass's record
+      # with it: a value assigned afterwards is new work for the rules.
+      def reload(*)
+        @addressable_normalized = nil
+        super
       end
 
       private

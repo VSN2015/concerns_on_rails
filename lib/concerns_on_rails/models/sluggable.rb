@@ -48,11 +48,18 @@ module ConcernsOnRails
 
         # we must override should_generate_new_friendly_id? to support update slug
         # if we don't override this method, friendly_id will not generate the new slug when update
-        define_method :should_generate_new_friendly_id? do # rubocop:disable Metrics/CyclomaticComplexity
+        define_method :should_generate_new_friendly_id? do
           return true if @sluggable_force_regenerate # regenerate_slug!
 
           field = self.class.sluggable_field
           slug_column = self.class.friendly_id_config.slug_column
+
+          # A missing slug is built whenever there is a source to build it
+          # from: legacy/imported rows with a NULL slug self-heal, and a blank
+          # slug ASSIGNED in this save — "" from an optional form field, or
+          # nil, friendly_id's way to ask for a fresh one — is not stored as
+          # is (a second "" would trip the slug's unique index).
+          return true if send(slug_column).blank? && slug_source.present?
 
           # An explicitly-assigned slug wins — don't overwrite it with a generated
           # one when the slug column itself is being changed in this save. The
@@ -62,13 +69,7 @@ module ConcernsOnRails
                           send("will_save_change_to_#{slug_column}?")
           return sluggable_built_slug_stale? if changing_slug
 
-          source_changed = respond_to?("will_save_change_to_#{field}?") &&
-                           send("will_save_change_to_#{field}?")
-          # Backfill a missing slug even when the source did not change, so
-          # legacy/imported rows with a NULL slug still self-heal.
-          slug_missing = send(slug_column).blank? && slug_source.present?
-
-          source_changed || slug_missing || sluggable_scope_changed?
+          sluggable_source_rebuild?(field) || sluggable_scope_changed?
         end
 
         # Defined on the class (like the method above) so it sits ABOVE
@@ -132,6 +133,7 @@ module ConcernsOnRails
         #   sluggable_by :wonderful_name
         #   sluggable_by :title, history: true            # old slugs keep resolving (needs a friendly_id_slugs table)
         #   sluggable_by :title, scope: :account_id       # slugs unique per scope column
+        #   sluggable_by :title, scope: %i[account_id locale]  # ... or per combination of columns
         #   sluggable_by :title, reserved_words: %w[new]  # block these slugs (a UUID is appended instead)
         #   sluggable_by :title, finders: true            # Model.find accepts a slug directly
         #   sluggable_by :title, candidates: [:title, %i[title city]]   # try "title", then "title-city", then a uuid
@@ -144,11 +146,14 @@ module ConcernsOnRails
           candidates = sluggable_validate_candidates!(candidates)
           max_length = sluggable_validate_max_length!(max_length)
           sluggable_guard_encryptable!(sluggable_source_fields(field, candidates))
+          sluggable_guard_encryptable_scope!(scope)
           # Validate the slug column too (a missing one used to fail at first save
-          # with an opaque friendly_id error); an association scope: is exempt.
-          scope_column = scope && reflect_on_association(scope.to_sym) ? nil : scope
+          # with an opaque friendly_id error). scope: is one entry or, as
+          # friendly_id allows, an Array of them; an association entry is
+          # exempt (friendly_id scopes by its foreign key).
+          scope_columns = Array(scope).reject { |entry| reflect_on_association(entry.to_sym) }
           ensure_columns!("ConcernsOnRails::Models::Sluggable",
-                          [field, friendly_id_config.slug_column, scope_column].compact,
+                          [field, friendly_id_config.slug_column, *scope_columns],
                           types: { friendly_id_config.slug_column.to_sym => "string:uniq" })
           self.sluggable_field = field
           self.sluggable_candidates = candidates
@@ -188,6 +193,30 @@ module ConcernsOnRails
                 "#{LABEL}: #{overlap.map { |f| ":#{f}" }.join(', ')} declared with both Encryptable and " \
                 "Sluggable; the slug would store the decrypted plaintext in the slug column. " \
                 "Slug from a non-sensitive field instead."
+        end
+
+        # friendly_id's uniqueness check scopes its query with
+        # `where(column => value)` per scope column; on an `encryptable`
+        # column that serializes a fresh envelope (random IV) matching no
+        # stored row, so two records in one scope get the same slug, and a
+        # unique index over the ciphertext never rejects it. Resolved the way
+        # friendly_id resolves `scope_columns` (an association to its foreign
+        # key; a multi-column scope flattened), before anything is assigned.
+        # Encryptable#encryptable mirrors this for the reverse order.
+        def sluggable_guard_encryptable_scope!(scope)
+          return if scope.nil? || !respond_to?(:encryptable_rules)
+
+          overlap = sluggable_scope_columns(scope) & encryptable_rules.keys
+          return if overlap.empty?
+
+          raise ArgumentError,
+                "#{LABEL}: scope: #{overlap.map { |f| ":#{f}" }.join(', ')} is an `encryptable` column; " \
+                "friendly_id's uniqueness check would compare ciphertext (a fresh random IV per query), match no " \
+                "row and give two records in one scope the same slug. Scope by a non-encrypted column instead."
+        end
+
+        def sluggable_scope_columns(scope)
+          Array(scope).map { |entry| (reflect_on_association(entry.to_sym)&.foreign_key || entry).to_sym }
         end
 
         # Mirror of Hashable's macro-time guard, covering the reverse
@@ -287,6 +316,20 @@ module ConcernsOnRails
         return false unless current == built[:slug] || current == sluggable_transform_slug(built[:slug])
 
         sluggable_candidate_key != built[:from]
+      end
+
+      # A changed source rebuilds the slug only while it still yields a
+      # usable candidate. A cleared source (nil, blank, or "!!!", which
+      # normalizes to nothing) would leave friendly_id only its bare uuid
+      # fallback, silently swapping a meaningful slug — and every URL to it —
+      # for a random one; stock friendly_id keeps the slug then too. The
+      # scope rule (#sluggable_scope_changed?) is deliberately not gated: a
+      # record moved into a scope that already holds its slug must not keep a
+      # duplicate there, so it still gets friendly_id's uuid.
+      def sluggable_source_rebuild?(field)
+        return false unless respond_to?("will_save_change_to_#{field}?") && send("will_save_change_to_#{field}?")
+
+        sluggable_candidate_key.any?
       end
 
       def sluggable_forget_built_slug

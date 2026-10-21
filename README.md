@@ -148,7 +148,7 @@ across all 43 concerns — press <kbd>/</kbd> and type.
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured columns exist and raises `ArgumentError` early — listing *every* missing column at once, with one ready-to-paste `rails generate migration` command that adds them all
 - **Composable** — concerns are independent; mix and match per model
-- **Tested like an app, not a snippet** — **2,827 RSpec examples** run against a real database on every CI build
+- **Tested like an app, not a snippet** — **3,420 RSpec examples** run against a real database on every CI build
 - **Documented twice** — everything in this README also lives as a per-concern page on the [docs site](https://vsn2015.github.io/concerns_on_rails), searchable and deep-linkable
 
 ---
@@ -302,6 +302,7 @@ Post.friendly.find("old-slug")   # still resolves to the renamed post
 
 # Unique slug only within a scope column (same slug allowed in different accounts)
 sluggable_by :title, scope: :account_id
+sluggable_by :title, scope: %i[account_id locale]   # ... or within each combination of columns
 
 # Reject reserved slugs — saving a record whose slug would be reserved fails validation
 sluggable_by :title, reserved_words: %w[new edit admin]
@@ -318,10 +319,12 @@ Post.find("hello-world")   # resolves by slug
 **Notes**
 - Schema must have a `slug` column (string).
 - `history: true` requires a `friendly_id_slugs` table — generate with `rails generate friendly_id` or add a manual migration.
-- `scope: :col` requires `col` to exist in the same table.
+- `scope: :col` (or an Array of columns) requires each column to exist in the same table; a `belongs_to` association name is accepted too (friendly_id scopes by its foreign key). It can't be an [Encryptable](#-encryptable) column (nor an association whose foreign key is one, nor a member of a multi-column scope): friendly_id's uniqueness check would compare ciphertext, match no row and give two records in one scope the same slug, so the declaration raises `ArgumentError`, in either order.
 - `candidates:` takes friendly_id's shapes — a Symbol/String method, a Proc, or an Array of those joined with `-` — tried in order until one is free (all taken → the first candidate plus a uuid); the slug still regenerates only when the **primary** field changes (a candidate-only change doesn't churn the URL), and a NULL slug backfills through the candidates.
 - `max_length:` truncates each candidate at the last `-` inside the limit (a single long word is hard-cut); friendly_id's conflict suffix is appended afterwards, so a colliding slug may exceed the limit — unlike friendly_id's own `slug_limit`, which squeezes the uuid inside it.
 - `regenerate_slug!` is the escape hatch for the explicit-slug rule: it forces regeneration and saves (`save!`), keeping uniqueness handling.
+- A **blank** assigned slug — `""` from an optional form field, or `nil` (friendly_id's "regenerate" idiom) — is not an explicit slug: it is built from the source in the same save (stored blank only when the source is blank too).
+- Clearing the source (`update!(title: nil)`, `""`, or a value that normalizes to nothing such as `"!!!"`) keeps the existing slug instead of replacing it with a random uuid; the uuid fallback only applies when there is no slug yet.
 - **Order-independent source.** A sibling that transforms the source in `before_validation` — [Sanitizable](#-sanitizable) `on: :write`, [Normalizable](#-normalizable), your own callback — no longer loses to include order: a slug built earlier in the same save from the raw value (`"<b>Hello</b>"` → `"b-hello-b"`) is rebuilt at the start of validation, before any validator (`reserved_words:` too) or sibling `before_save` sees it. A slug sourced from a column generated in `before_create` ([Sequenceable](#-sequenceable)'s `into:`, a [Hashable](#-hashable) code) is built in the same `INSERT` instead of staying `nil` until a later save — with the slug column's own write-mode Sanitizable / Normalizable rules applied, since their callbacks have already run. An explicitly assigned slug still wins.
 - Falls back to `to_s` if the configured source field doesn't respond.
 - Uses friendly_id's `:slugged` (+ optionally `:history`, `:scoped`) strategies under the hood.
@@ -360,6 +363,7 @@ sortable_by :position, add_new_at: :top          # new rows insert at the top (a
 
 **Notes**
 - The configured field must exist as a column; a direction other than `:asc` / `:desc` raises at declaration.
+- `scope:` can't be an [Encryptable](#-encryptable) column (a Symbol — resolved as acts_as_list does, so `scope: :list` means `list_id` or the association's foreign key — an Array entry or a fixed-value Hash key): acts_as_list's scope query would compare ciphertext, match no row and leave every record alone in its list (each new one at position 1, `move_*` a no-op), so the declaration raises `ArgumentError`, in either order. A String SQL scope is not inspected.
 - `reposition!` runs inside the current relation (`Task.where(list_id: 1)` — the same set acts_as_list's `scope:` would use), rejects ids outside it and duplicates before writing anything, coerces String ids from params, and on a descending list gives the first id the highest value. It bypasses acts_as_list callbacks by design (one `update_all`, no per-row shifting).
 
 ---
@@ -379,6 +383,7 @@ article = Article.create!(title: "Draft")
 article.published?      # => false
 article.publish!
 article.published?      # => true
+article.publish!        # already published (saved state): a no-op (true), keeps published_at, no hooks
 article.unpublish!
 
 Article.published       # WHERE published_at <= NOW()
@@ -424,6 +429,13 @@ exactly those ten on the streaming path too (it resolves the limit to primary ke
 `has_many` join (`Post.joins(:comments).publish_all`) publishes — and runs `after_publish` for —
 each post once however many comments it joins, and a model's default-scope `ORDER BY` (Sortable)
 no longer trips `error_on_ignored_order` — true of every `*_all` verb.
+They also stream per record whenever one of the gem's own sibling concerns keeps data in step from
+save callbacks that `update_all` would skip: a CounterCacheable rule with an `if:` condition, or
+Auditable tracking a column the verb writes. The single `UPDATE` used to leave such a counter or audit
+trail behind, and whether it did depended on whether some unrelated validator forced the per-record
+path. (`expire_all`, `activate_all` and `deactivate_all` are gated the same way.)
+
+**STI tables always use the per-record path.** On a single-table-inheritance table (a present `inheritance_column` that is a real column) the relation also holds every subclass's rows, and a subclass may override a hook, declare validations or re-declare the macro with other options. A bulk `UPDATE` would skip all of that, so no batch verb takes it there: hooks and validations run per record (slower on large STI tables, always correct). A model that sets `self.inheritance_column = nil` is not STI and keeps the single `UPDATE`. This holds for every batch verb below (`publish_all`/`unpublish_all`, `soft_delete_all`/`restore_all`, `expire_all`, `activate_all`/`deactivate_all`, `unlock_expired`).
 
 `publish_all` targets every not-currently-published row — **including scheduled ones**, whose
 future `published_at` it overwrites — so chain `.draft` (`Post.draft.publish_all`) to exclude
@@ -483,9 +495,10 @@ in memory.
 
 **Notes**
 - "Published" means `published_at` is set **and** in the past — so future-dated posts stay unpublished until their time arrives.
+- On a `date` publish column (`publishable_by :published_on`), `published?` / `scheduled?` compare against today in `Time.zone`, as `.published` / `.scheduled` do.
 - `publish_at!` casts its argument through the column's type. A value that is not a time raises `ArgumentError` before any hook runs: a String must name a year (ISO 8601, RFC 2822, `"Oct 1 2026"` and `"2026-10-01 10:30"` all do; `"junk"`, `"Monday"` and `"10:30"` do not, although `Time.zone.parse` reads them as June 1st and today), and `42` or `1.hour` never cast. It used to write `NULL` and return `true`. `nil` still writes `NULL` (and fires the publish hooks).
 - No `default_scope` is added by default; chain `.published` explicitly (or opt in with `default_scope: true`). An explicit `default_scope: false` on a later call or an STI subclass turns it off again; omitting the option keeps the current (inherited) setting.
-- A boolean publishable column works too (`publishable_by :is_published`). Its `.published` scope is `(is_published = TRUE)`, wrapped in parentheses (an Arel Grouping) so that Rails does not copy the condition onto new records built through the scope. So with `default_scope: true` a new record still starts unpublished, and so does `Post.published.new`. The predicate stays in the index-friendly `= TRUE` form, so a partial index `WHERE published = true` still matches. On Rails 6.0, which cannot `unscope` a Grouping, the scope uses `is_published <> FALSE` instead; it selects the same rows.
+- A boolean publishable column works too (`publishable_by :is_published`). Its `.published` scope is `(is_published = TRUE)`, wrapped in parentheses (an Arel Grouping) so that Rails does not copy the condition onto new records built through the scope. So with `default_scope: true` a new record still starts unpublished, and so does `Post.published.new`. The predicate stays in the index-friendly `= TRUE` form, so a partial index `WHERE published = true` still matches. On Rails 6.0, which cannot `unscope` a Grouping, the scope uses `is_published <> FALSE` instead; it selects the same rows. `unpublish!` / `unpublish_all` write `false` into a boolean column (`NULL` into a timestamp one), so a `null: false` column can be unpublished.
 
 ---
 
@@ -506,7 +519,7 @@ user.deleted?              # => true
 user.restore!
 user.deleted?              # => false
 
-user.really_delete!        # bypasses callbacks, hard deletes from DB
+user.really_delete!        # bypasses callbacks, hard deletes from DB; the instance is then destroyed? (not persisted?)
 ```
 
 **Scopes**
@@ -527,6 +540,9 @@ User.unscoped             # everything (deleted + non-deleted)
 ```ruby
 User.soft_delete_all      # soft-deletes all matching records; returns the count (explicit — preferred)
 User.destroy_all          # alias of soft_delete_all (kept for backwards compatibility; returns a count, not records)
+User.where(org_id: 7).destroy_all   # a relation's destroy_all soft-deletes too (returns the records)
+post.comments.destroy_all           # and so does an association's (comments include SoftDeletable)
+User.only_deleted.destroy_all       # ...except through a trash scope: rows ALREADY soft-deleted are destroyed for real (purges the trash)
 User.really_destroy_all   # hard-deletes the records matching the CURRENT relation (soft-deleted included)
 User.restore_all          # restores the matching soft-deleted records; returns the count
 
@@ -535,15 +551,88 @@ User.deleted_within(30.days).really_destroy_all # purge recent trash; older rows
 User.only_deleted.really_destroy_all           # empty the trash can, nothing else
 ```
 
+**`destroy_all` is contextual.** An app-initiated `destroy_all` on the class, on a relation (`where(...)`,
+`destroy_by`, `in_batches`) or on a non-`:through` association (`post.comments.destroy_all`,
+`post.comments.where(...)`) follows three rules:
+
+1. A **live** record is soft-deleted, through its own `soft_delete!` (hooks, `cascade:`), atomically
+   (`RecordNotSaved` + rollback on failure). The relation and association forms return the records they
+   acted on, as ActiveRecord's do (an association whose `before_remove` aborts answers `nil`); only the class
+   form returns a count.
+2. A record that is **already soft-deleted** is destroyed for real (as `paranoia` does) ONLY when you reached
+   the trash on purpose, through one of **that model's own** trash scopes: `only_deleted`, `soft_deleted`,
+   `deleted_within(...)` or `with_deleted` (or their affixed / renamed variants; also inside an association
+   declared `-> { only_deleted }`, or merged in: `User.where(...).merge(User.only_deleted)`). Another model's
+   trash scope merged into the relation does not count: `Post.joins(:comments).merge(Comment.only_deleted)
+   .destroy_all` soft-deletes the live posts that have trashed comments and purges no post. So
+   `User.only_deleted.destroy_all` and
+   `User.deleted_within(30.days).destroy_all` purge the trash, and a mixed relation (`with_deleted.destroy_all`)
+   soft-deletes its live rows and purges its trashed ones. **Every other relation leaves the trash untouched**,
+   including `where(...)`, `all`, `destroy_by`, `post.comments` and `unscoped` on a `default_scope: false` model,
+   whose relations already contain the trashed rows. The trashed set is decided when the call **starts**: a row
+   this call soft-deletes (a self-referential `cascade:`, an `after_soft_delete` hook) is never purged by a later
+   batch (it stays in the trash; as with `soft_delete_all`, a stale copy that a self-referential `cascade:`
+   already trashed can be re-stamped, so the parent's `restore!` may not bring it back). Each row is re-checked
+   right before its purge, so a row restored before its turn is not purged (a plain `EXISTS`, not a row lock: a
+   restore committed concurrently between that check and the `DELETE` is still lost). The real destroy
+   is Rails' own (callbacks and `dependent: :destroy` run); a trashed parent first purges its **trashed**
+   `cascade:` children, whatever their timestamp (live ones are left to `dependent:`), because
+   `dependent: :destroy` cannot see them through their default scope; a cascade cycle (a self-parented row, a
+   user owning the team it belongs to) purges each row once; the purge pass ignores a cascaded association's own `limit`/`offset`. A vetoed destroy (the record's own, or any trashed
+   child's, which rolls that record's whole purge back) is skipped on a relation; an association raises
+   `RecordNotDestroyed` for it, as Rails' `destroy!` does.
+3. **Rails' own association maintenance keeps Rails semantics.** `has_many :groups, through: :memberships,
+   dependent: :destroy` on a destroyed owner, `user.groups.destroy(group)` and `user.groups.destroy_all`
+   remove the join rows with a hard delete, even when the join model is soft-deletable (soft-deleting them
+   would leave rows pointing at a destroyed owner). A `:through` association's `destroy_all` removes the links,
+   never the targets. Only the ONE `destroy_all` Rails issues for that is hard: a destroy callback of the join
+   model that calls `destroy_all` itself is an app call again and soft-deletes. (A join model with **no primary
+   key** is the exception: Rails then runs its destroy callbacks and a `delete_all` instead, so a `destroy_all`
+   on the join model from one of those callbacks is still hard.)
+
+The association form goes through Rails' own remove path, so `before_remove` / `after_remove` run and the
+loaded instances are the ones marked deleted; a loaded relation (or one with `limit` / `offset`, or a
+`has_many :through, disable_joins: true` relation) acts on its records as loaded, once per record. Instance
+`destroy` is unchanged: Rails' own hard delete.
+
+These forms stay **hard deletes** (they are Rails' own, not an app `destroy_all`): `has_many ..., dependent:
+:destroy`, `post.comments.destroy(comment)`, `post.comments.delete(comment)` on a `dependent: :destroy`
+association, assigning a collection that drops records (`post.comments = [...]`) on a `dependent: :destroy` association and
+nested attributes with `_destroy`. Use `cascade:`, `soft_delete!` or `post.comments.soft_delete_all` to soft-delete through an
+association.
+
+To get the pre-fix behavior (a relation's or association's `destroy_all` is ActiveRecord's own hard delete) declare
+`soft_deletable_by :deleted_at, relation_destroy_all: :hard` (default `:soft`; set by every macro call like the
+other options, inherited by subclasses that do not call it). `Model.destroy_all` / `soft_delete_all` always
+soft-delete. Use `really_destroy_all` to hard-delete on purpose.
+
+**Upgrading.** Code that called `Model.where(...).destroy_all` or `record.assoc.destroy_all` on a SoftDeletable
+model and relied on it hard-deleting now soft-deletes: switch to `really_destroy_all`, or set
+`relation_destroy_all: :hard`. Beyond the delete itself, for **live rows** a scoped `destroy_all` no longer runs
+`before_destroy` / `after_destroy` or `after_commit on: :destroy` / `after_destroy_commit`: it runs
+`before_soft_delete` / `after_soft_delete` instead, and under the default `touch: true` also the model's
+validations and update callbacks (`after_update_commit`). A row that fails validation (or whose
+`before_soft_delete` vetoes) now raises `ActiveRecord::RecordNotSaved` and **rolls the batch back**, where
+ActiveRecord's own `destroy_all` skipped the rows whose destroy was vetoed. On Rails 7.2+ `in_batches.destroy_all`
+sums `count(&:destroyed?)`, so soft-deleted rows read as `0` there (they are not `destroyed?`). Rows now stay in
+the table, so a **unique index that also covers soft-deleted rows blocks re-creating the record** (`email`, a
+join-table pair): use a partial index that ignores the trash, `CREATE UNIQUE INDEX ... WHERE deleted_at IS NULL`
+(`add_index :users, :email, unique: true, where: "deleted_at IS NULL"`). A soft-deleted **parent does not trigger
+`dependent: :destroy`** on its children (nothing is destroyed): list them in `cascade:` to send them to the trash
+with it.
+
 A record that fails to transition raises `ActiveRecord::RecordNotSaved` and rolls the whole
 batch back. With `touch: false` and no overridden hooks, `soft_delete_all` / `restore_all`
-collapse to a single `UPDATE`. Both `restore_all` and `really_destroy_all` peel off **only the
+collapse to a single `UPDATE` (never on an STI table, which always streams per record so each class's hooks and validations run). Both `restore_all` and `really_destroy_all` peel off **only the
 default scope's own** `deleted_at IS NULL`: a predicate *you* put on the column — `deleted_within`,
 `where(deleted_at: range)`, `only_deleted` — survives, as does any other default scope the model
 declares. (Previously they unscoped the column outright, so `deleted_within(1.hour).restore_all`
 restored the whole trash can and `only_deleted.really_destroy_all` widened to the whole relation.)
 The *scopes* still unscope the column, so chain them first: `soft_deleted.where(...)`, not
-`where(...).soft_deleted`.
+`where(...).soft_deleted`. They unscope it on the model's own table only (Rails 6.1+), and the
+default scope records no unscope at all. So merging a soft-deletable model's relation into another
+model's (`Comment.joins(:post).merge(Post.where(...))`, `.merge(Post.with_deleted)`) keeps the
+other model's own `deleted_at` filter. It used to bring that model's soft-deleted rows back.
 
 **Scope-name collisions**
 
@@ -738,6 +827,7 @@ Expirable also defines) belongs to whichever concern is included last.
 - A `nil` end means "never expires"; a `nil` start means "not yet started".
 - `start!` / `finish!` / `reschedule!` cast each time through its column's type. A value that is not a time raises `ArgumentError` and nothing is written (it used to clear the column): a String must name a year (ISO 8601, RFC 2822, `"Oct 1 2026"` and `"2026-10-01 10:30"` all do; `"junk"`, `"Monday"` and `"10:30"` do not, although `Time.zone.parse` reads them as June 1st and today), and `42` or `1.hour` never cast. `nil` still clears a side.
 - No `default_scope`; chain `.current` explicitly.
+- `date` columns work (`schedulable_by starts_at: :starts_on, ends_at: :ends_on`): the predicates cast the instant through the `date` column's type, as the scopes' binds are, so `current?` / `upcoming?` / `expired?` / `active_at?` / `overlaps?` compare against the date in `Time.zone` and agree with `.current` / `.upcoming` / `.expired`. They used to compare the stored Date at UTC midnight, so outside UTC they disagreed with the scopes for part of every day. Expirable's and Publishable's predicates do the same. A `datetime` column is not touched: its String / Date bounds are read exactly as before.
 
 ---
 
@@ -766,12 +856,18 @@ ApiToken.expiring_within(1.day)  # future expiry within the next 1 day
 
 ```ruby
 token.expire!                       # expires_at = now (nil or "" also mean now)
-token.expire!(2.hours.from_now)     # explicit time (a Time, or a parseable String)
+token.expire!(2.hours.from_now)     # explicit time (a Time, or a parseable String); never pushes an expiry later
 token.expire!("garbage")            # ArgumentError, raised before any hook runs (a String must name a year)
 token.expire_in!(15.minutes)        # absolute lifetime from now, whatever the current expiry
 token.extend_expiry!(by: 1.day)     # pushes expiry forward
 token.clear_expiry!                 # never expires (nil)
 ```
+
+Expiring only ever brings an expiry **forward**. When the saved expiry is already at or before the
+requested time, `expire!` returns `true` and writes nothing, and no hook fires: calling `expire!` on an
+already-expired token keeps its expiry, and `expire!(1.week.from_now)` on a token expiring in an hour keeps
+the hour. Until this fix it rewrote the expiry (to a later time) and fired `after_expire` again. To set a
+later expiry, use `expire_in!` (an absolute lifetime, whatever the current expiry) or `extend_expiry!`. A no-op `expire!` still saves the record's other unsaved changes (`token.note = "revoked"; token.expire!`). The guard reads the instance's saved expiry, so a stale instance cannot revoke an expiry another process pushed later (reload first, or use `expire_all`); and `expire_in!` writes through a private writer, so an `expire!` override does not see it.
 
 `extend_expiry!` is smart about the base:
 - If `expires_at` is `nil` or in the past → new value is `now + by`
@@ -808,6 +904,7 @@ plain names, but Activatable (`active?`) and Schedulable (`expired?`) define the
 that combines them, the concern included last owns the plain name, so use the affixed predicates.
 The plain predicates keep their old relationship: `active?` is `!expired?`, so overriding `expired?` changes both.
 The affixed predicates always give Expirable's own answer.
+On a `date` expiry column, `expired?` / `active?` compare against today in `Time.zone`, as `.expired` / `.active` do.
 
 The same rules apply to every concern with affixed predicates (Expirable, Activatable, Schedulable):
 - The macro raises `ArgumentError` if an affixed predicate would shadow a column's query method. For
@@ -818,6 +915,16 @@ The same rules apply to every concern with affixed predicates (Expirable, Activa
 - Re-declaring the macro with a different affix (or none) removes the previous affix's predicates. On a
   subclass, every inherited affixed predicate that the current affix no longer defines is hidden, and the
   parent keeps its own.
+- An affixed predicate or scope that another concern already generates on the model raises
+  `ArgumentError` naming that concern. For example, `expirable_by prefix: :term` followed by
+  `activatable_by prefix: :term` would generate `term_active?` / `.term_active` twice, and
+  `activatable_by suffix: :at` would generate `.active_at`, which is Schedulable's scope. The scopes of
+  Publishable, SoftDeletable, Schedulable, Expirable, Activatable and Lockable are all checked. Choose a
+  different affix. Until this fix the second concern silently replaced the first one's predicate and
+  scope. Unaffixed names are still shared: the concern declared last owns them.
+- The batch verbs never select their rows through those shared scope names. `expire_all`,
+  `activate_all` / `deactivate_all` and `unpublish_all` build their own predicates, so whichever concern
+  owns `.active` cannot change which rows they write.
 
 **Bulk operations**
 
@@ -825,12 +932,15 @@ The same rules apply to every concern with affixed predicates (Expirable, Activa
 ApiToken.expiring_within(1.day).expire_all   # => 12
 ```
 
-`expire_all(time = Time.zone.now)` expires every currently-active record in the relation and
-returns the Integer count, in a transaction. With `expire!` and both hooks unoverridden and no validations on
+`expire_all(time = Time.zone.now)` expires every currently-active record in the relation whose expiry
+is unset or later than `time`, and returns the Integer count of rows written, in a transaction. Like
+`expire!` it never pushes an expiry later: `Token.where(user: u).expire_all(1.hour.from_now)` leaves a
+token due in 5 minutes at 5 minutes (it used to be extended to the hour). With `expire!` and both hooks unoverridden and no validations on
 the model — neither `validates`/`validates_with`, a custom `validate :method`, nor an
 association's autosave validation (a bare `has_many` registers one, so most models with
-associations take the streaming path) — it collapses
-to a single `UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise it
+associations take the streaming path) — and no STI, it collapses
+to a single `UPDATE`, which bumps `updated_at` exactly as the per-record path does (unless a CounterCacheable
+rule with `if:` or Auditable tracking the expiry column needs the per-record callbacks); otherwise it
 streams per record through `expire!` so validations still run, and a record that fails to save
 raises `ActiveRecord::RecordNotSaved` and rolls the whole batch back.
 
@@ -880,10 +990,10 @@ User.find_by(email: User.normalize(:email, params[:email]))
 | `:titleize`     | upcase each word's first letter and downcase the rest, **in place** — deliberately *not* `String#titleize` (that is `humanize(underscore(v))`, which splits `"Jean-Luc"` into `"Jean Luc"` and drops the `_id` of `"customer_id"`). No character is added or removed, so hyphens and underscores survive; only case changes, so `"DVD player"` → `"Dvd Player"` |
 | `:parameterize` | `parameterize` (URL slug)                                            |
 | `:nullify_blank`| `""` or whitespace-only → `nil` (content untouched)                  |
-| `:url`          | strip, default scheme to `https://` (`host:port` counts as schemeless), lowercase scheme + host, keep userinfo/path/query, drop a redundant default port. Only `http`/`https` are canonicalized — any other scheme (`mailto:`, `tel:`, `javascript:`, `data:`) and unparseable input come back stripped for your format validator to reject |
+| `:url`          | strip, default scheme to `https://` (`host:port` counts as schemeless; a protocol-relative `//CDN.example.com/x` becomes `https://cdn.example.com/x`), lowercase scheme + host, keep userinfo/path/query, drop a redundant default port. Only `http`/`https` are canonicalized — any other scheme (`mailto:`, `tel:`, `javascript:`, `data:`) and unparseable input come back stripped for your format validator to reject |
 
 **Notes**
-- Runs in `before_validation`, so DB constraints and AR validations see the normalized value — with a `before_save` backstop for saves that skip validation (`update_attribute`, `save(validate: false)`); `update_column(s)`/`update_all` bypass it. The backstop is prepended to the save callbacks, so a sibling's `before_save` (Encryptable's blind index, Auditable's entry, Addressable's fingerprint) sees the normalized value whichever concern was included first.
+- Runs in `before_validation`, so DB constraints and AR validations see the normalized value — with a `before_save` backstop for saves that skip validation (`update_attribute`, `save(validate: false)`); `update_column(s)`/`update_all` bypass it. A rule runs once per save, even a non-idempotent Proc under `save if valid?` (the second validation skips a field still holding what the first left, also after a Sanitizable `on: :write` rule rewrote it; `reload` forgets the earlier validation). The backstop is prepended to the save callbacks, so a sibling's `before_save` (Addressable's fingerprint) sees the normalized value whichever concern was included first; Encryptable's blind index and Auditable's entry run later still, at the write boundary (`Support::WriteBoundary`). It is one shared dispatcher with the Sanitizable / Taggable / Addressable backstops, run in their `before_validation` order, so a save that skips validation stores the same value as a validated one when two of them transform the same column.
 - `with:` takes a preset, a Proc, or an Array of them (applied in order); every entry is validated at class load.
 - `nil` values are skipped — no `nil → ""` coercion (use `:nullify_blank` for the opposite direction).
 - Preset normalizers pass non-string values through unchanged.
@@ -928,6 +1038,7 @@ Article.search("ruby")                        # "ruby" (title) → "Ruby" (body)
 Article.search("ruby", ranked: false)         # per-call override (and `ranked: true` opts in per call)
 Article.recent.search("ruby")                 # relevance leads; the existing ORDER BY breaks ties
 Article.group(:author_id).search("ruby")      # grouped relations are returned unranked
+Article.joins(:tags).distinct.search("ruby")  # so are DISTINCT ones (distinct BEFORE search; after it, use ranked: false)
 Article.search(q).pluck(:id, Article.search_rank(q))  # the score itself (0 = exact hit on the first column)
 ```
 
@@ -937,7 +1048,7 @@ Article.search(q).pluck(:id, Article.search_rank(q))  # the score itself (0 = ex
 - Blank or nil queries return the relation unchanged, so it's safe to drop into a controller pipeline.
 - An [Encryptable](#-encryptable) column holds ciphertext, which `LIKE` never matches — naming one in `searchable_by` raises `ArgumentError` at declaration, in either order (it used to return nothing, silently).
 - `ranked:` uses `reorder`, so relevance leads — until something reorders again. `Controllers::Sortable#sorted` and `CursorPaginatable` both reorder unconditionally, so chain `.search` **after** them (`paginated(sorted(Article.all).search(q))`), not before.
-- Grouped relations are returned unranked (ORDER BY on a non-grouped column is a hard error on Postgres/MySQL), so `Article.group(:author_id).search(q).count` is safe; pass `ranked: false` when the `group`/`distinct` comes after the search. Under `mode: :all` the per-term scores are summed.
+- Grouped relations are returned unranked (ORDER BY on a non-grouped column is a hard error on Postgres/MySQL), so `Article.group(:author_id).search(q).count` is safe. DISTINCT relations are returned unranked too (`SELECT DISTINCT … ORDER BY <expression not in the select list>` is rejected by Postgres and MySQL 5.7.5+), so `Article.joins(:tags).distinct.search(q)` is safe — order it yourself if it needs an order. Apply `distinct`/`group` BEFORE `search`, or pass `ranked: false`: a DISTINCT/GROUP added after `search` still carries the rank `ORDER BY`, which PostgreSQL and MySQL reject. Under `mode: :all` the per-term scores are summed.
 - Reach for `pg_search` / Elasticsearch when you need stemming, weighting by frequency, or full-text indexes.
 
 ---
@@ -962,6 +1073,7 @@ sub = Subscription.create!(active: true)
 sub.active?            # => true
 sub.deactivate!
 sub.inactive?          # => true
+sub.deactivate!        # already inactive: a no-op (true), no hooks, deactivated_at kept
 sub.toggle_active!     # flips back to true
 
 Subscription.active     # WHERE active = TRUE
@@ -980,12 +1092,13 @@ direction: with `activate!`, `before_activate` and `after_activate` unoverridden
 validations on the model — neither
 `validates`/`validates_with`, a custom `validate :method`, nor an association's autosave
 validation (a bare `has_many` registers one, so most models with associations take the
-streaming path) — `activate_all` collapses to a single
+streaming path) and the table is not STI — `activate_all` collapses to a single
 `UPDATE`, which bumps `updated_at` exactly as the per-record path does; otherwise it streams
 per record so the hooks and validations still run, and a record that fails to save raises
 `ActiveRecord::RecordNotSaved` and rolls the whole batch back. `deactivate_all` is gated the
 same way by `deactivate!`/`before_deactivate`/`after_deactivate`, so overriding only
-`after_deactivate` leaves `activate_all` on the fast path. `toggle_active!`'s row lock has
+`after_deactivate` leaves `activate_all` on the fast path. A CounterCacheable rule with `if:`, or
+Auditable tracking the flag or a stamp, also keeps both on the per-record path (see Publishable). `toggle_active!`'s row lock has
 no batch analogue. It reloads a clean record under the lock; a record with unsaved changes (which
 `with_lock` refuses) has only the flag read under the lock, and its changes save with the flip.
 
@@ -1037,7 +1150,7 @@ User.reset_password_token_expired         # scope: rows whose expiry has passed 
 - URL-safe by default (`A–Z`, `a–z`, `0–9`, `-`, `_`) — drop straight into URLs and headers.
 - Caller-supplied values are respected: `User.create!(api_token: "preset")` won't be overwritten.
 - Generation does a best-effort uniqueness check before insert (across the whole table — an STI subclass sees its siblings' tokens) and retries up to 10 times. Pair with a `unique` DB index for real safety, especially for short alphanumeric/numeric codes; `regenerate_<field>!` retries a `RecordNotUnique` from that index in its own savepoint, so it also works inside your transaction on PostgreSQL.
-- `.authenticate_by_<field>` uses `ActiveSupport::SecurityUtils.secure_compare` to avoid leaking partial matches via response timing, and returns `nil` once an `expires_in:` token has expired.
+- `.authenticate_by_<field>` uses `ActiveSupport::SecurityUtils.secure_compare` to avoid leaking partial matches via response timing, and returns `nil` once an `expires_in:` token has expired. Only a String or Integer is looked up: a crafted non-scalar param (`?token[a]=b`) answers `nil` (as `consume_<field>` does) instead of raising `TypeError`.
 - `.consume_<field>(value)` (every field) is the single-use verb — password resets, invite codes, magic links: it authenticates, then revokes with a **conditional `UPDATE`** keyed on the token still being present, so two concurrent consumers cannot both succeed; the loser gets `nil`. An expired token is refused and left in place.
 - A caller-supplied token on an `expires_in:` field gets the configured lifetime **on create** unless the caller also sets `<field>_expires_at`. Assigning one to an already-persisted row (`user.update!(reset_password_token: "preset")`) stamps nothing, and a row whose expiry is `nil` never expires — rotate with `regenerate_<field>!` (which stamps a fresh expiry) or set `<field>_expires_at` yourself.
 - Tokens are assigned in `before_create`, and reported to the siblings that already ran: an [Encryptable](#-encryptable) blind index is fingerprinted, so a freshly created record is findable; a slug or [Auditable](#-auditable) entry built from the token sees it. Whatever the include order.
@@ -1081,7 +1194,8 @@ Invoice.next_sequence(account_id: 1)   # => 4  (peek the next value, without cre
 | `separator:`         | `"-"`       | Joins prefix / period token / number in the default format.                              |
 | `start_at:`          | `1`         | First value when the scope/period has no rows yet.                                       |
 | `scope:`             | `nil`       | Column (or array of columns) the counter is scoped to — e.g. one sequence per `account_id`. |
-| `reset:`             | `:never`    | `:never` / `:year` / `:month` / `:day` — restart numbering each period (needs `created_at`). |
+| `reset:`             | `:never`    | `:never` / `:year` / `:month` / `:day` — restart numbering each period (needs `created_at`, or your `period_column:`). |
+| `period_column:`     | `:created_at` | Datetime column the `reset:` period is cut from. With `assign: :manual` set it to a stamp such as `:finalized_at` so a draft numbers into the period it is **finalized** in (`assign_<field>!` stamps it when blank); with the default a late-finalized draft numbers into its creation period. Not `:updated_at`. Declare it on the class that declares the format (or on an `assign:`-only re-declaration, which inherits it): a subclass restating the same format with a different `period_column:` is refused, since both series would print the same numbers. |
 | `time_zone:`         | app zone    | Zone the `reset:` periods are cut in (a zone name as a String or Symbol, or an `ActiveSupport::TimeZone`). Defaults to `config.time_zone` (`Time.zone_default`), else UTC — never the per-request `Time.zone`. Unknown names raise `ArgumentError`. |
 | `template:`          | `nil`       | `->(seq, record) { ... }` full custom formatter; overrides `prefix` / `padding` / period. To render the period, read `record.sequenceable_period_time(:field)` (the fixed-zone instant), not `created_at`. |
 | `assign:`            | `:create`   | `:create` numbers every record in `before_create`; `:manual` leaves the column NULL until `assign_<field>!` is called — for invoices that get their number when finalized, not when drafted. Re-declaring the field (same class or an STI subclass) switches the mode; the last declaration wins. Pass only `assign:` to keep the rest of the config (see the notes). |
@@ -1108,10 +1222,11 @@ Invoice.next_sequence(account_id: 1)   # => 4  (peek the next value, without cre
 
 **Notes**
 - The next value is `MAX(<field>) + 1` within the scope (and period), so numbering is dense and ordered — not random.
+- A `scope:` column can't be [Encryptable](#-encryptable): the scoped `MAX` would compare ciphertext, match no row and number every record `start_at` (two invoices of one region both `1`, which a unique index over the ciphertext never rejects). Declaring one raises `ArgumentError`, in either order.
 - Caller-supplied values are respected: `Invoice.create!(sequence: 100)` is not overwritten (and its `into:` string is still formatted from `100`).
 - The number is drawn in `before_create`, then reported to the siblings that already ran, whatever the include order: `sluggable_by :number` gets `"inv-1"` in the same `INSERT` (not `nil` until a later save), an [Auditable](#-auditable) creation entry includes a tracked `number`, and an [Encryptable](#-encryptable) blind index on it is fingerprinted.
-- With `assign: :manual`, numbering follows **assignment** order (the first invoice finalized is #1, whenever it was drafted); with `reset:` the period is still taken from the row's `created_at`, exactly as on create.
-- Generation reads `MAX` then inserts, so two concurrent inserts can race. It's **best-effort** — add a **scoped unique index** on `<field>` (and on `into:`) for a real guarantee, the same way you would for any `MAX`-based numbering, and wrap the write in `ConcernsOnRails::Support::UniqueRetry.with_retries { … }` (pass `savepoint: Invoice` when it runs inside your own transaction, so a rejected attempt rolls back to a savepoint instead of aborting it on PostgreSQL). `assign_<field>!` saves in its own savepoint and puts the number back when the save fails, so a retried `assign_<field>!` draws a fresh one.
+- With `assign: :manual`, numbering follows **assignment** order (the first invoice finalized is #1, whenever it was drafted); with `reset:` the period is taken from the row's `created_at` by default — so a draft finalized in a later period numbers into the period it was **created** in. Pass `period_column: :finalized_at` (any datetime column; `assign_<field>!` stamps it when blank) to number it in the period it is finalized in. Switching an existing series to a `period_column:` is safe: a numbered row whose column is still NULL keeps counting by its `created_at`. A `date` column is stamped with the calendar day in the field's `time_zone:`.
+- Generation reads `MAX` then inserts, so two concurrent inserts can race. It's **best-effort** — add a **scoped unique index** on `<field>` (and on `into:`) for a real guarantee, the same way you would for any `MAX`-based numbering, and wrap the write in `ConcernsOnRails::Support::UniqueRetry.with_retries { … }` (pass `savepoint: Invoice` when it runs inside your own transaction, so a rejected attempt rolls back to a savepoint instead of aborting it on PostgreSQL). `assign_<field>!` saves in its own savepoint and puts the number back when the save fails, so a retried `assign_<field>!` draws a fresh one. A create that rolls back (a lost race, a caller's transaction rolling back) restores the number and `into:` string too, so `with_retries { invoice.save! }` on the same new record draws afresh (Tokenizable, Hashable and Sortable's position behave the same; a value you supplied yourself is kept).
 - With STI, the rows that share a counter are those of the class that **declared** `sequenceable_by` (and its subclasses): declared on the base, every subclass draws from one table-wide counter; declared on each subclass (`INV-` / `CN-`), each keeps its own sequence. A subclass that re-declares a **different** format under a declaring parent numbers its own series (see the next notes for what counts as different), while the parent's MAX still spans the whole table: the parent series may show a **gap**, never a duplicate. For independent per-type series without gaps, use `scope: :type`. Declared on an abstract class, each concrete table gets its own counter. `next_<field>` previews exactly what the receiving class's next `create!` gets in each of these setups. Per-subclass series share one integer column, so index `(type, <field>)` rather than the column alone.
 - `reset:` requires a `created_at` column; the period is taken from each row's creation time, **in one fixed zone** (`time_zone:`, default `config.time_zone`, else UTC). It never follows the per-request `Time.zone` (Timezoneable, `Time.use_zone`): requests in different zones would disagree on which day it is and issue the same number, and `formatted_<field>` without `into:` would render a different date per reader. Apps that never change `Time.zone` per request see no change. With `into:` (and no `template:`), the `MAX` also counts rows whose stored value already carries this period's `prefix + token + separator`. So a number stamped under a request zone before the upgrade is continued, never reissued; the cost is at most a gap. Without `into:`, add a unique index before upgrading.
 - **Re-declaring a field** (later on the same class, or on an STI subclass). A call that passes **`assign:` and/or `time_zone:` and nothing else** keeps every other option of the field's current config. Any other call — one that passes a format option, or a bare `sequenceable_by :sequence` with no options — restates the format: every option it omits takes its default, exactly as in a first declaration — so a subclass switching to `prefix: "CN-"` repeats `into:`, `reset:`, `padding:` … if it wants them. A **draft/manual subclass should re-declare with ONLY `assign:`**: `sequenceable_by :sequence, assign: :manual` keeps the parent's `into:` / `prefix:` / `reset:` and even its `template:` object, and finalizes into the parent's series. Declare the parent fully (including `time_zone:`) before its subclasses: a subclass that calls `sequenceable_by` copies the config at that moment, so a later re-declaration of the parent (a reopened class, `to_prepare`, an engine override) is neither propagated to it nor re-checked.
@@ -1167,7 +1282,12 @@ Returns the Integer count of records transitioned, running in a transaction; rec
 guard rejects are skipped (not errors). Unlike every other batch verb in this gem,
 `transition_all` has **no single-UPDATE fast path** — it always streams per record through
 the guarded `<event>!` method, because that path runs validations via `update!` while a bulk
-`update_all` would silently skip them.
+`update_all` would silently skip them. On an STI table each row is judged by its own class's
+declaration: a base-class `transition_all` skips the rows of a subclass that re-declared
+`stateable_by` without the event (it used to abort with `NoMethodError`) and transitions the rows a
+subclass's wider `from:` accepts (the base's `from:` used to filter them out). With `lock: true` each record's guard is checked under its row
+lock, so a row another process moved after the batch loaded it is skipped like any other rejected row
+(it used to raise `InvalidTransition` and roll the whole batch back); a single `<event>!` still raises.
 
 **Timestamps and per-event hooks**
 
@@ -1262,13 +1382,13 @@ end
 |-------------------|--------------------------------------|---------------------------------------------------------------------|
 | `line1:` … `country:` | same-named columns               | Map each canonical part to a real column. Missing columns are skipped. |
 | `required:`       | `%i[line1 city postal_code country]` | Parts (by canonical name) that must be present. Each must map to an existing column. |
-| `default_country:`| `"US"`                               | Postal-code format used when the country column is **absent or blank**. A present-but-unrecognized country value falls back to the permissive pattern instead — see the postal note below. |
+| `default_country:`| `"US"`                               | Postal-code format used when the country column is **absent or blank**. Canonicalized like a country value (`"Canada"`/`"CAN"`/`"ca"` → `"CA"`); anything that does not resolve to an ISO alpha-2 code raises `ArgumentError` at load time (`nil` means no default: a blank country gets the permissive rules). A present-but-unrecognized country value falls back to the permissive pattern instead — see the postal note below. |
 | `validate_state:` | `false`                              | When `true`, validates the state against US / CA code sets.         |
 | `lengths:`        | `{}`                                 | Per-part length limits: `{ line1: 100, city: 50, postal_code: 5..10 }`. An Integer is a (positive) maximum; a Range is `min..max` (non-negative, satisfiable; endless `3..` and beginless `..50` allowed). Only the parts you list are checked. Bad bounds raise an `ArgumentError` at load time. |
 | `allow_blank:`    | `false`                              | Per-field opt-out for the length check: an Array of parts (e.g. `%i[line2 state]`), or `true` for all parts. A blank value for an allowed part skips its length check. Independent of `required:`. |
-| `normalize_country:` | `false`                           | When `true`, canonicalize the country to its ISO 3166-1 alpha-2 code: an English name (`"Canada"`, `"United States"`) or a 3-letter alpha-3 (`"CAN"`, `"USA"`) maps to the alpha-2 (`"CA"`, `"US"`); unrecognized values are left untouched. This also lets postal/state validation recognize a named country. |
+| `normalize_country:` | `false`                           | When `true`, canonicalize the country to its ISO 3166-1 alpha-2 code: an English name (`"Canada"`, `"United States"`, diacritics optional), a 3-letter alpha-3 (`"CAN"`, `"USA"`) or a common alias (`"UK"`, `"United States of America"`, ISO official names such as `"Viet Nam"`, former names such as `"Czech Republic"`) maps to the alpha-2 (`"CA"`, `"US"`, `"GB"`); unrecognized values are left untouched. This also lets postal/state validation recognize a named country. |
 | `verify_with:`    | `nil`                                | A callable for real-world verification (see below).                 |
-| `fingerprint:`    | `nil`                                | A `string` column to store `address_fingerprint` in (stamped in `before_validation`, after normalization) so duplicates are one indexed query away: `Location.with_address(record)`. |
+| `fingerprint:`    | `nil`                                | A `string` column to store `address_fingerprint` in so duplicates are one indexed query away: `Location.with_address(record)`. Stamped after normalization and every other `before_validation`, ahead of your own validations (so `validates :address_fingerprint, uniqueness: true` dedupes), and again in `before_save` for `save(validate: false)`. |
 | `if:` / `unless:` | `nil`                                | Standard Rails validation conditions (Symbol, Proc, or Array) gating the address **validations** — e.g. `if: :on_addresses?`. Normalization still runs unconditionally. Per class: a later `addressable_by` (or a subclass's) replaces the condition. Procs get Rails' callback arguments for their arity (`-> {}`, `->(record) {}`, `->(record, _) {}`). |
 
 **What it normalizes** (in `before_validation`, plus a `before_save` backstop for saves that skip validation)
@@ -1297,7 +1417,7 @@ end
 ```ruby
 loc.address_fingerprint        # => "9f2c…" — SHA-256 of the normalized parts: case, whitespace, postal spacing
                                #    and a blank country (→ default_country) don't change it; nil for a blank address
-loc.same_address_as?(other)    # fingerprints equal (never true for two blanks)
+loc.same_address_as?(other)    # fingerprints equal — other is a record or a digest String (never true for two blanks)
 loc.address_changed?           # any mapped column dirty (address_parts_changed? when you have an `address` column)
 
 addressable_by fingerprint: :address_fingerprint     # add a string column + index
@@ -1395,7 +1515,7 @@ article.sanitized_body  # => "<b>Hi</b>alert(1)"                    (script tag 
 **Serialization & clean-up**
 
 ```ruby
-article.sanitized_attributes                 # => { "body" => "<b>Hi</b>alert(1)", "summary" => "sum" } — every declared field, cleaned
+article.sanitized_attributes                 # => { "body" => "<b>Hi</b>alert(1)", "summary" => "sum" } — every declared (loaded) field, cleaned
 article.as_json(sanitized: true)             # declared fields swapped for their sanitized form, the rest raw
 render json: article.as_json(sanitized: [:body], only: %i[id body])   # subset; composes with only:/except:/methods:
 article.as_json(sanitized: true, include: :comments)                  # nested records are sanitized too
@@ -1408,7 +1528,7 @@ Article.where(legacy: true).sanitize_all!(:body)   # scope-aware, subset of fiel
 
 **Notes**
 - `on: :read` (default) is **non-destructive**: it adds a `sanitized_<field>` reader and leaves the stored column untouched.
-- `on: :write` overwrites the column in `before_validation` (plus a `before_save` backstop for `update_attribute` / `save(validate: false)`) — **lossy and irreversible** (never use it on code, Markdown, math, or prices), and bypassed only by `update_column` / `update_all` / raw SQL.
+- `on: :write` overwrites the column in `before_validation` (plus a `before_save` backstop for `update_attribute` / `save(validate: false)`) — **lossy and irreversible** (never use it on code, Markdown, math, or prices), and bypassed only by `update_column` / `update_all` / raw SQL. On a persisted record only the fields this save changes are rewritten, so a non-idempotent `Proc` writer is never re-applied to a stored value (and an unrelated save does not repair a row written around the callbacks — `sanitize_all!` does).
 - `with: :strip, on: :write` stores **plain text**, not HTML-escaped text: `"<b>Tom</b> & Jerry"` is stored as `"Tom & Jerry"` (so `<%= %>` shows it once, not as `Tom &amp;amp; Jerry`). `&lt;` / `&gt;` are deliberately kept encoded — the stored value can never become markup, even rendered with `raw` — so a typed `a < b` is stored as `a &lt; b`. An `&amp;` that would read back as a character reference (a literal `&amp;copy;`) also stays encoded (a static, linear-time rule: `&` followed by `#`, a `name;`, or an HTML5 semicolon-less legacy name), so re-saving and `sanitize_all!` are idempotent. `sanitize_all!` uses the same plain-text form, and repairs rows stored double-escaped by earlier versions. The `on: :read` reader and `sanitized:` serialization still return HTML-escaped text.
 - `sanitize_all!` is the repair tool for that bypass (and for rows written before the concern was added): one `update_columns` per row that actually changes, skipping validations/callbacks on purpose, inside a transaction. A bare call repairs the `on: :write` fields only — with none declared it returns `0` without a query.
 - `sanitized:` sanitizes the **serialized** value, so it composes with [Maskable](#-maskable) in either include order: `as_json(masked: true, sanitized: true)` never falls back to the raw column.
@@ -1447,7 +1567,7 @@ end
 **Serialization** — mask in the response, not just in the view
 
 ```ruby
-user.masked_attributes            # => { "email" => "j****@example.com", "card" => "**** **** **** 4242" }
+user.masked_attributes            # => { "email" => "j****@example.com", "card" => "**** **** **** 4242" } (loaded columns only, like attributes)
 user.as_json(masked: true)        # every declared field swapped for its masked form, the rest raw
 user.as_json(masked: [:email])    # just these fields (undeclared ones raise)
 user.to_json(masked: true, only: %i[id email])   # composes with only:/except:/methods:/include:
@@ -1479,7 +1599,7 @@ product.formatted_price # => "$19.99"
 | Method            | Returns                                       |
 |-------------------|-----------------------------------------------|
 | `price`           | the amount as a `BigDecimal` (cents ÷ 100)    |
-| `price=`          | assign in major units; rounded to whole cents. Strings are read as plain decimals (`"19.99"`) or in the field's own display format (`"$1,234.50"`, `"€1.234,50"` with `separator: ","`), so `formatted_price` round-trips. The unit is only recognized at the start or end; in a `delimiter: "."` field with another separator, `"1.234"` means 1234 (like `"€1.234"`). Garbage, NaN, Infinity and oversized input (over 64 characters, a 3-digit exponent, or ≥ 10^24 — a parse-cost bound, far above a `bigint` column's ~9.2e18 subunits, so the database may still reject a large amount at save) become `nil` |
+| `price=`          | assign in major units; rounded to whole cents. Strings are read as plain decimals (`"19.99"`) or in the field's own display format (`"$1,234.50"`, `"€1.234,50"` with `separator: ","`), so `formatted_price` round-trips. The unit is only recognized at the start or end; in a `delimiter: "."` field with another separator, `"1.234"` means 1234 (like `"€1.234"`), but a leading `0` group is never grouping (`"0.500"` is 0.5 there, and `"0,500"` in a `","` field is `nil`, not 500). Garbage, NaN, Infinity and oversized input (over 64 characters, a 3-digit exponent, or ≥ 10^24 — a parse-cost bound, far above a `bigint` column's ~9.2e18 subunits, so the database may still reject a large amount at save) become `nil` |
 | `formatted_price` | a display string (`"$1,234.56"`); accepts per-call overrides: `formatted_price(unit: "€", delimiter: ".", separator: ",")` |
 
 **Aggregates** — class methods that follow the current scope, exact and float-free:
@@ -1490,7 +1610,7 @@ Product.in_stock.average_price         # average_ / minimum_ / maximum_ too — 
 Order.paid.formatted_sum_total         # => "€3.500,50"  every aggregate has a formatted_ twin (overrides accepted)
 ```
 
-**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors. A `unit:` containing the `delimiter:` or `separator:` raises (formatted output could not be read back). `precision:` and `subunit_to_unit:` are coerced (`"2"` works, `"two"` raises) at the macro and in per-call `formatted_` overrides alike.
+**Options**: `as:` (explicit method name — required when the column does not end in `_cents`), `unit:` (`"$"`), `precision:` (`2`, or every decimal a power-of-ten `subunit_to_unit:` carries — `3` for `1000`, so `"KD1.999"` round-trips), `delimiter:` (`","`), `separator:` (`"."`), `subunit_to_unit:` (`100`). `nil` stays `nil` across all the accessors. A `unit:` containing the `delimiter:` or `separator:` raises (formatted output could not be read back), and so does a `separator:` equal to the `delimiter:` (`separator: ","` needs `delimiter: "."` or another mark) or an empty `separator:` with `precision:` above 0 — at the macro and in per-call `formatted_` overrides. `precision:` and `subunit_to_unit:` are coerced (`"2"` works, `"two"` raises) at the macro and in per-call `formatted_` overrides alike.
 
 ---
 
@@ -1519,7 +1639,7 @@ product.audited_changes_since(1.day.ago)   # recent entries, oldest first
 product.clear_audit_trail!                 # wipe the column (skips callbacks)
 ```
 
-One entry is recorded **per changed field per save** (creates record `"from" => nil`), appended in the same `INSERT`/`UPDATE` via `before_save` — zero extra queries. A tracked column a sibling generates later in the create (a [Sequenceable](#-sequenceable) number, a [Tokenizable](#-tokenizable)/[Hashable](#-hashable) value, a slug built from one) is folded into the creation entry, whatever the include order.
+One entry is recorded **per changed field per save** (creates record `"from" => nil`), appended in the same `INSERT`/`UPDATE` — zero extra queries. The capture runs at the write boundary, after every `before_*` callback, so entries record the values actually written: a tracked column your own later callback sets or rewrites is recorded as stored, and a column a sibling generates in the create (a [Sequenceable](#-sequenceable) number, a [Tokenizable](#-tokenizable)/[Hashable](#-hashable) value, a slug built from one, an Encryptable blind index) is included, whatever the include or declaration order.
 
 **Options**: `into:` (`:audit_log`), `actor:` (a lambda with no required parameter or a block is `instance_exec`'d on the record; a `->(record)` lambda, a symbol proc or any other callable is called with the record — bare unless its `#call` requires an argument; or a Symbol naming a record method such as `:updated_by_id`; omit it to take the gem-wide `config.audit_actor`, an explicit `nil`/`false` opts out of that; `"by"` omitted when it resolves to nil), `max_entries:` (`200`; keeps the newest N, `nil` = unlimited), `max_value_length:` (`nil`; truncates long String `from`/`to` values to the first N characters + `…`).
 
@@ -1570,7 +1690,8 @@ User.unlock_by_token(params[:token])   # constant-time lookup; unlocks once (hoo
 count, runs in a transaction. Returns `0` without querying when `unlock_in` is `nil` (manual
 unlock only). Because `unlock_access!` persists via `update_columns` (which already skips
 validations), the single-`UPDATE` fast path and the per-record path are equivalent here —
-unlike Publishable/Expirable/Activatable, this one has no validators gate.
+unlike Publishable/Expirable/Activatable, this one has no validators gate. It does have the STI
+rule: on an STI table `unlock_expired` always streams per record, so a subclass's `after_unlock` and `lockable_by` columns apply to its rows.
 
 **Notes**
 - The increment is SQL-side (`COALESCE(attempts, 0) + 1` via `update_counters`), so concurrent failures never lose updates and a NULL counter needs no column default; a locked account stops counting.
@@ -1649,7 +1770,7 @@ Account.active.where_flag_beta(true).where_items_per_page(50)   # PostgreSQL ->>
 Account.where_theme(nil)         # unset key, explicit null, or NULL column
 ```
 
-**Options** (per key): `type:` (`:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`, `:json`), `default:` (a value, or a Proc `instance_exec`'d per read), `in:` (inclusion validation, errors on the accessor name), `query:` (`false` skips this key's `where_` scope). Macro options: `prefix:` / `suffix:` affix the generated method names (the collision escape hatch), `query:` sets the default for every key in the call. The macro is repeatable — repeat calls for the same column merge keys, different columns are independent, and subclasses can add keys without affecting the parent.
+**Options** (per key): `type:` (`:string` default, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime`, `:json`), `default:` (a value, or a Proc `instance_exec`'d per read; cast through the key's `type:` exactly as a stored value is when the key declares one, so `default: "false"` on a `:boolean` key reads `false`; a default that cannot be cast reads `nil`, `:json` defaults and keys declared without `type:` return the default as written — `default: false` stays `false`, `25` stays `25`), `in:` (inclusion validation, errors on the accessor name), `query:` (`false` skips this key's `where_` scope). Macro options: `prefix:` / `suffix:` affix the generated method names (the collision escape hatch), `query:` sets the default for every key in the call. The macro is repeatable — repeat calls for the same column merge keys, different columns are independent, and subclasses can add keys without affecting the parent.
 
 **Notes**
 - Works on a plain `text` column (JSON encoded/decoded internally), a native `json`/`jsonb` column, or a column the host app already `serialize`d — detected automatically. `serialize` itself is never used, so the Rails 7.1 API drift is irrelevant.
@@ -1683,7 +1804,7 @@ Comment.recount_counter_caches!    # repair drift / backfill every counter
 Comment.recount_counter_caches!(:post, parents: imported_posts)   # repair just these parents (ids, records or a relation)
 ```
 
-Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose. A destroy decrements only when its DELETE actually removed the row (as Rails' native counter cache does) — destroying a stale second instance, or a never-saved record, writes nothing — and it reads the parent and the `if:` verdict from the **persisted** values, so an unsaved reparent or condition flip can't redirect it. A `belongs_to ..., primary_key: :code` is honoured: parents are addressed by that key (live adjustments and `recount_counter_caches!` alike), never by `id`. A child destroyed by its parent's own `has_many ..., dependent: :destroy` does not decrement that parent (as with Rails' native counter cache) — the row is going away, and bumping it first would trip the parent's `lock_version`. A `has_one` replacement, where the parent survives, still decrements. With `lock_version` on the parent, each adjustment bumps it in SQL, and the parent instance the child's association holds (`post.comments.create!`'s `post`, or the one passed as `post:`) gets the bump and the counter delta mirrored in memory (the in-memory half of native `increment!`; a counter you assigned and haven't saved is left pending as assigned) — so `post.update!` afterwards doesn't raise `StaleObjectError` — and a rolled-back save of the child takes the mirror back off the parent. Two pre-existing cases can still raise it: destroying a parent whose counted child hangs off a `has_one ..., dependent: :destroy`, and a `has_many :through ..., dependent: :destroy` (Rails deletes the join rows without `destroyed_by_association`).
+Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,0) ± 1`) inside the record's own save transaction. The update path handles the full matrix: a **foreign-key reparent** moves the count from the old parent to the new one, a **condition flip** increments/decrements in place, and the two compose. A destroy decrements only when its DELETE actually removed the row (as Rails' native counter cache does) — destroying a stale second instance, or a never-saved record, writes nothing — and it reads the parent and the `if:` verdict from the **persisted** values, so an unsaved reparent or condition flip can't redirect it. A `belongs_to ..., primary_key: :code` is honoured: parents are addressed by that key (live adjustments and `recount_counter_caches!` alike), never by `id`. A child destroyed by its parent's own `has_many ..., dependent: :destroy` does not decrement that parent (as with Rails' native counter cache) — the row is going away, and bumping it first would trip the parent's `lock_version`. A child destroyed through a `has_one ..., dependent: :destroy` still decrements (it may be a replacement, where the parent survives), but that UPDATE leaves the parent's `lock_version` alone, so destroying a locked parent never trips over its own child. With `lock_version` on the parent, each adjustment (the `has_one` destroy decrement excepted) bumps it in SQL, and the parent instance the child's association holds (`post.comments.create!`'s `post`, or the one passed as `post:`) gets the bump and the counter delta mirrored in memory (the in-memory half of native `increment!`; a counter you assigned and haven't saved is left pending as assigned) — so `post.update!` afterwards doesn't raise `StaleObjectError` — and a rolled-back save of the child takes the mirror back off the parent. One pre-existing case can still raise it: a `has_many :through ..., dependent: :destroy` (Rails deletes the join rows without `destroyed_by_association`).
 
 **Options** (`counter_cacheable_by association, …`, repeatable — re-declaring the same association + `count:` replaces that rule, e.g. an STI subclass narrowing it with `if:`): `count:` (the parent column; default `"<table_name>_count"`), `if:` (a callable evaluated against the record — counts only when truthy; the previous state is reconstructed for updates), `touch:` (`false`; also bump the parent's `updated_at`).
 
@@ -1739,11 +1860,6 @@ On the model itself both sweep the **whole table**, bypassing `default_scope` �
 Reads pick the key by the envelope's id, so old and new rows coexist; `find_by_<field>` / `where_<field>` match blind-index digests under the current **and** previous keys during the window. Per-field `key:` fields sit outside rotation.
 
 **Notes**
-- The declared column must be `text`/binary (it stores an opaque envelope, not the logical type); a blind-index column holds a 64-char hex digest — add an index on it.
-- Ciphertext is non-deterministic (random IV), so `where(ssn: ...)` matches nothing — query through a blind index. `nil` stays `nil`; presence checks work normally. Declaring an encrypted field in `searchable_by` or as the `taggable_by` column raises (either order); Tokenizable's `authenticate_by_`/`consume_` go through the blind index, and raise when there is none.
-- A value generated in `before_create` by a sibling ([Tokenizable](#-tokenizable), [Hashable](#-hashable), [Sequenceable](#-sequenceable)) is fingerprinted when it is generated, so a freshly created record is findable by `find_by_<field>` (it used to be stored with a NULL blind index). **Upgrading:** rows created before this fix keep that NULL fingerprint, and `reencrypt_all!` does not reach them (they are under the current key) — backfill them once with `update_columns(<field>_bidx: Model.<field>_fingerprint(record.<field>))` over `Model.unscoped.where(<field>_bidx: nil).where.not(<field>: nil)` ([recipe](docs/concerns/encryptable.md#upgrading-blind-indexes-of-generated-values)).
-- `ssn_ciphertext` is `nil` while the field has an unsaved change (so it can never return the plaintext you just assigned), and `ssn_encrypted?` asks whether what is stored really is an envelope. After a save or `update_columns` it is exactly what was written (on Rails 6.0–7.0, which re-serialize in memory with a fresh IV, that costs one raw `SELECT` of the encrypted columns per write).
-- `update_column(s)` on an encrypted field DOES encrypt (the value still serializes through the attribute type), but it skips validations, callbacks, dirty tracking and the blind-index refresh — so a value written that way is unsearchable until the row is saved normally. Declaring a field with both `encryptable` and `auditable_by` raises (either order), and so does slugging one — an encrypted field as the `sluggable_by` source or a `candidates:` entry, or a bare friendly_id base (a slug is its plaintext); what a declaration cannot see is refused at save. **Upgrading:** a model that slugged an encrypted field before this release stored plaintext slugs — point the slug at a safe field, `regenerate_slug!` every row, and delete the stale `friendly_id_slugs` history rows ([snippet](docs/concerns/encryptable.md#upgrading-slugs-built-from-an-encrypted-field)).
 - Wrong key / tampered ciphertext / malformed envelope raise `Encryption::DecryptionError`. Encrypted field names are auto-registered with Rails' `filter_parameters` (via the gem's railtie), so they're redacted from request logs.
 - Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` streams with `find_each` and rewrites each row with one UPDATE — no validations/callbacks (only the ciphertext changes), no `lock_version` bump (so records open in edit forms don't go stale), guarded on the ciphertext it read so a concurrent write is never reverted, and skipping any field with an unsaved change. A row whose key id is no longer configured raises `DecryptionError` naming the id.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need Rails-managed key infrastructure (KMS, per-record keys) or deterministic encryption.
@@ -1778,6 +1894,7 @@ User.where(...).anonymize_all!     # batch; returns the count, skips stamped rec
 - Deliberately `update_columns`: erasure is never blocked by validations and never runs callbacks that could copy old values elsewhere. Values still serialize through the attribute types, so an `encryptable` field stores a fresh ciphertext envelope — never plaintext.
 - Optimistic locking: with a `lock_version` column the single UPDATE goes through `update_all`, which bumps `lock_version` in SQL (the row's value + 1). An edit form loaded before the erasure then raises `StaleObjectError` instead of writing the personal data back, and a stale anonymizing instance still erases.
 - `before_anonymize`/`after_anonymize` hooks run inside the write's own savepoint; the record reloads afterwards (erasure is terminal for the instance). A hook that raises, or vetoes with `raise ActiveRecord::Rollback`, undoes the erasure and restores the in-memory values. `anonymize!` then returns `false`, even inside your own transaction.
+- `anonymize_all!` on the model itself (`User.anonymize_all!`) also erases the rows the gem's own default scopes hide — [SoftDeletable](#-softdeletable)'s trash and Publishable's drafts under `default_scope: true` — since a soft-deleted account is the typical erasure subject; your own default scopes (a tenant, a discriminator) still apply. On a relation (`User.where(account_id: 1).anonymize_all!`, an association, a `scoping` block) it erases exactly that relation, default scope included like any other chain; start from `with_deleted`/`unscoped` to include hidden rows in a subset.
 - `anonymize_all!` makes as much progress as it can. Each record is erased in its own savepoint, so a record whose hook vetoes (for example, one under a legal hold) is skipped and the others are still erased. The return value counts only the records actually erased. A hook that *raises* an exception is still an error: it propagates and rolls the batch back.
 - Never blocked by crypto state: `:nullify` reads nothing, `:redact`/`:email`/`:random_hex` only check presence (from the stored ciphertext for an encrypted field — no decryption), and `:hash`/callables write a fresh random 64-hex value (cast through the field's type) when an encrypted value cannot be decrypted — random per row, so unique indexes survive — and one bad row never rolls back `anonymize_all!`.
 - Slugs (`slug: :auto` default / `true` / `false`): a friendly_id slug built from an anonymized **column** (`sluggable_by` field, or the `candidates:` columns when given; a bare friendly_id model's base column) is replaced in the same UPDATE by a random slug sized to the slug column's `limit` (at least 16 random hex characters, or `anonymize!` raises naming `slug: false`; a unique-index collision is retried with a fresh slug in a savepoint), and the record's friendly_id history rows are deleted in the same transaction. `:auto` does not see through methods or Procs — declare `slug: true` when your slug derives from PII that way. A rewritten slug counts as an erased field for `clear_audit_trail:`, so an audited `slug` column's trail is cleared too.
@@ -1806,9 +1923,9 @@ copy = invoice.duplicate!(except: :line_items)          # this copy skips the li
 copy = invoice.duplicate!(only: [])                     # shallow copy — attributes only
 ```
 
-**Auto-reset identity columns** (no configuration): `created_at`/`updated_at`, Sluggable slug, Tokenizable/Hashable tokens, Sequenceable sequence + `into:` columns, Auditable trail, SoftDeletable timestamp, Lockable attempts/locked_at. Business state (Publishable, Stateable, …) is a judgment call — list it in `reset:`.
+**Auto-reset identity columns** (no configuration): `created_at`/`updated_at`, Sluggable slug, Tokenizable/Hashable tokens, Sequenceable sequence + `into:` columns, Auditable trail, SoftDeletable timestamp, Lockable attempts/locked_at, and — on the top-level copy only — the Sortable/acts_as_list position (the copy goes where `add_new_at:` puts new rows instead of taking the original's slot; a deep-copied child keeps its position only when its list is scoped by the copied association's foreign key — it then goes into the new parent's own list — otherwise it is blanked like the top-level copy). Business state (Publishable, Stateable, …) is a judgment call — list it in `reset:`.
 
-**Counter-cache columns start at 0**: a column on the copy's class maintained by a child — CounterCacheable rules or a native `belongs_to ..., counter_cache:` (polymorphic `as:` included), found through the class's `has_many`/`has_one` reflections — is zeroed, and each child the copy actually carries re-increments it on save. A deep copy of a post with two comments therefore counts 2 (not 4), a shallow copy 0. Plain (non-Duplicable) child copies get the same treatment for their own counters, since their children are never copied. A has_many with no inverse (a scoped one) makes Rails bump the copy's in-memory counter as children are attached; that bump is undone before the INSERT, so the result is right with partial inserts on or off, and `duplicate!` re-reads the counters after saving. (After a plain `duplicate` + your own `save!`, the in-memory counter stays at 0 until `reload`; the row is correct.) A counter kept by a child with no `has_many`/`has_one` on the parent is invisible to this — set it in `on_duplicate`.
+**Counter-cache columns start at 0**: a column on the copy's class maintained by a child — CounterCacheable rules or a native `belongs_to ..., counter_cache:` (polymorphic `as:` included), found through the class's `has_many`/`has_one` reflections — is zeroed, and each child the copy actually carries re-increments it on save. A deep copy of a post with two comments therefore counts 2 (not 4), a shallow copy 0. Plain (non-Duplicable) child copies get the same treatment for their own counters, since their children are never copied. A has_many with no inverse (a scoped one) makes Rails bump the copy's in-memory counter as children are attached; that bump is undone before the INSERT, so the result is right with partial inserts on or off, and `duplicate!` re-reads the counters after saving — together with `lock_version`, inside the save's transaction, since each child's counter UPDATE bumped it row-side; the returned copy — and every Duplicable child copied below it, which its own copied children bump the same way — saves again without `StaleObjectError`. (After a plain `duplicate` + your own `save!`, the in-memory counter stays at 0 until `reload`; the row is correct.) A counter kept by a child with no `has_many`/`has_one` on the parent is invisible to this — set it in `on_duplicate`.
 
 **Associations** (`associations:` allow-list, declared before the macro, validated at macro time): `has_many`/`has_one` children are deep-copied — a child that also includes Duplicable copies via **its own** rules, so nested graphs stay declarative, and a plain child still gets its own class's identity resets (token, slug, number, trail…), so it never shares a credential or trips a unique index. Children are read with only the gem's own hiding predicates removed — those on the child's **own table's** SoftDeletable column and, under `default_scope: true`, its Publishable column — so drafts hidden by `publishable_by ..., default_scope: true` are copied too, while every other default-scope predicate still applies: a tenant, a discriminator on a shared table, a joined table's same-named column (`joins(:author).where(authors: { deleted_at: nil })`). A SoftDeletable child's soft-deleted rows are never copied, whatever its `default_scope:` setting (the copy would otherwise get them back as live rows), and a `has_one` copies the child its reader returns (a hidden one only when the reader returns none). `has_and_belongs_to_many` re-links the *same* records, drafts included (soft-deleted ones only while the target's SoftDeletable default scope is off); `belongs_to` and `has_many :through` are rejected with an explanation.
 
@@ -1914,7 +2031,7 @@ Render it straight into a `1 … 44 45 46 [47] 48 49 50 … 100` bar:
 `?page=` past the last page windows around the last page (as `rel="prev"` already does), and
 `window:` must be a non-negative Integer or `nil`/`false` — validated at declaration.
 
-A relation's total is a `COUNT` with `ORDER`/`LIMIT`/`OFFSET` stripped; a `DISTINCT` relation with its own `SELECT` list (`Membership.select(:group_id).distinct`) is counted as a raw `SELECT COUNT(*) FROM (…)` subquery (STI-safe), so the total is the number of distinct rows it returns, not the underlying row count. MySQL alone rejects repeated output names in that subquery (`select("a.id, b.id")`); there the count is retried with the list re-aliased positionally, and a list that cannot be re-aliased (`table.*`) falls back to the plain over-count. A model class (`paginated(Article)`) is counted through `.all`.
+A relation's total is a `COUNT` with `ORDER`/`LIMIT`/`OFFSET` stripped; a `DISTINCT` relation with its own `SELECT` list (`Membership.select(:group_id).distinct`, or DISTINCT written into the list: `select("DISTINCT category")`) is counted as a raw `SELECT COUNT(*) FROM (…)` subquery (STI-safe), so the total is the number of distinct rows it returns, not the underlying row count. MySQL alone rejects repeated output names in that subquery (`select("a.id, b.id")`); there the count is retried with the list re-aliased positionally, and a list that cannot be re-aliased (`table.*`) falls back to the plain over-count. A model class (`paginated(Article)`) is counted through `.all`.
 
 **Response headers**: `X-Total-Count`, `X-Page`, `X-Per-Page`, `X-Total-Pages`, and an RFC 8288 `Link`
 header with `first` / `prev` / `next` / `last` URLs rebuilt from the current request (other query params
@@ -1951,8 +2068,8 @@ end
 **Response headers**: `X-Per-Page`, `X-Count` (rows on **this** page — totals are deliberately not computed), `X-Has-More`, `X-Next-Cursor` (only while more pages exist). With `bidirectional: true`: also `X-Has-Prev`, `X-Prev-Cursor`. Plus an RFC 8288 `Link` header: `rel="next"` carries the next-cursor URL, `rel="prev"` the prev-cursor URL (bidirectional), `rel="first"` the current URL with the cursor dropped (once a cursor is in play); `per_page` and the order preset are preserved. `cursor_paginate_by link_header: false` turns it off.
 
 **Notes**
-- The primary key is always appended as a tiebreaker, so duplicate values never skip or repeat rows; ordering columns are chosen **in code** (never from params), must be **selected by the relation, unaliased**, and may be nullable: a column the schema allows NULL in paginates with its **NULLs last** in either direction on every adapter, returning every row exactly once with no extra queries. PostgreSQL uses `NULLS LAST`; other adapters use a `CASE WHEN col IS NULL` sort key, and the keyset WHERE uses the OR-expansion. NOT NULL columns keep the plain, index-friendly SQL, so prefer them on large tables. Boundary values are the stored column values (`read_attribute`), so an overridden attribute reader cannot derail the walk; a boundary column the relation did not select raises `ActiveModel::MissingAttributeError`, and a stored non-NULL value that its attribute type casts to nil (an unparseable datetime string) raises `ArgumentError` — neither is minted as a NULL boundary. A select alias that shadows an ordering column (`select(:id, "UPPER(name) AS name")`) is not detected: the cursor would carry the alias's value while the WHERE compares the column, repeating or skipping rows — alias under another name instead. Re-declaring `cursor_paginate_by` (e.g. in a subclass) changes only the options passed — the rest, `signed:` included, are inherited.
-- Cursors are opaque, table/order-pinned tokens — a malformed, cross-endpoint, or stale-config cursor renders a 400 (`invalid_cursor`; override `render_invalid_cursor` to customize, delegates to Respondable's `render_error` when present). Unsigned by default: a client can mint different boundary values, but values are cast through the model's attribute types and bound by Arel (no injection); a value the column cannot hold — a timestamp outside years 0001..9999 included — is the same 400, never a database error and the relation's own scoping still applies — treat a cursor as a page position, never an authorization boundary. **`signed: true`** (or a String key, or a callable for rotating keys) appends a URL-safe HMAC-SHA256 to every cursor and rejects tampered or unsigned tokens with the same 400, so clients can no longer hand-craft positions at all; `true` uses `Rails.application.secret_key_base`. Turning it on invalidates in-flight cursors (clients restart from page one).
+- The primary key is always appended as a tiebreaker, so duplicate values never skip or repeat rows; ordering columns are chosen **in code** (never from params), must be **selected by the relation, unaliased**, and may be nullable: a column the schema allows NULL in paginates with its **NULLs last** in either direction on every adapter, returning every row exactly once with no extra queries. PostgreSQL uses `NULLS LAST`; other adapters use a `CASE WHEN col IS NULL` sort key, and the keyset WHERE uses the OR-expansion. NOT NULL columns keep the plain, index-friendly SQL, so prefer them on large tables. Boundary values are the stored column values (`read_attribute`), so an overridden attribute reader cannot derail the walk (a binary one — e.g. a `binary(16)` UUID primary key — travels as Base64; a `time` column's is its stored time of day, `"10:30:15.500000"`, which every Rails line reads back exactly); a boundary column the relation did not select raises `ActiveModel::MissingAttributeError`, and a stored non-NULL value that its attribute type casts to nil (an unparseable datetime string) raises `ArgumentError` — neither is minted as a NULL boundary. A select alias that shadows an ordering column (`select(:id, "UPPER(name) AS name")`) is not detected: the cursor would carry the alias's value while the WHERE compares the column, repeating or skipping rows — alias under another name instead. Re-declaring `cursor_paginate_by` (e.g. in a subclass) changes only the options passed — the rest, `signed:` included, are inherited.
+- Cursors are opaque, table/order-pinned tokens — a malformed, cross-endpoint, or stale-config cursor renders a 400 (`invalid_cursor`; override `render_invalid_cursor` to customize, delegates to Respondable's `render_error` when present). Unsigned by default: a client can mint different boundary values, but values are cast through the model's attribute types and bound by Arel (no injection); a value the column cannot hold — a timestamp outside years 0001..9999, a String that is invalid UTF-8 or carries a NUL byte (accepted on MySQL, which stores and escapes one), or is a number beyond a decimal's precision or too long/wide to read (bounded like Filterable's operands), included — is the same 400, never a database error and the relation's own scoping still applies — treat a cursor as a page position, never an authorization boundary. **`signed: true`** (or a String key, or a callable for rotating keys) appends a URL-safe HMAC-SHA256 to every cursor and rejects tampered or unsigned tokens with the same 400, so clients can no longer hand-craft positions at all; `true` uses `Rails.application.secret_key_base`. Turning it on invalidates in-flight cursors (clients restart from page one).
 - `cursor_paginated` uses `reorder` (replaces any `default_scope` ORDER BY) and returns a loaded Array. Don't wrap it with the controller Sortable's `sorted` — pass `order:` per call instead.
 - Forward-only by default — `bidirectional: true` (macro or per call) adds prev cursors and `X-Has-Prev`/`X-Prev-Cursor`; direction is pinned in the token, so prev tokens replayed on forward-only endpoints 400 and old direction-less tokens stay valid. `order_presets: { newest: {...}, top: {...} }` (+ `default_preset:`, `order_param:`) lets clients pick a **named** ordering from an allow-list. `predicate: :auto` upgrades the keyset WHERE to a row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when directions are uniform — composite-index friendly — falling back to the portable OR-expansion (`:row`/`:or` force a strategy).
 - Use Paginatable when you need page numbers and totals.
@@ -1992,13 +2109,28 @@ accepted as a suffix `?price_gte=10` or in bracket form `?price[gte]=10&price[lt
 
 Comparison values are cast through the column's own type, or through `type:` (any ActiveModel type
 name) — except numbers, which are read exactly rather than through ActiveModel's lossy numeric casts
-(see below). `type:` also pre-casts the value handed to a `with:` lambda; a numeric `type:` does it with
-the same strict reader, so `?min_stock=1e1` hands the lambda `10` (not `1`), and a value the type cannot
+(see below). `type: :datetime` reads a zone-less operand the way the target column does: in `Time.zone` (the
+per-request zone included) on a zone-aware column — every Rails app's default — and in
+`ActiveRecord.default_timezone` (UTC by default) otherwise; `:date`/`:time` use ActiveRecord's own types.
+Never the server's system time zone. `type:` also pre-casts the value handed to a `with:` lambda (a `:datetime`
+one, which has no column, in `Time.zone` while the model's `time_zone_aware_attributes` is on — the Rails default — else
+in `default_timezone`); a numeric `type:` does it with the same strict reader, so `?min_stock=1e1` hands the lambda `10` (not `1`), and a value the type cannot
 represent exactly (`abc`, or `5.5` for `:integer`) fails the filter closed without calling the lambda.
 Range limits only ever come from a real numeric column, never from a declared `type:`. Blank values
 are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`/`lte` value the type
 cannot represent (`?price_gte=abc`) matches **nothing** rather than silently comparing against `0` —
-nothing raises at request time. For strict, validated contracts reach for `Permittable`.
+nothing raises at request time. So does any operand carrying a NUL byte (`?title_gte=a%00b`,
+`?title_contains=%00`, `?title=a%00b`, a NUL member of an `in` list; binary columns excepted): it used to
+cut the SQL short, a `StatementInvalid` 500. For strict, validated contracts reach for `Permittable`.
+
+On an `enum` column a comparison operand is a **label** (`?status_gte=review` is `status >= 1`). On an
+integer-backed enum anything else is read as a number, exactly like an integer column's operand, so a
+threshold need not be a mapped value: with `{ low: 0, medium: 5, high: 10 }`, `?priority_gte=2` is
+`priority >= 2` and `?priority_lt=1.5` is `priority <= 1`. An unknown non-numeric label (or a value that is not
+a number) matches nothing, never a 500.
+
+On an `enum` column an unknown label (`?status=drfat`) equals nothing — it drops out of an `in` list — where
+Rails 7.0+ turned it into `status IS NULL` and returned the rows with no status.
 
 Numeric columns are read **strictly, never truncated**, in every form (direct `?stock=`, suffix, bracket,
 `in`/`not_in` lists):
@@ -2038,6 +2170,7 @@ case-insensitive on PostgreSQL (`ILIKE`), on SQLite (ASCII letters only) and on 
 
 **Notes**
 - Blank params are skipped — unset filters don't narrow the relation.
+- `filtered` accepts a relation or a bare model class (`filtered(Article)` filters `Article.all`).
 - Passing both `:scope` and `:with` raises `ArgumentError`; so do `operators:` on a `scope:`/`with:` filter, an unknown operator name, or an unknown `type:` — all at class load.
 - Scope mode pairs naturally with `Publishable.published`, `SoftDeletable.active`, `Expirable.active`, etc.
 
@@ -2065,9 +2198,9 @@ end
 **URL params**: `?sort=-created_at,title` or `?sort=title&direction=asc`
 
 - `params[:sort]` is a comma-separated list of sort **keys**, each optionally prefixed with `-` (descending) or `+` (ascending) — the JSON:API convention. A `+` must be percent-encoded as `%2B`, since a raw `+` in a query string decodes to a space. Non-whitelisted keys are dropped and a repeated key collapses to its first occurrence; when nothing valid remains the declared default applies.
-- Un-prefixed keys take `params[:direction]` (`asc` / `desc`, case-insensitive), then the declared default direction.
+- Un-prefixed keys take `params[:direction]` (`asc` / `desc`, case-insensitive), then the declared default direction. The macro's `direction:` is case-insensitive too (`"DESC"` works); anything but asc/desc raises `ArgumentError` at class load.
 - A plain Symbol sorts by that column of the relation's own table. A `key: { ... }` rule can point elsewhere: `column: "table.column"` plus `joins:` (anything `left_outer_joins` accepts — LEFT OUTER by default so rows without the association are kept; `join: :inner` drops them), and/or `nulls: :first | :last` (Rails 6.1+). Joins are added only when that key is requested.
-- `sorted` uses `reorder`, so the requested columns **replace** any prior `ORDER BY` (including a model `default_scope` order).
+- `sorted` uses `reorder`, so the requested columns **replace** any prior `ORDER BY` (including a model `default_scope` order). Like `filtered` and the paginators, it accepts a bare model class (`sorted(Article)` sorts `Article.all`).
 - `nulls:` uses PostgreSQL's native `NULLS FIRST/LAST`; on every other adapter it emits the portable `CASE WHEN col IS NULL` equivalent, so the row order is the same and nothing sends MySQL syntax it rejects.
 - If no `default:` is given, the **first** declared key is used. A `default:` that is *not* in the allow-list is legal — it orders the relation but stays unselectable by clients.
 
@@ -2129,7 +2262,7 @@ respondable_by error_format: :problem_details, problem_type_base: "https://api.e
 
 | Method            | Signature                                                                                  |
 |-------------------|--------------------------------------------------------------------------------------------|
-| `render_success`  | `render_success(data: nil, status: :ok, meta: {}, location: nil, headers: {})` — `location:` sets the `Location` header (a String, or anything `url_for` resolves); `headers:` sets extra response headers (names and values are coerced to String and stripped of CR/LF, so caller data cannot split the response) |
+| `render_success`  | `render_success(data: nil, status: :ok, meta: {}, location: nil, headers: {})` — `location:` sets the `Location` header (a String, or anything `url_for` resolves); `headers:` sets extra response headers (names and values are coerced to String and stripped of CR/LF, so caller data cannot split the response; `Link` and `Vary` are appended to what is already there, so Localizable's `Accept-Language` / Timezoneable's `Time-Zone` survive a `"Vary" => "Origin"`) |
 | `render_created`  | `render_created(data: nil, location: nil, meta: {}, headers: {})` — `render_success` with `status: :created` |
 | `render_invalid`  | `render_invalid(record_or_errors, message: "Validation failed", status: :unprocessable_entity, code: "record_invalid")` — `render_error` with `errors.full_messages` as `details` (omitted when empty, and when an app's `render_error` override cannot take an `errors:` keyword); same shape as ErrorHandleable's `RecordInvalid` handler, problem-details aware |
 | `render_error`    | `render_error(message:, status: :unprocessable_entity, code: nil, errors: nil)`            |
@@ -2176,7 +2309,9 @@ races Rails leaves as 500s (`RecordNotUnique`, `InvalidForeignKey`) get the REST
 for database- and parser-level errors are deliberately generic (`"Resource already exists"`,
 `"Malformed request body"`, …): the raw messages carry SQL fragments, table/column names, model class
 names or the offending input, none of which belongs in an API response. `details` is present only when
-there is something to list.
+there is something to list. A malformed query string (bad %-escape, invalid UTF-8) also gets the
+`bad_request` envelope, although Rails raises it while logging the parameters, before `rescue_from` is in
+scope. ErrorHandleable hands that one exception to the handler chain itself.
 
 Response shape (matches `Respondable#render_error`):
 
@@ -2211,7 +2346,7 @@ handle_errors only: %i[not_found parameter_missing record_invalid] # just the or
 declarations keep precedence. Unknown keys raise `ArgumentError` listing the valid ones;
 `error_handleable_keys` returns the keys still active on a controller.
 
-**Reporting** — every handled error instruments `handled_error.concerns_on_rails` (`controller`, `action`, `code`, `status`, `message`, `exception`, `exception_class`) via the public `on_handled_error(key, error, status:, message:)` override point, so the 409s reach your error tracker while the 404s stay quiet:
+**Reporting** — every handled error instruments `handled_error.concerns_on_rails` (`controller`, `action`, `code`, `status`, `message`, `exception`, `exception_class`) via the public `on_handled_error(key, error, status:, message:)` override point, so the 409s reach your error tracker while the 404s stay quiet. `error` is the exception the handler actually matched — the `#cause` when a wrapper (`ActionView::Template::Error`, your own `raise ServiceError`) was rescued — and `nil` for a handler called directly:
 
 ```ruby
 def on_handled_error(key, error, **)
@@ -2318,7 +2453,7 @@ end
 
 **Notes**
 - Headers are applied in an `after_action`, so they reinforce Rails' middleware defaults; later `secure_headers` declarations win on a colliding name.
-- `content_security_policy_for` forwards `report_only:` and per-action `only:` / `except:` / `if:` / `unless:` straight to Rails — it never re-implements CSP. Per-controller CSP overrides the global initializer for that controller.
+- `content_security_policy_for` forwards `report_only:` and per-action `only:` / `except:` / `if:` / `unless:` straight to Rails — it never re-implements CSP. Per-controller CSP overrides the global initializer for that controller. `report_only:` is `true` / `false` / `:inherit` (the default): omitted keeps the report-only flag a parent controller or `config.content_security_policy_report_only` set (so adding a CDN to `img_src` never flips a rollout to enforcing), `true` reports, and an explicit `false` **enforces**, even over an inherited report-only flag.
 - CSP nonce generation (`content_security_policy_nonce_generator`) is app-wide initializer config and intentionally stays out of the concern.
 - These headers mitigate clickjacking / MIME-sniffing and (via CSP) XSS as **defense-in-depth** — output escaping remains the primary defense.
 
@@ -2339,7 +2474,7 @@ end
 
 Resolution order: `params[param]` → first match in `Accept-Language` → `default` → `I18n.default_locale`. The chosen locale is always validated against `I18n.available_locales`, so a stray param or a mismatched `available:` list can never raise `I18n::InvalidLocale`.
 
-Every response carries **`Content-Language: <resolved locale>`** (BCP 47 form — `pt_BR` → `pt-BR`) and, when `Accept-Language` is a locale source, **`Vary: Accept-Language`** appended to any existing `Vary` (de-duplicated) so shared caches key on the header. Both are written *before* the action runs, so a `rescue_from`-rendered error still carries them; `response_headers: false` turns them off. `rescue_from` handlers — which Rails runs after the `around_action` has already unwound — also render **under the resolved locale** (so an ErrorHandleable 404 or a CursorPaginatable 400 is localized to match its `Content-Language`), and the previous locale is always restored afterwards, even when the handler raises. `Accept-Language` tags that share a q-value keep header order, the `q` parameter is read case-insensitively, and a weight that is not an RFC 9110 qvalue (`0`–`1`, at most three decimals — so not `0x10`, `1_0`, `Infinity` or `2`) is treated as `q=0`: that tag is dropped.
+Every response carries **`Content-Language: <resolved locale>`** (BCP 47 form — `pt_BR` → `pt-BR`) and, when `Accept-Language` is a locale source, **`Vary: Accept-Language`** appended to any existing `Vary` (de-duplicated) so shared caches key on the header. Both are written *before* the action runs, so a `rescue_from`-rendered error still carries them; `response_headers: false` turns them off. `rescue_from` handlers — which Rails runs after the `around_action` has already unwound — also render **under the resolved locale** (so an ErrorHandleable 404 or a CursorPaginatable 400 is localized to match its `Content-Language`), and the previous locale is always restored afterwards, even when the handler raises. `Accept-Language` tags that share a q-value keep header order, the `q` parameter is read case-insensitively, and a weight that is not an RFC 9110 qvalue (`0`–`1`, at most three decimals — so not `0x10`, `1_0`, `Infinity` or `2`) is treated as `q=0`: that tag is dropped. Each tag is looked up as RFC 4647 §3.4 does — the full tag, then one subtag shorter at a time (`zh-Hant-TW` → `zh-Hant` → `zh`, a singleton left exposed by the cut dropped with it) — before the next tag is tried, matching `-` and `_` alike and case-insensitively, and the allow-list's own symbol is returned.
 
 **Options**: `available:` (allow-list for matching; defaults to `I18n.available_locales`), `default:`, `param:` (default `:locale`), `header:` (default `true`), `response_headers:` (default `true`).
 
@@ -2379,7 +2514,7 @@ The predicate runs via `instance_exec`, so `current_user` (and any helper) resol
 **Notes**
 - Rules run in declaration order; the first failing rule renders and halts.
 - Every denial emits `authorization_denied.concerns_on_rails` with `controller`, `action`, `actor_id`, `actor_type`, `rule` (the `name:`), `status`, `message` — subscribe for audit logs or alerting on repeated denials. The actor is reduced to scalars on purpose: notification payloads aren't filtered by `config.filter_parameters`.
-- When `Respondable` is also included, denials delegate to `render_error` (envelope `{ success: false, error: { message:, code: "forbidden" } }`); otherwise the same envelope is rendered inline.
+- When `Respondable` is also included, denials delegate to `render_error` (envelope `{ success: false, error: { message:, code: "forbidden" } }`); otherwise the same envelope is rendered inline. The `code` follows `status:`: `"unauthorized"` for 401, `"not_found"` for 404, `"forbidden"` for 403 and anything else. A `status: :not_found, message: "Resource not found"` concealment rule then answers exactly like ErrorHandleable's missing-record 404.
 - `only:` / `except:` are mutually exclusive (passing both raises `ArgumentError`); `authorize_by` requires a block and `require_role` requires at least one role.
 - `skip_authorization` validates its arguments at class-load time, because every mistake there fails **open**: a nil `only:`/`except:`, or an empty/non-action `except:` (`[]`, `false`, `""` — what `except: Rails.env.production? && :destroy` collapses to), raises instead of exempting every action of the controller *and its subclasses*. Only the bare form grants a blanket skip. The skip is inherited and outranks rules a subclass declares afterwards; `skip_authorization only: []` switches it back off.
 - **Non-goals**: no policy objects, no ability DSL, no resource inference — reach for [`pundit`](https://github.com/varvet/pundit) / [`cancancan`](https://github.com/CanCanCommunity/cancancan) when you outgrow a predicate per action.
@@ -2438,6 +2573,7 @@ Resolution order: `params[param]` → `Time-Zone` header → cookie (if enabled)
 
 **Notes**
 - An unknown `available:` / `default:` zone raises `ArgumentError` at declaration time (fail-fast on misconfiguration); so does `persist:` without `cookie:`.
+- The action always runs inside `Time.use_zone` — also when the resolved zone is already the current one — so a `Time.zone = …` inside the action (or in a gem it calls) never outlives the request; it used to leak to the next request on the thread whenever the client asked for the current zone.
 - `rescue_from` handlers render under the resolved zone too (Rails runs them after the `around_action` has unwound), and the previous zone is always restored afterwards — even when the handler raises.
 - `time_zone_source` tells you which source won (`:param`, `:header`, `:cookie`, `:default`, `:current`) — handy for a "times shown in London (from your browser)" hint.
 - Pairs naturally with the model concerns that read the clock (`Schedulable`, `Publishable`, `Expirable`, `SoftDeletable`).
@@ -2589,7 +2725,7 @@ etag_with { current_user&.role }             # => Cache-Control: private, max-ag
 
 **Conditional-GET correctness**
 - Weak ETag `W/"<md5>"` from the resource's cache key (collections fold their members' keys + size); `If-None-Match` is matched with **weak comparison**, honours `*`, and accepts a comma-separated list.
-- `Last-Modified` is an IMF-fixdate via `Time#httpdate` (not hand-rolled ISO 8601); `If-Modified-Since` is compared at whole-second granularity.
+- `Last-Modified` is an IMF-fixdate via `Time#httpdate` (not hand-rolled ISO 8601); `If-Modified-Since` is compared at whole-second granularity. It comes from `updated_at`: an ActiveRecord relation's SQL `MAX(updated_at)`, any other collection's newest member timestamp (members without `updated_at`, or with a nil one, are skipped — none at all means no `Last-Modified`, just the ETag).
 - When both are sent, `If-None-Match` wins and the date is ignored (RFC 7232 §3.3); a 304 is only sent for safe (GET/HEAD) requests, and still carries the validators and the `Cache-Control` policy.
 - Override `cache_etag_for` / `cache_last_modified_for` to customise validator derivation. For write-side preconditions (`If-Match` → 412), reach for Rails' own helpers.
 
@@ -2722,9 +2858,9 @@ Point your agent at `llms.txt` for an overview, or paste a single concern's `.md
 
 ```sh
 bundle install                                  # install dev dependencies
-bundle exec rspec                               # run the test suite (2,827 examples)
+bundle exec rspec                               # run the test suite (3,420 examples)
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.32.1.gem      # install locally
+gem install ./concerns_on_rails-1.33.0.gem      # install locally
 
 # Preview the docs site locally (GitHub Pages serves docs/ as-is):
 cd docs && python3 -m http.server 8000          # → http://localhost:8000

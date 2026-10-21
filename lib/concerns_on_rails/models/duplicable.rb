@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/association_scope"
+require "concerns_on_rails/support/primary_key"
 
 module ConcernsOnRails
   module Models
@@ -35,6 +36,18 @@ module ConcernsOnRails
     #     creation is then audited normally, like any create)
     #   * SoftDeletable timestamp — a copy of trash is a live record
     #   * Lockable attempts (0) / locked_at (nil) — a copy starts unlocked
+    #   * Sortable's acts_as_list position — on the TOP-LEVEL copy only, so
+    #     acts_as_list places it per `add_new_at:` instead of inserting it at
+    #     the original's slot and pushing the original down. A deep-copied
+    #     child keeps its position only when its list is scoped by the copied
+    #     association's foreign key (the copy then goes into the NEW parent's
+    #     own list, so the copied list keeps its order — children are saved
+    #     in position order); a child in any other list (another column, no
+    #     scope, an opaque String scope) is blanked like the top-level copy,
+    #     or it would take the original child's slot. (Sortable
+    #     with `use_acts_as_list: false` has nothing to regenerate it: kept.
+    #     Under `add_new_at: nil` the copy, like any new row, starts outside
+    #     the list.)
     #   * counter-cache columns (0) maintained by a child — a child class's
     #     CounterCacheable rules or a native `belongs_to ..., counter_cache:`
     #     pointing at this class (found through its has_many / has_one
@@ -79,6 +92,10 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Models::Duplicable".freeze
       SUPPORTED_MACROS = %i[has_many has_one has_and_belongs_to_many].freeze
       TIMESTAMP_COLUMNS = %w[created_at updated_at].freeze
+
+      # Ids per refresh SELECT in duplicate! (keeps the IN list inside the
+      # bind limits of older SQLite builds; still one query per class).
+      REFRESH_BATCH_SIZE = 500
 
       included do
         class_attribute :duplicable_config, instance_accessor: false,
@@ -160,11 +177,17 @@ module ConcernsOnRails
 
       # Persisted deep copy — the copy and its copied children save together
       # (autosave) inside one transaction. Returns the saved copy, its counter
-      # columns re-read from the row the children's saves incremented.
+      # columns (and lock_version) re-read from the row the children's saves
+      # incremented — inside that transaction, so the row read is the one this
+      # save produced and no other writer can have touched it yet. The same
+      # goes for every Duplicable child copied below it (see
+      # refresh_copied_records).
       def duplicate!(overrides = {}, **)
         copy = duplicate(overrides, **)
-        transaction { copy.save! }
-        Duplicable.refresh_counter_cache_columns(copy)
+        transaction do
+          copy.save!
+          Duplicable.refresh_copied_records(copy)
+        end
         copy
       end
 
@@ -190,11 +213,15 @@ module ConcernsOnRails
         end
       end
 
+      # The copy's own resets. Only `duplicate` calls this, so the list
+      # position blanked here is the TOP-LEVEL copy's (see
+      # #duplicable_child_copy for a Duplicable child's).
       def duplicable_reset_attributes(copy)
         self.class.duplicable_config[:reset].each do |column|
           copy[column] = nil if copy.class.column_names.include?(column.to_s)
         end
         Duplicable.reset_identity_columns(copy)
+        Duplicable.reset_list_position(copy)
       end
 
       def duplicable_apply_suffixes(copy)
@@ -209,9 +236,11 @@ module ConcernsOnRails
           children = duplicable_source_records(name)
           case reflection.macro
           when :has_many
-            children.each { |child| copy.public_send(name) << duplicable_child_copy(child) }
+            Duplicable.in_list_order(children, reflection).each do |child|
+              copy.public_send(name) << duplicable_child_copy(child, reflection)
+            end
           when :has_one
-            copy.public_send("#{name}=", duplicable_child_copy(children.first)) if children.first
+            copy.public_send("#{name}=", duplicable_child_copy(children.first, reflection)) if children.first
           when :has_and_belongs_to_many
             copy.public_send("#{name}=", children)
           end
@@ -282,11 +311,23 @@ module ConcernsOnRails
       # every sibling concern's token/slug/number/trail — so a plain child
       # regenerates them on save instead of sharing a credential with the
       # original or colliding with its unique index.
-      def duplicable_child_copy(child)
-        return child.duplicate if child.class.include?(Duplicable)
+      #
+      # A child keeps its acts_as_list position only when its list is scoped
+      # by the copied association's foreign key — the copy then lands in the
+      # NEW parent's own list, so the copied children keep their order there.
+      # Any other list (scoped by another column, or unscoped) is shared with
+      # the original child, so the copy is blanked like a top-level copy and
+      # acts_as_list appends it instead of pushing the originals down. (A
+      # Duplicable child's own `duplicate` blanked it already.)
+      def duplicable_child_copy(child, reflection)
+        if child.class.include?(Duplicable)
+          copy = child.duplicate
+          return Duplicable.keeps_list_position?(copy, reflection) ? Duplicable.keep_list_position(child, copy) : copy
+        end
 
         plain = child.dup
         Duplicable.reset_identity_columns(plain)
+        Duplicable.reset_list_position(plain) unless Duplicable.keeps_list_position?(plain, reflection)
         plain
       end
 
@@ -301,6 +342,96 @@ module ConcernsOnRails
           end
           record[klass.lockable_attempts_field] = 0 if concern?(klass, :Lockable)
           zero_counter_cache_columns(record)
+        end
+
+        # Blank the acts_as_list position of a TOP-LEVEL copy (see the module
+        # docs): acts_as_list assigns it on create per `add_new_at:`, as for
+        # any new record. Since 1.32.1 that position is a reported
+        # create-time generated value (Sortable::GeneratedPosition).
+        def reset_list_position(record)
+          column = list_position_column(record)
+          record[column] = nil if column
+        end
+
+        # Whether a deep-copied child's acts_as_list list is scoped by the
+        # association's foreign key (so the copy goes into the new parent's own
+        # list). acts_as_list's `scope_name` is a Symbol (already `_id`-ified),
+        # an Array (columns, or Hashes of fixed values — their keys are the
+        # columns) or a String: acts_as_list 0.7.x (the gemspec floor) answers
+        # every scope as a String, so a bare identifier is one column name
+        # ("account_id"); any other String (an array dump, SQL) is opaque and
+        # never trusted to name it.
+        def keeps_list_position?(record, reflection)
+          return false unless list_position_column(record)
+
+          foreign_keys = Array(reflection.foreign_key).map(&:to_s)
+          list_scope_columns(record).intersect?(foreign_keys)
+        end
+
+        def list_scope_columns(record)
+          case (scope = record.scope_name)
+          when Symbol then [scope.to_s]
+          when Array then scope.flat_map { |entry| entry.is_a?(Hash) ? entry.keys : entry }.map(&:to_s)
+          when String then string_scope_columns(scope)
+          else []
+          end
+        end
+
+        def string_scope_columns(scope)
+          scope.match?(/\A\w+\z/) ? [scope] : []
+        end
+
+        # The source children in the order acts_as_list should receive them: by
+        # position (blank last), so keeping 20, 10, 30 never shifts the first
+        # one on its way in (children are otherwise read in id order under
+        # Sortable `default_scope: false`); reversed when the positions are
+        # blanked on a list that adds new rows at the top, so the copies end
+        # up in the original order.
+        def in_list_order(children, reflection)
+          first = children.first
+          column = children.size > 1 && list_position_column(first)
+          return children unless column
+
+          ordered = by_position(children, column)
+          list_adds_on_top?(first, reflection) ? ordered.reverse : ordered
+        end
+
+        def by_position(children, column)
+          children.each_with_index.sort_by do |child, index|
+            [child[column].nil? ? 1 : 0, child[column] || 0, index]
+          end.map(&:first)
+        end
+
+        # Blanked copies of a top-adding list reach acts_as_list in reverse.
+        # (acts_as_list 0.7.x answers `add_new_at` as the String "top".)
+        def list_adds_on_top?(record, reflection)
+          !keeps_list_position?(record, reflection) && record.send(:add_new_at).to_s == "top"
+        end
+
+        # A deep-copied Duplicable child keeps the original child's position
+        # unless its own `on_duplicate` set one or its own `reset:` lists the
+        # column. Returns the copy.
+        def keep_list_position(child, copy)
+          column = list_position_column(copy)
+          return copy if column.nil? || !copy[column].nil?
+          return copy if copy.class.duplicable_config[:reset].include?(column.to_sym)
+
+          copy[column] = child[column]
+          copy
+        end
+
+        # The acts_as_list position column of a Sortable record whose list is
+        # kept by acts_as_list, or nil (`use_acts_as_list: false` has nothing
+        # to regenerate it, so it is never blanked). Read through
+        # acts_as_list's `position_column` instance reader, which every
+        # supported acts_as_list version defines (`acts_as_list_options` is
+        # 1.2+ only — the Rails 6.0 line resolves 1.1).
+        def list_position_column(record)
+          klass = record.class
+          return nil unless concern?(klass, :Sortable) && klass.method_defined?(:acts_as_list_top)
+
+          column = record.position_column.to_s
+          klass.column_names.include?(column) ? column : nil
         end
 
         # Zero every counter-cache column on `record`'s class (see the module
@@ -320,17 +451,96 @@ module ConcernsOnRails
           before.each { |column, value| record[column] = value }
         end
 
-        # After the save the database holds the true counts (each child's
-        # create incremented them); mirror them into the saved copy.
-        def refresh_counter_cache_columns(record)
-          columns = counter_cache_columns(record.class)
-          return if columns.empty? || !record.persisted?
+        # Refresh the copy and every persisted Duplicable record copied below
+        # it. A child copied through its own rules is bumped exactly like the
+        # root: ITS copied children's counter UPDATEs raise its row's counters
+        # and lock_version, so a copy refreshed only at the top raised
+        # StaleObjectError one level down. Walks the copy's in-memory
+        # association targets (what `duplicate` attached — a
+        # `duplicate!(only:)` that left an association out has nothing there);
+        # plain children are skipped, since their own children are never
+        # copied. The cost is one SELECT per CLASS in the graph, never per
+        # record: the records are grouped by class first (the walk reads only
+        # loaded targets) and a class with no lock or counter column is
+        # skipped. The per-class column list is computed once per call.
+        def refresh_copied_records(root)
+          groups = {}
+          collect_copied_records(root, groups)
+          groups.each do |klass, records|
+            columns = refreshable_columns(klass)
+            refresh_columns_for(klass, records, columns) unless columns.empty?
+          end
+        end
 
-          values = record.class.unscoped.where(record.class.primary_key => record.id).pluck(*columns).first
-          return if values.nil?
+        # Records per class, `record` and everything copied below it.
+        def collect_copied_records(record, groups)
+          (groups[record.class] ||= []) << record if record.persisted?
+          return unless record.class.include?(Duplicable)
 
-          columns.zip(Array(values)).each { |column, value| record[column] = value }
-          record.send(:clear_attribute_changes, columns)
+          copied_children(record).each { |child| collect_copied_records(child, groups) }
+        end
+
+        # The persisted Duplicable children `record` carries through its
+        # declared has_many / has_one associations.
+        def copied_children(record)
+          klass = record.class
+          klass.duplicable_config[:associations].flat_map do |name|
+            next [] unless %i[has_many has_one].include?(klass.reflect_on_association(name)&.macro)
+
+            Array.wrap(record.association(name).target).select { |child| child.persisted? && child.class.include?(Duplicable) }
+          end
+        end
+
+        # What the save's child inserts bumped on `klass`'s rows: its counter
+        # columns, and under optimistic locking the lock column — each of
+        # those increments also bumped the row's lock_version, which reaches
+        # the copy only when the child's belongs_to target IS the copy
+        # (inverse detection); through a scoped has_many the copy was left a
+        # version behind its own row and raised StaleObjectError on its next
+        # save.
+        def refreshable_columns(klass)
+          columns = counter_cache_columns(klass)
+          columns += [klass.locking_column.to_s] if klass.locking_enabled? && klass.column_names.include?(klass.locking_column.to_s)
+          columns
+        end
+
+        # After the save the database holds the true counts and versions:
+        # read them for ALL of `records` (one class) with one SELECT per batch
+        # and mirror them into each, clearing the change. The caller reads
+        # inside the transaction that created the rows, so the values are this
+        # save's own.
+        #
+        # A composite primary key can't be matched with one `where(key => ids)`,
+        # so those rows are read one record at a time (PrimaryKey.condition)
+        # and keyed on the id tuple.
+        def refresh_columns_for(klass, records, columns)
+          rows = refreshed_rows(klass, records, columns)
+          records.each do |record|
+            values = rows[record.id]
+            next if values.nil?
+
+            columns.zip(values).each { |column, value| record[column] = value }
+            record.send(:clear_attribute_changes, columns)
+          end
+        end
+
+        def refreshed_rows(klass, records, columns)
+          key = klass.primary_key
+          rows = {}
+          if key.is_a?(Array)
+            records.each do |record|
+              condition = ConcernsOnRails::Support::PrimaryKey.condition(klass, record.id)
+              values = klass.unscoped.where(condition).pluck(*columns).first
+              rows[record.id] = Array(values) unless values.nil?
+            end
+          else
+            records.each_slice(REFRESH_BATCH_SIZE) do |batch|
+              klass.unscoped.where(key => batch.map(&:id)).pluck(key, *columns).each do |id, *values|
+                rows[id] = values
+              end
+            end
+          end
+          rows
         end
 
         # Columns of `klass` maintained by a child's counter — CounterCacheable
@@ -394,8 +604,16 @@ module ConcernsOnRails
 
         def sequence_columns(klass)
           klass.sequenceable_config.flat_map do |field, cfg|
-            [field, cfg[:into]].compact
+            [field, cfg[:into], sequence_period_column(cfg)].compact
           end
+        end
+
+        # A custom period_column (a finalized_at stamp) belongs to the number it
+        # anchors, so it is cleared with it; created_at is already a timestamp
+        # reset.
+        def sequence_period_column(cfg)
+          column = cfg[:period_column]
+          column unless cfg[:reset] == :never || TIMESTAMP_COLUMNS.include?(column.to_s)
         end
 
         # By NAME, never a bare constant: a concern still behind its autoload

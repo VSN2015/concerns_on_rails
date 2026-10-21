@@ -314,10 +314,14 @@ module ConcernsOnRails
         def define_lockable_scopes(prefix, suffix)
           prefix = ConcernsOnRails::Support::Affix.normalize(prefix, default: lockable_locked_at_field)
           suffix = ConcernsOnRails::Support::Affix.normalize(suffix, default: lockable_locked_at_field)
-          self.lockable_scope_names = {
+          names = {
             locked: ConcernsOnRails::Support::Affix.name(:locked, prefix: prefix, suffix: suffix),
             unlocked: ConcernsOnRails::Support::Affix.name(:unlocked, prefix: prefix, suffix: suffix)
           }.freeze
+          ConcernsOnRails::Support::Affix.refuse_sibling_names!(
+            self, label: LABEL, scopes: names.values, prefix: prefix, suffix: suffix
+          )
+          self.lockable_scope_names = names
           ConcernsOnRails::Support::Affix.refuse_stateable_names!(self, lockable_scope_names.values, kind: :scope, label: LABEL)
 
           scope lockable_scope_names[:locked], lambda {

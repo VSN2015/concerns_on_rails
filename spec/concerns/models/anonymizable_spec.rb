@@ -576,8 +576,14 @@ RSpec.describe ConcernsOnRails::Models::Anonymizable do
           id = writer.create!(secret: "top secret").id
           klass = eraser(preset)
           record = klass.find(id)
+          stored = record.secret_ciphertext
 
-          expect(ConcernsOnRails::Support::Encryptor).not_to receive(:decrypt)
+          # The OLD value is never decrypted. (On Rails 7.1+ ActiveModel
+          # re-checks the envelope it memoized for the NEW value through
+          # EncryptedType#changed_in_place?, which decrypts that fresh
+          # envelope — written under the eraser's own key, so it always can.)
+          allow(ConcernsOnRails::Support::Encryptor).to receive(:decrypt).and_call_original
+          expect(ConcernsOnRails::Support::Encryptor).not_to receive(:decrypt).with(stored, anything)
           expect { record.send(:anonymize_record!) }.not_to raise_error
           RSpec::Mocks.space.proxy_for(ConcernsOnRails::Support::Encryptor).reset
 

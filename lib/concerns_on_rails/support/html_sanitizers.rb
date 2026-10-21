@@ -19,7 +19,10 @@ module ConcernsOnRails
     # Picks the HTML5 parser (Rails::HTML5::*, the default since Rails 7.1, so
     # it matches the host app's own ActionView sanitize/strip_tags output) when
     # the platform supports it, and otherwise falls back to HTML4 (libgumbo /
-    # HTML5 is unavailable on JRuby) — mirroring Rails core.
+    # HTML5 is unavailable on JRuby) — mirroring Rails core. On
+    # rails-html-sanitizer older than 1.6 (which actionpack 6.0-7.0 still
+    # accept) neither namespace exists: there the gem's Rails::Html::*
+    # sanitizers — the same HTML4 parser — are used.
     #
     # The namespace decision and each sanitizer are built lazily on first use,
     # so libgumbo / ActionView is never probed at file-load time, and the
@@ -31,16 +34,26 @@ module ConcernsOnRails
     module HtmlSanitizers
       module_function
 
+      # Feature-detected, never assumed: Rails::HTML4 / Rails::HTML5 (and
+      # Rails::HTML) arrived in rails-html-sanitizer 1.6.0, so naming
+      # Rails::HTML4 unconditionally raised NameError on 1.5.x and earlier.
       def namespace
         @namespace ||=
-          if defined?(Rails::HTML::Sanitizer) &&
-             Rails::HTML::Sanitizer.respond_to?(:html5_support?) &&
-             Rails::HTML::Sanitizer.html5_support?
-            Rails::HTML5
+          if defined?(::Rails::HTML5) && html5_support?
+            ::Rails::HTML5
+          elsif defined?(::Rails::HTML4)
+            ::Rails::HTML4
           else
-            Rails::HTML4
+            ::Rails::Html
           end
       end
+
+      def html5_support?
+        defined?(::Rails::HTML::Sanitizer) &&
+          ::Rails::HTML::Sanitizer.respond_to?(:html5_support?) &&
+          ::Rails::HTML::Sanitizer.html5_support?
+      end
+      private_class_method :html5_support?
 
       # Removes every tag, keeping the inner text. The safe default and the
       # only sanitizer appropriate for a destructive write (it cannot

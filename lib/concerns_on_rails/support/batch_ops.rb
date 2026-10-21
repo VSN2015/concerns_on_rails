@@ -14,27 +14,74 @@ module ConcernsOnRails
       module_function
 
       # True when every named instance method is still the concern's own — the
-      # host model overrode none of them. This is the ownership half of the
-      # fast-path decision on its own, for the two concerns whose per-record
-      # path already skips validations (SoftDeletable under `touch: false` and
-      # Lockable, both of which write via update_column(s)) and so are exempt
-      # from the validations half.
+      # host model overrode none of them — and the model is not an STI table.
+      # This is the ownership half of the fast-path decision on its own, for
+      # the two concerns whose per-record path already skips validations
+      # (SoftDeletable under `touch: false` and Lockable, both of which write
+      # via update_column(s)) and so are exempt from the validations half.
+      #
+      # An STI table never takes the single UPDATE (see sti_table?): the
+      # relation also holds every subclass's rows, and a subclass may override a
+      # hook, declare validations or re-declare the macro with other options —
+      # none of which the receiver can see, and a bulk UPDATE built from the
+      # receiver's configuration would skip all of it. The per-record path is
+      # always correct (each record applies its own class's hooks, validations
+      # and configuration); the fast path is only an optimisation.
       def unoverridden?(klass, owner, *methods)
-        methods.all? { |name| klass.instance_method(name).owner == owner }
+        !sti_table?(klass) && methods.all? { |name| klass.instance_method(name).owner == owner }
       end
 
       # The whole safety decision for a single-UPDATE fast path: it is only
       # taken when per-record behavior cannot differ from `update_all` —
-      # the host model overrode none of the concern's hooks or bang methods,
-      # AND it declares no validations (update_all skips validations
-      # entirely, so an unguarded fast path would silently write invalid
-      # records instead of honoring the batch contract: RecordNotSaved +
+      # the table is not STI, the host model overrode none of the concern's
+      # hooks or bang methods, AND it declares no validations (update_all skips
+      # validations entirely, so an unguarded fast path would silently write
+      # invalid records instead of honoring the batch contract: RecordNotSaved +
       # rollback on a record that can't save).
       #
-      # Save callbacks are deliberately NOT gated on: update_all skipping
-      # callbacks is documented Rails behavior shared by every *_all method.
-      def fast_path?(klass, owner, *methods)
-        !validations?(klass) && unoverridden?(klass, owner, *methods)
+      # Save callbacks in general are deliberately NOT gated on: update_all
+      # skipping callbacks is documented Rails behavior shared by every *_all
+      # method. The exception is the gem's OWN sibling concerns, which keep
+      # data in step from save callbacks the per-record path runs (see
+      # sibling_bookkeeping?): `writes:` names the columns the verb writes.
+      def fast_path?(klass, owner, *methods, writes: [])
+        !validations?(klass) && unoverridden?(klass, owner, *methods) && !sibling_bookkeeping?(klass, writes)
+      end
+
+      # True when another concern of this gem on `klass` keeps derived data
+      # in step from the save callbacks that the per-record path runs and
+      # update_all skips — so the single UPDATE would silently desynchronise
+      # the gem's own concerns on one model, and whether it did depended on
+      # whether some unrelated validator forced the per-record path:
+      #   * a CounterCacheable rule with an `if:` condition — a batch verb
+      #     can flip it (`if: -> { published? }` under publish_all). A rule
+      #     without one never moves: no batch verb changes a foreign key;
+      #   * Auditable tracking a column the verb writes (the touch columns
+      #     included, which the fast path writes too).
+      def sibling_bookkeeping?(klass, columns)
+        conditional_counters?(klass) || audited_writes?(klass, columns)
+      end
+
+      def conditional_counters?(klass)
+        klass.respond_to?(:counter_cacheable_rules) && klass.counter_cacheable_rules.any? { |rule| rule[:condition] }
+      end
+
+      def audited_writes?(klass, columns)
+        return false unless klass.respond_to?(:auditable_fields)
+
+        tracked = klass.auditable_fields.map(&:to_s)
+        tracked.intersect?(columns.map(&:to_s) | TOUCH_COLUMNS)
+      end
+
+      # True when the model's table is single-table inheritance: it has a
+      # present `inheritance_column` that is a real column. A model that turned
+      # STI off (`self.inheritance_column = nil`, or a name the table lacks) is
+      # not STI, so its rows are only ever instances of the class itself.
+      def sti_table?(klass)
+        return false unless klass.respond_to?(:inheritance_column)
+
+        column = klass.inheritance_column
+        column.present? && klass.column_names.include?(column.to_s)
       end
 
       # True when the host model declares anything that runs at validation time.
@@ -177,7 +224,7 @@ module ConcernsOnRails
 
         relation.klass.unscoped.from(relation, relation.klass.quoted_table_name).pluck(key)
       end
-      private_class_method :each_row, :joined?, :unjoined, :limited_keys
+      private_class_method :each_row, :joined?, :unjoined, :limited_keys, :conditional_counters?, :audited_writes?
 
       # The validate callbacks every ActiveRecord model carries out of the box
       # (Rails 7.1 registers :cant_modify_encrypted_attributes_when_frozen on

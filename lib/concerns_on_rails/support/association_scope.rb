@@ -69,6 +69,27 @@ module ConcernsOnRails
         peeled
       end
 
+      # `relation.unscope(where: column)` matched on the relation's OWN
+      # table: how the named scopes peel their column (SoftDeletable's
+      # with_deleted / soft_deleted / without_deleted / active, Publishable's
+      # unpublished / scheduled / draft). ActiveRecord records an unscope
+      # (unscope_values) and Relation#merge replays it on the RECEIVER, where
+      # a column NAME matches every table, so
+      # `Comment.joins(:post).merge(Post.with_deleted)` also stripped the
+      # comments' own `deleted_at IS NULL`. An Arel attribute (Rails 6.1+)
+      # matches this table only. It is still RECORDED — unlike `without`,
+      # which only filters the where clause — and must be: an association
+      # lambda (`has_many :all_comments, -> { with_deleted }`) is evaluated on
+      # an unscoped relation, and peels the target's default scope only
+      # because Rails replays its unscope over the default-scoped one. Rails
+      # 6.0 unscopes by name only, so there it stays by name (and still leaks
+      # through a merge).
+      def unscope_own(relation, column)
+        return relation.unscope(where: column) if ActiveRecord.gem_version < Gem::Version.new("6.1")
+
+        relation.unscope(where: relation.klass.arel_table[column])
+      end
+
       # The columns whose default-scope predicate is the gem's own: the
       # SoftDeletable stamp while its default scope is on, the Publishable
       # column while `default_scope: true` is.

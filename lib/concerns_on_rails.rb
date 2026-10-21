@@ -81,6 +81,7 @@ module ConcernsOnRails
     autoload :BatchOps,                "concerns_on_rails/support/batch_ops"
     autoload :HookedWrite,             "concerns_on_rails/support/hooked_write"
     autoload :Locking,                 "concerns_on_rails/support/locking"
+    autoload :PrimaryKey,              "concerns_on_rails/support/primary_key"
     autoload :AssociationScope,        "concerns_on_rails/support/association_scope"
     autoload :LinkHeader,              "concerns_on_rails/support/link_header"
     autoload :VaryHeader,              "concerns_on_rails/support/vary_header"
@@ -89,7 +90,10 @@ module ConcernsOnRails
     autoload :Callable,                "concerns_on_rails/support/callable"
     autoload :SlugSources,             "concerns_on_rails/support/slug_sources"
     autoload :GeneratedValues,         "concerns_on_rails/support/generated_values"
+    autoload :WriteBoundary,           "concerns_on_rails/support/write_boundary"
     autoload :EncryptedLookup,         "concerns_on_rails/support/encrypted_lookup"
+    autoload :TransformBackstop,       "concerns_on_rails/support/transform_backstop"
+    autoload :ContextualDestroy,       "concerns_on_rails/support/contextual_destroy"
   end
 end
 
