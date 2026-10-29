@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/encrypted_lookup"
 require "concerns_on_rails/support/generated_values"
+require "concerns_on_rails/support/primary_key"
 require "concerns_on_rails/support/random_value"
 require "concerns_on_rails/support/unique_retry"
 require "active_support/security_utils"
@@ -171,7 +172,7 @@ module ConcernsOnRails
           record = public_send("authenticate_by_#{field}", value)
           return nil unless record
 
-          revoked = unscoped.where(primary_key => record.id)
+          revoked = unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(self, record.id))
                             .where(ConcernsOnRails::Support::EncryptedLookup.condition(self, field, value))
                             .update_all(tokenizable_consumed_attributes(record, field))
           revoked == 1 ? record.reload : nil

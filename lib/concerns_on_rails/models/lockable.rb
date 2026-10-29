@@ -4,6 +4,7 @@ require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/locking"
+require "concerns_on_rails/support/primary_key"
 require "securerandom"
 require "active_support/security_utils"
 
@@ -226,7 +227,8 @@ module ConcernsOnRails
           version = nil
           begin
             transaction(requires_new: true) do
-              next if unscoped.where(primary_key => record.id, field => given).update_all(field => nil).zero?
+              next if unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(self, record.id)).where(field => given)
+                              .update_all(field => nil).zero?
 
               version = lockable_mirror_claim_bump(record)
               unlocked = record if record.unlock_access!
@@ -261,7 +263,7 @@ module ConcernsOnRails
         # Drop a token whose lock is gone. Keyed on the token itself, so it is
         # no oracle — only whoever holds the link can trigger it. Always nil.
         def lockable_retire_token(record, field, given)
-          unscoped.where(primary_key => record.id, field => given).update_all(field => nil)
+          unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(self, record.id)).where(field => given).update_all(field => nil)
           nil
         end
 
@@ -553,7 +555,8 @@ module ConcernsOnRails
         lapsed = klass.arel_table[klass.lockable_locked_at_field].lteq(Time.zone.now - klass.lockable_unlock_in)
         # A copy: update_all adds its lock_version increment to the Hash it is
         # given, and the sync below must not assign that Arel node.
-        return false if klass.unscoped.where(klass.primary_key => id).where(lapsed).update_all(attributes.dup).zero?
+        return false if klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id)).where(lapsed)
+                             .update_all(attributes.dup).zero?
 
         lockable_sync_columns(attributes)
         ConcernsOnRails::Support::Locking.mirror_bump!(self)
@@ -569,7 +572,7 @@ module ConcernsOnRails
         column = klass.arel_table[klass.lockable_locked_at_field]
         unlocked = column.eq(nil)
         unlocked = unlocked.or(column.lteq(Time.zone.now - klass.lockable_unlock_in)) if klass.lockable_unlock_in
-        klass.unscoped.where(klass.primary_key => id).where(unlocked).update_all(attributes.dup) == 1
+        klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id)).where(unlocked).update_all(attributes.dup) == 1
       end
 
       # Mirror a raw write into the in-memory attributes without leaving them
@@ -598,7 +601,8 @@ module ConcernsOnRails
       def lockable_adopt_current_lock!
         klass = self.class
         columns = [klass.lockable_locked_at_field, klass.lockable_unlock_token_field].compact
-        current = klass.unscoped.where(klass.primary_key => id).select(klass.primary_key, *columns).lock.first
+        current = klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id))
+                       .select(*ConcernsOnRails::Support::PrimaryKey.columns(klass), *columns).lock.first
         return false unless current
 
         lockable_sync_columns(columns.to_h { |column| [column, current[column]] })
@@ -632,7 +636,7 @@ module ConcernsOnRails
       # default_scope (e.g. SoftDeletable's) cannot hide the row. nil (row
       # deleted concurrently) collapses to 0.
       def lockable_fresh_attempts_count
-        self.class.unscoped.where(self.class.primary_key => id)
+        self.class.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(self.class, id))
             .pluck(self.class.lockable_attempts_field).first.to_i
       end
 
