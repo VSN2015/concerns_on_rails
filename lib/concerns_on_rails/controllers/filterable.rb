@@ -460,7 +460,23 @@ module ConcernsOnRails
       # and LIKE / comparisons ran over ciphertext. Support::EncryptedLookup is
       # the gem's one detection of such a field.
       def filterable_encrypted?(relation, field)
-        !ConcernsOnRails::Support::EncryptedLookup.rule(relation.model, field).nil?
+        !ConcernsOnRails::Support::EncryptedLookup.rule(relation.model, filterable_resolved_field(relation, field)).nil?
+      end
+
+      # `alias_attribute :mail, :email` reads and writes the `email` column, so a
+      # filter on the alias is a filter on that (maybe encrypted) column — the
+      # rule lookup and the blind-index finder are keyed by the real name.
+      # Followed through an alias of an alias (bounded, so a cycle cannot hang).
+      def filterable_resolved_field(relation, field)
+        model = relation.model
+        aliases = model.respond_to?(:attribute_aliases) ? model.attribute_aliases : {}
+        name = field.to_s
+        aliases.size.times do
+          break unless aliases.key?(name)
+
+          name = aliases[name]
+        end
+        name.to_sym
       end
 
       # Only equality and `in` (through the blind index, see
@@ -474,11 +490,14 @@ module ConcernsOnRails
       # Equality through the field's blind index (`where_<field>`, which reads
       # the value through the field's `normalizes` and every current / previous
       # key); a field without one — and any negation — matches nothing, as does
-      # a value with no fingerprint (nil).
+      # a value with no fingerprint (nil). A nil member of an array operand
+      # (a JSON body's `[null, "a"]`) is dropped by `where_<field>`: the filter
+      # fails toward fewer rows, never toward more.
       def apply_filter_encrypted_equality(relation, field, value, negate)
-        return relation.none if negate || ConcernsOnRails::Support::EncryptedLookup.unqueryable?(relation.model, field)
+        real = filterable_resolved_field(relation, field)
+        return relation.none if negate || ConcernsOnRails::Support::EncryptedLookup.unqueryable?(relation.model, real)
 
-        relation.public_send(:"where_#{field}", *Array(value))
+        relation.public_send(:"where_#{real}", *Array(value))
       end
 
       def apply_filter_list(relation, field, operator, raw)

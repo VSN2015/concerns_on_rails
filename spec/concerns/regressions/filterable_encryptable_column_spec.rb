@@ -114,4 +114,50 @@ describe ConcernsOnRails::Controllers::Filterable do
     expect(plain.new(params: { name_not: "ann" }).filtered(model.all.order(:id)).pluck(:name)).to eq(%w[bob cat])
     expect(plain.new(params: { name: "bob" }).filtered(model.all).pluck(:name)).to eq(%w[bob])
   end
+
+  describe "a filter declared on an alias_attribute of an encrypted column" do
+    let(:aliased_model) do
+      Class.new(TestModel) do
+        self.table_name = "filter_secrets"
+        include ConcernsOnRails::Models::Encryptable
+
+        encryptable :ssn
+        encryptable :email, blind_index: true
+        alias_attribute :mail, :email
+        alias_attribute :mail2, :mail
+        alias_attribute :tax_id, :ssn
+      end
+    end
+
+    let(:aliased_controller) do
+      Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :mail, :mail2, :tax_id, operators: true
+      end
+    end
+
+    def aliased_names(params)
+      aliased_controller.new(params: params).filtered(aliased_model.all.order(:id)).pluck(:name)
+    end
+
+    it "reads equality and in through the blind index, also through an alias chain" do
+      expect(aliased_names(mail: "ann@example.com")).to eq(%w[ann])
+      expect(aliased_names(mail2: "bob@example.com")).to eq(%w[bob])
+      expect(aliased_names(mail_in: "ann@example.com,bob@example.com")).to eq(%w[ann bob])
+      expect(aliased_names(mail: "nobody@example.com")).to eq([])
+    end
+
+    it "fails every other operator closed, not / not_in included" do
+      expect(aliased_names(mail_not: "ann@example.com")).to eq([])
+      expect(aliased_names(mail_not_in: "ann@example.com")).to eq([])
+      expect(aliased_names(mail_contains: "example")).to eq([])
+      expect(aliased_names(mail_gt: "a")).to eq([])
+    end
+
+    it "fails an alias of a field without a blind index closed" do
+      expect(aliased_names(tax_id: "123")).to eq([])
+      expect(aliased_names(tax_id_not: "123")).to eq([])
+    end
+  end
 end
