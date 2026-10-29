@@ -92,7 +92,7 @@ module ConcernsOnRails
       }.freeze
 
       included do
-        # { field => { type:, key:, blind_index: } }. Subclasses inherit and may
+        # { field => { type:, key:, blind_index:, field: } }. Subclasses inherit and may
         # add fields.
         class_attribute :encryptable_rules, instance_accessor: false, default: {}
         # Blind indexes are refreshed at the write boundary
@@ -206,7 +206,7 @@ module ConcernsOnRails
         return [] if inputs.empty?
 
         config = ConcernsOnRails.encryption
-        material = config.resolve_material(rule[:key])
+        material = config.resolve_material(rule[:key], field: rule[:field])
         return inputs if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
         keys = blind_index_materials(rule, config, material)
@@ -225,7 +225,7 @@ module ConcernsOnRails
       #      index hashed before, so a row indexed then is still found by the
       #      same lookup. For every type but :datetime the two are the same.
       def self.blind_index_inputs(rule, value, zone_aware, legacy: true)
-        type = EncryptedType.new(type: rule[:type], key: rule[:key])
+        type = EncryptedType.new(type: rule[:type], key: rule[:key], field: rule[:field])
         expression = rule[:blind_index][:expression]
         canonical = blind_index_canonical(type, expression, value, zone_aware)
         [canonical, (blind_index_legacy(expression, value) if legacy)].compact.uniq
@@ -344,9 +344,10 @@ module ConcernsOnRails
         # decimal column casts it (".5" is 0.5), so those fields do too.
         NUMERIC_STRING = /\A\s*[+-]?\d/
 
-        def initialize(type: :string, key: nil)
+        def initialize(type: :string, key: nil, field: nil)
           @type = type
           @key = key
+          @field = field
           super()
         end
 
@@ -482,20 +483,20 @@ module ConcernsOnRails
         # rows apart; a per-field `key:` is outside rotation and always writes 0.
         def write_ciphertext(plaintext)
           config = ConcernsOnRails.encryption
-          material = config.resolve_material(@key)
+          material = config.resolve_material(@key, field: @field)
           return plaintext if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
           ConcernsOnRails::Support::Encryptor.encrypt(
-            plaintext, key: material, key_id: @key ? 0 : config.key_id, salt: config.key_derivation_salt
+            plaintext, key: material, key_id: @key.nil? ? config.key_id : 0, salt: config.key_derivation_salt
           )
         end
 
         def read_plaintext(stored)
           config = ConcernsOnRails.encryption
-          material = config.resolve_material(@key)
+          material = config.resolve_material(@key, field: @field)
           return stored if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
-          material = rotation_material(stored, config) unless @key
+          material = rotation_material(stored, config) if @key.nil?
           ConcernsOnRails::Support::Encryptor.decrypt(
             stored, key: material, salt: config.key_derivation_salt
           )
@@ -537,8 +538,8 @@ module ConcernsOnRails
             bi = encryptable_normalize_blind_index(field, blind_index)
             encryptable_guard_declared_uniqueness!(field, bi)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
-            self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
-            attribute field, EncryptedType.new(type: type, key: key)
+            self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi, field: field })
+            attribute field, EncryptedType.new(type: type, key: key, field: field)
             encryptable_define_helpers(field)
             encryptable_define_blind_index(field, bi) if bi
             encryptable_register_filter_parameter(field)
