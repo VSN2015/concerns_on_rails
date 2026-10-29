@@ -43,7 +43,7 @@ touches one, so direct requires still work; `spec/concerns/direct_require_spec.r
 every model/controller file alone in a subprocess). `friendly_id`/`acts_as_list` load lazily
 with Sluggable/Sortable (absent gem → `ConcernsOnRails::MissingDependency`, a LoadError
 subclass). Top-level aliases for the pre-1.6 module paths (e.g. `ConcernsOnRails::Sluggable`)
-resolve lazily via `const_missing` in `lib/concerns_on_rails/legacy_aliases.rb`. Gem-wide
+resolve lazily via `const_missing` in `lib/concerns_on_rails/legacy_aliases.rb` (serialized by a reentrant Monitor, so a racing first reference never re-defines the constant). Gem-wide
 config lives behind `ConcernsOnRails.setup` (`lib/concerns_on_rails/configuration.rb`);
 its `cache_store` (store or Proc) is the fallback store for Throttleable/Idempotentable.
 
@@ -61,7 +61,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   bare uuid), backfills a blank slug (an ASSIGNED `""`/nil too, whenever the source is present), and
   won't overwrite an explicitly-assigned non-blank slug.
   Options: `history:`, `scope:` (a column, an association, or an Array of them), `reserved_words:`, `finders:`. A saved record whose `scope:`
-  column changes keeps a slug the new scope has free and rebuilds one that scope already holds.
+  column changes keeps a slug the new scope has free and rebuilds one that scope already holds (live or, with `history: true`, another record's history). With `history: true` friendly_id's own history finder is not scope-aware: a mover's stale history row can still match the old slug in the new scope's relation.
 - **`Sortable`** — wraps `acts_as_list`; `default_scope` orders by the configured
   field/direction. `sortable_by :position` / `position: :desc`; `scope:` (an `encryptable`
   column is refused, either order), `add_new_at:`, `use_acts_as_list: false`; `reposition!` also works on a composite primary key (`[shop_id, id]` tuples, one UPDATE per row).
@@ -95,7 +95,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   re-checks (EXISTS, no row lock) the row is still trashed in the DB (`soft_delete_purge!`: true purged / false vetoed /
   nil skipped). A purged parent first purges its TRASHED cascade children of any stamp, a visited
   set of [base_class, id] stops cascade cycles, the purge pass ignores a cascaded association's own limit/offset, and a vetoed child rolls the parent back (relation:
-  skipped; association: RecordNotDestroyed). The association form rides Rails' own `delete_or_destroy` (before/after_remove,
+  skipped; association: RecordNotDestroyed). After an association `destroy_all` the association cache is `reset`
+  (not marked loaded-and-empty), so a `default_scope: false`/`with_deleted` association still shows its trash. The association form rides Rails' own `delete_or_destroy` (before/after_remove,
   marks the loaded instances, nil on abort); a loaded / limited / composite-key / disable_joins relation
   acts on its records as loaded (deduped by id). Rails' OWN maintenance stays hard (HMT
   `delete_records(:destroy)` wrapped in a fiber-local ONE-SHOT hard context for the join model: owner
@@ -116,7 +117,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `authenticate_by_`/`consume_` look up only a String or Integer (a Hash/Array/Parameters param, or a String with a NUL byte → nil); `consume_` works on a composite primary key (via `Support::PrimaryKey`).
 - **`Sequenceable`** — ordered reference numbers (invoice/order numbers). `into:`, `prefix:`,
   `padding:`, `scope:`, `reset:` (`:year`/`:month`/`:day`), `template:`, `assign:`
-  (`:create`/`:manual`), `period_column:` (default `created_at`; the datetime column the `reset:` MAX range, token and `sequenceable_period_time` read — `assign_<field>!`/the create path stamp it when blank; part of the format tuple, so a different one under an identical printed format is refused at macro time (declare it on the declaring class or an `assign:`-only re-declaration; ignored under `reset: :never`); refuses `updated_at`/non-date types (`created_at` unchecked); rows numbered before a switch, NULL there, still count by `created_at`; a `date` column is stamped in the field's zone; a Duplicable copy blanks it), `time_zone:` (`reset:` periods — MAX range AND token — are cut in ONE
+  (`:create`/`:manual`), `period_column:` (default `created_at`; the datetime column the `reset:` MAX range, token and `sequenceable_period_time` read — `assign_<field>!`/the create path stamp it when blank; part of the format tuple, so a different one under an identical printed format is refused at macro time (declare it on the declaring class or an `assign:`-only re-declaration; ignored under `reset: :never`); refuses `updated_at`/non-date types (`created_at` unchecked); rows numbered before a switch, NULL there, still count by `created_at` and display by it (`period_time`/`base_time` take the field); a `date` column is stamped in the field's zone; a Duplicable copy blanks it), `time_zone:` (`reset:` periods — MAX range AND token — are cut in ONE
   fixed zone, default `Time.zone_default` resolved at use time, never the request's `Time.zone`;
   `sequenceable_period_time(field)` hands that instant to templates). Under STI the
   series is MAX over the DECLARING class's relation (an abstract declarer falls back to the
@@ -151,7 +152,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `activate_all`/`deactivate_all` (same validators-gated, never-on-STI fast path as Publishable/Expirable).
 - **`Stateable`** — lightweight string-backed state machine: states, `default:`,
   `transitions:`, `prefix:`/`suffix:`, `lock:`, `timestamps:` (`<state>_at` stamped on entry;
-  Rails-owned `created_at`/`updated_at` refused at macro time; NOT affixed). A generated
+  Rails-owned `created_at`/`updated_at` refused at macro time; NOT affixed; an event whose affixed name is
+  `transition` is refused too — its `transition!` would hit the generic hooks). A generated
   method/scope overriding an AR or sibling-concern method raises at macro time (the reverse
   order via `Affix.refuse_stateable_names!`), EXCEPT a SoftDeletable/Publishable/Schedulable
   include-time default scope on the class's OWN singleton (concern included first), which
@@ -165,7 +167,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   Batch `transition_all(event)` — deliberately NO fast path, since the per-record path runs
   validations via `update!` and `update_all` would skip them; on an STI table each record is judged by
   its own class's declaration (the SQL filter admits any loaded subclass's `from:`); under `lock: true` it reads each guard
-  under the row lock, so a row moved concurrently is skipped (a single `<event>!` still raises).
+  under the row lock, so a row moved concurrently is skipped (a single `<event>!` still raises); a record failing
+  validation raises `RecordNotSaved` (own record only, `e.record.equal?(record)`; batch rolled back), another record's
+  `RecordInvalid` from a hook propagates, the single `<event>!` raises `RecordInvalid`.
 - **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all`,
   `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only), `ranked:` (a grouped or
   DISTINCT relation is returned unranked — its rank CASE would sit outside the GROUP BY / SELECT list).
@@ -340,7 +344,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `counter_cache:`, and the TOP-LEVEL copy's acts_as_list position; a deep-copied child keeps its
   position only when its acts_as_list scope names the copied association's foreign key — the
   copy goes into the new parent's own list — else it is blanked too, an opaque String scope
-  included; children are fed to acts_as_list in position order) so sibling concerns regenerate on save; a Duplicable
+  included; children are fed to acts_as_list in position order; a child/has_one target `marked_for_destruction?` — nested `_destroy` —
+  is skipped, loaded or not, via `duplicable_without_marked`) so sibling concerns regenerate on save; a Duplicable
   child copies via its OWN rules (recursive graphs); `on_duplicate(copy)`
   hook. `duplicate!` re-reads the counters + `lock_version` of the copy and of every nested Duplicable copy inside its save transaction, with one SELECT per class in the copied graph (never per record).
 
@@ -370,17 +375,24 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   on `render_success` (names and values stripped of illegal bytes, `Link` appended
   case-insensitively, `Vary` appended through `Support::VaryHeader`, a caller's `*` replacing
   it). `respondable_by error_format: :problem_details` switches every error-rendering concern
-  to RFC 9457 app-wide.
+  to RFC 9457 app-wide. The envelope and `ErrorEnvelope`'s inline branch render `ErrorEnvelope.renderable_status`
+  (`:unprocessable_entity`/`:payload_too_large`/... renamed only when the running Rack dropped the old name, so
+  Rack >= 3.1 without Rails 8.1 logs no deprecation; `rendered[:status]` is a symbol, Rack-version dependent); an
+  app's OWN `render_error` override still gets the raw old symbol.
 - **`ErrorHandleable`** — `rescue_from` for RecordNotFound / ParameterMissing / RecordInvalid; a private
   `process_action` hands the BadRequest Instrumentation raises for a malformed query string
   (before `rescue_from` is in scope) to the handlers, unless `:bad_request` was trimmed.
   `handled_error.concerns_on_rails` / `on_handled_error` report the exception the handler was
-  invoked with (the `#cause` when Rescuable matched through a wrapper), nil for a direct call.
+  invoked with (the `#cause` when Rescuable matched through a wrapper), nil for a direct call. RecordNotDestroyed
+  renders the generic "Resource could not be deleted" (no model name / id), `errors.full_messages` as `details`.
 - **`Includable`** — allow-listed association sideloading (nested include trees via `Support::IncludeTree`,
   `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets. A re-declaration replaces the association list but inherits omitted `fields:`/`default:`/`strategy:` (`default: nil`/`fields: {}` clear; an inherited default the new list lacks is dropped with a stderr warning).
 - **`SecureHeadable`** — security response headers + native CSP DSL passthrough
   (`content_security_policy_for report_only:` is `true`/`false`/`:inherit` — omitted keeps the
-  inherited or app-wide report-only flag, an explicit `false` enforces over it).
+  inherited or app-wide report-only flag, an explicit `false` enforces over it). The `:hsts` preset is skipped
+  while `Rails.application.config.force_ssl` is on (read per request; detected by value, `PRESETS[:hsts].last`),
+  so Rails' own `ssl_options[:hsts]` applies; header names compare case-insensitively (`merge_headers` keeps the
+  first-registered spelling; each header is written under the spelling the response already carries).
 - **`Localizable`** — per-request `I18n.locale` from params / `Accept-Language` (strict
   RFC 9110 q-values, stable order on ties; RFC 4647 Lookup truncation one subtag at a time,
   `zh-Hant-TW` → `zh-Hant` → `zh`; `-` and `_` match each other, case-insensitively,
@@ -388,7 +400,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   active for `rescue_from` handlers and is always restored afterwards.
 - **`Authorizable`** — declarative per-action authorization (`authorize_by`, `require_role`); the
   denial's envelope `code` follows its `status:` (401 `unauthorized`, 404 `not_found` — the same
-  body as ErrorHandleable's 404 — else `forbidden`).
+  body as ErrorHandleable's 404 — else `forbidden`) and so does the default `message:` (404 `ErrorEnvelope::NOT_FOUND_MESSAGE`,
+  401 "Unauthorized", else "Forbidden"; resolved at declaration via `Authorizable.denial_message`, an explicit one wins);
+  `require_role` flattens its roles and raises at class load on an empty, nil or blank one.
 - **`Throttleable`** — fixed-window rate limiting with an injectable atomic store. A rule
   without `name:` defaults to `"<DeclaringController>#rule<n>"`, so unrelated controllers
   never share a counter (subclasses share their parent's rule). The first-hit seed is
@@ -398,7 +412,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `available:` allow-list matches by canonical tzinfo identifier (exact name first, the
   allow-listed zone returned); a value that is not valid UTF-8 is no match. The action always
   runs inside `Time.use_zone` (also for the already-current zone), so an in-action
-  `Time.zone =` never leaks to the thread's next request.
+  `Time.zone =` never leaks to the thread's next request. It appends `Vary: Time-Zone` whenever the header
+  source is on and `Vary: Cookie` whenever the cookie source is on (through `Support::VaryHeader`; `vary: false`
+  opts out; independent of `response_header:`, which only controls `X-Time-Zone`).
 - **`Idempotentable`** — `Idempotency-Key` response replay with an injectable store
   (`idempotent_actions`); 409 on in-flight duplicates, 422 on payload mismatch, 503
   `idempotency_store_unavailable` when the store is down (both claims failed AND both reads
@@ -536,9 +552,9 @@ via `ActiveRecord::RecordNotSaved` on a failed record (inside a caller's transac
 checks (`unoverridden?`/`fast_path?`) also refuse on an STI table — `sti_table?`: a present
 `inheritance_column` that is a real column — so a batch verb never takes the single UPDATE there, whether or
 not a subclass exists or is loaded (it could override a hook, declare validations or re-declare the macro;
-the per-record path is always correct, only slower) — and `each_record`, the ONLY way to `find_each` a relation: it strips the
+the per-record path is always correct, only slower) — `full_rows` (a partial `select` gets the MODEL's own star added — `*`, `table.*`, schema-qualified, an Arel star on the model's table; a joined table's star doesn't count — computed aliases kept; used by `run` and ContextualDestroy's unloaded relation, NOT by `each_record`, since CounterCacheable's recount and Anonymizable/Encryptable rely on partial-select semantics), and `each_record`, the ONLY way to `find_each` a relation: it strips the
 ORDER (error_on_ignored_order), resolves a LIMIT/OFFSET to plucked PKs first (bare `find_each`
-keeps the limit but pages by PK), and yields each record once even over a has_many join (a
+keeps the limit but pages by PK), and `limited_keys`' DISTINCT key subquery keeps the own-table star first and every computed select, dropping only plain own-table columns — accepted limit: a joined-table column, a 7.1+ Hash select or a comma-joined String repeating a column can still repeat `id` on PG/MySQL; a direct `each_record` caller selecting without the PK gets nil ids), yields each record once even over a has_many join (a
 joined limited slice is re-plucked, then loaded unjoined — one instance per record)),
 `AssociationScope` (`unfiltered(record, name)`, for the cascade and deep copies: the
 association's own scope minus ONLY the gem's hiding predicates on the child's OWN table —
