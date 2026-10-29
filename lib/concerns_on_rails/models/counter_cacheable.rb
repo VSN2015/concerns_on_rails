@@ -59,8 +59,9 @@ module ConcernsOnRails
     #
     # Notes:
     #   * The `belongs_to` must be declared BEFORE the macro (the reflection is
-    #     validated at declaration time). Polymorphic associations are not
-    #     supported in this version.
+    #     validated at declaration time). Polymorphic associations and
+    #     composite (Array) foreign/primary keys are not supported in this
+    #     version — the macro raises ArgumentError.
     #   * Do NOT also set native `counter_cache: true` on the same column — both
     #     would fire and double-count.
     #   * Counters track the PERSISTED record. Writes that skip callbacks
@@ -472,9 +473,31 @@ module ConcernsOnRails
             raise ArgumentError, "#{LABEL}: `#{association}` must be a belongs_to association (got #{reflection.macro})"
           end
           raise ArgumentError, "#{LABEL}: polymorphic association `#{association}` is not supported" if reflection.polymorphic?
+
+          counter_cacheable_refuse_composite_key!(association, reflection)
           raise ArgumentError, "#{LABEL}: :if must be callable (respond to #call)" unless condition.nil? || condition.respond_to?(:call)
 
           validate_counter_cacheable_touch!(touch)
+        end
+
+        # A composite foreign key (Rails 7.1+ `foreign_key: [:shop_id, :order_id]`)
+        # or a composite association key would be read as ONE column everywhere
+        # below — the child never counted, the recount an invalid `NOT (())` —
+        # so it is refused up front, the way a polymorphic association is. The
+        # parent class is resolved only when it is already loadable
+        # (load-order tolerant, like counter_cacheable_ensure_parent_column!).
+        def counter_cacheable_refuse_composite_key!(association, reflection)
+          composite = reflection.foreign_key.is_a?(Array) ||
+                      (begin
+                        reflection.association_primary_key.is_a?(Array)
+                      rescue StandardError
+                        false
+                      end)
+          return unless composite
+
+          raise ArgumentError,
+                "#{LABEL}: association `#{association}` has a composite key (foreign_key: / primary_key: is an " \
+                "Array), which is not supported — counters track one foreign-key column"
         end
 
         def validate_counter_cacheable_touch!(touch)
