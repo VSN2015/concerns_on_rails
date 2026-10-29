@@ -44,11 +44,13 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
     token_for(JSON.generate("t" => "boundary_items", "o" => ["title:asc", "id:asc"], "d" => "next", "v" => [title, 1]))
   end
 
-  # Only the MySQL adapters both store a NUL in a text column and escape it
-  # in a quoted literal, so only there can such a boundary have been minted.
-  it "rejects a String boundary carrying a NUL byte as an InvalidCursor (MySQL: pages past it)" do
+  # MySQL (escapes the NUL in a quoted literal) and SQLite (stores one through
+  # a bind; the boundary goes in as a hex blob cast, PARAMS-5) can hold a NUL
+  # in a text column, so only on PostgreSQL can such a boundary not have been
+  # minted.
+  it "rejects a String boundary carrying a NUL byte as an InvalidCursor (MySQL, SQLite: pages past it)" do
     controller = controller_class.new(params: { cursor: cursor("a\u0000b") })
-    if TestDatabase.mysql?
+    if TestDatabase.mysql? || TestDatabase.sqlite?
       expect(controller.cursor_paginated(BoundaryItem.all).map(&:title)).to eq(%w[b c])
     else
       expect { controller.cursor_paginated(BoundaryItem.all) }

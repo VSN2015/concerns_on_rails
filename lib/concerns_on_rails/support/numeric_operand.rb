@@ -164,7 +164,23 @@ module ConcernsOnRails
         return out_of_range(value) unless value.finite?
         return underflow(raw) if value.zero? && !written_zero?(raw)
 
-        Operand.new(:exact, value)
+        float_precision_loss(raw, value) || Operand.new(:exact, value)
+      end
+
+      # A decimal literal with more digits than a Float keeps ("0.1000000000000000000001"
+      # reads as the double 0.1, which is NOT that number) is :inexact, like an
+      # integer column's 5.5: no stored value equals it, `> v` / `>= v` are
+      # `> floor` and `< v` / `<= v` are `<= floor`, `floor` being the largest
+      # Float at or below the literal. A literal is "kept" when the Float's own
+      # shortest round-trip decimal IS it, so "0.1" still means the double 0.1;
+      # a JSON Float is a double already. nil when nothing was lost.
+      def float_precision_loss(raw, value)
+        return nil if raw.is_a?(Float)
+
+        exact = decimal_value(raw)
+        return nil if exact.nil? || BigDecimal(value.to_s) == exact
+
+        Operand.new(:inexact, exact, value.to_r <= exact.to_r ? value : value.prev_float)
       end
 
       # A nonzero literal below the smallest subnormal ("1e-400") reads as

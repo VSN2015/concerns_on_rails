@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "active_model/type"
+require "concerns_on_rails/support/encrypted_lookup"
 require "concerns_on_rails/support/scalar_param"
 require "concerns_on_rails/support/numeric_operand"
 require "concerns_on_rails/support/time_value"
@@ -19,7 +20,7 @@ module ConcernsOnRails
     #   filter_by :created_at, operators: %i[gte lte]        # a subset
     #
     #   not · gt · gte · lt · lte · in · not_in (comma list or array) ·
-    #   null (true/false) · contains · starts_with (LIKE, wildcards escaped)
+    #   null (true/false, 1/0, t/f, yes/no; anything else matches nothing) · contains · starts_with (LIKE, wildcards escaped)
     #
     # Comparison values are cast through the column's own attribute type, or
     # through `type:` (any ActiveModel type name: :integer, :decimal,
@@ -65,6 +66,11 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Controllers::Filterable".freeze
       OPERATORS = %i[not gt gte lt lte in not_in null contains starts_with].freeze
       COMPARISONS = { gt: :gt, gte: :gteq, lt: :lt, lte: :lteq }.freeze
+      # The only spellings `?<field>_null=` reads (case-insensitive); anything
+      # else fails closed rather than going through Rails' Boolean cast, which
+      # reads every string it does not know as false-y as TRUE ("maybe").
+      NULL_TRUE_VALUES = %w[true 1 t yes].freeze
+      NULL_FALSE_VALUES = %w[false 0 f no].freeze
       LIKE_ESCAPE = "\\".freeze
       LIKE_SPECIAL = /[\\%_]/
       NUMERIC_TYPES = %i[integer float decimal].freeze
@@ -212,10 +218,15 @@ module ConcernsOnRails
       # "1e3" 1 and "abc" 0: the lambda gets the exact number, and a value
       # the type cannot represent exactly — garbage, or 5.5 for :integer —
       # fails the filter closed (`none`) without calling the lambda. There is
-      # no column here, so no range applies.
+      # no column here, so no range applies. A non-scalar value (Array,
+      # Parameters) fails closed for EVERY `type:`, as it does for a numeric one.
       def apply_filter_lambda(relation, value, options)
         type = options[:type]
         return options[:with].call(relation, type ? type.cast(value) : value) unless type
+
+        # A structured value (`?flag[]=0`, `?q[x]=1`) is no scalar any `type:` can
+        # read: the Boolean cast made `["0"]` true and the string cast `'["a"]'`.
+        return relation.none unless filterable_operand?(value)
 
         operand = ConcernsOnRails::Support::NumericOperand.classify(value, type, column_type: nil)
         return options[:with].call(relation, filterable_lambda_cast(relation, type, value)) if operand.nil?
@@ -292,7 +303,12 @@ module ConcernsOnRails
       # it: a JSON body's `false` is a value, not an absent param.
       def apply_filter_operator(relation, field, operator, raw, options)
         return relation if filterable_unset?(raw)
+        return relation.none if filterable_encrypted_refusal?(relation, field, operator)
 
+        apply_filter_dispatch(relation, field, operator, raw, options)
+      end
+
+      def apply_filter_dispatch(relation, field, operator, raw, options)
         case operator
         when :in, :not_in then apply_filter_list(relation, field, operator, raw)
         when :null then apply_filter_null(relation, field, raw)
@@ -438,6 +454,52 @@ module ConcernsOnRails
         end
       end
 
+      # An `encryptable` column holds random-IV ciphertext: the operand `where`
+      # serializes is a FRESH envelope that equals no stored one, so `=` / `IN`
+      # matched nothing, `!=` / NOT IN matched EVERY row (the excluded one too),
+      # and LIKE / comparisons ran over ciphertext. Support::EncryptedLookup is
+      # the gem's one detection of such a field.
+      def filterable_encrypted?(relation, field)
+        !ConcernsOnRails::Support::EncryptedLookup.rule(relation.model, filterable_resolved_field(relation, field)).nil?
+      end
+
+      # `alias_attribute :mail, :email` reads and writes the `email` column, so a
+      # filter on the alias is a filter on that (maybe encrypted) column — the
+      # rule lookup and the blind-index finder are keyed by the real name.
+      # Followed through an alias of an alias (bounded, so a cycle cannot hang).
+      def filterable_resolved_field(relation, field)
+        model = relation.model
+        aliases = model.respond_to?(:attribute_aliases) ? model.attribute_aliases : {}
+        name = field.to_s
+        aliases.size.times do
+          break unless aliases.key?(name)
+
+          name = aliases[name]
+        end
+        name.to_sym
+      end
+
+      # Only equality and `in` (through the blind index, see
+      # apply_filter_encrypted_equality) and `null` (IS NULL is true of the
+      # stored NULL, ciphertext or not) mean anything on such a column; every
+      # other operator — `not` and `not_in` included — fails closed.
+      def filterable_encrypted_refusal?(relation, field, operator)
+        !%i[in null].include?(operator) && filterable_encrypted?(relation, field)
+      end
+
+      # Equality through the field's blind index (`where_<field>`, which reads
+      # the value through the field's `normalizes` and every current / previous
+      # key); a field without one — and any negation — matches nothing, as does
+      # a value with no fingerprint (nil). A nil member of an array operand
+      # (a JSON body's `[null, "a"]`) is dropped by `where_<field>`: the filter
+      # fails toward fewer rows, never toward more.
+      def apply_filter_encrypted_equality(relation, field, value, negate)
+        real = filterable_resolved_field(relation, field)
+        return relation.none if negate || ConcernsOnRails::Support::EncryptedLookup.unqueryable?(relation.model, real)
+
+        relation.public_send(:"where_#{real}", *Array(value))
+      end
+
       def apply_filter_list(relation, field, operator, raw)
         list = filterable_list(raw)
         return relation if list.nil?
@@ -456,6 +518,12 @@ module ConcernsOnRails
       # list left empty matches nothing (`in`) or every non-NULL row
       # (`not_in`, exactly what `!=` / NOT IN would answer).
       def apply_filter_equality(relation, field, value, negate: false)
+        return apply_filter_encrypted_equality(relation, field, value, negate) if filterable_encrypted?(relation, field)
+
+        apply_filter_plain_equality(relation, field, value, negate)
+      end
+
+      def apply_filter_plain_equality(relation, field, value, negate)
         kept = filterable_equality_values(relation, field, value.is_a?(Array) ? value : [value], negate: negate)
         return filterable_where(relation, field, value, negate) if kept.nil?
         return relation.none if kept == :uncastable
@@ -588,7 +656,21 @@ module ConcernsOnRails
       def apply_filter_null(relation, field, raw)
         return relation unless filterable_operand?(raw)
 
-        ActiveModel::Type::Boolean.new.cast(raw) ? relation.where(field => nil) : relation.where.not(field => nil)
+        wanted = filterable_null_flag(raw)
+        return relation.none if wanted.nil?
+
+        wanted ? relation.where(field => nil) : relation.where.not(field => nil)
+      end
+
+      # true / false for an explicit spelling (a real boolean, or one of
+      # NULL_TRUE_VALUES / NULL_FALSE_VALUES, case-insensitive), else nil.
+      def filterable_null_flag(raw)
+        return raw if [true, false].include?(raw)
+
+        word = raw.to_s.strip.downcase
+        return true if NULL_TRUE_VALUES.include?(word)
+
+        false if NULL_FALSE_VALUES.include?(word)
       end
 
       # LIKE with the user's wildcards escaped — with an explicit ESCAPE clause,

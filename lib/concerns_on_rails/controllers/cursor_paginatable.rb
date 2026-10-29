@@ -45,6 +45,8 @@ module ConcernsOnRails
     #     (PostgreSQL/MySQL/SQLite) and uniform directions, the keyset WHERE is
     #     a tuple comparison `(a, b, id) > (x, y, z)` that walks a composite
     #     index directly; everything else falls back to the OR-expansion.
+    #     `predicate: :row` demands uniform directions: a mixed `order:` / preset
+    #     (or a mixed per-call `order:`) raises ArgumentError up front.
     #
     # Malformed or mismatched cursors raise CursorPaginatable::InvalidCursor;
     # on real controllers a rescue_from is registered automatically and renders
@@ -78,9 +80,13 @@ module ConcernsOnRails
       NON_FINITE_FLOATS = %w[Infinity -Infinity NaN].freeze
       # Adapters whose SQL supports row-value (tuple) comparison: (a, b) > (x, y).
       ROW_PREDICATE_ADAPTERS = /postgres|mysql|trilogy|sqlite/i
-      # Adapters that store a NUL byte in a text column AND escape it in a
-      # quoted literal, so a String boundary carrying one can have been minted.
-      NUL_LITERAL_ADAPTERS = /mysql|trilogy/i
+      # Adapters that store a NUL byte in a text column AND can compare against
+      # one, so a String boundary carrying one can have been minted: MySQL
+      # escapes it in a quoted literal; SQLite cuts a literal at the NUL, so the
+      # boundary goes in as CAST(X'<hex>' AS TEXT) (see cursor_sql_value).
+      # PostgreSQL cannot store one at all.
+      NUL_LITERAL_ADAPTERS = /mysql|trilogy|sqlite/i
+      SQLITE_ADAPTER = /sqlite/i
       # Deliberately mutable: memoizes adapter row-predicate support per model
       # class — stable for the life of the process, benign write race.
       ROW_PREDICATE_SUPPORT_CACHE = {} # rubocop:disable Style/MutableConstant
@@ -202,6 +208,7 @@ module ConcernsOnRails
           ordering = CursorPaginatable.resolve_ordering!(self, order, order_presets, default_preset)
           passed = { order_param:, per_page:, max_per_page:, bidirectional:, predicate:, link_header:, signed: }
           options = CursorPaginatable.normalize_options!(passed.reject { |_name, value| value.equal?(UNSET) })
+          CursorPaginatable.validate_row_orderings!(options.fetch(:predicate, cursor_paginatable_predicate), ordering)
 
           self.cursor_paginatable_order, self.cursor_paginatable_order_presets,
             self.cursor_paginatable_default_preset = ordering
@@ -242,6 +249,24 @@ module ConcernsOnRails
         return [inherited_order, inherited_presets, klass.cursor_paginatable_default_preset] if default_preset.nil?
 
         [inherited_order, inherited_presets, resolve_default_preset!(inherited_presets, default_preset, inherited_order)]
+      end
+
+      # `predicate: :row` compares a row-value tuple, which has ONE direction, so
+      # it can only walk an ordering whose directions are uniform. Checked where
+      # the ordering is declared (the order and every preset), never at page 2 —
+      # that is when the keyset WHERE is first built, so a mixed ordering used to
+      # serve page 1, mint a cursor, and 500 on every request that followed it.
+      def self.validate_row_orderings!(predicate, ordering)
+        return unless predicate == :row
+
+        order, presets, = ordering
+        [order, *presets&.values].compact.each { |pairs| validate_row_directions!(pairs) }
+      end
+
+      def self.validate_row_directions!(pairs)
+        return if pairs.map(&:last).uniq.size <= 1
+
+        raise ArgumentError, "#{name}: predicate: :row requires uniform order directions"
       end
 
       # `signed:` — false, true (the app's secret_key_base), a non-blank String,
@@ -408,7 +433,14 @@ module ConcernsOnRails
         pk = pk.to_sym
         pairs << [pk, pairs.empty? ? :asc : pairs.last.last] unless pairs.any? { |col, _| col == pk }
         validate_cursor_columns!(relation.model, pairs)
+        cursor_validate_row_directions!(pairs)
         pairs
+      end
+
+      # A per-call `order:` bypasses the macro's check, so refuse here — before
+      # page 1 is served and a cursor minted that page 2 could not read.
+      def cursor_validate_row_directions!(pairs)
+        CursorPaginatable.validate_row_directions!(pairs) if self.class.cursor_paginatable_predicate == :row
       end
 
       def validate_cursor_columns!(model, pairs)
@@ -660,9 +692,10 @@ module ConcernsOnRails
       # into the keyset WHERE as a quoted literal. Invalid UTF-8 is never
       # minted (JSON.generate raises on it) and raised ArgumentError on Rails
       # 7.0 / an encoding error on PostgreSQL. A NUL byte cut the statement
-      # short on SQLite (a StatementInvalid 500), and PostgreSQL cannot store
-      # one; only the MySQL adapters (which escape it) can hold and quote a row
-      # value carrying one, so only there is it a boundary we may have minted.
+      # short on SQLite as a quoted literal (a StatementInvalid 500), and
+      # PostgreSQL cannot store one; MySQL escapes it, and SQLite stores one
+      # through a bind and takes it back as a hex blob cast (cursor_sql_value),
+      # so only on those adapters is it a boundary we may have minted.
       # A binary column's boundary is raw bytes, not text, and is left alone.
       def cursor_text_minted?(model, type, raw)
         return true unless raw.is_a?(String) && type.type != :binary
@@ -844,7 +877,7 @@ module ConcernsOnRails
       # tuple cannot say "NULLs last" (`(c, id) > (v, x)` is never TRUE for a
       # NULL c), so :auto AND an explicit :row fall back to it.
       def cursor_predicate(model, pairs, values, nullable: [], backward: false)
-        values = values.map { |value| cursor_sql_value(model, value) }
+        values = values.each_with_index.map { |value, i| cursor_sql_value(model, value, pairs[i][0]) }
         if nullable.empty? && cursor_row_predicate?(model, pairs)
           cursor_row_predicate(model, pairs, values)
         else
@@ -852,23 +885,39 @@ module ConcernsOnRails
         end
       end
 
-      # A boundary as the WHERE binds it. Only an infinite float on SQLite
-      # differs: SQLite reads no quoted literal as infinity — Rails before 7.2
+      # A boundary as the WHERE binds it. Only two kinds differ, both on SQLite.
+      # An infinite float: SQLite reads no quoted literal as infinity — Rails before 7.2
       # quote Float::INFINITY as the bare word Infinity (no such column, a
       # 500), later ones as the TEXT 'Infinity', which SQLite sorts after
       # every number, so the boundary row matched again and the walk never
       # ended — but it reads a literal past the largest double as one.
       # PostgreSQL reads its quoted 'Infinity' / 'NaN' as float8.
-      def cursor_sql_value(model, value)
-        return value unless value.is_a?(Float) && value.infinite? && model.connection.adapter_name.match?(/sqlite/i)
+      #
+      # A String boundary holding a NUL byte is the other: SQLite reads statement
+      # text as a C string, so the quoted literal Arel inlines ends at the NUL
+      # (a StatementInvalid) — the walk stopped at the row, a 400 on the cursor
+      # the gem itself minted. A hex blob cast carries every byte; it reads the
+      # blob as text in the database encoding, so it assumes a UTF-8 SQLite
+      # database (Rails' default; a UTF-16 one would read the bytes wrongly).
+      def cursor_sql_value(model, value, column = nil)
+        return value unless model.connection.adapter_name.match?(SQLITE_ADAPTER)
+        return cursor_nul_text_literal(model, value, column) if value.is_a?(String)
+        return value unless value.is_a?(Float) && value.infinite?
 
         Arel.sql(value.positive? ? "9e999" : "-9e999")
+      end
+
+      def cursor_nul_text_literal(model, value, column)
+        return value unless value.include?("\u0000") && model.type_for_attribute(column.to_s).type != :binary
+
+        Arel.sql("CAST(X'#{value.b.unpack1('H*')}' AS TEXT)")
       end
 
       # :auto picks :row when it is expressible (>= 2 uniform-direction
       # columns) and the adapter supports tuples, silently falling back
       # otherwise; an explicit :row raises on mixed directions instead of
-      # silently changing strategy.
+      # silently changing strategy (the macro and cursor_order_pairs refuse
+      # such an ordering first, so this is a backstop).
       def cursor_row_predicate?(model, pairs)
         mode = self.class.cursor_paginatable_predicate
         return false if mode == :or || pairs.size < 2

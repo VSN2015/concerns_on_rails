@@ -1,3 +1,5 @@
+require "concerns_on_rails/support/numeric_operand"
+
 module ConcernsOnRails
   module Support
     # Guards against query-param type confusion. A client can make any params
@@ -69,15 +71,17 @@ module ConcernsOnRails
         defined?(ActionController::Parameters) ? value.is_a?(ActionController::Parameters) : false
       end
 
-      # Coerce an untrusted param to Integer, falling back to `default` for
-      # anything non-scalar (Array/Parameters/nil) — and for a non-finite
-      # number: a JSON body's `{"page": 1e400}` decodes to Float::INFINITY,
-      # whose `.to_i` (like NaN's) raises FloatDomainError — a 500.
+      # Whole-number reader for page / per_page, with the same exactness rule as
+      # Filterable's operands (NumericOperand): "1e3" is 1000, "2.0" is 2, but
+      # "2.9", "10abc", "twelve", an Array/Parameters or a non-finite number
+      # (a JSON body's `1e400` is Float::INFINITY) all fall back to `default`.
+      # String#to_i read them as 2, 10 and 0, and "1e3" as 1 — a client asking
+      # for 1000 rows got one.
       def to_i(value, default: 0)
         return default unless scalar?(value)
-        return default if value.respond_to?(:finite?) && !value.finite?
 
-        value.to_i
+        operand = NumericOperand.classify(value, ActiveModel::Type::Integer.new, column_type: nil)
+        operand&.status == :exact ? operand.value.to_i : default
       end
     end
   end
