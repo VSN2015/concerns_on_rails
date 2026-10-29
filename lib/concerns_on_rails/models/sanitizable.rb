@@ -76,6 +76,7 @@ module ConcernsOnRails
         # stored rewrite (on: :write, sanitize_all!).
         class_attribute :sanitizable_rules, instance_accessor: false, default: {}
         before_validation :apply_sanitizations
+        after_save :sanitizable_clear_record
         after_validation :sanitizable_record_validated
         # Backstop for the saves that skip validation — update_attribute,
         # save(validate: false) — which otherwise stored the raw markup in a
@@ -306,7 +307,7 @@ module ConcernsOnRails
       # A reload throws the unsaved state away, and the previous pass's record
       # with it: a value assigned afterwards is new work for the rules.
       def reload(*)
-        @sanitizable_applied = nil
+        sanitizable_clear_record
         super
       end
 
@@ -322,17 +323,24 @@ module ConcernsOnRails
       # Sanitize only what before_validation did not: a field it already
       # handled, still holding the value it produced, is skipped, so a Proc
       # runs exactly once in a validated save. A field assigned after that
-      # validation (or never validated at all) is sanitized here. The record
-      # is cleared for the next save.
+      # validation (or never validated at all) is sanitized here and recorded
+      # the same way. The record is dropped once the save succeeded
+      # (sanitizable_clear_record, after_save), so a save halted by a later
+      # before_save or rolled back, then retried on the same record, does not
+      # run a Proc on its own output again.
       def sanitizable_apply_unvalidated
-        applied = @sanitizable_applied || {}
-        @sanitizable_applied = nil
+        applied = (@sanitizable_applied ||= {})
         sanitizable_each_write_rule do |field, writer, value|
           next if applied.key?(field) && applied[field] == value
 
           self[field] = writer.call(value)
           ConcernsOnRails::Support::TransformBackstop.wrote(self, field)
+          applied[field] = self[field].dup
         end
+      end
+
+      def sanitizable_clear_record
+        @sanitizable_applied = nil
       end
 
       def sanitizable_each_write_rule
@@ -356,8 +364,8 @@ module ConcernsOnRails
       def sanitizable_stored_unchanged?(field)
         persisted? && respond_to?(:will_save_change_to_attribute?) && !will_save_change_to_attribute?(field)
       end
-      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_each_write_rule,
-              :sanitizable_stored_unchanged?
+      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_clear_record,
+              :sanitizable_each_write_rule, :sanitizable_stored_unchanged?
 
       # { field => sanitized } for the fields whose stored value would change;
       # nil values are left alone (nothing to sanitize).

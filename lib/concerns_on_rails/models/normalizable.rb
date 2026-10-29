@@ -121,6 +121,11 @@ module ConcernsOnRails
         class_attribute :normalizable_rules, instance_accessor: false, default: {}
         before_validation :apply_normalizations
         after_validation :normalizable_record_validated
+        # The per-save record is dropped once the save SUCCEEDED, not inside
+        # the dispatcher: a save halted by a later before_save, or rolled back
+        # (RecordNotUnique), never reaches after_save, so a retry on the same
+        # record finds the record and does not run a Proc on its output again.
+        after_save :normalizable_clear_record
         # Backstop for the saves that skip validation — update_attribute,
         # save(validate: false) — which otherwise stored the raw value. Run
         # by the shared PREPENDED dispatcher (Support::TransformBackstop), in
@@ -209,8 +214,10 @@ module ConcernsOnRails
           # escaping what we produced) may have rewritten; the value we
           # PRODUCED is only the fallback, for a pass that never finished.
           if previous.key?(field) && validated.fetch(field) { previous[field] } == value
-            # Skipped, but the record keeps what WE produced.
-            @normalizable_applied[field] = previous[field]
+            # Skipped. The record keeps what the field HOLDS (what validation
+            # accepted, a later sibling transform's rewrite included): a
+            # sibling's output is never this concern's to normalize again.
+            @normalizable_applied[field] = value.dup
             next
           end
 
@@ -226,7 +233,7 @@ module ConcernsOnRails
       # A reload throws the unsaved state away, and the previous pass's
       # record with it: a value assigned afterwards is new work for the rules.
       def reload(*)
-        @normalizable_applied = @normalizable_validated = nil
+        normalizable_clear_record
         super
       end
 
@@ -260,16 +267,28 @@ module ConcernsOnRails
       # Sanitizable's "&lt;" into "&Lt;") and ran validation's value past
       # validation. What is normalized here is a field rewritten by code that
       # is no transform — a slug friendly_id rebuilds in a validate step, after
-      # this concern's pass — or one the pass never saw (nil then). The record
-      # is cleared for the next save.
+      # this concern's pass — or one the pass never saw (nil then). Then the
+      # record is re-taken as the save leaves the fields, so a retry of a
+      # halted or rolled-back save (the record outlives it, see
+      # normalizable_clear_record) finds them as that save stored them.
       def normalizable_settle
-        @normalizable_applied = @normalizable_validated = nil
+        applied = (@normalizable_applied ||= {})
         normalizable_each_pending_rule do |field, normalizer, value|
           next if ConcernsOnRails::Support::TransformBackstop.wrote?(self, field, value)
 
           normalized = normalizer.call(value)
           self[field] = normalized unless normalized == value
+          ConcernsOnRails::Support::TransformBackstop.wrote(self, field)
+          applied[field] = nil
         end
+        @normalizable_applied = applied.to_h { |field, _| [field, self[field].dup] }
+        @normalizable_validated = @normalizable_applied.transform_values(&:dup)
+      end
+
+      # Dropped once a save succeeded (after_save) and on reload: the next save
+      # cycle starts afresh. Not before then — see the after_save above.
+      def normalizable_clear_record
+        @normalizable_applied = @normalizable_validated = nil
       end
 
       def normalizable_each_pending_rule
