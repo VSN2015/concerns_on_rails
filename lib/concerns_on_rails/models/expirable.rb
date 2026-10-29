@@ -76,7 +76,10 @@ module ConcernsOnRails
         # (Support::TimeValue.cast_argument!).
         # (Internal: public only so the instance verbs can reach it.)
         def expirable_cast_time(time)
-          return Time.zone.now if time.blank?
+          # A blank means now, cast through the column like any given time: on a
+          # date column that is today's Date, never the raw TimeWithZone (which
+          # compares against a Date at UTC midnight).
+          time = Time.zone.now if time.blank?
 
           ConcernsOnRails::Support::TimeValue.cast_argument!(
             self, expirable_field, time,
@@ -200,11 +203,7 @@ module ConcernsOnRails
       # expiry later). A positive duration schedules expiry and fires no
       # hooks; zero or less expires the record now, with the hooks.
       def expire_in!(duration)
-        unless duration.respond_to?(:to_i) && !duration.is_a?(String)
-          raise ArgumentError,
-                "ConcernsOnRails::Models::Expirable: expire_in! takes a duration " \
-                "(e.g. 15.minutes), got #{duration.class}"
-        end
+        expirable_check_duration!(duration, "expire_in!", "a duration")
 
         expirable_write_expiry(self.class.expirable_cast_time(Time.zone.now + duration))
       end
@@ -227,6 +226,7 @@ module ConcernsOnRails
       # is extended as assigned; a new record has no row and extends its own.
       # Other unsaved changes are saved with it, as `update` always has.
       def extend_expiry!(by:)
+        expirable_check_duration!(by, "extend_expiry!", "a duration (by:)")
         field = self.class.expirable_field
         return update(field => expiry_extension_base(self[field]) + by) if new_record? || will_save_change_to_attribute?(field)
 
@@ -236,15 +236,29 @@ module ConcernsOnRails
       end
 
       # Returns an ActiveSupport::Duration of how long until expiry, or nil
-      # when there's no expiry set, or 0.seconds when already expired.
+      # when there's no expiry set, or 0.seconds when already expired. "Already
+      # expired" is `expired?`'s own answer, and on a `date` column the expiry
+      # instant is the start of that day in Time.zone (the moment `expired?`
+      # turns true), so the time left is measured to it.
       def time_until_expiry
         value = self[self.class.expirable_field]
         return nil if value.nil?
+        return 0.seconds if expirable_expired?
 
-        now = Time.zone.now
-        return 0.seconds if value <= now
+        # Clamped: an expiry falling between `expired?`'s clock read and this
+        # one must never give a negative Duration.
+        [value.in_time_zone - Time.zone.now, 0].max.seconds
+      end
 
-        (value - now).seconds
+      # A lifetime is an ActiveSupport::Duration or a Numeric number of seconds;
+      # anything else (nil from an absent param included) raises the concern's
+      # ArgumentError before any hook or write.
+      def expirable_check_duration!(value, verb, what)
+        return if value.is_a?(ActiveSupport::Duration) || value.is_a?(Numeric)
+
+        raise ArgumentError,
+              "ConcernsOnRails::Models::Expirable: #{verb} takes #{what} " \
+              "(e.g. 15.minutes), got #{value.class}"
       end
 
       # Whether the saved expiry already falls at or before `time`, so
@@ -266,9 +280,15 @@ module ConcernsOnRails
 
       # The write behind expire! and expire_in!. Hooks fire only when the
       # time is not in the future: a future time schedules, it doesn't expire.
+      # "Future" is judged against the predicates' own bound
+      # (Support::TimeValue.predicate_bound — today in Time.zone on a date
+      # column), so the hooks fire exactly when the written value makes the
+      # record `expired?`; never through Date#to_time, which reads the
+      # process zone.
       def expirable_write_expiry(time)
-        hooks = time.to_time > Time.zone.now ? {} : { before: :before_expire, after: :after_expire }
         field = self.class.expirable_field
+        bound = ConcernsOnRails::Support::TimeValue.predicate_bound(self.class, field, Time.zone.now)
+        hooks = time > bound ? {} : { before: :before_expire, after: :after_expire }
         ConcernsOnRails::Support::HookedWrite.run(self, **hooks) do
           update(field => time)
         end
@@ -301,7 +321,7 @@ module ConcernsOnRails
       end
 
       private :expiry_extension_base, :expirable_expired?, :expirable_live?,
-              :expirable_expires_by?, :expirable_write_expiry, :expirable_settle
+              :expirable_expires_by?, :expirable_write_expiry, :expirable_settle, :expirable_check_duration!
     end
   end
 end
