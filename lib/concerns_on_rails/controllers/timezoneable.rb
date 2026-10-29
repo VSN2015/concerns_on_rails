@@ -34,9 +34,9 @@ module ConcernsOnRails
     # `cookie:`), `response_header:` (default `false`; `true` emits
     # `X-Time-Zone: <name>`, or pass a header name), `vary:` (default `true`;
     # appends `Vary: Time-Zone` whenever the `Time-Zone` request header is a
-    # source, whether or not `response_header:` is on, so a shared cache never
-    # serves one zone's rendering to another; `vary: false` opts out — the
-    # cookie source needs none, cookies are not a cache key).
+    # source and `Vary: Cookie` whenever the cookie source is on, whether or
+    # not `response_header:` is on, so a shared cache never serves one zone's
+    # rendering to another; `vary: false` opts out).
     # `time_zone_source` reports which source won.
     module Timezoneable
       extend ActiveSupport::Concern
@@ -193,17 +193,21 @@ module ConcernsOnRails
       end
 
       # Vary: Time-Zone whenever the request header can influence the choice
-      # (the body differs per header value), independent of `response_header:` —
-      # a CDN must not serve the Tokyo rendering to a UTC client. Appended and
-      # de-duplicated, never clobbered (Localizable's Accept-Language rule), and
-      # only the dimension the resolver actually consults: `header: false` or
-      # `vary: false` writes nothing.
+      # (the body differs per header value), and Vary: Cookie whenever the
+      # cookie source is on (a shared cache would otherwise serve a
+      # cookie-zoned body to every client) -- both independent of
+      # `response_header:`. Appended and de-duplicated, never clobbered
+      # (Localizable's Accept-Language rule), and only the dimensions the
+      # resolver actually consults: `vary: false` writes nothing.
       def apply_time_zone_vary
         opts = self.class.timezoneable_options
-        return unless opts[:header] && opts.fetch(:vary, true)
+        return unless opts.fetch(:vary, true)
         return unless respond_to?(:response) && response.respond_to?(:set_header)
 
-        Support::VaryHeader.append(self, "Time-Zone")
+        dimensions = []
+        dimensions << "Time-Zone" if opts[:header]
+        dimensions << "Cookie" if opts[:cookie]
+        Support::VaryHeader.append(self, *dimensions) unless dimensions.empty?
       end
 
       # Match a raw source value against the allow-list (when present), returning

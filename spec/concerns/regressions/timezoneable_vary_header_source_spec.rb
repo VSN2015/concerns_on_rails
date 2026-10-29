@@ -56,11 +56,30 @@ describe "Timezoneable Vary on the Time-Zone request header" do
     expect(vary_of(result)).not_to include("Time-Zone")
   end
 
-  it "writes no Vary when the header source is off (the cookie and param sources need none)" do
+  it "advertises Vary: Cookie (not Time-Zone) when only the cookie source is on" do
     result = IntegrationHarness.dispatch(zone_controller(header: false, cookie: true), :show,
                                          headers: { "Time-Zone" => "Asia/Tokyo", "Cookie" => "time_zone=Tokyo" })
 
+    expect(JSON.parse(result.body)["zone"]).to eq("Tokyo")
+    expect(vary_of(result)).to include("Cookie")
     expect(vary_of(result)).not_to include("Time-Zone")
+  end
+
+  it "advertises both dimensions with header and cookie sources on, and neither with vary: false" do
+    both = IntegrationHarness.dispatch(zone_controller(cookie: true), :show)
+    expect(vary_of(both)).to include("Time-Zone", "Cookie")
+
+    off = IntegrationHarness.dispatch(zone_controller(cookie: true, vary: false), :show)
+    expect(vary_of(off)).not_to include("Time-Zone")
+    expect(vary_of(off)).not_to include("Cookie")
+  end
+
+  it "writes no Vary when neither the header nor the cookie source is on (param only)" do
+    result = IntegrationHarness.dispatch(zone_controller(header: false), :show, query: "time_zone=Tokyo")
+
+    expect(JSON.parse(result.body)["zone"]).to eq("Tokyo")
+    expect(vary_of(result)).not_to include("Time-Zone")
+    expect(vary_of(result)).not_to include("Cookie")
   end
 
   it "keeps vary: false from suppressing the X-Time-Zone response header" do
@@ -77,7 +96,9 @@ describe "Timezoneable Vary on the Time-Zone request header" do
 
       timezoneable default: "UTC"
       define_method(:show) { render json: {} }
-      before_action { response.set_header("Vary", "*") }
+      # prepend: it must run BEFORE switch_time_zone (an around_action registered
+      # at include time) for the Vary: * guard to be exercised at all.
+      prepend_before_action { response.set_header("Vary", "*") }
     end
     expect(IntegrationHarness.dispatch(star, :show).header("Vary")).to eq("*")
 
@@ -90,5 +111,35 @@ describe "Timezoneable Vary on the Time-Zone request header" do
       define_method(:show) { render json: {} }
     end
     expect(vary_of(IntegrationHarness.dispatch(other, :show))).to include("Origin", "Time-Zone")
+  end
+
+  it "still carries Vary: Time-Zone on a rescue_from-rendered error" do
+    klass = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Timezoneable
+      include ConcernsOnRails::Controllers::ErrorHandleable
+
+      timezoneable default: "UTC"
+      define_method(:show) { raise ActiveRecord::RecordNotFound }
+    end
+    result = IntegrationHarness.dispatch(klass, :show, headers: { "Time-Zone" => "Asia/Tokyo" })
+
+    expect(result.status).to eq(404)
+    expect(vary_of(result)).to include("Time-Zone")
+  end
+
+  it "de-duplicates next to Localizable: Accept-Language and Time-Zone, each once" do
+    klass = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Localizable
+      include ConcernsOnRails::Controllers::Timezoneable
+
+      localizable available: %i[en fr], default: :en
+      timezoneable default: "UTC"
+      define_method(:show) { render json: {} }
+    end
+    result = IntegrationHarness.dispatch(klass, :show, headers: { "Accept-Language" => "fr", "Time-Zone" => "Asia/Tokyo" })
+    dimensions = vary_of(result).map(&:downcase)
+
+    expect(dimensions.count("accept-language")).to eq(1)
+    expect(dimensions.count("time-zone")).to eq(1)
   end
 end
