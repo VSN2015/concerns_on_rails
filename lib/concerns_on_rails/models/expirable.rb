@@ -245,7 +245,9 @@ module ConcernsOnRails
         return nil if value.nil?
         return 0.seconds if expirable_expired?
 
-        (value.in_time_zone - Time.zone.now).seconds
+        # Clamped: an expiry falling between `expired?`'s clock read and this
+        # one must never give a negative Duration.
+        [value.in_time_zone - Time.zone.now, 0].max.seconds
       end
 
       # A lifetime is an ActiveSupport::Duration or a Numeric number of seconds;

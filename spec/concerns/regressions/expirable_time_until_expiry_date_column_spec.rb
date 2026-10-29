@@ -105,4 +105,20 @@ describe "Expirable#time_until_expiry on a date column" do
       expect(datetime_model.create!(expires_at: tokyo_morning - 1.minute).time_until_expiry).to eq(0.seconds)
     end
   end
+
+  it "never answers a negative Duration when the expiry passes between the two clock reads" do
+    datetime_model = Class.new(TestModel) do
+      self.table_name = "tue_tokens"
+      include ConcernsOnRails::Expirable
+
+      expirable_by :expires_at
+    end
+
+    travel_to(tokyo_morning) do
+      token = datetime_model.create!(expires_at: tokyo_morning - 1.second)
+      allow(token).to receive(:expirable_expired?).and_return(false) # the instant was still ahead at the first read
+
+      expect(token.time_until_expiry).to eq(0.seconds)
+    end
+  end
 end
