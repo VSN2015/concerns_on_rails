@@ -286,7 +286,17 @@ module ConcernsOnRails
           to = config.fetch(:to).to_s
           return :skip if record[klass.stateable_field].to_s == to && !Array(config[:from]).map(&:to_s).include?(to)
 
-          record.public_send(guard) ? record.public_send(:"#{method_base}!") : :skip
+          record.public_send(guard) ? stateable_batch_fire(record, method_base) : :skip
+        end
+
+        # A record the event's update! rejects is a failed record: false makes
+        # BatchOps raise RecordNotSaved (with the record) and roll the batch
+        # back, the contract of every *_all verb. The single <event>! still
+        # raises RecordInvalid.
+        def stateable_batch_fire(record, method_base)
+          record.public_send(:"#{method_base}!")
+        rescue ActiveRecord::RecordInvalid
+          false
         end
 
         def stateable_configure!(field, states, options)
