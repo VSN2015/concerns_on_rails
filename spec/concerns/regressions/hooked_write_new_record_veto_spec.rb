@@ -201,4 +201,95 @@ describe "HookedWrite on a new record whose after-hook vetoes" do
       expect(model.first.status).to eq("published")
     end
   end
+
+  context "other abort shapes on a new record" do
+    let(:model) do
+      Class.new(TestModel) do
+        self.table_name = "hw_plain"
+        include ConcernsOnRails::Publishable
+
+        attr_accessor :before_veto, :after_error
+
+        def before_publish
+          raise ActiveRecord::Rollback if before_veto
+        end
+
+        def after_publish
+          raise ArgumentError, "boom" if after_error
+        end
+      end
+    end
+
+    it "a BEFORE-hook veto leaves the record new, and a later save! INSERTs one row" do
+      post = model.new(title: "a", before_veto: true)
+      model.transaction do
+        expect(post.publish!).to be(false)
+        expect(post).to be_new_record
+        expect(post.id).to be_nil
+        expect(post.published_at).to be_nil
+        expect(post.save!).to be(true)
+      end
+      expect(model.count).to eq(1)
+    end
+
+    it "an after-hook exception rescued inside the caller's transaction leaves it new and the verb retryable" do
+      post = model.new(title: "a", after_error: true)
+      model.transaction do
+        expect { post.publish! }.to raise_error(ArgumentError, "boom")
+        expect(post).to be_new_record
+        expect(post.id).to be_nil
+        post.after_error = false
+        expect(post.publish!).to be(true)
+      end
+      expect(model.count).to eq(1)
+      expect(post).to be_persisted
+    end
+
+    it "restores destroyed? and previously_new_record? for a new record" do
+      post = model.new(title: "a")
+      post.after_error = true
+      model.transaction do
+        expect { post.publish! }.to raise_error(ArgumentError)
+        expect(post.destroyed?).to be(false)
+        expect(post.previously_new_record?).to be(false) if post.respond_to?(:previously_new_record?)
+        expect(post).to be_new_record
+      end
+    end
+  end
+
+  context "a composite primary key [shop_id, id]", min_rails: "7.1" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :hw_composite, primary_key: %i[shop_id id], force: true do |t|
+          t.integer :shop_id
+          t.integer :id
+          t.string :title
+          t.datetime :published_at
+        end
+      end
+    end
+
+    after { ActiveRecord::Base.connection.drop_table(:hw_composite, if_exists: true) }
+
+    it "keeps a vetoed new record new inside a caller transaction; save! INSERTs it" do
+      model = Class.new(TestModel) do
+        self.table_name = "hw_composite"
+        self.primary_key = %i[shop_id id]
+        include ConcernsOnRails::Publishable
+
+        def after_publish
+          raise ActiveRecord::Rollback
+        end
+      end
+      post = model.new(id: [1, 7], title: "a")
+      model.transaction do
+        expect(post.publish!).to be(false)
+        expect(post).to be_new_record
+        expect(post.id).to eq([1, 7])
+        expect(post.save!).to be(true)
+      end
+      expect(model.count).to eq(1)
+      expect(model.find([1, 7]).title).to eq("a")
+    end
+  end
 end

@@ -65,9 +65,12 @@ module ConcernsOnRails
       # The record's identity flags, snapshotted for a NEW record as well as a
       # stored one. Rolling the savepoint back does not reliably put them
       # back: Rails restores a record's transaction state (`@new_record`,
-      # `@destroyed`, `@previously_new_record`, the primary key) only when its
-      # OUTERMOST transaction rolls back — or, on 6.0, lazily from the state
-      # at the record's FIRST join of the enclosing transaction. So:
+      # `@destroyed`, `@previously_new_record`, the primary key) only on a
+      # full rollback or when the record's transaction join level is <= 1.
+      # `update` runs `with_transaction_returning_status` inside the verb's own
+      # transaction, so the record has joined twice (level 2) and a savepoint
+      # rollback leaves the flags alone. On 6.0 the state is applied lazily,
+      # from the record's FIRST join of the enclosing transaction. So:
       #
       # * a record CREATED by the aborted write, inside a caller's
       #   transaction, stayed `persisted?` with the id gone (the attribute set
