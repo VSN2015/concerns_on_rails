@@ -81,6 +81,42 @@ RSpec.describe "native JSON attribute detection (Storable + Auditable)" do
     end
   end
 
+  describe "an explicit non-JSON attribute type" do
+    it "wins over the column's own type (a String is wanted)" do
+      klass = model do
+        attribute :settings, :string
+      end
+
+      expect(ConcernsOnRails::Support::NativeJson.column?(klass, :settings)).to be(false)
+    end
+  end
+
+  describe "a PostgreSQL jsonb column", if: TestDatabase.adapter == "postgresql" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :native_json_jsonb_posts, force: true do |t|
+          t.jsonb :settings
+        end
+      end
+    end
+
+    after { ActiveRecord::Base.connection.drop_table(:native_json_jsonb_posts, if_exists: true) }
+
+    it "stores an object and answers where_<key>" do
+      klass = Class.new(TestModel) do
+        self.table_name = "native_json_jsonb_posts"
+        include ConcernsOnRails::Models::Storable
+
+        storable_by :settings, theme: { type: :string }
+      end
+      record = klass.create!(theme: "dark")
+
+      expect(ConcernsOnRails::Support::NativeJson.column?(klass, :settings)).to be(true)
+      expect(klass.connection.select_value("SELECT jsonb_typeof(settings) FROM native_json_jsonb_posts")).to eq("object")
+      expect(klass.where_theme("dark").to_a).to eq([record])
+    end
+  end
+
   describe "Support::NativeJson.column?" do
     let(:klass) do
       model do
