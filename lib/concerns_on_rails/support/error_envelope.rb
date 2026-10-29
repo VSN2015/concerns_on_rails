@@ -7,6 +7,12 @@ module ConcernsOnRails
     # dance that was hand-copied across seven concerns — and the single place
     # to change when e.g. an RFC 9457 problem+json mode lands.
     module ErrorEnvelope
+      # The generic body of a 404: ErrorHandleable's missing-record handler and
+      # Authorizable's `status: :not_found` concealment both render it, so a
+      # client can never tell a hidden record from a missing one. ONE constant,
+      # so the two cannot drift apart.
+      NOT_FOUND_MESSAGE = "Resource not found".freeze
+
       module_function
 
       def render(controller, message:, status:, code: nil, details: nil)

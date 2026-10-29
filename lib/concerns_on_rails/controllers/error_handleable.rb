@@ -163,7 +163,7 @@ module ConcernsOnRails
         # Use a generic message: the raw RecordNotFound message leaks the model
         # class name and the queried attribute/value to API clients. Subclasses
         # can override this method to surface detail in non-production envs.
-        render_handled_error(:not_found, message: "Resource not found", error: error)
+        render_handled_error(:not_found, message: ConcernsOnRails::Support::ErrorEnvelope::NOT_FOUND_MESSAGE, error: error)
       end
 
       def handle_parameter_missing(error)

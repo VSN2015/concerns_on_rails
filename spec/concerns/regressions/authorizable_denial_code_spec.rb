@@ -45,6 +45,22 @@ describe "Authorizable denial envelope code" do
     expect(concealed.body).to eq(missing.body)
   end
 
+  # The helper above passes `message:` explicitly, so it never covered the
+  # DEFAULT message (audit 2026-10-29, HTTP-1): omit it here.
+  it "answers a status: :not_found rule WITHOUT message: with the same body as a genuinely missing record" do
+    klass = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Respondable
+      include ConcernsOnRails::Controllers::Authorizable
+
+      authorize_by(status: :not_found) { false }
+      define_method(:show) { render json: { ok: true } }
+    end
+    concealed = IntegrationHarness.dispatch(klass, :show)
+    missing = IntegrationHarness.dispatch(missing_record_controller, :show)
+
+    expect(concealed.body).to eq(missing.body)
+  end
+
   it "answers a status: :not_found rule with the same problem document as a missing record under :problem_details" do
     concealed = IntegrationHarness.dispatch(denying_controller(:not_found, problem_details: true), :show)
     missing = IntegrationHarness.dispatch(missing_record_controller(problem_details: true), :show)
