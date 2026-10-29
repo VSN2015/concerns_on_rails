@@ -258,7 +258,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   re-encrypts unchanged data; `changed_in_place?` decrypts the stored value so an in-place
   String edit is saved); `type:` reuses the
   Storable casters; keys from `ConcernsOnRails.configure_encryption` / per-field
-  `key:` (PBKDF2, lazy Proc), missing key raises at first use. `<field>_ciphertext`
+  `key:` (PBKDF2, lazy Proc), missing key raises at first use (a DECLARED per-field key resolving to nil/"" — an explicit `key: nil` included — is a missing key for that field, never the global key; only an omitted `key:` uses it; `key:` must be a String or callable, else ArgumentError). `<field>_ciphertext`
   / `<field>_encrypted?` readers (read the DATABASE attribute behind any assignment —
   `encryptable_stored_value`, also Anonymizable's); wrong-key/tamper/malformed → `DecryptionError`.
   A `:datetime` field reports `type :datetime`, so ActiveRecord's own TimeZoneConverter wraps it

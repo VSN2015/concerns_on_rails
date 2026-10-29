@@ -102,7 +102,7 @@ Repeatable — each call declares more encrypted fields. Rules accumulate (reass
 |--------|------|---------|-------------|
 | `*fields` | `Symbol…` | — (required) | One or more `text`/`binary` columns to encrypt. |
 | `type:` | `Symbol` | `:string` | Casts the decrypted value: `:string`, `:integer`, `:float`, `:decimal`, `:boolean`, `:date`, `:datetime` (the Storable caster set; `:decimal` precision-safe, `:datetime` UTC microseconds). A `:datetime` field behaves like a datetime column on the same model: see [Notes](#notes--gotchas). |
-| `key:` | `String` / `Proc` / `nil` | `nil` | Per-field key override (raw / hex / passphrase, or a lazy Proc). Falls back to the gem-level `ConcernsOnRails.encryption` key. |
+| `key:` | `String` / callable | omitted | Per-field key override (raw / hex / passphrase, or a lazy Proc). Only an omitted `key:` falls back to the gem-level `ConcernsOnRails.encryption` key; a declared key resolving to nil or `""` (including an explicit `key: nil`) is a missing key for that field (`MissingKeyError`, or passthrough under `on_missing_key: :passthrough`), never the global key. Anything but a String or callable raises `ArgumentError`. |
 | `blind_index:` | `true` / `Hash` / `nil` | `nil` | Maintain a deterministic fingerprint column for exact-match lookups. `true` uses `<field>_bidx`; a Hash accepts `column:` and `expression:` (a callable normalizer applied on write and query). See below. |
 
 ### Blind index of a typed field
