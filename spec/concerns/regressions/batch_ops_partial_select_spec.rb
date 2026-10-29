@@ -112,6 +112,42 @@ RSpec.describe "Batch verbs and relation destroy_all over a partial select" do
     expect(ConcernsOnRails::Support::BatchOps.full_rows(publishable.select("COUNT(*) AS n")).select_values.size).to eq(2)
   end
 
+  it "counts only the model's own star: a joined table's star still gets the model's columns" do
+    stub_const("PsAuthor", Class.new(TestModel) { self.table_name = "ps_authors" })
+    author = PsAuthor.create!(name: "a")
+    publishable.create!(title: "a", author_id: author.id)
+    joined = publishable.joins("INNER JOIN ps_authors ON ps_authors.id = ps_posts.author_id")
+
+    expect(joined.select("ps_authors.*").publish_all).to eq(1)
+    publishable.update_all(published_at: nil)
+    expect(joined.select(PsAuthor.arel_table[Arel.star]).publish_all).to eq(1)
+  end
+
+  it "recognizes the model's own star in its quoted and schema-qualified spellings" do
+    full = ->(sel) { ConcernsOnRails::Support::BatchOps.full_rows(publishable.select(sel)).select_values.size }
+    expect(full.call("*")).to eq(1)
+    expect(full.call('"ps_posts".*')).to eq(1)
+    expect(full.call("`ps_posts`.*")).to eq(1)
+    expect(full.call("main.ps_posts.*")).to eq(1)
+    expect(full.call(publishable.arel_table[Arel.star])).to eq(1)
+    expect(full.call("ps_authors.*")).to eq(2)
+    expect(full.call("my_ps_posts.*")).to eq(2)
+  end
+
+  it "runs a limited DISTINCT select(:id) relation without repeating id in the key subquery" do
+    3.times { |i| publishable.create!(title: "t#{i}") }
+    relation = publishable.select(:id).distinct.order(:title).limit(2)
+    sql = []
+    callback = ->(*, payload) { sql << payload[:sql] }
+
+    count = ActiveSupport::Notifications.subscribed(callback, "sql.active_record") { relation.publish_all }
+
+    expect(count).to eq(2)
+    derived = sql.find { |query| query =~ /FROM \(SELECT DISTINCT/ }
+    expect(derived).to be_present
+    expect(derived[/FROM \(SELECT DISTINCT(.*?) FROM/m, 1].strip).to match(/\A[`"]?ps_posts[`"]?\.\*\z/)
+  end
+
   it "leaves an unselected relation alone" do
     publishable.create!(title: "a")
 

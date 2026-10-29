@@ -197,18 +197,23 @@ module ConcernsOnRails
       # rows are the same ones, so nothing but the instantiated columns changes.
       def full_rows(relation)
         values = relation.select_values
-        return relation if values.empty? || values.any? { |value| whole_table_select?(value) }
+        table = relation.klass.table_name
+        return relation if values.empty? || values.any? { |value| whole_table_select?(value, table) }
 
         relation.select(relation.klass.arel_table[Arel.star])
       end
 
-      WHOLE_TABLE_SELECT = /(?:\A|,)\s*(?:["`\w]+\.)?\*\s*(?:,|\z)/
-      private_constant :WHOLE_TABLE_SELECT
+      # Only the MODEL's own star counts: `*`, `table.*` or `schema.table.*`
+      # (quoted or bare), or an Arel star of its table. A joined table's
+      # `authors.*` leaves the model's columns out all the same.
+      def whole_table_select?(value, table)
+        if value.is_a?(Arel::Attributes::Attribute)
+          return value.name.to_s == "*" && value.relation.respond_to?(:name) && value.relation.name.to_s == table.to_s
+        end
+        return false unless value.is_a?(String)
 
-      def whole_table_select?(value)
-        return value.name.to_s == "*" if value.respond_to?(:name) && !value.is_a?(Symbol)
-
-        value.is_a?(String) && value.match?(WHOLE_TABLE_SELECT)
+        qualifier = "(?:[\"`\\w]+\\.)?[\"`]?#{Regexp.escape(table)}[\"`]?\\."
+        value.match?(/(?:\A|,)\s*(?:#{qualifier})?\*\s*(?:,|\z)/)
       end
 
       def each_row(relation, &)
@@ -248,7 +253,10 @@ module ConcernsOnRails
       def limited_keys(relation, key)
         return relation.pluck(key) unless relation.distinct_value
 
-        relation.klass.unscoped.from(relation, relation.klass.quoted_table_name).pluck(key)
+        # Only the key is plucked, so the derived table is the relation's own
+        # `SELECT DISTINCT table.*`: a select left on it (full_rows adds the
+        # star beside the caller's columns) would repeat `id` there.
+        relation.klass.unscoped.from(relation.unscope(:select), relation.klass.quoted_table_name).pluck(key)
       end
       private_class_method :each_row, :whole_table_select?, :joined?, :unjoined, :limited_keys, :conditional_counters?, :audited_writes?
 
