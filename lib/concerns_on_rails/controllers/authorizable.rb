@@ -88,6 +88,10 @@ module ConcernsOnRails
         # so arity slicing can't raise.
         def require_role(*roles, via: :current_user, role_method: :role, only: nil, except: nil,
                          status: :forbidden, message: "Forbidden", name: nil)
+          # Flatten BEFORE the empty check: `require_role %i[admin editor]` (or a
+          # role-list constant) arrives as [[:admin, :editor]], and `require_role []`
+          # as [[]] -- neither may count as a single role named "[...]".
+          roles = roles.flatten
           raise ArgumentError, "#{LABEL}: at least one role is required" if roles.empty?
 
           wanted = roles.map(&:to_s)
