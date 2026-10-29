@@ -148,7 +148,7 @@ describe "Transform backstops run in before_validation order" do
     expect(klass.concerns_on_rails_transform_backstops)
       .to eq(%i[sanitizable_apply_unvalidated normalizable_apply_unvalidated
                 addressable_normalize_unvalidated taggable_normalize_unvalidated])
-    expect(klass.concerns_on_rails_transform_settles).to eq(%i[normalizable_settle])
+    expect(klass.concerns_on_rails_transform_settles).to eq(%i[sanitizable_settle normalizable_settle])
 
     klass.create!(title: "t").update_attribute(:title, "<b> new </b>  title")
     expect(seen).to eq("new title")

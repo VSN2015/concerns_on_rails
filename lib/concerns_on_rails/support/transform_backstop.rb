@@ -35,12 +35,19 @@ module ConcernsOnRails
       # The before_save callback that runs them.
       DISPATCHER = :concerns_on_rails_run_transform_backstops
       OUTPUTS = :@concerns_on_rails_transform_outputs
-      private_constant :OUTPUTS
+      # The per-save records the transforms keep (what each produced, what
+      # validation left): dropped once a save has run, restored if its
+      # transaction then rolls back.
+      SAVE_RECORDS = [
+        :@normalizable_applied, :@normalizable_validated, :@sanitizable_applied, OUTPUTS
+      ].freeze
+      STASH = :@concerns_on_rails_transform_stash
+      private_constant :OUTPUTS, :SAVE_RECORDS, :STASH
 
       # Records that a transform just left `record[field]` holding its output.
       def self.wrote(record, field)
-        outputs = record.instance_variable_get(OUTPUTS) || record.instance_variable_set(OUTPUTS, {})
-        outputs[field.to_s] = record[field].dup
+        outputs = record.instance_variable_get(OUTPUTS) || {}
+        record.instance_variable_set(OUTPUTS, outputs.merge(field.to_s => record[field].dup))
       end
 
       # Is `value` exactly what a transform last wrote into `field`?
@@ -68,7 +75,10 @@ module ConcernsOnRails
         end
         klass.include(Dispatcher)
         klass.before_save DISPATCHER, prepend: true
-        klass.after_save :concerns_on_rails_forget_transform_outputs
+        klass.after_save :concerns_on_rails_stash_transform_records
+        # Rails 6.0 enrolls a record in the transaction (so `rolledback!` runs
+        # at all) only when its class has a transactional callback.
+        klass.after_rollback :concerns_on_rails_transform_enrolled if ActiveRecord.version < Gem::Version.new("6.1")
       end
 
       def self.append(klass, list, name)
@@ -82,14 +92,59 @@ module ConcernsOnRails
         # A reload throws the unsaved state away, the transforms' record of it
         # included.
         def reload(*)
-          concerns_on_rails_forget_transform_outputs
+          SAVE_RECORDS.each { |name| remove_instance_variable(name) if instance_variable_defined?(name) }
+          remove_instance_variable(STASH) if instance_variable_defined?(STASH)
           super
+        end
+
+        # What the transaction's end decides: a commit makes the stash
+        # pointless; a rollback restores attributes' dirty state but keeps the
+        # values the transforms wrote, so their record has to come back too —
+        # or a retry of the same record would transform its own output again.
+        # The keywords differ across Rails 6.0-8.1: everything goes to super.
+        def committed!(*, **, &)
+          super
+        ensure
+          remove_instance_variable(STASH) if instance_variable_defined?(STASH)
+        end
+
+        def rolledback!(*, **, &)
+          super
+        ensure
+          concerns_on_rails_restore_transform_records
+        end
+
+        # A copy starts from its own copy of the records (a shallow `dup`
+        # would share the Hashes the original keeps updating).
+        def initialize_dup(other)
+          super
+          SAVE_RECORDS.each do |name|
+            instance_variable_set(name, instance_variable_get(name).dup) if instance_variable_defined?(name)
+          end
+          remove_instance_variable(STASH) if instance_variable_defined?(STASH)
         end
 
         private
 
-        def concerns_on_rails_forget_transform_outputs
-          remove_instance_variable(OUTPUTS) if instance_variable_defined?(OUTPUTS)
+        def concerns_on_rails_transform_enrolled; end
+
+        # after_save: the save went through, so the next save cycle starts
+        # afresh — but the records are kept aside until the transaction is
+        # known to have committed.
+        def concerns_on_rails_stash_transform_records
+          stash = {}
+          SAVE_RECORDS.each do |name|
+            next unless instance_variable_defined?(name)
+
+            stash[name] = instance_variable_get(name)
+            remove_instance_variable(name)
+          end
+          instance_variable_set(STASH, stash)
+        end
+
+        def concerns_on_rails_restore_transform_records
+          stash = instance_variable_defined?(STASH) ? remove_instance_variable(STASH) : nil
+          stash&.each { |name, value| instance_variable_set(name, value) unless instance_variable_defined?(name) }
         end
 
         def concerns_on_rails_run_transform_backstops

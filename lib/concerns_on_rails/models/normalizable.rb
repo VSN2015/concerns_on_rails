@@ -121,11 +121,6 @@ module ConcernsOnRails
         class_attribute :normalizable_rules, instance_accessor: false, default: {}
         before_validation :apply_normalizations
         after_validation :normalizable_record_validated
-        # The per-save record is dropped once the save SUCCEEDED, not inside
-        # the dispatcher: a save halted by a later before_save, or rolled back
-        # (RecordNotUnique), never reaches after_save, so a retry on the same
-        # record finds the record and does not run a Proc on its output again.
-        after_save :normalizable_clear_record
         # Backstop for the saves that skip validation — update_attribute,
         # save(validate: false) — which otherwise stored the raw value. Run
         # by the shared PREPENDED dispatcher (Support::TransformBackstop), in
@@ -285,8 +280,9 @@ module ConcernsOnRails
         @normalizable_validated = @normalizable_applied.transform_values(&:dup)
       end
 
-      # Dropped once a save succeeded (after_save) and on reload: the next save
-      # cycle starts afresh. Not before then — see the after_save above.
+      # Dropped on reload; after a save the dispatcher's after_save sets it
+      # aside (and puts it back if the transaction rolls back) — never before
+      # then, so a halted or rolled-back save, retried, finds it.
       def normalizable_clear_record
         @normalizable_applied = @normalizable_validated = nil
       end
