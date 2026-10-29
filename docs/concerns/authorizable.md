@@ -36,7 +36,7 @@ end
 ### `authorize_by`
 
 ```
-authorize_by(only: nil, except: nil, status: :forbidden, message: "Forbidden", &block)
+authorize_by(only: nil, except: nil, status: :forbidden, message: <derived from status>, &block)
 ```
 
 | Option | Type | Default | Description |
@@ -55,12 +55,12 @@ A block is mandatory; calling `authorize_by` without one raises `ArgumentError`.
 ### `require_role`
 
 ```
-require_role(*roles, via: :current_user, role_method: :role, only: nil, except: nil, status: :forbidden, message: "Forbidden")
+require_role(*roles, via: :current_user, role_method: :role, only: nil, except: nil, status: :forbidden, message: <derived from status>)
 ```
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `*roles` | One or more `Symbol`/`String` (required) | — | The permitted role values. Comparison is performed after calling `.to_s` on both the configured role and the actor's role, so symbols and strings are interchangeable. |
+| `*roles` | One or more `Symbol`/`String` (required) | — | The permitted role values (Arrays are flattened; an empty list or a nil/blank role raises `ArgumentError` at class load). Comparison is performed after calling `.to_s` on both the configured role and the actor's role, so symbols and strings are interchangeable. |
 | `via` | `Symbol` | `:current_user` | Name of the controller method that returns the current actor. |
 | `role_method` | `Symbol` | `:role` | Name of the method called on the actor to read its role. |
 | `only` | `Symbol`, `Array<Symbol>`, or `nil` | `nil` | Same semantics as `authorize_by`'s `only:`. |

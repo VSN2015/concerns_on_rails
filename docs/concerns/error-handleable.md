@@ -35,7 +35,7 @@ No configuration macro is required. Every handler in the table below is register
 | `record_invalid`             | `ActiveRecord::RecordInvalid`                  | 422    | `errors.full_messages`       |
 | `validation_error`           | `ActiveModel::ValidationError`                 | 422    | `model.errors.full_messages` |
 | `record_not_saved`           | `ActiveRecord::RecordNotSaved`                 | 422    | record errors, if any        |
-| `record_not_destroyed`       | `ActiveRecord::RecordNotDestroyed`             | 422    | record errors, if any        |
+| `record_not_destroyed`       | `ActiveRecord::RecordNotDestroyed`             | 422    | record errors, if any (generic message "Resource could not be deleted") |
 | `stale_object`               | `ActiveRecord::StaleObjectError`               | 409    | —                            |
 | `record_not_unique`          | `ActiveRecord::RecordNotUnique`                | 409    | —                            |
 | `foreign_key_violation`      | `ActiveRecord::InvalidForeignKey`              | 409    | —                            |

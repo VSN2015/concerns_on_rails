@@ -327,6 +327,7 @@ Post.find("hello-world")   # resolves by slug
 - Clearing the source (`update!(title: nil)`, `""`, or a value that normalizes to nothing such as `"!!!"`) keeps the existing slug instead of replacing it with a random uuid; the uuid fallback only applies when there is no slug yet.
 - **Order-independent source.** A sibling that transforms the source in `before_validation` — [Sanitizable](#-sanitizable) `on: :write`, [Normalizable](#-normalizable), your own callback — no longer loses to include order: a slug built earlier in the same save from the raw value (`"<b>Hello</b>"` → `"b-hello-b"`) is rebuilt at the start of validation, before any validator (`reserved_words:` too) or sibling `before_save` sees it. A slug sourced from a column generated in `before_create` ([Sequenceable](#-sequenceable)'s `into:`, a [Hashable](#-hashable) code) is built in the same `INSERT` instead of staying `nil` until a later save — with the slug column's own write-mode Sanitizable / Normalizable rules applied, since their callbacks have already run. An explicitly assigned slug still wins.
 - Falls back to `to_s` if the configured source field doesn't respond.
+- With `history: true` + `scope:`, moving a record into a scope where another record's friendly_id history holds its slug regenerates the slug. friendly_id's own history finder is not scope-aware, so a mover's stale history row can still match the old slug in the new scope's relation (stock friendly_id behaviour).
 - Uses friendly_id's `:slugged` (+ optionally `:history`, `:scoped`) strategies under the hood.
 
 ---
@@ -1199,7 +1200,7 @@ Invoice.next_sequence(account_id: 1)   # => 4  (peek the next value, without cre
 | `start_at:`          | `1`         | First value when the scope/period has no rows yet.                                       |
 | `scope:`             | `nil`       | Column (or array of columns) the counter is scoped to — e.g. one sequence per `account_id`. |
 | `reset:`             | `:never`    | `:never` / `:year` / `:month` / `:day` — restart numbering each period (needs `created_at`, or your `period_column:`). |
-| `period_column:`     | `:created_at` | Datetime column the `reset:` period is cut from. With `assign: :manual` set it to a stamp such as `:finalized_at` so a draft numbers into the period it is **finalized** in (`assign_<field>!` stamps it when blank); with the default a late-finalized draft numbers into its creation period. Not `:updated_at`. Declare it on the class that declares the format (or on an `assign:`-only re-declaration, which inherits it): a subclass restating the same format with a different `period_column:` is refused, since both series would print the same numbers. |
+| `period_column:`     | `:created_at` | Datetime column the `reset:` period is cut from. With `assign: :manual` set it to a stamp such as `:finalized_at` so a draft numbers into the period it is **finalized** in (`assign_<field>!` stamps it when blank); with the default a late-finalized draft numbers into its creation period. Not `:updated_at`. Declare it on the class that declares the format (or on an `assign:`-only re-declaration, which inherits it): a subclass restating the same format with a different `period_column:` is refused, since both series would print the same numbers. A row numbered before a switch (NULL there) also displays (`formatted_<field>`, `sequenceable_period_time`) in its `created_at` period. |
 | `time_zone:`         | app zone    | Zone the `reset:` periods are cut in (a zone name as a String or Symbol, or an `ActiveSupport::TimeZone`). Defaults to `config.time_zone` (`Time.zone_default`), else UTC — never the per-request `Time.zone`. Unknown names raise `ArgumentError`. |
 | `template:`          | `nil`       | `->(seq, record) { ... }` full custom formatter; overrides `prefix` / `padding` / period. To render the period, read `record.sequenceable_period_time(:field)` (the fixed-zone instant), not `created_at`. |
 | `assign:`            | `:create`   | `:create` numbers every record in `before_create`; `:manual` leaves the column NULL until `assign_<field>!` is called — for invoices that get their number when finalized, not when drafted. Re-declaring the field (same class or an STI subclass) switches the mode; the last declaration wins. Pass only `assign:` to keep the rest of the config (see the notes). |
@@ -1291,7 +1292,7 @@ declaration: a base-class `transition_all` skips the rows of a subclass that re-
 `stateable_by` without the event (it used to abort with `NoMethodError`) and transitions the rows a
 subclass's wider `from:` accepts (the base's `from:` used to filter them out). With `lock: true` each record's guard is checked under its row
 lock, so a row another process moved after the batch loaded it is skipped like any other rejected row
-(it used to raise `InvalidTransition` and roll the whole batch back); a single `<event>!` still raises.
+(it used to raise `InvalidTransition` and roll the whole batch back); a single `<event>!` still raises. A record that fails validation raises `ActiveRecord::RecordNotSaved` (carrying the record; the batch rolls back) — not `RecordInvalid`, which only a single `<event>!` raises (another record's failed `save!` inside a hook still propagates as `RecordInvalid`).
 
 **Timestamps and per-event hooks**
 
@@ -1341,6 +1342,7 @@ stateable_by :state, states: %i[open closed], prefix: true
 - Re-declaring without `default:` keeps the earlier default while it is still one of the declared states; otherwise (or with an explicit `default: nil`) new records fall back to the column's database default.
 - Re-declaring replaces the generated methods too: the states, events and scopes the new declaration no longer lists are removed (hidden in an STI subclass, which keeps its parent's untouched), so a subclass with `states: %i[open closed]` no longer answers its parent's `archive!` or `.draft`. A method of such a name that the class defined itself is left alone.
 - No persistence of transition history; combine with `Publishable` / `Schedulable` for time-based state tracking.
+- An event whose (affixed) name is `transition` is refused at the macro (`ArgumentError`) — its `transition!` would collide with the generic `before_/after_transition` hooks; rename the event or use `prefix:`/`suffix:`.
 
 ---
 
@@ -1938,6 +1940,7 @@ copy = invoice.duplicate!(only: [])                     # shallow copy — attri
 - The macro is optional — bare `include` gives `duplicate`/`duplicate!` with the auto resets.
 - `only:` / `except:` on `duplicate` / `duplicate!` pick which of the declared associations this particular copy carries ("Duplicate with line items?" checkbox); names outside the allow-list raise. They are reserved keys — pass overrides for attributes literally named `only`/`except` as a braced Hash.
 - Override `on_duplicate(copy)` for custom tweaks; it receives the unsaved copy last.
+- A child (or has_one target) marked for destruction in memory (nested attributes `_destroy`, `mark_for_destruction`) is not copied, so a "save as copy" flow does not resurrect a just-removed child.
 - Reach for [`amoeba`](https://github.com/amoeba-rb/amoeba) when you need per-attribute regex/prepend rules or belongs_to graph copying.
 
 ---
@@ -2301,7 +2304,7 @@ end
 | `record_invalid`             | `ActiveRecord::RecordInvalid`                  | 422    | `errors.full_messages`       |
 | `validation_error`           | `ActiveModel::ValidationError`                 | 422    | `model.errors.full_messages` |
 | `record_not_saved`           | `ActiveRecord::RecordNotSaved`                 | 422    | record errors, if any        |
-| `record_not_destroyed`       | `ActiveRecord::RecordNotDestroyed`             | 422    | record errors, if any        |
+| `record_not_destroyed`       | `ActiveRecord::RecordNotDestroyed`             | 422    | record errors, if any (message is the generic "Resource could not be deleted") |
 | `stale_object`               | `ActiveRecord::StaleObjectError`               | 409    | —                            |
 | `record_not_unique`          | `ActiveRecord::RecordNotUnique`                | 409    | —                            |
 | `foreign_key_violation`      | `ActiveRecord::InvalidForeignKey`              | 409    | —                            |
@@ -2450,7 +2453,7 @@ end
 | `:no_referrer_leak`   | `Referrer-Policy: strict-origin-when-cross-origin`     |
 | `:no_cross_domain`    | `X-Permitted-Cross-Domain-Policies: none`              |
 | `:disable_legacy_xss` | `X-XSS-Protection: 0` (the only correct modern value)  |
-| `:hsts`               | `Strict-Transport-Security: max-age=31536000; includeSubDomains` (no `preload` — opt in via a custom pair) |
+| `:hsts`               | `Strict-Transport-Security: max-age=31536000; includeSubDomains` (no `preload` — opt in via a custom pair). Skipped automatically when `config.force_ssl` is on (Rails' own HSTS, from `config.ssl_options`, applies instead). |
 | `:same_origin_opener` / `:same_origin_opener_allow_popups` | `Cross-Origin-Opener-Policy: same-origin` / `same-origin-allow-popups` |
 | `:require_corp_embedder` | `Cross-Origin-Embedder-Policy: require-corp`        |
 | `:same_origin_resource` | `Cross-Origin-Resource-Policy: same-origin`          |
@@ -2513,8 +2516,8 @@ The predicate runs via `instance_exec`, so `current_user` (and any helper) resol
 
 | Method                    | Signature                                                                                  |
 |---------------------------|--------------------------------------------------------------------------------------------|
-| `authorize_by`            | `authorize_by(only: nil, except: nil, status: :forbidden, message: "Forbidden", name: nil, &block)` |
-| `require_role`            | `require_role(*roles, via: :current_user, role_method: :role, only:, except:, status:, message:, name:)` |
+| `authorize_by`            | `authorize_by(only: nil, except: nil, status: :forbidden, message: <derived from status>, name: nil, &block)` |
+| `require_role`            | `require_role(*roles, via: :current_user, role_method: :role, only:, except:, status:, message:, name:)` — roles may be given as one or several Arrays (flattened) |
 | `skip_authorization`      | `skip_authorization(only: %i[index show])` / `skip_authorization(except: %i[destroy])` / bare — exempt actions from every rule, inherited ones included; bare form exempts all |
 | `authorized?`             | `authorized?(action = action_name)` — evaluate the rules without rendering (for views / conditional UI) |
 | `on_authorization_denied` | `on_authorization_denied(rule)` — override point; instruments `authorization_denied.concerns_on_rails` (call `super` to keep the event) |
@@ -2522,8 +2525,8 @@ The predicate runs via `instance_exec`, so `current_user` (and any helper) resol
 **Notes**
 - Rules run in declaration order; the first failing rule renders and halts.
 - Every denial emits `authorization_denied.concerns_on_rails` with `controller`, `action`, `actor_id`, `actor_type`, `rule` (the `name:`), `status`, `message` — subscribe for audit logs or alerting on repeated denials. The actor is reduced to scalars on purpose: notification payloads aren't filtered by `config.filter_parameters`.
-- When `Respondable` is also included, denials delegate to `render_error` (envelope `{ success: false, error: { message:, code: "forbidden" } }`); otherwise the same envelope is rendered inline. The `code` follows `status:`: `"unauthorized"` for 401, `"not_found"` for 404, `"forbidden"` for 403 and anything else. A `status: :not_found, message: "Resource not found"` concealment rule then answers exactly like ErrorHandleable's missing-record 404.
-- `only:` / `except:` are mutually exclusive (passing both raises `ArgumentError`); `authorize_by` requires a block and `require_role` requires at least one role.
+- When `Respondable` is also included, denials delegate to `render_error` (envelope `{ success: false, error: { message:, code: "forbidden" } }`); otherwise the same envelope is rendered inline. The `code` follows `status:`: `"unauthorized"` for 401, `"not_found"` for 404, `"forbidden"` for 403 and anything else. The default `message:` follows the status: `"Resource not found"` for 404 (ErrorHandleable's exact text), `"Unauthorized"` for 401, `"Forbidden"` otherwise; an explicit `message:` wins. A `status: :not_found` rule then answers exactly like ErrorHandleable's missing-record 404.
+- `only:` / `except:` are mutually exclusive (passing both raises `ArgumentError`); `authorize_by` requires a block and `require_role` requires at least one role (an empty list, or a nil/blank role such as an unset `ENV` lookup, raises at class load; Arrays are flattened).
 - `skip_authorization` validates its arguments at class-load time, because every mistake there fails **open**: a nil `only:`/`except:`, or an empty/non-action `except:` (`[]`, `false`, `""` — what `except: Rails.env.production? && :destroy` collapses to), raises instead of exempting every action of the controller *and its subclasses*. Only the bare form grants a blanket skip. The skip is inherited and outranks rules a subclass declares afterwards; `skip_authorization only: []` switches it back off.
 - **Non-goals**: no policy objects, no ability DSL, no resource inference — reach for [`pundit`](https://github.com/varvet/pundit) / [`cancancan`](https://github.com/CanCanCommunity/cancancan) when you outgrow a predicate per action.
 
@@ -2571,13 +2574,13 @@ class ApplicationController < ActionController::Base
   timezoneable available: ["UTC", "Eastern Time (US & Canada)"], default: "UTC"
   # timezoneable param: :tz, header: false, cookie: :time_zone
   # timezoneable cookie: :time_zone, persist: true          # ?time_zone=London sticks for a year
-  # timezoneable response_header: true                       # X-Time-Zone: London (+ Vary: Time-Zone)
+  # timezoneable response_header: true                       # X-Time-Zone: London
 end
 ```
 
 Resolution order: `params[param]` → `Time-Zone` header → cookie (if enabled) → `default` → the current `Time.zone`. Every value — the configured `available:` / `default:` **and** each request candidate — is resolved through `ActiveSupport::TimeZone[...]`, so a zone accepted at boot can never be rejected at request time.
 
-**Options**: `available:` (allow-list applied to param/header/cookie matching; `default:` bypasses it, mirroring Localizable), `default:`, `param:` (default `:time_zone`), `header:` (default `true`, reads the `Time-Zone` header), `cookie:` (default `false`; `true` reads the `:time_zone` cookie, or pass a cookie name), `persist:` (default `false`; `true` or a Hash of cookie options — writes a **param**-chosen zone into the `cookie:` so a settings link makes it stick; needs `cookie:`), `response_header:` (default `false`; `true` emits `X-Time-Zone`, or pass a header name — `Vary: Time-Zone` is appended when the header source is on).
+**Options**: `available:` (allow-list applied to param/header/cookie matching; `default:` bypasses it, mirroring Localizable), `default:`, `param:` (default `:time_zone`), `header:` (default `true`, reads the `Time-Zone` header), `cookie:` (default `false`; `true` reads the `:time_zone` cookie, or pass a cookie name), `persist:` (default `false`; `true` or a Hash of cookie options — writes a **param**-chosen zone into the `cookie:` so a settings link makes it stick; needs `cookie:`), `response_header:` (default `false`; `true` emits `X-Time-Zone`, or pass a header name), `vary:` (default `true`; appends `Vary: Time-Zone` whenever the header source is on and `Vary: Cookie` whenever the cookie source is on, independent of `response_header:`; `vary: false` opts out).
 
 **Notes**
 - An unknown `available:` / `default:` zone raises `ArgumentError` at declaration time (fail-fast on misconfiguration); so does `persist:` without `cookie:`.
