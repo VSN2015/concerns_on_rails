@@ -45,6 +45,8 @@ module ConcernsOnRails
     #     (PostgreSQL/MySQL/SQLite) and uniform directions, the keyset WHERE is
     #     a tuple comparison `(a, b, id) > (x, y, z)` that walks a composite
     #     index directly; everything else falls back to the OR-expansion.
+    #     `predicate: :row` demands uniform directions: a mixed `order:` / preset
+    #     (or a mixed per-call `order:`) raises ArgumentError up front.
     #
     # Malformed or mismatched cursors raise CursorPaginatable::InvalidCursor;
     # on real controllers a rescue_from is registered automatically and renders
@@ -202,6 +204,7 @@ module ConcernsOnRails
           ordering = CursorPaginatable.resolve_ordering!(self, order, order_presets, default_preset)
           passed = { order_param:, per_page:, max_per_page:, bidirectional:, predicate:, link_header:, signed: }
           options = CursorPaginatable.normalize_options!(passed.reject { |_name, value| value.equal?(UNSET) })
+          CursorPaginatable.validate_row_orderings!(options.fetch(:predicate, cursor_paginatable_predicate), ordering)
 
           self.cursor_paginatable_order, self.cursor_paginatable_order_presets,
             self.cursor_paginatable_default_preset = ordering
@@ -242,6 +245,24 @@ module ConcernsOnRails
         return [inherited_order, inherited_presets, klass.cursor_paginatable_default_preset] if default_preset.nil?
 
         [inherited_order, inherited_presets, resolve_default_preset!(inherited_presets, default_preset, inherited_order)]
+      end
+
+      # `predicate: :row` compares a row-value tuple, which has ONE direction, so
+      # it can only walk an ordering whose directions are uniform. Checked where
+      # the ordering is declared (the order and every preset), never at page 2 —
+      # that is when the keyset WHERE is first built, so a mixed ordering used to
+      # serve page 1, mint a cursor, and 500 on every request that followed it.
+      def self.validate_row_orderings!(predicate, ordering)
+        return unless predicate == :row
+
+        order, presets, = ordering
+        [order, *presets&.values].compact.each { |pairs| validate_row_directions!(pairs) }
+      end
+
+      def self.validate_row_directions!(pairs)
+        return if pairs.map(&:last).uniq.size <= 1
+
+        raise ArgumentError, "#{name}: predicate: :row requires uniform order directions"
       end
 
       # `signed:` — false, true (the app's secret_key_base), a non-blank String,
@@ -408,7 +429,14 @@ module ConcernsOnRails
         pk = pk.to_sym
         pairs << [pk, pairs.empty? ? :asc : pairs.last.last] unless pairs.any? { |col, _| col == pk }
         validate_cursor_columns!(relation.model, pairs)
+        cursor_validate_row_directions!(pairs)
         pairs
+      end
+
+      # A per-call `order:` bypasses the macro's check, so refuse here — before
+      # page 1 is served and a cursor minted that page 2 could not read.
+      def cursor_validate_row_directions!(pairs)
+        CursorPaginatable.validate_row_directions!(pairs) if self.class.cursor_paginatable_predicate == :row
       end
 
       def validate_cursor_columns!(model, pairs)
@@ -868,7 +896,8 @@ module ConcernsOnRails
       # :auto picks :row when it is expressible (>= 2 uniform-direction
       # columns) and the adapter supports tuples, silently falling back
       # otherwise; an explicit :row raises on mixed directions instead of
-      # silently changing strategy.
+      # silently changing strategy (the macro and cursor_order_pairs refuse
+      # such an ordering first, so this is a backstop).
       def cursor_row_predicate?(model, pairs)
         mode = self.class.cursor_paginatable_predicate
         return false if mode == :or || pairs.size < 2

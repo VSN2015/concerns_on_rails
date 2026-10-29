@@ -744,13 +744,10 @@ describe ConcernsOnRails::Controllers::CursorPaginatable do
 
         cursor_paginate_by order: :id, predicate: :row
       end
-      page1 = klass.new(params: { per_page: 10 })
-      page1.cursor_paginated(Item.all, order: { score: :desc, name: :asc })
-      token = page1.response.headers["X-Next-Cursor"]
 
+      # Refused on page 1 (PARAMS-4): a cursor it could not read is never minted.
       expect do
-        klass.new(params: { per_page: 10, cursor: token })
-             .cursor_paginated(Item.all, order: { score: :desc, name: :asc })
+        klass.new(params: { per_page: 10 }).cursor_paginated(Item.all, order: { score: :desc, name: :asc })
       end.to raise_error(ArgumentError, /requires uniform order directions/)
     end
 
