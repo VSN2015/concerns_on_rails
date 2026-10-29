@@ -277,7 +277,7 @@ RSpec.describe "Sequenceable period_column:" do
 
     it "counts rows numbered before the switch (NULL period column) by their created_at" do
       legacy = legacy_class
-      travel_to(Time.utc(2025, 6, 1)) { legacy.create! }
+      old_row = travel_to(Time.utc(2025, 6, 1)) { legacy.create! }
       travel_to(Time.utc(2026, 2, 1)) { legacy.create! }
 
       switched = legacy_class(assign: :manual, period_column: :finalized_at)
@@ -286,6 +286,8 @@ RSpec.describe "Sequenceable period_column:" do
 
       expect(draft.sequence).to eq(2)
       expect(draft.formatted_sequence).to eq("INV-2026-2")
+      # a pre-switch row formats in its own (created_at) period, not today's
+      expect(travel_to(Time.utc(2026, 3, 3)) { switched.find(old_row.id).formatted_sequence }).to eq("INV-2025-1")
     end
 
     it "counts them too under a template:" do

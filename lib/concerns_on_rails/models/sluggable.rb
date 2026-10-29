@@ -358,8 +358,22 @@ module ConcernsOnRails
         return false if slug.blank?
 
         scope = config.scope_columns.to_h { |column| [column, self[column]] }
-        self.class.base_class.unscoped.where(scope).where(config.slug_column => slug)
-            .where.not(self.class.primary_key => id).exists?
+        live = self.class.base_class.unscoped.where(scope).where(config.slug_column => slug)
+                   .where.not(self.class.primary_key => id).exists?
+        live || sluggable_history_slug_taken_in_scope?(config, slug)
+      end
+
+      # With history: true another record's RETIRED slug in the new scope is
+      # just as taken (friendly_id's history generator joins the slugs table
+      # for the same reason): keeping it would insert a second
+      # (slug, sluggable_type, scope) history row — RecordNotUnique under the
+      # generator's unique index, or silently hijacking the old record's URL.
+      def sluggable_history_slug_taken_in_scope?(config, slug)
+        return false unless config.uses?(:history)
+
+        slug_class = self.class.reflect_on_association(:slugs).klass
+        slug_class.where(slug: slug, sluggable_type: self.class.polymorphic_name, scope: serialized_scope)
+                  .where.not(sluggable_id: id).exists?
       end
 
       # The slug column's own write-time transforms — a write-mode Sanitizable

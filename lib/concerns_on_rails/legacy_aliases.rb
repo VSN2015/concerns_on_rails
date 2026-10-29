@@ -1,3 +1,5 @@
+require "monitor"
+
 module ConcernsOnRails
   # Backwards-compatibility aliases for pre-1.6 module paths, resolved lazily:
   # eager `Sluggable = Models::Sluggable` assignments would force-load every
@@ -17,11 +19,21 @@ module ConcernsOnRails
     Anonymizable Duplicable
   ].freeze
 
+  # Reentrant: loading a concern may reference another legacy alias.
+  LEGACY_ALIAS_LOCK = Monitor.new
+  private_constant :LEGACY_ALIAS_LOCK
+
   def self.const_missing(name)
     return super unless LEGACY_MODEL_ALIASES.include?(name)
 
-    # Idempotent under a concurrent first reference: both threads pin the
-    # same module object, and once pinned const_missing never fires again.
-    const_set(name, Models.const_get(name))
+    # Idempotent under a concurrent first reference: whichever thread arrives
+    # second finds the constant already pinned and returns it, instead of a
+    # second const_set (Ruby's "already initialized constant" warning). Once
+    # pinned const_missing never fires again.
+    LEGACY_ALIAS_LOCK.synchronize do
+      next const_get(name, false) if const_defined?(name, false)
+
+      const_set(name, Models.const_get(name))
+    end
   end
 end

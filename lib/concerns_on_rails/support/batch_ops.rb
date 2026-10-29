@@ -130,7 +130,7 @@ module ConcernsOnRails
       def run(relation, label:, message: "failed to update record")
         relation.klass.transaction(requires_new: true) do
           count = 0
-          each_record(relation) do |record|
+          each_record(full_rows(relation)) do |record|
             result = yield(record)
             next if result == :skip
 
@@ -185,6 +185,37 @@ module ConcernsOnRails
       NO_KEY = Object.new.freeze
       private_constant :NO_KEY
 
+      # The relation with the whole table's columns ADDED to a caller's partial
+      # `select`, joins/wheres/aliases kept — for the verbs (`run`) and the
+      # relation destroy_all, not for every each_record caller
+      # (CounterCacheable's recount selects on purpose): a verb reads its
+      # concern's column (deleted_at, published_at, ...) on every record, which
+      # a `select(:id)` leaves out — MissingAttributeError on the per-record
+      # paths only, while the single-UPDATE fast path and ActiveRecord's own
+      # destroy_all never load rows that way. Added, not replaced: a computed
+      # alias (`COUNT(...) AS n`) a HAVING or a hook reads stays selected. The
+      # rows are the same ones, so nothing but the instantiated columns changes.
+      def full_rows(relation)
+        values = relation.select_values
+        table = relation.klass.table_name
+        return relation if values.empty? || values.any? { |value| whole_table_select?(value, table) }
+
+        relation.select(relation.klass.arel_table[Arel.star])
+      end
+
+      # Only the MODEL's own star counts: `*`, `table.*` or `schema.table.*`
+      # (quoted or bare), or an Arel star of its table. A joined table's
+      # `authors.*` leaves the model's columns out all the same.
+      def whole_table_select?(value, table)
+        if value.is_a?(Arel::Attributes::Attribute)
+          return value.name.to_s == "*" && value.relation.respond_to?(:name) && value.relation.name.to_s == table.to_s
+        end
+        return false unless value.is_a?(String)
+
+        qualifier = "(?:[\"`\\w]+\\.)?[\"`]?#{Regexp.escape(table)}[\"`]?\\."
+        value.match?(/(?:\A|,)\s*(?:#{qualifier})?\*\s*(?:,|\z)/)
+      end
+
       def each_row(relation, &)
         return relation.unscope(:order).find_each(&) unless relation.limit_value || relation.offset_value
 
@@ -222,9 +253,39 @@ module ConcernsOnRails
       def limited_keys(relation, key)
         return relation.pluck(key) unless relation.distinct_value
 
-        relation.klass.unscoped.from(relation, relation.klass.quoted_table_name).pluck(key)
+        # Only the key is plucked, so the derived table keeps the relation's
+        # star and its computed selects (an alias the ORDER BY names) but drops
+        # the plain own-table columns the star already carries: a `select(:id)`
+        # left beside the star would repeat `id` there (PostgreSQL: ambiguous;
+        # MySQL: error 1060). The own-table star leads whenever the kept values
+        # lack one — each_record's direct callers skip full_rows, and the outer
+        # pluck reads `table.id` from the derived table.
+        table = relation.klass.table_name
+        kept = relation.select_values.reject { |value| plain_column?(value, table) }
+        derived = relation.unscope(:select)
+        if kept.any?
+          kept.unshift(relation.klass.arel_table[Arel.star]) if kept.none? { |value| whole_table_select?(value, table) }
+          derived = derived.select(*kept)
+        end
+        relation.klass.unscoped.from(derived, relation.klass.quoted_table_name).pluck(key)
       end
-      private_class_method :each_row, :joined?, :unjoined, :limited_keys, :conditional_counters?, :audited_writes?
+
+      # A select value naming one of the model's own columns as is: a Symbol,
+      # a bare or own-table-qualified identifier String, or an own-table Arel
+      # attribute other than the star.
+      def plain_column?(value, table)
+        case value
+        when Symbol then true
+        when Arel::Attributes::Attribute
+          value.name.to_s != "*" && value.relation.respond_to?(:name) && value.relation.name.to_s == table.to_s
+        when String
+          qualifier = "(?:[\"`\\w]+\\.)?[\"`]?#{Regexp.escape(table)}[\"`]?\\."
+          value.match?(/\A\s*(?:#{qualifier})?["`]?\w+["`]?\s*\z/)
+        else false
+        end
+      end
+      private_class_method :each_row, :whole_table_select?, :joined?, :unjoined, :limited_keys, :plain_column?,
+                           :conditional_counters?, :audited_writes?
 
       # The validate callbacks every ActiveRecord model carries out of the box
       # (Rails 7.1 registers :cant_modify_encrypted_attributes_when_frozen on
