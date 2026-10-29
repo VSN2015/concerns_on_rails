@@ -269,7 +269,9 @@ module ConcernsOnRails
         return source.size if source.is_a?(Array)
 
         relation = paginatable_count_relation(source)
-        return paginatable_distinct_select_total(relation) if paginatable_distinct_select?(relation)
+        if paginatable_distinct_select?(relation) || paginatable_grouped_having_select?(relation)
+          return paginatable_distinct_select_total(relation)
+        end
 
         paginatable_plain_count(relation)
       end
@@ -301,6 +303,19 @@ module ConcernsOnRails
         return false unless %i[distinct_value select_values group_values].all? { |reader| relation.respond_to?(reader) }
 
         paginatable_distinct?(relation) && relation.select_values.any? && relation.group_values.empty?
+      end
+
+      # A grouped relation whose HAVING can name a SELECT alias
+      # (`select("category, COUNT(*) AS n").group(:category).having("n > 1")`,
+      # valid on SQLite and MySQL): the plain count strips the select list, and
+      # the alias HAVING reads with it (`no such column: n`, a 500). Counting the
+      # relation's own SQL as a subquery keeps the list; a grouped relation
+      # without a HAVING or a select list has no alias to lose and keeps the
+      # plain GROUP BY count.
+      def paginatable_grouped_having_select?(relation)
+        return false unless %i[select_values group_values having_clause].all? { |reader| relation.respond_to?(reader) }
+
+        relation.group_values.any? && relation.select_values.any? && !relation.having_clause.empty?
       end
 
       # `.distinct`, or DISTINCT spelled inside the select list itself:
