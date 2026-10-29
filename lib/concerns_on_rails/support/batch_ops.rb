@@ -130,7 +130,7 @@ module ConcernsOnRails
       def run(relation, label:, message: "failed to update record")
         relation.klass.transaction(requires_new: true) do
           count = 0
-          each_record(relation) do |record|
+          each_record(full_rows(relation)) do |record|
             result = yield(record)
             next if result == :skip
 
@@ -173,7 +173,7 @@ module ConcernsOnRails
       # arrives right after its first copy and is skipped.
       def each_record(relation)
         previous = NO_KEY
-        each_row(full_rows(relation)) do |record|
+        each_row(relation) do |record|
           key = record.id
           next if key == previous
 
@@ -185,7 +185,9 @@ module ConcernsOnRails
       NO_KEY = Object.new.freeze
       private_constant :NO_KEY
 
-      # The relation without the caller's partial `select`, joins/wheres kept:
+      # The relation without the caller's partial `select`, joins/wheres kept —
+      # for the verbs (`run`) and the relation destroy_all, not for every
+      # each_record caller (CounterCacheable's recount selects on purpose):
       # a verb reads its concern's column (deleted_at, published_at, ...) on every
       # record, which a `select(:id)` leaves out — MissingAttributeError on the
       # per-record paths only, while the single-UPDATE fast path and
