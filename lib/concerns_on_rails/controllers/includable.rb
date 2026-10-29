@@ -67,14 +67,14 @@ module ConcernsOnRails
         # allow-list with the ones listed, but `fields:`, `default:` and
         # `strategy:` keep their inherited value unless passed (`default: nil`
         # clears it, `fields: {}` empties it). An INHERITED default path the new
-        # allow-list no longer contains is dropped (a `default:` you pass is still
-        # validated and raises).
+        # allow-list no longer contains is dropped with a stderr warning (a
+        # `default:` you pass is still validated and raises).
         def includable(*associations, fields: UNSET, default: UNSET, strategy: UNSET, **nested)
           tree = TREE.from(associations + [nested], label: LABEL).freeze
           fields = fields.equal?(UNSET) ? includable_fields : includable_fields!(fields)
           strategy = strategy.equal?(UNSET) ? includable_strategy : includable_strategy!(strategy)
           default_paths = if default.equal?(UNSET)
-                            includable_default_paths.select { |path| TREE.allowed?(path, tree) }.freeze
+                            includable_inherited_defaults(tree)
                           else
                             includable_default_paths!(default, tree)
                           end
@@ -86,6 +86,20 @@ module ConcernsOnRails
         end
 
         private
+
+        # The inherited default paths the new allow-list still holds. A dropped
+        # one is named on stderr, once per declaration (this runs at class load):
+        # a typo in the subclass's association list would otherwise silently
+        # lose the default include.
+        def includable_inherited_defaults(tree)
+          kept, dropped = includable_default_paths.partition { |path| TREE.allowed?(path, tree) }
+          unless dropped.empty?
+            warn "#{LABEL}: #{name || 'anonymous controller'} re-declared includable without the inherited " \
+                 "default include path(s) #{dropped.join(', ')}; they are no longer loaded by default " \
+                 "(pass `default:` to set one)"
+          end
+          kept.freeze
+        end
 
         def includable_fields!(fields)
           fields.each_with_object({}) do |(table, cols), memo|

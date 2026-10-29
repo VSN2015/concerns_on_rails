@@ -896,7 +896,9 @@ module ConcernsOnRails
       # A String boundary holding a NUL byte is the other: SQLite reads statement
       # text as a C string, so the quoted literal Arel inlines ends at the NUL
       # (a StatementInvalid) — the walk stopped at the row, a 400 on the cursor
-      # the gem itself minted. A hex blob cast carries every byte.
+      # the gem itself minted. A hex blob cast carries every byte; it reads the
+      # blob as text in the database encoding, so it assumes a UTF-8 SQLite
+      # database (Rails' default; a UTF-16 one would read the bytes wrongly).
       def cursor_sql_value(model, value, column = nil)
         return value unless model.connection.adapter_name.match?(SQLITE_ADAPTER)
         return cursor_nul_text_literal(model, value, column) if value.is_a?(String)
