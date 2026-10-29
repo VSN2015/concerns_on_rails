@@ -236,15 +236,16 @@ module ConcernsOnRails
       end
 
       # Returns an ActiveSupport::Duration of how long until expiry, or nil
-      # when there's no expiry set, or 0.seconds when already expired.
+      # when there's no expiry set, or 0.seconds when already expired. "Already
+      # expired" is `expired?`'s own answer, and on a `date` column the expiry
+      # instant is the start of that day in Time.zone (the moment `expired?`
+      # turns true), so the time left is measured to it.
       def time_until_expiry
         value = self[self.class.expirable_field]
         return nil if value.nil?
+        return 0.seconds if expirable_expired?
 
-        now = Time.zone.now
-        return 0.seconds if value <= now
-
-        (value - now).seconds
+        (value.in_time_zone - Time.zone.now).seconds
       end
 
       # Whether the saved expiry already falls at or before `time`, so
