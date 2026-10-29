@@ -173,7 +173,7 @@ module ConcernsOnRails
       # arrives right after its first copy and is skipped.
       def each_record(relation)
         previous = NO_KEY
-        each_row(relation) do |record|
+        each_row(full_rows(relation)) do |record|
           key = record.id
           next if key == previous
 
@@ -184,6 +184,16 @@ module ConcernsOnRails
 
       NO_KEY = Object.new.freeze
       private_constant :NO_KEY
+
+      # The relation without the caller's partial `select`, joins/wheres kept:
+      # a verb reads its concern's column (deleted_at, published_at, ...) on every
+      # record, which a `select(:id)` leaves out — MissingAttributeError on the
+      # per-record paths only, while the single-UPDATE fast path and
+      # ActiveRecord's own destroy_all never load rows that way. The rows are
+      # the same ones, so nothing but the instantiated columns changes.
+      def full_rows(relation)
+        relation.select_values.any? ? relation.unscope(:select) : relation
+      end
 
       def each_row(relation, &)
         return relation.unscope(:order).find_each(&) unless relation.limit_value || relation.offset_value

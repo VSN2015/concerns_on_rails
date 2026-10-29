@@ -179,7 +179,8 @@ module ConcernsOnRails
 
       def destroy_loaded(relation, purge, acted)
         # One instance per record: a joined relation holds a stale copy per row.
-        trashed, live = relation.records.uniq(&:id).partition(&:deleted?)
+        rows = relation.loaded? ? relation : BatchOps.full_rows(relation) # the instances as loaded, else whole rows
+        trashed, live = rows.records.uniq(&:id).partition(&:deleted?)
         purge_loaded(trashed, acted) if purge
         live.each do |record|
           raise_not_saved(record) unless record.soft_delete!
