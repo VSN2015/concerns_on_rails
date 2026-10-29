@@ -82,11 +82,13 @@ describe "Transform backstops run in before_validation order" do
     expect(stored_values(klass, :tags, " , ruby, rails", title: "t")).to eq(["ruby"] * 3)
   end
 
-  # Normalizable compares against what IT produced, so in a validated save it
-  # re-normalizes at before_save a field a later transform rewrote. A save
-  # that skips validation must end the same way, without making the later
-  # transform run twice.
-  it "keeps the include order the other way round too (Normalizable gets the last word)" do
+  # TRANS-2 (audit 2026-10-29): Normalizable used to get "the last word" and
+  # re-normalized a later transform's output at before_save, so the stored value
+  # differed from the validated one (and could be corrupted: titleize turned
+  # Sanitizable's "&lt;" into "&Lt;"). A later transform's output is now left
+  # alone: every path stores what the transforms left, in include order. The
+  # expectation here was " a  b" squished to "a b" through that re-run.
+  it "keeps the include order the other way round too (a later transform's output stays as it left it)" do
     klass = Class.new(TestModel) do
       self.table_name = "backstop_order_posts"
       include ConcernsOnRails::Models::Normalizable
@@ -96,7 +98,7 @@ describe "Transform backstops run in before_validation order" do
       sanitizable :title, with: :strip, on: :write
     end
 
-    expect(stored_values(klass, :title, "<b> a </b>  b")).to eq(["a b"] * 3)
+    expect(stored_values(klass, :title, "<b> a </b>  b")).to eq([" a  b"] * 3)
   end
 
   it "runs each non-idempotent Proc once on every path, in either include order" do
@@ -120,9 +122,9 @@ describe "Transform backstops run in before_validation order" do
     end
 
     expect(stored_values(sanitize_first, :title, "a&b")).to eq(["a&amp;b!"] * 3)
-    # Validated: bang, escape, then bang again for the escaped value (the
-    # documented "Normalizable compares against what IT produced").
-    expect(stored_values(normalize_first, :title, "a&b")).to eq(["a&amp;b!!"] * 3)
+    # Bang, then escape: Normalizable does not run again on Sanitizable's
+    # output (it used to, storing "a&amp;b!!" — TRANS-2).
+    expect(stored_values(normalize_first, :title, "a&b")).to eq(["a&amp;b!"] * 3)
   end
 
   it "registers ONE prepended dispatcher, in before_validation order, ahead of an earlier before_save" do

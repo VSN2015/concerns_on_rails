@@ -129,6 +129,21 @@ describe "Field transforms run once when valid? precedes save" do
           end
           let(:plain) { klass.create!(title: input).reload.title }
 
+          # `plain` goes through the same path as the examples below, so it
+          # cannot catch a path that corrupts every save alike (TRANS-2: it
+          # enshrined "Tom &Amp; Jerry" for Normalizable first). The literal:
+          # each transform runs once, in include order.
+          it "stores each transform's output once, in include order" do
+            expected = {
+              ["Normalizable first", "titleize + html_escape"] => "Tom &amp; Jerry",
+              ["Normalizable first", "bang + html_escape"] => "a&amp;b!",
+              ["Sanitizable first", "titleize + html_escape"] => "Tom &Amp; Jerry",
+              ["Sanitizable first", "bang + html_escape"] => "a&amp;b!"
+            }.fetch([label, procs])
+
+            expect(plain).to eq(expected)
+          end
+
           it "stores what a plain save stores (valid? then save)" do
             record = klass.new(title: input)
             record.save! if record.valid?

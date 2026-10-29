@@ -293,7 +293,10 @@ module ConcernsOnRails
         @sanitizable_applied = {}
         sanitizable_each_write_rule do |field, writer, value|
           # A plain String, never a SafeBuffer.
-          self[field] = writer.call(value) unless previous.key?(field) && previous[field] == value
+          unless previous.key?(field) && previous[field] == value
+            self[field] = writer.call(value)
+            ConcernsOnRails::Support::TransformBackstop.wrote(self, field)
+          end
           # A copy: an in-place mutation after validation must not mutate the
           # recorded value too and look sanitized.
           @sanitizable_applied[field] = self[field].dup
@@ -328,6 +331,7 @@ module ConcernsOnRails
           next if applied.key?(field) && applied[field] == value
 
           self[field] = writer.call(value)
+          ConcernsOnRails::Support::TransformBackstop.wrote(self, field)
         end
       end
 

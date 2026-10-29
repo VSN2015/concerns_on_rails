@@ -339,6 +339,7 @@ module ConcernsOnRails
         return if raw.nil?
 
         self[field] = self.class.taggable_join(self.class.taggable_split(raw))
+        ConcernsOnRails::Support::TransformBackstop.wrote(self, field)
         self[field].dup
       end
 
