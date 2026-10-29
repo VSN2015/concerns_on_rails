@@ -185,16 +185,30 @@ module ConcernsOnRails
       NO_KEY = Object.new.freeze
       private_constant :NO_KEY
 
-      # The relation without the caller's partial `select`, joins/wheres kept —
-      # for the verbs (`run`) and the relation destroy_all, not for every
-      # each_record caller (CounterCacheable's recount selects on purpose):
-      # a verb reads its concern's column (deleted_at, published_at, ...) on every
-      # record, which a `select(:id)` leaves out — MissingAttributeError on the
-      # per-record paths only, while the single-UPDATE fast path and
-      # ActiveRecord's own destroy_all never load rows that way. The rows are
-      # the same ones, so nothing but the instantiated columns changes.
+      # The relation with the whole table's columns ADDED to a caller's partial
+      # `select`, joins/wheres/aliases kept — for the verbs (`run`) and the
+      # relation destroy_all, not for every each_record caller
+      # (CounterCacheable's recount selects on purpose): a verb reads its
+      # concern's column (deleted_at, published_at, ...) on every record, which
+      # a `select(:id)` leaves out — MissingAttributeError on the per-record
+      # paths only, while the single-UPDATE fast path and ActiveRecord's own
+      # destroy_all never load rows that way. Added, not replaced: a computed
+      # alias (`COUNT(...) AS n`) a HAVING or a hook reads stays selected. The
+      # rows are the same ones, so nothing but the instantiated columns changes.
       def full_rows(relation)
-        relation.select_values.any? ? relation.unscope(:select) : relation
+        values = relation.select_values
+        return relation if values.empty? || values.any? { |value| whole_table_select?(value) }
+
+        relation.select(relation.klass.arel_table[Arel.star])
+      end
+
+      WHOLE_TABLE_SELECT = /(?:\A|,)\s*(?:["`\w]+\.)?\*\s*(?:,|\z)/
+      private_constant :WHOLE_TABLE_SELECT
+
+      def whole_table_select?(value)
+        return value.name.to_s == "*" if value.respond_to?(:name) && !value.is_a?(Symbol)
+
+        value.is_a?(String) && value.match?(WHOLE_TABLE_SELECT)
       end
 
       def each_row(relation, &)
@@ -236,7 +250,7 @@ module ConcernsOnRails
 
         relation.klass.unscoped.from(relation, relation.klass.quoted_table_name).pluck(key)
       end
-      private_class_method :each_row, :joined?, :unjoined, :limited_keys, :conditional_counters?, :audited_writes?
+      private_class_method :each_row, :whole_table_select?, :joined?, :unjoined, :limited_keys, :conditional_counters?, :audited_writes?
 
       # The validate callbacks every ActiveRecord model carries out of the box
       # (Rails 7.1 registers :cant_modify_encrypted_attributes_when_frozen on

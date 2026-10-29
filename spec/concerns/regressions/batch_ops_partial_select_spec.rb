@@ -90,6 +90,28 @@ RSpec.describe "Batch verbs and relation destroy_all over a partial select" do
     expect(model.only_deleted.pluck(:title)).to eq(["a"])
   end
 
+  it "keeps a computed alias a HAVING reads (the star is added, not substituted)" do
+    skip "an alias in HAVING is invalid SQL on PostgreSQL" unless TestDatabase.sqlite?
+    stub_const("PsAuthor", Class.new(TestModel) { self.table_name = "ps_authors" })
+    busy = PsAuthor.create!(name: "busy")
+    quiet = PsAuthor.create!(name: "quiet")
+    model = publishable
+    2.times { model.create!(title: "b", author_id: busy.id) }
+    model.create!(title: "q", author_id: quiet.id)
+
+    relation = model.joins("INNER JOIN ps_authors ON ps_authors.id = ps_posts.author_id")
+                    .select("ps_posts.id, COUNT(ps_authors.id) AS n").group("ps_posts.id").having("n > 0")
+    expect(relation.publish_all).to eq(3)
+    expect(model.unscoped.where(published_at: nil).count).to eq(0)
+  end
+
+  it "does not add a second star when the select already carries one" do
+    relation = ConcernsOnRails::Support::BatchOps.full_rows(publishable.select("ps_posts.*, 1 AS n"))
+    expect(relation.select_values).to eq(["ps_posts.*, 1 AS n"])
+    expect(ConcernsOnRails::Support::BatchOps.full_rows(publishable.select(Arel.star)).select_values.size).to eq(1)
+    expect(ConcernsOnRails::Support::BatchOps.full_rows(publishable.select("COUNT(*) AS n")).select_values.size).to eq(2)
+  end
+
   it "leaves an unselected relation alone" do
     publishable.create!(title: "a")
 
