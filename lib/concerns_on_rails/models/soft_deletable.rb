@@ -4,6 +4,7 @@ require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/association_scope"
 require "concerns_on_rails/support/hooked_write"
+require "concerns_on_rails/support/primary_key"
 require "concerns_on_rails/support/contextual_destroy"
 require "concerns_on_rails/support/time_value"
 
@@ -460,7 +461,7 @@ module ConcernsOnRails
       # freezing it, as ActiveRecord's own `delete` does; it used to only
       # freeze, so the gone record still read as persisted.
       def really_delete!
-        self.class.unscoped.where(self.class.primary_key => id).delete_all
+        self.class.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(self.class, id)).delete_all
         @destroyed = true
         @previously_new_record = false
         freeze
@@ -476,7 +477,7 @@ module ConcernsOnRails
       alias soft_deleted? deleted?
 
       def is_really_deleted?
-        !self.class.unscoped.exists?(id)
+        !self.class.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(self.class, id)).exists?
       end
 
       private
@@ -514,7 +515,8 @@ module ConcernsOnRails
 
       # The row is still soft-deleted in the database (the purge guard).
       def soft_delete_trashed_row?
-        self.class.unscoped.where(self.class.primary_key => [id]).where.not(self.class.soft_delete_field => nil).exists?
+        self.class.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(self.class, id))
+            .where.not(self.class.soft_delete_field => nil).exists?
       end
 
       # `touch: true` goes through `update` (validations, callbacks,
