@@ -425,14 +425,23 @@ module ConcernsOnRails
       # (Support::HookedWrite): a raising hook — or one vetoing with
       # ActiveRecord::Rollback, even inside a caller's transaction or
       # soft_delete_all — rolls everything back and returns false, and the
-      # in-memory stamp is put back so a retry is not swallowed by the
-      # `deleted?` guard. A failed validation rolls back the before hook too.
+      # in-memory stamp is put back. A failed validation rolls back the before
+      # hook too.
+      #
+      # A no-op (true, no write, no hook, no cascade) only when the record is
+      # ALREADY soft-deleted in the SAVED state — the same rule as publish! /
+      # activate! / expire!: a stored record (destroyed included), no unsaved
+      # change to the stamp, a saved stamp that is set. The in-memory stamp is
+      # not the record's state: `record.deleted_at = Time.current;
+      # record.soft_delete!` used to answer true while the row stayed live. A
+      # new record or an unsaved flip transitions. A no-op that finds OTHER
+      # pending changes saves them (no stamp write, no hook).
       def soft_delete!(at: Time.zone.now)
         at = Time.zone.now if at.blank?
         at = ConcernsOnRails::Support::TimeValue.cast_argument!(
           self.class, self.class.soft_delete_field, at, label: "ConcernsOnRails::Models::SoftDeletable"
         )
-        return true if deleted?
+        return soft_delete_settle if soft_delete_saved_as?(true)
 
         ConcernsOnRails::Support::HookedWrite.run(self, before: :before_soft_delete, after: :after_soft_delete) do
           next false unless soft_delete_write(at)
@@ -442,15 +451,19 @@ module ConcernsOnRails
         end
       end
 
-      # Mirror of soft_delete!, same HookedWrite contract.
+      # Mirror of soft_delete!, same HookedWrite contract and the same
+      # saved-state no-op: true, nothing written, only when the SAVED stamp is
+      # already clear (`record.deleted_at = nil; record.restore!` on a trashed
+      # row really restores it, cascade included). The cascade restores the
+      # children carrying the SAVED stamp, whatever the in-memory one reads.
       def restore!
-        return true unless deleted?
+        return soft_delete_settle if soft_delete_saved_as?(false)
 
-        stamp = self[self.class.soft_delete_field]
+        stamp = new_record? ? self[self.class.soft_delete_field] : attribute_in_database(self.class.soft_delete_field)
         ConcernsOnRails::Support::HookedWrite.run(self, before: :before_restore, after: :after_restore) do
           next false unless soft_delete_write(nil)
 
-          restore_cascaded_dependents!(stamp)
+          restore_cascaded_dependents!(stamp) if stamp
           true
         end
       end
@@ -480,6 +493,22 @@ module ConcernsOnRails
       end
 
       private
+
+      # Whether the SAVED state already is the verb's target (`deleted`: true
+      # for soft_delete!, false for restore!): a stored record — destroyed
+      # included — with no unsaved change to the stamp, whose stamp is set (or
+      # clear). Never the in-memory stamp alone, never the overridable
+      # `deleted?`.
+      def soft_delete_saved_as?(deleted)
+        field = self.class.soft_delete_field
+        !new_record? && !will_save_change_to_attribute?(field) && self[field].present? == deleted
+      end
+
+      # The no-op verbs' answer: true, or the `save` result when the record
+      # carries other pending changes (the stamp itself is never among them).
+      def soft_delete_settle
+        has_changes_to_save? ? save : true
+      end
 
       # Destroys this soft-deleted record for real (Rails' own `destroy`:
       # callbacks, `dependent:`) — the purge of a trash-scope relation's
