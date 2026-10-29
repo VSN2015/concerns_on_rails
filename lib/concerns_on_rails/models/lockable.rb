@@ -161,13 +161,6 @@ module ConcernsOnRails
           unlock_by_claimed_token(record, field, given)
         end
 
-        # A blank token, or one with a NUL byte (`?token=%00`), can match no
-        # stored token — and PostgreSQL's driver refuses a NUL in a bound
-        # parameter, which would be a 500: answer nil without a query.
-        def lockable_token_lookupable?(given)
-          !given.strip.empty? && ConcernsOnRails::Support::ScalarParam.nul_free?(given)
-        end
-
         # {} or { unlock_token_field => value } — merged into every write that
         # locks or unlocks, so the token's lifetime is exactly the lock's.
         def lockable_token_attributes(value)
@@ -209,6 +202,13 @@ module ConcernsOnRails
         end
 
         private
+
+        # A blank token, or one with a NUL byte (`?token=%00`), can match no
+        # stored token — and PostgreSQL's driver refuses a NUL in a bound
+        # parameter, which would be a 500: answer nil without a query.
+        def lockable_token_lookupable?(given)
+          !given.strip.empty? && ConcernsOnRails::Support::ScalarParam.nul_free?(given)
+        end
 
         # Claim the token with a conditional UPDATE before unlocking, the way
         # Tokenizable's consume_<field> does. Read-then-write would let two

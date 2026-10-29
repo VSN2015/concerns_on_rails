@@ -125,7 +125,9 @@ module ConcernsOnRails
         # unknown `missing:` raise before anything is written. The first id gets
         # the top position; on a :desc list it gets the highest value instead.
         # Returns the number of rows updated. Bypasses acts_as_list callbacks by
-        # design (no per-row shifting).
+        # design (no per-row shifting). A composite primary key has no single
+        # column to CASE on, so it runs one UPDATE per row, inside the same
+        # transaction (ids are [shop_id, id] tuples).
         def reposition!(ids, missing: :append)
           unless MISSING_MODES.include?(missing)
             raise ArgumentError,

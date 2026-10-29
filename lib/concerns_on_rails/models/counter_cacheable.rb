@@ -480,24 +480,36 @@ module ConcernsOnRails
           validate_counter_cacheable_touch!(touch)
         end
 
-        # A composite foreign key (Rails 7.1+ `foreign_key: [:shop_id, :order_id]`)
-        # or a composite association key would be read as ONE column everywhere
-        # below — the child never counted, the recount an invalid `NOT (())` —
-        # so it is refused up front, the way a polymorphic association is. The
-        # parent class is resolved only when it is already loadable
-        # (load-order tolerant, like counter_cacheable_ensure_parent_column!).
-        def counter_cacheable_refuse_composite_key!(association, reflection)
-          composite = reflection.foreign_key.is_a?(Array) ||
-                      (begin
-                        reflection.association_primary_key.is_a?(Array)
-                      rescue StandardError
-                        false
-                      end)
-          return unless composite
+        # A composite foreign key (Rails 7.1+ `foreign_key: [:shop_id, :order_id]`,
+        # `query_constraints:`) or a composite association key would be read as
+        # ONE column everywhere below — the child never counted, the recount an
+        # invalid `NOT (())` — so it is refused, the way a polymorphic
+        # association is. At the macro only the reflection's raw options (and
+        # the parent's key, when its class is already loadable) are read:
+        # `reflection.foreign_key` is memoized by Rails, so calling it here
+        # would pin it before a LATER model-level `query_constraints` could
+        # change it — declare `query_constraints` before `counter_cacheable_by`.
+        # The same check repeats with `strict: true` at the first recount and
+        # the first adjustment, where the reflection can be resolved fully.
+        def counter_cacheable_refuse_composite_key!(association, reflection, strict: false)
+          return unless counter_cacheable_composite_key?(reflection, strict)
 
           raise ArgumentError,
                 "#{LABEL}: association `#{association}` has a composite key (foreign_key: / primary_key: is an " \
                 "Array), which is not supported — counters track one foreign-key column"
+        end
+
+        def counter_cacheable_composite_key?(reflection, strict)
+          options = reflection.options
+          return true if options[:foreign_key].is_a?(Array) || options[:primary_key].is_a?(Array) ||
+                         options[:query_constraints]
+          return reflection.foreign_key.is_a?(Array) || reflection.association_primary_key.is_a?(Array) if strict
+
+          begin
+            reflection.association_primary_key.is_a?(Array)
+          rescue StandardError
+            false
+          end
         end
 
         def validate_counter_cacheable_touch!(touch)
@@ -520,6 +532,7 @@ module ConcernsOnRails
 
         def counter_cacheable_recount_rule(rule, parent_ids = nil)
           reflection = reflect_on_association(rule[:association])
+          counter_cacheable_refuse_composite_key!(rule[:association], reflection, strict: true)
           fk = reflection.foreign_key
           parent_class = reflection.klass
           key = counter_cacheable_parent_key(reflection)
@@ -788,9 +801,10 @@ module ConcernsOnRails
       # `parent_key` is the foreign-key value: the parent's association key
       # (its `id`, or the belongs_to's `primary_key:` column).
       def counter_cacheable_adjustment(rule, parent_key, delta, judge = self.class)
+        reflection = counter_cacheable_reflection(rule, judge)
+        judge.send(:counter_cacheable_refuse_composite_key!, rule[:association], reflection, strict: true)
         return nil if parent_key.nil?
 
-        reflection = counter_cacheable_reflection(rule, judge)
         { klass: reflection.klass, key_column: reflection.association_primary_key.to_s, parent_key: parent_key,
           column: rule[:count_column], delta: delta, touch: rule[:touch], association: rule[:association],
           rule: rule, judge: judge }
@@ -907,7 +921,9 @@ module ConcernsOnRails
       end
 
       def counter_cacheable_fk_value(rule, judge = self.class)
-        self[counter_cacheable_reflection(rule, judge).foreign_key]
+        reflection = counter_cacheable_reflection(rule, judge)
+        judge.send(:counter_cacheable_refuse_composite_key!, rule[:association], reflection, strict: true)
+        self[reflection.foreign_key]
       end
 
       # Looked up on the judging class: after a type change its rule may name

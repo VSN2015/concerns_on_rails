@@ -60,6 +60,30 @@ describe "CounterCacheable and composite keys", min_rails: "7.1" do
     end.to raise_error(ArgumentError, /composite/)
   end
 
+  it "decides at the macro from the raw options, without memoizing the reflection's foreign key" do
+    reflection = nil
+    expect do
+      item_class do
+        belongs_to :cc_cpk_order, class_name: "CcCpkOrder", foreign_key: %i[shop_id order_id], optional: true
+        reflection = reflect_on_association(:cc_cpk_order)
+        counter_cacheable_by :cc_cpk_order
+      end
+    end.to raise_error(ArgumentError, /composite/)
+    expect(reflection.instance_variable_get(:@foreign_key)).to be_nil
+  end
+
+  it "re-checks lazily: a composite key only visible after the macro still raises on first use" do
+    klass = item_class do
+      belongs_to :simple_order, class_name: "CcSimpleOrder", optional: true
+      counter_cacheable_by :simple_order, count: :cc_cpk_items_count
+    end
+    reflection = klass.reflect_on_association(:simple_order)
+    allow(reflection).to receive(:foreign_key).and_return(%w[shop_id order_id])
+
+    expect { klass.recount_counter_caches! }.to raise_error(ArgumentError, /composite/)
+    expect { klass.create!(simple_order: CcSimpleOrder.create!) }.to raise_error(ArgumentError, /composite/)
+  end
+
   it "still counts and recounts through a single-column foreign key" do
     klass = item_class do
       belongs_to :simple_order, class_name: "CcSimpleOrder", optional: true
