@@ -200,7 +200,7 @@ module ConcernsOnRails
       # expiry later). A positive duration schedules expiry and fires no
       # hooks; zero or less expires the record now, with the hooks.
       def expire_in!(duration)
-        unless duration.respond_to?(:to_i) && !duration.is_a?(String)
+        unless duration.is_a?(ActiveSupport::Duration) || duration.is_a?(Numeric)
           raise ArgumentError,
                 "ConcernsOnRails::Models::Expirable: expire_in! takes a duration " \
                 "(e.g. 15.minutes), got #{duration.class}"
