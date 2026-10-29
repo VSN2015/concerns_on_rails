@@ -19,7 +19,7 @@ module ConcernsOnRails
     #   filter_by :created_at, operators: %i[gte lte]        # a subset
     #
     #   not · gt · gte · lt · lte · in · not_in (comma list or array) ·
-    #   null (true/false) · contains · starts_with (LIKE, wildcards escaped)
+    #   null (true/false, 1/0, t/f, yes/no; anything else matches nothing) · contains · starts_with (LIKE, wildcards escaped)
     #
     # Comparison values are cast through the column's own attribute type, or
     # through `type:` (any ActiveModel type name: :integer, :decimal,
@@ -65,6 +65,11 @@ module ConcernsOnRails
       LABEL = "ConcernsOnRails::Controllers::Filterable".freeze
       OPERATORS = %i[not gt gte lt lte in not_in null contains starts_with].freeze
       COMPARISONS = { gt: :gt, gte: :gteq, lt: :lt, lte: :lteq }.freeze
+      # The only spellings `?<field>_null=` reads (case-insensitive); anything
+      # else fails closed rather than going through Rails' Boolean cast, which
+      # reads every string it does not know as false-y as TRUE ("maybe").
+      NULL_TRUE_VALUES = %w[true 1 t yes].freeze
+      NULL_FALSE_VALUES = %w[false 0 f no].freeze
       LIKE_ESCAPE = "\\".freeze
       LIKE_SPECIAL = /[\\%_]/
       NUMERIC_TYPES = %i[integer float decimal].freeze
@@ -588,7 +593,21 @@ module ConcernsOnRails
       def apply_filter_null(relation, field, raw)
         return relation unless filterable_operand?(raw)
 
-        ActiveModel::Type::Boolean.new.cast(raw) ? relation.where(field => nil) : relation.where.not(field => nil)
+        wanted = filterable_null_flag(raw)
+        return relation.none if wanted.nil?
+
+        wanted ? relation.where(field => nil) : relation.where.not(field => nil)
+      end
+
+      # true / false for an explicit spelling (a real boolean, or one of
+      # NULL_TRUE_VALUES / NULL_FALSE_VALUES, case-insensitive), else nil.
+      def filterable_null_flag(raw)
+        return raw if [true, false].include?(raw)
+
+        word = raw.to_s.strip.downcase
+        return true if NULL_TRUE_VALUES.include?(word)
+
+        false if NULL_FALSE_VALUES.include?(word)
       end
 
       # LIKE with the user's wildcards escaped — with an explicit ESCAPE clause,
