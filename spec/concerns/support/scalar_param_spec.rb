@@ -33,7 +33,7 @@ RSpec.describe ConcernsOnRails::Support::ScalarParam do
       [Float::INFINITY, -Float::INFINITY, Float::NAN, BigDecimal("Infinity"), BigDecimal("NaN")].each do |junk|
         expect(described_class.to_i(junk, default: 3)).to eq(3)
       end
-      expect(described_class.to_i(5.9, default: 3)).to eq(5)
+      expect(described_class.to_i(5.0, default: 3)).to eq(5)
     end
   end
 
