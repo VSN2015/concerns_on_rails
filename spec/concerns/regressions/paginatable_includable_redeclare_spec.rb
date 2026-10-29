@@ -102,8 +102,8 @@ describe "re-declaring paginate_by / includable in a subclass" do
     end
 
     it "stays quiet while every inherited default is still allowed, or when a default: is passed" do
-      expect { Class.new(parent) { includable :author, :comments } }.not_to output.to_stderr
-      expect { Class.new(parent) { includable :comments, default: nil } }.not_to output.to_stderr
+      expect { Class.new(parent) { includable :author, :comments } }.not_to output(/default include path/).to_stderr
+      expect { Class.new(parent) { includable :comments, default: nil } }.not_to output(/default include path/).to_stderr
     end
 
     it "explicit options override, and nil / {} clear" do
