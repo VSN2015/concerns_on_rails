@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "active_model/type"
+require "concerns_on_rails/support/encrypted_lookup"
 require "concerns_on_rails/support/scalar_param"
 require "concerns_on_rails/support/numeric_operand"
 require "concerns_on_rails/support/time_value"
@@ -297,7 +298,12 @@ module ConcernsOnRails
       # it: a JSON body's `false` is a value, not an absent param.
       def apply_filter_operator(relation, field, operator, raw, options)
         return relation if filterable_unset?(raw)
+        return relation.none if filterable_encrypted_refusal?(relation, field, operator)
 
+        apply_filter_dispatch(relation, field, operator, raw, options)
+      end
+
+      def apply_filter_dispatch(relation, field, operator, raw, options)
         case operator
         when :in, :not_in then apply_filter_list(relation, field, operator, raw)
         when :null then apply_filter_null(relation, field, raw)
@@ -443,6 +449,33 @@ module ConcernsOnRails
         end
       end
 
+      # An `encryptable` column holds random-IV ciphertext: the operand `where`
+      # serializes is a FRESH envelope that equals no stored one, so `=` / `IN`
+      # matched nothing, `!=` / NOT IN matched EVERY row (the excluded one too),
+      # and LIKE / comparisons ran over ciphertext. Support::EncryptedLookup is
+      # the gem's one detection of such a field.
+      def filterable_encrypted?(relation, field)
+        !ConcernsOnRails::Support::EncryptedLookup.rule(relation.model, field).nil?
+      end
+
+      # Only equality and `in` (through the blind index, see
+      # apply_filter_encrypted_equality) and `null` (IS NULL is true of the
+      # stored NULL, ciphertext or not) mean anything on such a column; every
+      # other operator — `not` and `not_in` included — fails closed.
+      def filterable_encrypted_refusal?(relation, field, operator)
+        !%i[in null].include?(operator) && filterable_encrypted?(relation, field)
+      end
+
+      # Equality through the field's blind index (`where_<field>`, which reads
+      # the value through the field's `normalizes` and every current / previous
+      # key); a field without one — and any negation — matches nothing, as does
+      # a value with no fingerprint (nil).
+      def apply_filter_encrypted_equality(relation, field, value, negate)
+        return relation.none if negate || ConcernsOnRails::Support::EncryptedLookup.unqueryable?(relation.model, field)
+
+        relation.public_send(:"where_#{field}", *Array(value))
+      end
+
       def apply_filter_list(relation, field, operator, raw)
         list = filterable_list(raw)
         return relation if list.nil?
@@ -461,6 +494,12 @@ module ConcernsOnRails
       # list left empty matches nothing (`in`) or every non-NULL row
       # (`not_in`, exactly what `!=` / NOT IN would answer).
       def apply_filter_equality(relation, field, value, negate: false)
+        return apply_filter_encrypted_equality(relation, field, value, negate) if filterable_encrypted?(relation, field)
+
+        apply_filter_plain_equality(relation, field, value, negate)
+      end
+
+      def apply_filter_plain_equality(relation, field, value, negate)
         kept = filterable_equality_values(relation, field, value.is_a?(Array) ? value : [value], negate: negate)
         return filterable_where(relation, field, value, negate) if kept.nil?
         return relation.none if kept == :uncastable
