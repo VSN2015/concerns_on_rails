@@ -203,11 +203,7 @@ module ConcernsOnRails
       # expiry later). A positive duration schedules expiry and fires no
       # hooks; zero or less expires the record now, with the hooks.
       def expire_in!(duration)
-        unless duration.is_a?(ActiveSupport::Duration) || duration.is_a?(Numeric)
-          raise ArgumentError,
-                "ConcernsOnRails::Models::Expirable: expire_in! takes a duration " \
-                "(e.g. 15.minutes), got #{duration.class}"
-        end
+        expirable_check_duration!(duration, "expire_in!", "a duration")
 
         expirable_write_expiry(self.class.expirable_cast_time(Time.zone.now + duration))
       end
@@ -230,6 +226,7 @@ module ConcernsOnRails
       # is extended as assigned; a new record has no row and extends its own.
       # Other unsaved changes are saved with it, as `update` always has.
       def extend_expiry!(by:)
+        expirable_check_duration!(by, "extend_expiry!", "a duration (by:)")
         field = self.class.expirable_field
         return update(field => expiry_extension_base(self[field]) + by) if new_record? || will_save_change_to_attribute?(field)
 
@@ -249,6 +246,17 @@ module ConcernsOnRails
         return 0.seconds if expirable_expired?
 
         (value.in_time_zone - Time.zone.now).seconds
+      end
+
+      # A lifetime is an ActiveSupport::Duration or a Numeric number of seconds;
+      # anything else (nil from an absent param included) raises the concern's
+      # ArgumentError before any hook or write.
+      def expirable_check_duration!(value, verb, what)
+        return if value.is_a?(ActiveSupport::Duration) || value.is_a?(Numeric)
+
+        raise ArgumentError,
+              "ConcernsOnRails::Models::Expirable: #{verb} takes #{what} " \
+              "(e.g. 15.minutes), got #{value.class}"
       end
 
       # Whether the saved expiry already falls at or before `time`, so
@@ -311,7 +319,7 @@ module ConcernsOnRails
       end
 
       private :expiry_extension_base, :expirable_expired?, :expirable_live?,
-              :expirable_expires_by?, :expirable_write_expiry, :expirable_settle
+              :expirable_expires_by?, :expirable_write_expiry, :expirable_settle, :expirable_check_duration!
     end
   end
 end

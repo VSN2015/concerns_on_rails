@@ -43,6 +43,27 @@ describe "Expirable#expire_in! argument checking" do
     end
   end
 
+  describe "extend_expiry!(by:)" do
+    [nil, "15", "soon", :soon, [], Object.new].each do |bad|
+      it "raises the concern's ArgumentError for #{bad.inspect}, writing nothing" do
+        future = Time.zone.now + 2.days
+        token = model.create!(expires_at: future)
+
+        expect { token.extend_expiry!(by: bad) }.to raise_error(ArgumentError, /extend_expiry! takes a duration/)
+        expect(token.reload.expires_at).to be_within(1).of(future)
+      end
+    end
+
+    it "still takes a Duration or a Numeric number of seconds" do
+      token = model.create!(expires_at: Time.zone.now + 1.day)
+
+      expect(token.extend_expiry!(by: 1.day)).to be(true)
+      expect(token.expires_at).to be_within(2).of(Time.zone.now + 2.days)
+      expect(token.extend_expiry!(by: 3600)).to be(true)
+      expect(token.expires_at).to be_within(2).of(Time.zone.now + 2.days + 1.hour)
+    end
+  end
+
   it "still takes a Duration" do
     token = model.create!
 
