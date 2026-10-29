@@ -374,6 +374,11 @@ module ConcernsOnRails
         lockable_guard_persisted!("register_failed_attempt!")
         return lockable_current_attempts if access_locked?
 
+        # Before the increment: it is a class-level update_counters, which
+        # ignores readonly?/destroyed?, and the lock_access! behind the
+        # threshold would then raise with the counter already written.
+        lockable_guard_writable!
+
         # A lapsed lock is cleared quietly — this is a *failed* login, so
         # firing unlock hooks ("account unlocked" notifications) would be
         # wrong. The failure below then counts as attempt 1 of the new window.
