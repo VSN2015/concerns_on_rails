@@ -253,12 +253,34 @@ module ConcernsOnRails
       def limited_keys(relation, key)
         return relation.pluck(key) unless relation.distinct_value
 
-        # Only the key is plucked, so the derived table is the relation's own
-        # `SELECT DISTINCT table.*`: a select left on it (full_rows adds the
-        # star beside the caller's columns) would repeat `id` there.
-        relation.klass.unscoped.from(relation.unscope(:select), relation.klass.quoted_table_name).pluck(key)
+        # Only the key is plucked, so the derived table keeps the relation's
+        # star and its computed selects (an alias the ORDER BY names) but drops
+        # the plain own-table columns full_rows' star already carries: a
+        # `select(:id)` left beside the star would repeat `id` there
+        # (PostgreSQL: ambiguous; MySQL: error 1060).
+        table = relation.klass.table_name
+        kept = relation.select_values.reject { |value| plain_column?(value, table) }
+        derived = relation.unscope(:select)
+        derived = derived.select(*kept) if kept.any?
+        relation.klass.unscoped.from(derived, relation.klass.quoted_table_name).pluck(key)
       end
-      private_class_method :each_row, :whole_table_select?, :joined?, :unjoined, :limited_keys, :conditional_counters?, :audited_writes?
+
+      # A select value naming one of the model's own columns as is: a Symbol,
+      # a bare or own-table-qualified identifier String, or an own-table Arel
+      # attribute other than the star.
+      def plain_column?(value, table)
+        case value
+        when Symbol then true
+        when Arel::Attributes::Attribute
+          value.name.to_s != "*" && value.relation.respond_to?(:name) && value.relation.name.to_s == table.to_s
+        when String
+          qualifier = "(?:[\"`\\w]+\\.)?[\"`]?#{Regexp.escape(table)}[\"`]?\\."
+          value.match?(/\A\s*(?:#{qualifier})?["`]?\w+["`]?\s*\z/)
+        else false
+        end
+      end
+      private_class_method :each_row, :whole_table_select?, :joined?, :unjoined, :limited_keys, :plain_column?,
+                           :conditional_counters?, :audited_writes?
 
       # The validate callbacks every ActiveRecord model carries out of the box
       # (Rails 7.1 registers :cant_modify_encrypted_attributes_when_frozen on

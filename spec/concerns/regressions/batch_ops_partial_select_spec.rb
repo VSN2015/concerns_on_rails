@@ -148,6 +148,28 @@ RSpec.describe "Batch verbs and relation destroy_all over a partial select" do
     expect(derived[/FROM \(SELECT DISTINCT(.*?) FROM/m, 1].strip).to match(/\A[`"]?ps_posts[`"]?\.\*\z/)
   end
 
+  it "keeps a computed alias the ORDER BY names in the DISTINCT key subquery" do
+    %w[c a b].each { |t| publishable.create!(title: t) }
+    relation = publishable.select("ps_posts.*, LOWER(title) AS lt").order("lt").distinct.limit(2)
+
+    expect(relation.publish_all).to eq(2)
+    expect(publishable.unscoped.where.not(published_at: nil).order(:title).pluck(:title)).to eq(%w[a b])
+  end
+
+  it "drops only the plain columns beside a computed alias in the DISTINCT key subquery" do
+    %w[c a b].each { |t| publishable.create!(title: t) }
+    relation = publishable.select(:id, "LOWER(title) AS lt").order("lt").distinct.limit(2)
+    sql = []
+    callback = ->(*, payload) { sql << payload[:sql] }
+
+    count = ActiveSupport::Notifications.subscribed(callback, "sql.active_record") { relation.publish_all }
+
+    expect(count).to eq(2)
+    expect(publishable.unscoped.where.not(published_at: nil).order(:title).pluck(:title)).to eq(%w[a b])
+    derived = sql.find { |query| query =~ /FROM \(SELECT DISTINCT/ }
+    expect(derived[/FROM \(SELECT DISTINCT(.*?) FROM/m, 1]).not_to match(/[`"]?ps_posts[`"]?\.[`"]?id[`"]?/)
+  end
+
   it "leaves an unselected relation alone" do
     publishable.create!(title: "a")
 
