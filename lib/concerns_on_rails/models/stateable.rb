@@ -292,10 +292,13 @@ module ConcernsOnRails
         # A record the event's update! rejects is a failed record: false makes
         # BatchOps raise RecordNotSaved (with the record) and roll the batch
         # back, the contract of every *_all verb. The single <event>! still
-        # raises RecordInvalid.
+        # raises RecordInvalid. Only THIS record's: another record a hook saved
+        # (`other.save!`) failing is that hook's error and propagates.
         def stateable_batch_fire(record, method_base)
           record.public_send(:"#{method_base}!")
-        rescue ActiveRecord::RecordInvalid
+        rescue ActiveRecord::RecordInvalid => e
+          raise unless e.record.equal?(record)
+
           false
         end
 

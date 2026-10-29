@@ -31,11 +31,12 @@ RSpec.describe "Stateable transition_all with a record that fails validation" do
     context "with lock: #{lock}" do
       it "raises RecordNotSaved carrying the record, and rolls the whole batch back" do
         klass = model(lock: lock)
-        good = klass.create!(title: "x")
+        klass.create!(title: "x")
         bad = klass.create!(title: nil)
 
         expect { klass.transition_all(:finish) }.to raise_error(ActiveRecord::RecordNotSaved) { |error|
-          expect(error.record.id).to be_in([good.id, bad.id])
+          expect(error.record.id).to eq(bad.id)
+          expect(error.record.errors[:title]).to be_present
         }
         expect(klass.pluck(:status)).to all(eq("draft"))
       end
@@ -48,6 +49,24 @@ RSpec.describe "Stateable transition_all with a record that fails validation" do
         expect(bad.reload.status).to eq("draft")
       end
     end
+  end
+
+  it "lets another record's failed save inside a hook propagate as its own RecordInvalid" do
+    klass = model
+    ticket = klass.create!(title: "x")
+    other = klass.create!(title: nil)
+    klass.class_eval do
+      attr_accessor :sibling
+
+      def after_finish
+        sibling&.update!(status: "done") # fails: the sibling has no title
+      end
+    end
+    allow_any_instance_of(klass).to receive(:sibling) { |record| record.id == ticket.id ? other : nil }
+
+    expect { klass.where(id: ticket.id).transition_all(:finish) }.to raise_error(ActiveRecord::RecordInvalid) { |error|
+      expect(error.record.id).to eq(other.id)
+    }
   end
 
   it "counts every valid record when none fails" do
