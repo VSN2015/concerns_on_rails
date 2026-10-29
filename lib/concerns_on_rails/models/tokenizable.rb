@@ -3,6 +3,7 @@ require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/encrypted_lookup"
 require "concerns_on_rails/support/generated_values"
 require "concerns_on_rails/support/primary_key"
+require "concerns_on_rails/support/scalar_param"
 require "concerns_on_rails/support/random_value"
 require "concerns_on_rails/support/unique_retry"
 require "active_support/security_utils"
@@ -183,9 +184,12 @@ module ConcernsOnRails
         # Hash or ActionController::Parameters, which find_by cannot cast
         # (TypeError: a 500 instead of a 401), and an Array would run an
         # IN (...) over the caller's guesses; anything else answers nil, like
-        # a wrong token, without a query.
+        # a wrong token, without a query. A String holding a NUL byte
+        # (`?token=%00`) is a wrong token too: PostgreSQL's driver refuses it in
+        # a bound parameter, which would be a 500 (ScalarParam.nul_free?).
         def tokenizable_lookup_value?(value)
-          (value.is_a?(String) || value.is_a?(Integer)) && value.present?
+          (value.is_a?(String) || value.is_a?(Integer)) && value.present? &&
+            ConcernsOnRails::Support::ScalarParam.nul_free?(value)
         end
 
         def tokenizable_consumed_attributes(record, field)

@@ -5,6 +5,7 @@ require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/locking"
 require "concerns_on_rails/support/primary_key"
+require "concerns_on_rails/support/scalar_param"
 require "securerandom"
 require "active_support/security_utils"
 
@@ -143,7 +144,7 @@ module ConcernsOnRails
           raise ArgumentError, "#{LABEL}: unlock_token: is not configured (lockable_by unlock_token: :unlock_token)" unless field
 
           given = token.to_s
-          return nil if given.strip.empty?
+          return nil unless lockable_token_lookupable?(given)
 
           record = find_by(field => given)
           return nil unless record
@@ -158,6 +159,13 @@ module ConcernsOnRails
           return lockable_retire_token(record, field, given) unless record.access_locked?
 
           unlock_by_claimed_token(record, field, given)
+        end
+
+        # A blank token, or one with a NUL byte (`?token=%00`), can match no
+        # stored token — and PostgreSQL's driver refuses a NUL in a bound
+        # parameter, which would be a 500: answer nil without a query.
+        def lockable_token_lookupable?(given)
+          !given.strip.empty? && ConcernsOnRails::Support::ScalarParam.nul_free?(given)
         end
 
         # {} or { unlock_token_field => value } — merged into every write that
