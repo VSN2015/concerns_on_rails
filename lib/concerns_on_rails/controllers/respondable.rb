@@ -59,13 +59,8 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       LABEL = "ConcernsOnRails::Controllers::Respondable".freeze
-      # Rack 3.1+ renamed these status phrases; see problem_status_code.
-      RENAMED_STATUS_SYMBOLS = {
-        unprocessable_entity: :unprocessable_content,
-        request_entity_too_large: :content_too_large,
-        payload_too_large: :content_too_large,
-        request_uri_too_long: :uri_too_long
-      }.freeze
+      # Rack 3.1+ renamed these status phrases; see ErrorEnvelope.renderable_status.
+      RENAMED_STATUS_SYMBOLS = ConcernsOnRails::Support::ErrorEnvelope::RENAMED_STATUS_SYMBOLS
 
       ERROR_FORMATS = %i[envelope problem_details].freeze
       PROBLEM_JSON = "application/problem+json".freeze
@@ -156,7 +151,10 @@ module ConcernsOnRails
         error[:code] = code if code
         error[:details] = errors if errors
 
-        render json: { success: false, error: error }, status: status
+        # Never a renamed symbol: on Rack >= 3.1 `:unprocessable_entity` (this
+        # method's own default) logs a deprecation warning per call.
+        render json: { success: false, error: error },
+               status: ConcernsOnRails::Support::ErrorEnvelope.renderable_status(status)
       end
 
       private

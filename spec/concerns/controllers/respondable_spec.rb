@@ -45,7 +45,7 @@ describe ConcernsOnRails::Controllers::Respondable do
       controller.render_error(message: "Bad request")
       expect(controller.rendered).to eq(
         json: { success: false, error: { message: "Bad request" } },
-        status: :unprocessable_entity
+        status: ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity)
       )
     end
 
@@ -290,7 +290,7 @@ describe ConcernsOnRails::Controllers::Respondable do
       controller.render_invalid(record)
       expect(controller.rendered).to eq(
         json: { success: false, error: { message: "Validation failed", code: "record_invalid", details: ["Name can't be blank"] } },
-        status: :unprocessable_entity
+        status: ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity)
       )
 
       custom = controller_class.new

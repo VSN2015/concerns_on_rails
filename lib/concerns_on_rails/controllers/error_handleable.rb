@@ -163,7 +163,7 @@ module ConcernsOnRails
         # Use a generic message: the raw RecordNotFound message leaks the model
         # class name and the queried attribute/value to API clients. Subclasses
         # can override this method to surface detail in non-production envs.
-        render_handled_error(:not_found, message: "Resource not found", error: error)
+        render_handled_error(:not_found, message: ConcernsOnRails::Support::ErrorEnvelope::NOT_FOUND_MESSAGE, error: error)
       end
 
       def handle_parameter_missing(error)
@@ -186,8 +186,13 @@ module ConcernsOnRails
         render_handled_error(:record_not_saved, message: error.message, errors: record_error_details(error), error: error)
       end
 
+      # `destroy!` refused by a callback abort. Rails' raw message is "Failed to
+      # destroy <Model> with id=<id>" -- the model class name and primary key,
+      # which belong in a log, not in an API response (the not_found handler
+      # hides exactly this). The record's own errors, if any, stay as details.
       def handle_record_not_destroyed(error)
-        render_handled_error(:record_not_destroyed, message: error.message, errors: record_error_details(error), error: error)
+        render_handled_error(:record_not_destroyed, message: "Resource could not be deleted",
+                                                    errors: record_error_details(error), error: error)
       end
 
       # Optimistic locking (`lock_version`) lost the race. The raw message names

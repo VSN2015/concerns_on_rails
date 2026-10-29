@@ -183,7 +183,7 @@ describe ConcernsOnRails::Controllers::Idempotentable do
 
       c = instance(klass, key: "pay-1", params: { amount: 999 })
       expect(perform(c)).to eq(0)
-      expect(c.rendered[:status]).to eq(:unprocessable_entity)
+      expect(c.rendered[:status]).to eq(ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity))
       expect(c.rendered[:json][:error][:code]).to eq("idempotency_key_reuse")
     end
 

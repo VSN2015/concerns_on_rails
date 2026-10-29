@@ -133,7 +133,7 @@ module ConcernsOnRails
           end
 
           self.secure_headable_headers =
-            secure_headable_headers.merge(resolved).merge(custom.transform_keys(&:to_s))
+            SecureHeadable.merge_headers(secure_headable_headers, resolved.merge(custom.transform_keys(&:to_s)))
         end
 
         # Thin pass-through to Rails' native CSP DSL — never re-implement CSP.
@@ -172,6 +172,18 @@ module ConcernsOnRails
 
       REPORT_ONLY_MODES = [true, false, :inherit].freeze
 
+      # Header names are case-insensitive (RFC 9110 section 5.1), so a custom
+      # "x-frame-options" pair and the :deny_frame preset are ONE header: the
+      # later value wins, under the spelling first registered. A plain Hash
+      # merge kept both keys, and on Rails < 7.1 (case-sensitive response
+      # headers) emitted two conflicting X-Frame-Options lines.
+      def self.merge_headers(existing, incoming)
+        incoming.each_with_object(existing.dup) do |(name, value), merged|
+          key = merged.keys.find { |seen| seen.casecmp?(name) } || name
+          merged[key] = value
+        end
+      end
+
       # Module-level (not a class method) so the macro stays under the block cap.
       def self.validate_report_only!(value)
         return if REPORT_ONLY_MODES.include?(value)
@@ -187,17 +199,45 @@ module ConcernsOnRails
         return unless respond_to?(:response) && response
 
         self.class.secure_headable_headers.each do |name, value|
-          next if secure_headable_skip?(name)
+          next if secure_headable_skip?(name) || secure_headable_superseded_by_force_ssl?(name, value)
 
-          response.set_header(name, value)
+          response.set_header(secure_headable_header_name(name), value)
         end
+      end
+
+      # Write under the spelling the response already carries: Rails < 7.1
+      # headers are a case-sensitive Hash, so "x-frame-options" beside Rails'
+      # default "X-Frame-Options" would otherwise be a second, conflicting line.
+      def secure_headable_header_name(name)
+        return name unless response.respond_to?(:headers) && response.headers.respond_to?(:keys)
+
+        response.headers.keys.find { |existing| existing.to_s.casecmp?(name) } || name
+      end
+
+      # The `:hsts` PRESET under `config.force_ssl`: ActionDispatch::SSL only
+      # fills Strict-Transport-Security when it is absent (`||=`), so the
+      # preset's fixed one-year value would override the app's own
+      # `config.ssl_options[:hsts]` (2-year default, `preload:`,
+      # `subdomains:`). A custom pair with a different value is the app's
+      # explicit choice and is still sent. Read per request.
+      def secure_headable_superseded_by_force_ssl?(name, value)
+        return false unless name.to_s.casecmp?(HSTS_HEADER) && value == PRESETS[:hsts].last
+
+        secure_headable_force_ssl?
+      end
+
+      def secure_headable_force_ssl?
+        return false unless defined?(::Rails) && ::Rails.respond_to?(:application)
+
+        config = ::Rails.application&.config
+        config.respond_to?(:force_ssl) && config.force_ssl ? true : false
       end
 
       # HSTS is the one preset that is wrong to send unconditionally: RFC 6797
       # section 7.2 forbids it over plaintext, and overwriting a value the app
       # already set would silently shorten a longer max-age or drop `preload`.
       def secure_headable_skip?(name)
-        return false unless name == HSTS_HEADER
+        return false unless name.to_s.casecmp?(HSTS_HEADER)
 
         secure_headable_plain_http? || secure_headable_existing_hsts.present?
       end
@@ -208,10 +248,14 @@ module ConcernsOnRails
         req.respond_to?(:ssl?) && !req.ssl?
       end
 
+      # Looked up case-insensitively: Rails < 7.1 headers are a plain Hash, so a
+      # lower-case "strict-transport-security" set earlier is a different key.
       def secure_headable_existing_hsts
-        return response.get_header(HSTS_HEADER) if response.respond_to?(:get_header)
+        value = response.get_header(HSTS_HEADER) if response.respond_to?(:get_header)
+        return value if value.present?
+        return nil unless response.respond_to?(:headers)
 
-        response.headers[HSTS_HEADER] if response.respond_to?(:headers)
+        response.headers.find { |name, _| name.to_s.casecmp?(HSTS_HEADER) }&.last
       end
     end
   end
