@@ -118,7 +118,7 @@ module ConcernsOnRails
           # role-list constant) arrives as [[:admin, :editor]], and `require_role []`
           # as [[]] -- neither may count as a single role named "[...]".
           roles = roles.flatten
-          raise ArgumentError, "#{LABEL}: at least one role is required" if roles.empty?
+          validate_required_roles!(roles)
 
           wanted = roles.map(&:to_s)
           check = proc do
@@ -136,6 +136,15 @@ module ConcernsOnRails
         end
 
         private
+
+        def validate_required_roles!(roles)
+          raise ArgumentError, "#{LABEL}: at least one role is required" if roles.empty?
+          # A nil/blank entry (`require_role ENV["ADMIN_ROLE"]&.to_sym`, unset)
+          # would otherwise admit every actor whose role is "" or nil.
+          return unless roles.any? { |role| role.to_s.strip.empty? }
+
+          raise ArgumentError, "#{LABEL}: roles must not be nil or blank"
+        end
 
         def validate_skip_authorization!(only, except)
           raise ArgumentError, "#{LABEL}: pass either :only or :except, not both" if only != UNSET && except != UNSET

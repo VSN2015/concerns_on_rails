@@ -59,4 +59,26 @@ describe "Authorizable require_role with an Array of roles" do
       end
     end.to raise_error(ArgumentError, /at least one role is required/)
   end
+
+  it "raises at class load for a nil or blank role (an unset ENV lookup) instead of admitting role-less actors" do
+    [[nil], [""], ["  "], [:admin, nil], [[:admin, ""]]].each do |args|
+      expect do
+        IntegrationHarness.build_controller do
+          include ConcernsOnRails::Controllers::Authorizable
+
+          require_role(*args)
+        end
+      end.to raise_error(ArgumentError, /roles must not be nil or blank/)
+    end
+  end
+
+  it "does not admit an actor with an empty role when the role list was built from an unset value" do
+    expect do
+      IntegrationHarness.build_controller do
+        include ConcernsOnRails::Controllers::Authorizable
+
+        require_role ENV.fetch("COR_UNSET_ROLE_FOR_SPEC", nil)&.to_sym
+      end
+    end.to raise_error(ArgumentError)
+  end
 end
