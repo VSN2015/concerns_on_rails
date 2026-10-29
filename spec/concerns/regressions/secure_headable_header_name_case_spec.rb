@@ -103,4 +103,25 @@ describe "SecureHeadable header-name case" do
     frames = response_headers.select { |name, _| name.to_s.casecmp?("X-Frame-Options") }
     expect(frames.values).to eq(["SAMEORIGIN"])
   end
+
+  # Rails < 7.1 response headers are a case-sensitive Hash and the framework's
+  # default_headers carry "X-Frame-Options": a custom lower-case pair must
+  # overwrite THAT entry, not sit next to it.
+  it "writes over the spelling already on the response (Rails' default X-Frame-Options), leaving one header" do
+    saved = ActionDispatch::Response.default_headers
+    ActionDispatch::Response.default_headers = { "X-Frame-Options" => "SAMEORIGIN" }
+    klass = controller_with { secure_headers "x-frame-options" => "DENY" }
+    frames = IntegrationHarness.dispatch(klass, :show).headers.select { |name, _| name.to_s.casecmp?("X-Frame-Options") }
+
+    expect(frames.values).to eq(["DENY"])
+  ensure
+    ActionDispatch::Response.default_headers = saved
+  end
+
+  it "adds the header under the registered spelling when the response has none" do
+    klass = controller_with { secure_headers "x-custom-policy" => "on" }
+    headers = IntegrationHarness.dispatch(klass, :show).headers
+
+    expect(headers.select { |name, _| name.to_s.casecmp?("x-custom-policy") }.values).to eq(["on"])
+  end
 end

@@ -201,8 +201,17 @@ module ConcernsOnRails
         self.class.secure_headable_headers.each do |name, value|
           next if secure_headable_skip?(name)
 
-          response.set_header(name, value)
+          response.set_header(secure_headable_header_name(name), value)
         end
+      end
+
+      # Write under the spelling the response already carries: Rails < 7.1
+      # headers are a case-sensitive Hash, so "x-frame-options" beside Rails'
+      # default "X-Frame-Options" would otherwise be a second, conflicting line.
+      def secure_headable_header_name(name)
+        return name unless response.respond_to?(:headers) && response.headers.respond_to?(:keys)
+
+        response.headers.keys.find { |existing| existing.to_s.casecmp?(name) } || name
       end
 
       # HSTS is the one preset that is wrong to send unconditionally: RFC 6797
