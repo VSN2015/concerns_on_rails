@@ -83,7 +83,9 @@ module ConcernsOnRails
         # dispatcher (Support::TransformBackstop) in before_validation order,
         # so a sibling's earlier before_save (Encryptable's blind index,
         # Auditable's entry) sees the value that gets stored.
-        ConcernsOnRails::Support::TransformBackstop.install(self, :sanitizable_apply_unvalidated)
+        ConcernsOnRails::Support::TransformBackstop.install(
+          self, :sanitizable_apply_unvalidated, settle: :sanitizable_settle
+        )
       end
 
       module ClassMethods
@@ -293,18 +295,14 @@ module ConcernsOnRails
         @sanitizable_applied = {}
         sanitizable_each_write_rule do |field, writer, value|
           # A plain String, never a SafeBuffer.
-          self[field] = writer.call(value) unless previous.key?(field) && previous[field] == value
+          unless previous.key?(field) && previous[field] == value
+            self[field] = writer.call(value)
+            ConcernsOnRails::Support::TransformBackstop.wrote(self, field)
+          end
           # A copy: an in-place mutation after validation must not mutate the
           # recorded value too and look sanitized.
           @sanitizable_applied[field] = self[field].dup
         end
-      end
-
-      # A reload throws the unsaved state away, and the previous pass's record
-      # with it: a value assigned afterwards is new work for the rules.
-      def reload(*)
-        @sanitizable_applied = nil
-        super
       end
 
       # Re-recorded once validation is over: a later before_validation — a
@@ -319,16 +317,27 @@ module ConcernsOnRails
       # Sanitize only what before_validation did not: a field it already
       # handled, still holding the value it produced, is skipped, so a Proc
       # runs exactly once in a validated save. A field assigned after that
-      # validation (or never validated at all) is sanitized here. The record
-      # is cleared for the next save.
+      # validation (or never validated at all) is sanitized here and recorded
+      # the same way. The record outlives a save halted by a later before_save
+      # or rolled back (the dispatcher's after_save sets it aside, a rollback
+      # restores it), so a retry on the same record does not run a Proc on its
+      # own output again.
       def sanitizable_apply_unvalidated
-        applied = @sanitizable_applied || {}
-        @sanitizable_applied = nil
+        applied = (@sanitizable_applied ||= {})
         sanitizable_each_write_rule do |field, writer, value|
           next if applied.key?(field) && applied[field] == value
 
           self[field] = writer.call(value)
+          ConcernsOnRails::Support::TransformBackstop.wrote(self, field)
+          applied[field] = self[field].dup
         end
+      end
+
+      # After every backstop: re-take the record from what the fields now hold,
+      # so a later transform's rewrite (Normalizable after Sanitizable) is what
+      # a retry of a halted save compares against.
+      def sanitizable_settle
+        @sanitizable_applied = @sanitizable_applied.to_h { |field, _| [field, self[field].dup] } if @sanitizable_applied
       end
 
       def sanitizable_each_write_rule
@@ -352,8 +361,8 @@ module ConcernsOnRails
       def sanitizable_stored_unchanged?(field)
         persisted? && respond_to?(:will_save_change_to_attribute?) && !will_save_change_to_attribute?(field)
       end
-      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_each_write_rule,
-              :sanitizable_stored_unchanged?
+      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_settle,
+              :sanitizable_each_write_rule, :sanitizable_stored_unchanged?
 
       # { field => sanitized } for the fields whose stored value would change;
       # nil values are left alone (nothing to sanitize).

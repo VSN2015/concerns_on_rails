@@ -162,6 +162,18 @@ module ConcernsOnRails
         nil
       end
 
+      # `cents` when the column's attribute type can store it, else nil. An
+      # integer column answers an out-of-range value at SERIALIZE time
+      # (ActiveModel::RangeError, on save), so ask it now.
+      def fit_column(cents, type)
+        return cents if cents.nil?
+
+        type.serialize(cents)
+        cents
+      rescue ActiveModel::RangeError
+        nil
+      end
+
       def parse_string(amount, options)
         body = strip_unit(strip_space(amount), options.fetch(:unit, "$").to_s)
         return nil unless body && plausible_input?(body)

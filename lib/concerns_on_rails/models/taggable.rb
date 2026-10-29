@@ -39,7 +39,11 @@ module ConcernsOnRails
     #   * A tag cannot contain the delimiter (default ",") — input containing
     #     it is split into multiple tags on the spot (`add_tags("a,b")` adds
     #     "a" and "b"), everywhere, so what you read back always matches what
-    #     a save would have produced.
+    #     a save would have produced. Under a delimiter that overlaps itself
+    #     ("--") a tag also cannot END with the start of it ("a-"): the join
+    #     "a---b" would read back as "a" and "-b", so the trailing part is
+    #     dropped when the tag is cleaned (and a leading "-" likewise, which
+    #     would make tagged_with("b") match "-b").
     #   * `tagged_with` (SQL) matches the NORMALIZED column form: tags joined by
     #     the bare delimiter ("ruby,rails"). Writes through the model always
     #     produce it; rows written around the callbacks (update_column, raw
@@ -186,9 +190,11 @@ module ConcernsOnRails
           unscoped.where(primary_key => base.pluck(primary_key))
         end
 
-        # Split a raw stored column value into a normalized tag array.
+        # Split a raw stored column value into a normalized tag array. An Array
+        # is cleaned item by item: joining it first would let a tag's end and
+        # the delimiter's start run together.
         def taggable_split(raw)
-          taggable_clean_all(raw.to_s.split(taggable_delimiter))
+          taggable_clean_all(raw.is_a?(Array) ? raw : [raw])
         end
 
         # The stored column form of a tag array (nil when empty).
@@ -201,9 +207,48 @@ module ConcernsOnRails
         # kept as a distinct tag that tagged_with("ruby") never found, though
         # it looked identical in all_tags.
         def taggable_clean(tag)
-          tag = tag.to_s.gsub(EDGE_SPACE, "")
+          tag = taggable_trim_straddle(tag.to_s.gsub(EDGE_SPACE, ""))
           taggable_downcase ? tag.downcase : tag
         end
+
+        # A tag that ENDS with the start of a self-overlapping delimiter would
+        # swallow part of it when joined: with delimiter "--", ["a-", "b"]
+        # joins to "a---b", which splits as ["a", "-b"] — so the tag was never
+        # stored as given, and tagged_with("a-") could not find it. A tag that
+        # STARTS with the end of one ("-b") reads back, but the LIKE behind
+        # tagged_with("b") ("%--b") matches "x---b". Such a trailing/leading
+        # part is dropped, as the delimiter itself splits a tag (a delimiter
+        # with no overlap with itself — "," or ", " — has none).
+        def taggable_trim_straddle(tag)
+          prefixes, suffixes = taggable_straddle_parts
+          return tag if prefixes.empty?
+
+          loop do
+            trimmed = taggable_trim_edges(tag, prefixes, suffixes)
+            return tag if trimmed == tag
+
+            tag = trimmed
+          end
+        end
+
+        def taggable_trim_edges(tag, prefixes, suffixes)
+          trailing = prefixes.find { |prefix| tag.end_with?(prefix) }
+          tag = tag[0, tag.length - trailing.length] if trailing
+          leading = suffixes.find { |suffix| tag.start_with?(suffix) }
+          tag = tag[leading.length..] if leading
+          tag.gsub(EDGE_SPACE, "")
+        end
+
+        # For each period k of the delimiter d (d == d[0, k] + d[k..], i.e.
+        # d[k..] == d[0, d.length - k]): its first k characters, and its last
+        # k. A tag ending in the first, followed by d, holds d one place early;
+        # a tag starting with the last, after d, does the same.
+        def taggable_straddle_parts
+          delimiter = taggable_delimiter
+          lengths = (1...delimiter.length).select { |len| delimiter[len..] == delimiter[0, delimiter.length - len] }
+          [lengths.map { |len| delimiter[0, len] }, lengths.map { |len| delimiter[-len, len] }]
+        end
+        private :taggable_trim_straddle, :taggable_trim_edges, :taggable_straddle_parts
 
         private
 
@@ -339,6 +384,7 @@ module ConcernsOnRails
         return if raw.nil?
 
         self[field] = self.class.taggable_join(self.class.taggable_split(raw))
+        ConcernsOnRails::Support::TransformBackstop.wrote(self, field)
         self[field].dup
       end
 
@@ -346,8 +392,7 @@ module ConcernsOnRails
       # (and Array items that themselves contain the delimiter) normalize
       # identically.
       def taggable_coerce(value)
-        raw = value.is_a?(Array) ? value.join(self.class.taggable_delimiter) : value.to_s
-        self.class.taggable_split(raw)
+        self.class.taggable_split(value.is_a?(Array) ? value : value.to_s)
       end
     end
   end
