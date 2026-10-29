@@ -109,7 +109,7 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
 
       controller.handle_record_invalid(error)
 
-      expect(controller.rendered[:status]).to eq(:unprocessable_entity)
+      expect(controller.rendered[:status]).to eq(ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity))
       expect(controller.rendered[:json][:error][:code]).to eq("record_invalid")
       expect(controller.rendered[:json][:error][:details]).to include("Name can't be blank")
     end
@@ -120,7 +120,7 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
       error = ActiveRecord::RecordInvalid.new(record)
 
       expect(controller.rescue_with_handler(error)).to be_truthy
-      expect(controller.rendered[:status]).to eq(:unprocessable_entity)
+      expect(controller.rendered[:status]).to eq(ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity))
     end
   end
 
@@ -222,7 +222,7 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
         expect(controller_class.public_method_defined?(spec[:handler])).to be(true), "#{spec[:handler]} must be public"
         fresh = controller_class.new
         expect(fresh.rescue_with_handler(build.call)).to be_truthy, "no handler dispatched for #{key}"
-        expect(fresh.rendered[:status]).to eq(spec[:status]), "#{key}: status"
+        expect(fresh.rendered[:status]).to eq(ConcernsOnRails::Support::ErrorEnvelope.renderable_status(spec[:status])), "#{key}: status"
         expect(fresh.rendered[:json][:error][:code]).to eq(key.to_s), "#{key}: code"
       end
     end
@@ -241,14 +241,14 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
       end
       form = form_class.new.tap(&:valid?)
       rendered = rescue!(ActiveModel::ValidationError.new(form))
-      expect(rendered[:status]).to eq(:unprocessable_entity)
+      expect(rendered[:status]).to eq(ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity))
       expect(rendered[:json][:error]).to include(code: "validation_error", details: ["Email can't be blank"])
       expect(rendered[:json][:error][:message]).to include("Email can't be blank")
     end
 
     it "ActiveRecord::RecordNotSaved → 422 record_not_saved, details only when the record has errors" do
       rendered = rescue!(ActiveRecord::RecordNotSaved.new("Failed to save the record", invalid_item))
-      expect(rendered[:status]).to eq(:unprocessable_entity)
+      expect(rendered[:status]).to eq(ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity))
       expect(rendered[:json][:error]).to eq(
         message: "Failed to save the record", code: "record_not_saved", details: ["Name can't be blank"]
       )
@@ -262,7 +262,7 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
       item = ErrorItem.create!(name: "keep")
       item.errors.add(:base, "Cannot delete an item with open orders")
       rendered = rescue!(ActiveRecord::RecordNotDestroyed.new("Failed to destroy the record", item))
-      expect(rendered[:status]).to eq(:unprocessable_entity)
+      expect(rendered[:status]).to eq(ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity))
       expect(rendered[:json][:error]).to include(
         code: "record_not_destroyed", details: ["Cannot delete an item with open orders"]
       )
@@ -301,7 +301,7 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
 
     it "ActionController::InvalidAuthenticityToken → 422 invalid_authenticity_token" do
       rendered = rescue!(ActionController::InvalidAuthenticityToken.new)
-      expect(rendered[:status]).to eq(:unprocessable_entity)
+      expect(rendered[:status]).to eq(ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity))
       expect(rendered[:json][:error]).to eq(message: "Invalid authenticity token", code: "invalid_authenticity_token")
     end
 

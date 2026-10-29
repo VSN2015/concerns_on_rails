@@ -13,7 +13,32 @@ module ConcernsOnRails
       # so the two cannot drift apart.
       NOT_FOUND_MESSAGE = "Resource not found".freeze
 
+      # Rack 3.1+ renamed these status phrases (422 became "Unprocessable
+      # Content"), and `Rack::Utils.status_code` warns "Status code
+      # :unprocessable_entity is deprecated" on EVERY call for the old names.
+      # Rails >= 8.1 rewrites them before calling Rack for exactly that reason;
+      # `renderable_status` mirrors it for Rails 7.1-8.0 on Rack >= 3.1. (Rack's
+      # own obsolete-symbol table is private_constant, so it cannot be consulted.)
+      RENAMED_STATUS_SYMBOLS = {
+        unprocessable_entity: :unprocessable_content,
+        request_entity_too_large: :content_too_large,
+        payload_too_large: :content_too_large,
+        request_uri_too_long: :uri_too_long
+      }.freeze
+
       module_function
+
+      # The status to hand to `render`/`head`: a renamed symbol the running Rack
+      # no longer lists becomes its new name; everything else (an Integer, a
+      # symbol Rack knows -- all of them on Rack < 3.1, where the NEW name would
+      # raise) is returned untouched.
+      def renderable_status(status)
+        return status unless status.is_a?(Symbol) && RENAMED_STATUS_SYMBOLS.key?(status)
+        return status unless defined?(::Rack::Utils::SYMBOL_TO_STATUS_CODE)
+        return status if ::Rack::Utils::SYMBOL_TO_STATUS_CODE.key?(status)
+
+        RENAMED_STATUS_SYMBOLS.fetch(status)
+      end
 
       def render(controller, message:, status:, code: nil, details: nil)
         # respond_to?(..., true) because render_error is very often declared
@@ -41,7 +66,7 @@ module ConcernsOnRails
           error = { message: message }
           error[:code] = code if code
           error[:details] = details if details
-          controller.render(json: { success: false, error: error }, status: status)
+          controller.render(json: { success: false, error: error }, status: renderable_status(status))
         end
       end
 
