@@ -199,7 +199,7 @@ module ConcernsOnRails
         return unless respond_to?(:response) && response
 
         self.class.secure_headable_headers.each do |name, value|
-          next if secure_headable_skip?(name)
+          next if secure_headable_skip?(name) || secure_headable_superseded_by_force_ssl?(name, value)
 
           response.set_header(secure_headable_header_name(name), value)
         end
@@ -212,6 +212,25 @@ module ConcernsOnRails
         return name unless response.respond_to?(:headers) && response.headers.respond_to?(:keys)
 
         response.headers.keys.find { |existing| existing.to_s.casecmp?(name) } || name
+      end
+
+      # The `:hsts` PRESET under `config.force_ssl`: ActionDispatch::SSL only
+      # fills Strict-Transport-Security when it is absent (`||=`), so the
+      # preset's fixed one-year value would override the app's own
+      # `config.ssl_options[:hsts]` (2-year default, `preload:`,
+      # `subdomains:`). A custom pair with a different value is the app's
+      # explicit choice and is still sent. Read per request.
+      def secure_headable_superseded_by_force_ssl?(name, value)
+        return false unless name.to_s.casecmp?(HSTS_HEADER) && value == PRESETS[:hsts].last
+
+        secure_headable_force_ssl?
+      end
+
+      def secure_headable_force_ssl?
+        return false unless defined?(::Rails) && ::Rails.respond_to?(:application)
+
+        config = ::Rails.application&.config
+        config.respond_to?(:force_ssl) && config.force_ssl ? true : false
       end
 
       # HSTS is the one preset that is wrong to send unconditionally: RFC 6797
