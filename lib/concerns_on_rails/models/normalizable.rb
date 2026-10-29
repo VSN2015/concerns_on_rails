@@ -225,13 +225,6 @@ module ConcernsOnRails
         end
       end
 
-      # A reload throws the unsaved state away, and the previous pass's
-      # record with it: a value assigned afterwards is new work for the rules.
-      def reload(*)
-        normalizable_clear_record
-        super
-      end
-
       private
 
       # Re-recorded once validation is over: a later before_validation (a
@@ -264,8 +257,8 @@ module ConcernsOnRails
       # is no transform — a slug friendly_id rebuilds in a validate step, after
       # this concern's pass — or one the pass never saw (nil then). Then the
       # record is re-taken as the save leaves the fields, so a retry of a
-      # halted or rolled-back save (the record outlives it, see
-      # normalizable_clear_record) finds them as that save stored them.
+      # halted or rolled-back save (the record outlives it: the
+      # dispatcher drops it only on reload or after a committed save) finds them as that save stored them.
       def normalizable_settle
         applied = (@normalizable_applied ||= {})
         normalizable_each_pending_rule do |field, normalizer, value|
@@ -278,13 +271,6 @@ module ConcernsOnRails
         end
         @normalizable_applied = applied.to_h { |field, _| [field, self[field].dup] }
         @normalizable_validated = @normalizable_applied.transform_values(&:dup)
-      end
-
-      # Dropped on reload; after a save the dispatcher's after_save sets it
-      # aside (and puts it back if the transaction rolls back) — never before
-      # then, so a halted or rolled-back save, retried, finds it.
-      def normalizable_clear_record
-        @normalizable_applied = @normalizable_validated = nil
       end
 
       def normalizable_each_pending_rule

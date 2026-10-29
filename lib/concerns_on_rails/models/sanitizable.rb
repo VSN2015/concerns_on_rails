@@ -305,13 +305,6 @@ module ConcernsOnRails
         end
       end
 
-      # A reload throws the unsaved state away, and the previous pass's record
-      # with it: a value assigned afterwards is new work for the rules.
-      def reload(*)
-        sanitizable_clear_record
-        super
-      end
-
       # Re-recorded once validation is over: a later before_validation — a
       # sibling's (Normalizable's :squish) or the app's own — may rewrite a
       # field this pass handled, and what validation accepted is what the
@@ -347,10 +340,6 @@ module ConcernsOnRails
         @sanitizable_applied = @sanitizable_applied.to_h { |field, _| [field, self[field].dup] } if @sanitizable_applied
       end
 
-      def sanitizable_clear_record
-        @sanitizable_applied = nil
-      end
-
       def sanitizable_each_write_rule
         self.class.sanitizable_rules.each do |field, rule|
           # A partial `select` load lacks the column: reading it would raise
@@ -372,7 +361,7 @@ module ConcernsOnRails
       def sanitizable_stored_unchanged?(field)
         persisted? && respond_to?(:will_save_change_to_attribute?) && !will_save_change_to_attribute?(field)
       end
-      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_settle, :sanitizable_clear_record,
+      private :sanitizable_record_validated, :sanitizable_apply_unvalidated, :sanitizable_settle,
               :sanitizable_each_write_rule, :sanitizable_stored_unchanged?
 
       # { field => sanitized } for the fields whose stored value would change;

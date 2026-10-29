@@ -114,17 +114,26 @@ module ConcernsOnRails
           concerns_on_rails_restore_transform_records
         end
 
-        # A copy starts from its own copy of the records (a shallow `dup`
-        # would share the Hashes the original keeps updating).
+        # A copy starts from its own copy of the records (a shallow `dup` or
+        # `clone` would share the Hashes the original keeps updating).
         def initialize_dup(other)
           super
+          concerns_on_rails_own_transform_records
+        end
+
+        def initialize_clone(*, **)
+          super
+          concerns_on_rails_own_transform_records
+        end
+
+        private
+
+        def concerns_on_rails_own_transform_records
           SAVE_RECORDS.each do |name|
             instance_variable_set(name, instance_variable_get(name).dup) if instance_variable_defined?(name)
           end
           remove_instance_variable(STASH) if instance_variable_defined?(STASH)
         end
-
-        private
 
         def concerns_on_rails_transform_enrolled; end
 

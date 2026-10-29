@@ -230,6 +230,27 @@ describe "Transform rules run once per attempt when a save is halted or rolled b
     expect(copy.reload.title).to eq("b!")
   end
 
+  # (ActiveRecord's own clone shares the attribute set with its original, so
+  # the records are compared directly.)
+  it "gives a clone its own copy of the record" do
+    klass = model do
+      include ConcernsOnRails::Models::Sanitizable
+
+      sanitizable :title, with: ->(v) { "#{v}!" }, on: :write
+    end
+    original = klass.create!(title: "seed")
+    original.title = "a"
+    original.valid?
+    copy = original.clone
+    shared = original.instance_variable_get(:@sanitizable_applied)
+
+    expect(shared).to eq(title: "a!")
+    expect(copy.instance_variable_get(:@sanitizable_applied)).to eq(shared)
+    expect(copy.instance_variable_get(:@sanitizable_applied)).not_to equal(shared)
+    expect(copy.instance_variable_get(:@concerns_on_rails_transform_outputs))
+      .not_to equal(original.instance_variable_get(:@concerns_on_rails_transform_outputs))
+  end
+
   it "gives a Duplicable copy its own record too" do
     klass = model do
       include ConcernsOnRails::Models::Normalizable
