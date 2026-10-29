@@ -76,7 +76,10 @@ module ConcernsOnRails
         # (Support::TimeValue.cast_argument!).
         # (Internal: public only so the instance verbs can reach it.)
         def expirable_cast_time(time)
-          return Time.zone.now if time.blank?
+          # A blank means now, cast through the column like any given time: on a
+          # date column that is today's Date, never the raw TimeWithZone (which
+          # compares against a Date at UTC midnight).
+          time = Time.zone.now if time.blank?
 
           ConcernsOnRails::Support::TimeValue.cast_argument!(
             self, expirable_field, time,

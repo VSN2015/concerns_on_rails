@@ -116,6 +116,61 @@ describe "Expirable hooks on a date column, whatever the process time zone" do
         end
       end
 
+      # A blank argument means now: it is cast through the column like a given
+      # time (today's Date on a date column), so it is decided the same way.
+      [nil, "", false].each do |blank|
+        it "fires the hooks when expire!(#{blank.inspect}) writes today's date" do
+          travel_to(clock) do
+            token = date_model.create!
+
+            expect(token.expire!(blank)).to be(true)
+            expect(token.expired?).to be(true)
+            expect(token.reload.expires_on).to eq(Time.zone.today)
+            expect(token.fired).to eq(%i[before_expire after_expire])
+          end
+        end
+      end
+
+      it "a second expire!(nil) on the expired date is a no-op (no hooks)" do
+        travel_to(clock) do
+          token = date_model.create!
+          token.expire!(nil)
+          token.fired = nil
+
+          expect(token.expire!(nil)).to be(true)
+          expect(token.fired).to be_nil
+        end
+      end
+
+      it "expire_all(nil) expires the live rows to today (per-record path fires the hooks)" do
+        travel_to(clock) do
+          live = date_model.create!
+          scheduled = date_model.create!(expires_on: Time.zone.today + 5)
+          past = date_model.create!(expires_on: Time.zone.today - 5)
+
+          expect(date_model.expire_all(nil)).to eq(2)
+          expect([live, scheduled, past].map { |t| t.reload.expires_on })
+            .to eq([Time.zone.today, Time.zone.today, Time.zone.today - 5])
+          expect(live.reload.expired?).to be(true)
+        end
+      end
+
+      it "expire_all(nil) on the single-UPDATE fast path writes today's date" do
+        plain = Class.new(TestModel) do
+          self.table_name = "edh_tokens"
+          include ConcernsOnRails::Expirable
+
+          expirable_by :expires_on
+        end
+        travel_to(clock) do
+          token = plain.create!
+
+          expect(plain.expire_all(nil)).to eq(1)
+          expect(token.reload.expires_on).to eq(Time.zone.today)
+          expect(token).to be_expired
+        end
+      end
+
       it "still fires the hooks on a datetime column for now, and nothing for a future time" do
         travel_to(clock) do
           now_token = datetime_model.create!
