@@ -19,9 +19,10 @@ module ConcernsOnRails
     #   rolls the savepoint back too, so a before-hook's own side effects
     #   never commit for a write that did not happen. The after-hook is
     #   skipped and the result is false.
-    # * On any abort — false write, Rollback, or an exception — EVERY
-    #   attribute is put back to its pre-write in-memory state, dirty
-    #   tracking included. A database rollback never undoes the attribute
+    # * On any abort — false write, Rollback, or an exception — the record's
+    #   identity (new/destroyed/previously-new flags and the id, a NEW
+    #   record's included) and EVERY attribute are put back to the pre-write
+    #   in-memory state, dirty tracking included. A database rollback never undoes the attribute
     #   cache (update_column(s) syncs it immediately; `update` leaves the new
     #   values assigned and marks them saved), and the concerns' idempotency
     #   guards (`return true if deleted?`) would otherwise turn every retry
@@ -61,25 +62,38 @@ module ConcernsOnRails
         completed
       end
 
-      # Rails 6.0: rolling the savepoint back runs `rolledback!`, which
-      # restores the record's transaction state from when it FIRST joined the
-      # enclosing transaction. For a record CREATED earlier in the caller's
-      # transaction that is "new, no id", so the next save INSERTed a
-      # duplicate row. A record persisted before the write is persisted after
-      # an aborted one, so its identity is put back. (A no-op on 6.1+, which
-      # leaves it alone.)
+      # The record's identity flags, snapshotted for a NEW record as well as a
+      # stored one. Rolling the savepoint back does not reliably put them
+      # back: Rails restores a record's transaction state (`@new_record`,
+      # `@destroyed`, `@previously_new_record`, the primary key) only on a
+      # full rollback or when the record's transaction join level is <= 1.
+      # `update` runs `with_transaction_returning_status` inside the verb's own
+      # transaction, so the record has joined twice (level 2) and a savepoint
+      # rollback leaves the flags alone. On 6.0 the state is applied lazily,
+      # from the record's FIRST join of the enclosing transaction. So:
+      #
+      # * a record CREATED by the aborted write, inside a caller's
+      #   transaction, stayed `persisted?` with the id gone (the attribute set
+      #   is put back): the next `save` ran `UPDATE … WHERE id IS NULL`,
+      #   reported success and wrote no row (a StaleObjectError under
+      #   lock_version);
+      # * on 6.0 a record created EARLIER in the caller's transaction came
+      #   back "new, no id", and the next save INSERTed a duplicate row.
+      #
+      # Whatever the flags were before the write is what they are after an
+      # aborted one. (A no-op wherever Rails already leaves them alone.)
       def identity_snapshot(record)
-        return nil unless record.persisted?
-
         { id: record.id,
+          new_record: record.instance_variable_get(:@new_record),
+          destroyed: record.instance_variable_get(:@destroyed),
           previously_new_record: record.instance_variable_get(:@previously_new_record) }
       end
 
       def restore_identity!(record, identity)
-        return if identity.nil? || record.frozen?
+        return if record.frozen?
 
-        record.instance_variable_set(:@new_record, false)
-        record.instance_variable_set(:@destroyed, false)
+        record.instance_variable_set(:@new_record, identity[:new_record])
+        record.instance_variable_set(:@destroyed, identity[:destroyed])
         if record.instance_variable_defined?(:@previously_new_record)
           record.instance_variable_set(:@previously_new_record, identity[:previously_new_record])
         end
