@@ -178,4 +178,4 @@ Order.paid.formatted_sum_total(unit: "EUR ")   # => "EUR 3.500,50"
 
 ## Changed in 1.22.0
 
-- The generated money setter casts garbage input (`"abc"`, `""`) to nil — the ActiveModel convention — instead of raising `ArgumentError` out of a form assignment.
+- The generated money setter casts garbage input (`"abc"`, `""`) to nil — the ActiveModel convention — instead of raising `ArgumentError` out of a form assignment. An amount the cents column cannot hold (`price = "1e18"` on an integer column; a 4-byte column overflows at about 21.4 million units) is cast to nil too, checked against the column type, instead of raising `ActiveModel::RangeError` at save.

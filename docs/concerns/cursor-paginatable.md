@@ -37,7 +37,7 @@ end
 | `default_preset` | Symbol | first preset | Preset used when the param is absent. Must name a configured preset. |
 | `order_param` | Symbol | `:order` | Query param that selects the preset. |
 | `bidirectional` | Boolean | `false` | Mints `X-Prev-Cursor` / `X-Has-Prev` (and `prev_cursor` / `has_prev` in meta) so clients can page backward. Also a per-call override on `cursor_paginated`. |
-| `predicate` | Symbol | `:auto` | Keyset WHERE strategy. `:auto`: row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when all directions are uniform (walks a composite index directly), otherwise the portable OR-expansion. `:row` forces tuples (raises on mixed directions); `:or` forces the expansion. A nullable ordering column always uses the OR-expansion (tuples cannot express NULLs-last). |
+| `predicate` | Symbol | `:auto` | Keyset WHERE strategy. `:auto`: row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when all directions are uniform (walks a composite index directly), otherwise the portable OR-expansion. `:row` forces tuples and requires uniform directions, validated at declaration (`order:` or any `order_presets:` entry mixing directions raises `ArgumentError` at class load, also against an inherited one, and a per-call `cursor_paginated(order:)` with mixed directions raises before page 1; a nullable ordering column included — use `:auto`); `:or` forces the expansion. A nullable ordering column always uses the OR-expansion (tuples cannot express NULLs-last). |
 | `link_header:` | Boolean | `true` | Emit the RFC 8288 `Link` header (`next`, `prev` in bidirectional mode, `first`). |
 | `signed` | `false`, `true`, String, callable | `false` | Tamper-proof cursors: every token becomes `<payload>.<hex HMAC-SHA256>` (still URL-safe) and `?cursor=` is verified in constant time **before** it is parsed; a tampered, mis-signed or unsigned token on a signed endpoint is an `InvalidCursor` → 400. `true` signs with `Rails.application.secret_key_base` (a clear `ArgumentError` outside Rails); a String is the key; a callable is invoked per request so keys can rotate. Turning signing on invalidates in-flight cursors. |
 
@@ -50,7 +50,7 @@ end
 | Param | Default | Notes |
 |---|---|---|
 | `?cursor=` | — | The opaque token from `X-Next-Cursor`. Omit (or blank) for the first page. |
-| `?per_page=` | value of `cursor_paginatable_per_page` | Values below 1 fall back to the default; values above `max_per_page` are capped, and in every case — `max_per_page: 0` included — the result is held under `MAX_PER_PAGE` (1,000,000), so `?per_page=99999999999999999999` cannot overflow `LIMIT`. Resolved by the same `Support::ScalarParam.per_page` Paginatable uses. |
+| `?per_page=` | value of `cursor_paginatable_per_page` | Values below 1 fall back to the default; values above `max_per_page` are capped, and in every case — `max_per_page: 0` included — the result is held under `MAX_PER_PAGE` (1,000,000), so `?per_page=99999999999999999999` cannot overflow `LIMIT`. Resolved by the same `Support::ScalarParam.per_page` Paginatable uses, which reads an exact whole number (`1e3` is 1000); a fraction, trailing garbage or a value beyond 100 digits is the default. |
 | `?order=` (configurable via `order_param:`) | `default_preset` | Only with `order_presets:` — selects a named ordering from the allow-list. |
 
 ## Methods

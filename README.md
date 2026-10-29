@@ -364,7 +364,7 @@ sortable_by :position, add_new_at: :top          # new rows insert at the top (a
 **Notes**
 - The configured field must exist as a column; a direction other than `:asc` / `:desc` raises at declaration.
 - `scope:` can't be an [Encryptable](#-encryptable) column (a Symbol — resolved as acts_as_list does, so `scope: :list` means `list_id` or the association's foreign key — an Array entry or a fixed-value Hash key): acts_as_list's scope query would compare ciphertext, match no row and leave every record alone in its list (each new one at position 1, `move_*` a no-op), so the declaration raises `ArgumentError`, in either order. A String SQL scope is not inspected.
-- `reposition!` runs inside the current relation (`Task.where(list_id: 1)` — the same set acts_as_list's `scope:` would use), rejects ids outside it and duplicates before writing anything, coerces String ids from params, and on a descending list gives the first id the highest value. It bypasses acts_as_list callbacks by design (one `update_all`, no per-row shifting).
+- `reposition!` runs inside the current relation (`Task.where(list_id: 1)` — the same set acts_as_list's `scope:` would use), rejects ids outside it and duplicates before writing anything, coerces String ids from params, and on a descending list gives the first id the highest value. It bypasses acts_as_list callbacks by design (one `update_all`, no per-row shifting). On a composite primary key (Rails 7.1+) the ids are `[shop_id, id]` tuples (a record is accepted too) and each row is written with its own UPDATE inside the transaction; a malformed tuple raises `ArgumentError` before any write.
 
 ---
 
@@ -384,7 +384,7 @@ article.published?      # => false
 article.publish!
 article.published?      # => true
 article.publish!        # already published (saved state): a no-op (true), keeps published_at, no hooks
-article.unpublish!
+article.unpublish!      # a draft (blank saved column): a no-op (true), no hooks; a scheduled row is still cleared
 
 Article.published       # WHERE published_at <= NOW()
 Article.unpublished     # WHERE published_at IS NULL OR published_at > NOW()
@@ -484,6 +484,8 @@ Passing `true` for a scope- or accessor-name affix means "use the configured fie
 Unrelated to all three: Searchable's `match: :prefix` is a LIKE-match mode (`term%`), not a
 naming affix.
 
+`unpublish!` mirrors `publish!`: on a stored record with no unsaved change to the column and a blank saved value (a draft; `false`/`NULL` on a boolean) it is a no-op — `true`, nothing written, no `before/after_unpublish` (other pending changes are saved); a published or scheduled row still writes with the hooks.
+
 **Lifecycle hooks** — override `before_publish` / `after_publish` / `before_unpublish` /
 `after_unpublish`. They and the write share their own savepoint, so a hook that raises — or
 vetoes with `raise ActiveRecord::Rollback` — undoes the write: `publish!` / `unpublish!` /
@@ -518,6 +520,8 @@ user.soft_delete!
 user.deleted?              # => true
 user.restore!
 user.deleted?              # => false
+# soft_delete!/restore! are no-ops only on the SAVED state (stored, stamp unchanged, saved stamp already in the target
+# state; other pending changes are saved); an unsaved stamp assignment is written, with hooks and cascade
 
 user.really_delete!        # bypasses callbacks, hard deletes from DB; the instance is then destroyed? (not persisted?)
 ```
@@ -993,7 +997,7 @@ User.find_by(email: User.normalize(:email, params[:email]))
 | `:url`          | strip, default scheme to `https://` (`host:port` counts as schemeless; a protocol-relative `//CDN.example.com/x` becomes `https://cdn.example.com/x`), lowercase scheme + host, keep userinfo/path/query, drop a redundant default port. Only `http`/`https` are canonicalized — any other scheme (`mailto:`, `tel:`, `javascript:`, `data:`) and unparseable input come back stripped for your format validator to reject |
 
 **Notes**
-- Runs in `before_validation`, so DB constraints and AR validations see the normalized value — with a `before_save` backstop for saves that skip validation (`update_attribute`, `save(validate: false)`); `update_column(s)`/`update_all` bypass it. A rule runs once per save, even a non-idempotent Proc under `save if valid?` (the second validation skips a field still holding what the first left, also after a Sanitizable `on: :write` rule rewrote it; `reload` forgets the earlier validation). The backstop is prepended to the save callbacks, so a sibling's `before_save` (Addressable's fingerprint) sees the normalized value whichever concern was included first; Encryptable's blind index and Auditable's entry run later still, at the write boundary (`Support::WriteBoundary`). It is one shared dispatcher with the Sanitizable / Taggable / Addressable backstops, run in their `before_validation` order, so a save that skips validation stores the same value as a validated one when two of them transform the same column.
+- Runs in `before_validation`, so DB constraints and AR validations see the normalized value — with a `before_save` backstop for saves that skip validation (`update_attribute`, `save(validate: false)`); `update_column(s)`/`update_all` bypass it. A rule runs once per save, even a non-idempotent Proc under `save if valid?` (the second validation skips a field still holding what the first left, also after a Sanitizable `on: :write` rule rewrote it; `reload` forgets the earlier validation) and also when a save is halted or rolled back and retried on the same record. The `before_save` step never re-normalizes a sibling transform's output (Sanitizable `on: :write`, Taggable, Addressable): it normalizes only a field no transform handled or one rewritten by non-transform code (a slug built in a validate step), so include Normalizable AFTER another transform to normalize that transform's output. The backstop is prepended to the save callbacks, so a sibling's `before_save` (Addressable's fingerprint) sees the normalized value whichever concern was included first; Encryptable's blind index and Auditable's entry run later still, at the write boundary (`Support::WriteBoundary`). It is one shared dispatcher with the Sanitizable / Taggable / Addressable backstops, run in their `before_validation` order, so a save that skips validation stores the same value as a validated one when two of them transform the same column.
 - `with:` takes a preset, a Proc, or an Array of them (applied in order); every entry is validated at class load.
 - `nil` values are skipped — no `nil → ""` coercion (use `:nullify_blank` for the opposite direction).
 - Preset normalizers pass non-string values through unchanged.
@@ -1463,7 +1467,7 @@ Article.normalize_tags!                        # repair rows written around the 
 
 | Option       | Default | Purpose                                                          |
 |--------------|---------|------------------------------------------------------------------|
-| `delimiter:` | `","`   | Character joining the stored tags (a tag must not contain it; an empty delimiter raises). |
+| `delimiter:` | `","`   | Character joining the stored tags (a tag must not contain it; an empty delimiter raises). A tag cannot start or end with part of a self-overlapping delimiter (`"--"`, `"||"`, `" \| "`): the part is dropped when the tag is cleaned (`"a-"` becomes `"a"` under `"--"`). |
 | `downcase:`  | `false` | Case-fold tags on write so matching is case-insensitive.          |
 
 **Notes**
@@ -1599,7 +1603,7 @@ product.formatted_price # => "$19.99"
 | Method            | Returns                                       |
 |-------------------|-----------------------------------------------|
 | `price`           | the amount as a `BigDecimal` (cents ÷ 100)    |
-| `price=`          | assign in major units; rounded to whole cents. Strings are read as plain decimals (`"19.99"`) or in the field's own display format (`"$1,234.50"`, `"€1.234,50"` with `separator: ","`), so `formatted_price` round-trips. The unit is only recognized at the start or end; in a `delimiter: "."` field with another separator, `"1.234"` means 1234 (like `"€1.234"`), but a leading `0` group is never grouping (`"0.500"` is 0.5 there, and `"0,500"` in a `","` field is `nil`, not 500). Garbage, NaN, Infinity and oversized input (over 64 characters, a 3-digit exponent, or ≥ 10^24 — a parse-cost bound, far above a `bigint` column's ~9.2e18 subunits, so the database may still reject a large amount at save) become `nil` |
+| `price=`          | assign in major units; rounded to whole cents. Strings are read as plain decimals (`"19.99"`) or in the field's own display format (`"$1,234.50"`, `"€1.234,50"` with `separator: ","`), so `formatted_price` round-trips. The unit is only recognized at the start or end; in a `delimiter: "."` field with another separator, `"1.234"` means 1234 (like `"€1.234"`), but a leading `0` group is never grouping (`"0.500"` is 0.5 there, and `"0,500"` in a `","` field is `nil`, not 500). Garbage, NaN, Infinity and oversized input (over 64 characters, a 3-digit exponent, or ≥ 10^24 — a parse-cost bound, far above a `bigint` column's ~9.2e18 subunits, and an amount past the cents column's integer range, checked against its type — a 4-byte column overflows at about 21.4 million units) become `nil` |
 | `formatted_price` | a display string (`"$1,234.56"`); accepts per-call overrides: `formatted_price(unit: "€", delimiter: ".", separator: ",")` |
 
 **Aggregates** — class methods that follow the current scope, exact and float-free:
@@ -1809,7 +1813,7 @@ Counters are adjusted with `update_counters` (a single atomic SQL `COALESCE(col,
 **Options** (`counter_cacheable_by association, …`, repeatable — re-declaring the same association + `count:` replaces that rule, e.g. an STI subclass narrowing it with `if:`): `count:` (the parent column; default `"<table_name>_count"`), `if:` (a callable evaluated against the record — counts only when truthy; the previous state is reconstructed for updates), `touch:` (`false`; also bump the parent's `updated_at`).
 
 **Notes**
-- The `belongs_to` must be declared **before** the macro (the reflection is validated at declaration). Polymorphic associations are not supported.
+- The `belongs_to` must be declared **before** the macro (the reflection is validated at declaration). Polymorphic associations and composite-key associations (a composite `foreign_key:`, association primary key or `query_constraints:`, Rails 7.1+) are not supported: the macro raises `ArgumentError` (a model-level `query_constraints` must be declared before `counter_cacheable_by`).
 - Don't also set native `counter_cache: true` on the same column — both would fire and double-count.
 - Counters track the **persisted** record; writes that skip callbacks (`update_column(s)`, `update_all`, `delete`) are not tracked — run `recount_counter_caches!` to reconcile. Bare, it rewrites every parent (portable across adapters, but O(n) for conditional counters) — a maintenance operation, run it offline. On an STI table every class's rows are tallied under that class's own rule for the column, so a repair from any class of the tree matches the live counts (types are resolved without instantiating a row; a stored type that no longer resolves counts under the base class's rule). With `parents:` it zeroes and re-tallies only those parents (O(their children)) in one transaction that locks those rows before tallying, so repairing one imported post is safe on the request path.
 - Reach for [`counter_culture`](https://github.com/magnusvk/counter_culture) when you need multi-level rollups, delta columns, or after-commit execution.
@@ -1860,6 +1864,7 @@ On the model itself both sweep the **whole table**, bypassing `default_scope` �
 Reads pick the key by the envelope's id, so old and new rows coexist; `find_by_<field>` / `where_<field>` match blind-index digests under the current **and** previous keys during the window. Per-field `key:` fields sit outside rotation.
 
 **Notes**
+- [Filterable](#-filterable) is Encryptable-aware (`alias_attribute` followed): on an encrypted field equality and `in` (`?ssn=`, `?ssn_in=`) go through the blind index, and every other operator (`not`, `not_in`, `gt`/`gte`/`lt`/`lte`, `contains`, `starts_with`) fails closed (matches nothing); a field without a blind index fails closed for every operator but `null`.
 - Wrong key / tampered ciphertext / malformed envelope raise `Encryption::DecryptionError`. Encrypted field names are auto-registered with Rails' `filter_parameters` (via the gem's railtie), so they're redacted from request logs.
 - Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` streams with `find_each` and rewrites each row with one UPDATE — no validations/callbacks (only the ciphertext changes), no `lock_version` bump (so records open in edit forms don't go stale), guarded on the ciphertext it read so a concurrent write is never reverted, and skipping any field with an unsaved change. A row whose key id is no longer configured raises `DecryptionError` naming the id.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need Rails-managed key infrastructure (KMS, per-record keys) or deterministic encryption.
@@ -1988,6 +1993,8 @@ render_success(data: paginated(result.hits, total: result.total_hits), meta: pag
 | `?page=`     | `1`     | Page numbers below 1 are clamped to 1 |
 | `?per_page=` | `25`    | Capped at `max_per_page` (default 200) |
 
+`?page=` and `?per_page=` are read as an exact whole number (`?per_page=1e3` is 1000, then capped; `?page=2e0` is 2); anything else — a fraction (`2.9`), trailing garbage (`10abc`), a value beyond 100 digits — is the default (page 1 / the default `per_page`), never its leading digits. A grouped relation counts its groups, a `HAVING` on a select alias included (it is counted as a subquery that keeps its select list). Re-declaring `paginate_by` (e.g. in a subclass) changes only the options passed — every omitted one (`max_per_page:`, `link_header:`, `window:`, `style:`, the param paths) is inherited; `style:` re-derives both param paths, and an explicit `page_param:`/`per_page_param:` still wins.
+
 Rename them, or speak JSON:API — the `Link` header URLs follow whatever you pick:
 
 ```ruby
@@ -2062,7 +2069,7 @@ end
 | Param        | Default | Notes                                                    |
 |--------------|---------|----------------------------------------------------------|
 | `?cursor=`   | —       | The opaque token from `X-Next-Cursor` (omit for page 1)  |
-| `?per_page=` | `25`    | Capped at `max_per_page` (default 200; `0` disables the configured cap, but never the absolute 1,000,000 ceiling it shares with Paginatable) |
+| `?per_page=` | `25`    | Capped at `max_per_page` (default 200; `0` disables the configured cap, but never the absolute 1,000,000 ceiling it shares with Paginatable); read as an exact whole number, anything else is the default |
 | `?order=`    | first preset | With `order_presets:` only — selects a named ordering from the allow-list (unknown names → 400 `invalid_order_preset`) |
 
 **Response headers**: `X-Per-Page`, `X-Count` (rows on **this** page — totals are deliberately not computed), `X-Has-More`, `X-Next-Cursor` (only while more pages exist). With `bidirectional: true`: also `X-Has-Prev`, `X-Prev-Cursor`. Plus an RFC 8288 `Link` header: `rel="next"` carries the next-cursor URL, `rel="prev"` the prev-cursor URL (bidirectional), `rel="first"` the current URL with the cursor dropped (once a cursor is in play); `per_page` and the order preset are preserved. `cursor_paginate_by link_header: false` turns it off.
@@ -2071,7 +2078,7 @@ end
 - The primary key is always appended as a tiebreaker, so duplicate values never skip or repeat rows; ordering columns are chosen **in code** (never from params), must be **selected by the relation, unaliased**, and may be nullable: a column the schema allows NULL in paginates with its **NULLs last** in either direction on every adapter, returning every row exactly once with no extra queries. PostgreSQL uses `NULLS LAST`; other adapters use a `CASE WHEN col IS NULL` sort key, and the keyset WHERE uses the OR-expansion. NOT NULL columns keep the plain, index-friendly SQL, so prefer them on large tables. Boundary values are the stored column values (`read_attribute`), so an overridden attribute reader cannot derail the walk (a binary one — e.g. a `binary(16)` UUID primary key — travels as Base64; a `time` column's is its stored time of day, `"10:30:15.500000"`, which every Rails line reads back exactly); a boundary column the relation did not select raises `ActiveModel::MissingAttributeError`, and a stored non-NULL value that its attribute type casts to nil (an unparseable datetime string) raises `ArgumentError` — neither is minted as a NULL boundary. A select alias that shadows an ordering column (`select(:id, "UPPER(name) AS name")`) is not detected: the cursor would carry the alias's value while the WHERE compares the column, repeating or skipping rows — alias under another name instead. Re-declaring `cursor_paginate_by` (e.g. in a subclass) changes only the options passed — the rest, `signed:` included, are inherited.
 - Cursors are opaque, table/order-pinned tokens — a malformed, cross-endpoint, or stale-config cursor renders a 400 (`invalid_cursor`; override `render_invalid_cursor` to customize, delegates to Respondable's `render_error` when present). Unsigned by default: a client can mint different boundary values, but values are cast through the model's attribute types and bound by Arel (no injection); a value the column cannot hold — a timestamp outside years 0001..9999, a String that is invalid UTF-8 or carries a NUL byte (accepted on MySQL, which stores and escapes one), or is a number beyond a decimal's precision or too long/wide to read (bounded like Filterable's operands), included — is the same 400, never a database error and the relation's own scoping still applies — treat a cursor as a page position, never an authorization boundary. **`signed: true`** (or a String key, or a callable for rotating keys) appends a URL-safe HMAC-SHA256 to every cursor and rejects tampered or unsigned tokens with the same 400, so clients can no longer hand-craft positions at all; `true` uses `Rails.application.secret_key_base`. Turning it on invalidates in-flight cursors (clients restart from page one).
 - `cursor_paginated` uses `reorder` (replaces any `default_scope` ORDER BY) and returns a loaded Array. Don't wrap it with the controller Sortable's `sorted` — pass `order:` per call instead.
-- Forward-only by default — `bidirectional: true` (macro or per call) adds prev cursors and `X-Has-Prev`/`X-Prev-Cursor`; direction is pinned in the token, so prev tokens replayed on forward-only endpoints 400 and old direction-less tokens stay valid. `order_presets: { newest: {...}, top: {...} }` (+ `default_preset:`, `order_param:`) lets clients pick a **named** ordering from an allow-list. `predicate: :auto` upgrades the keyset WHERE to a row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when directions are uniform — composite-index friendly — falling back to the portable OR-expansion (`:row`/`:or` force a strategy).
+- Forward-only by default — `bidirectional: true` (macro or per call) adds prev cursors and `X-Has-Prev`/`X-Prev-Cursor`; direction is pinned in the token, so prev tokens replayed on forward-only endpoints 400 and old direction-less tokens stay valid. `order_presets: { newest: {...}, top: {...} }` (+ `default_preset:`, `order_param:`) lets clients pick a **named** ordering from an allow-list. `predicate: :auto` upgrades the keyset WHERE to a row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when directions are uniform — composite-index friendly — falling back to the portable OR-expansion (`:row`/`:or` force a strategy). `:row` requires uniform directions, validated at declaration: `predicate: :row` with a mixed-direction `order:` or `order_presets:` entry raises `ArgumentError` at class load (a per-call `cursor_paginated(order:)` with mixed directions raises before page 1) — use `:auto` for a mixed order. A NUL-bearing String ordering value on SQLite is paged with the boundary cast from its hex bytes as TEXT, which assumes a UTF-8 SQLite database (Rails' default).
 - Use Paginatable when you need page numbers and totals.
 
 ---
@@ -2104,7 +2111,7 @@ accepted as a suffix `?price_gte=10` or in bracket form `?price[gte]=10&price[lt
 | `not`    | `?status_not=draft`                | `status != 'draft'`                   |
 | `gt` `gte` `lt` `lte` | `?price_gte=10`       | `price >= 10` (cast through the column type) |
 | `in` `not_in` | `?status_in=a,b` or `?status_in[]=a` | `status IN ('a','b')`         |
-| `null`   | `?deleted_at_null=true`            | `deleted_at IS NULL` (`false` → `IS NOT NULL`) |
+| `null`   | `?deleted_at_null=true`            | `deleted_at IS NULL` (`false` → `IS NOT NULL`); reads true/false (also 1/0, t/f, yes/no, case-insensitive); any other value matches nothing |
 | `contains` `starts_with` | `?title_contains=rails` | `title LIKE '%rails%'` (wildcards escaped; ILIKE on PostgreSQL; string/text columns only) |
 
 Comparison values are cast through the column's own type, or through `type:` (any ActiveModel type
@@ -2121,7 +2128,7 @@ are skipped and unknown operators / non-scalar values ignored. A `gt`/`gte`/`lt`
 cannot represent (`?price_gte=abc`) matches **nothing** rather than silently comparing against `0` —
 nothing raises at request time. So does any operand carrying a NUL byte (`?title_gte=a%00b`,
 `?title_contains=%00`, `?title=a%00b`, a NUL member of an `in` list; binary columns excepted): it used to
-cut the SQL short, a `StatementInvalid` 500. For strict, validated contracts reach for `Permittable`.
+cut the SQL short, a `StatementInvalid` 500. A `with:` lambda declared with a `type:` never receives an Array/Hash/Parameters value: it fails the filter closed for every `type:`, the lambda is not called. A Float column's operand is compared exactly too: a decimal literal the double does not read back as (`0.1000000000000000000001`) equals nothing and compares as the largest double at or below it (`?score_gt=` keeps a stored `0.1`). On an [Encryptable](#-encryptable) column equality and `in` use the blind index and every other operator fails closed (see Encryptable). For strict, validated contracts reach for `Permittable`.
 
 On an `enum` column a comparison operand is a **label** (`?status_gte=review` is `status >= 1`). On an
 integer-backed enum anything else is read as a number, exactly like an integer column's operand, so a
@@ -2403,6 +2410,7 @@ GET /articles?include=author,comments.author&fields[articles]=id,title&fields[au
 - A path is kept only if **every** segment follows the allow-list tree (`comments.author` needs `comments: :author`); anything else is **silently dropped** — no error, no arbitrary eager-loading.
 - `default:` applies only when `?include` is absent; `?include=` (blank) means "nothing" and is honoured. Defaults are validated against the allow-list at class load, stored frozen and `dup`ed per request.
 - **A typo in an option name becomes an association.** Inline nested Hashes arrive as `**nested`, so any keyword the macro does not name is registered as an allow-listed association instead of raising: `feilds:` silently leaves `includable_fields` empty — i.e. no sparse-fieldset allow-list at all.
+- Re-declaring `includable` (e.g. in a subclass) changes only what it passes: the association list replaces the parent's, but `fields:`, `default:` and `strategy:` keep their inherited value when omitted (`default: nil` / `fields: {}` clear them). An inherited `default:` path the new list no longer contains is dropped with a one-line warning on stderr at class load.
 - Non-whitelisted tables in `params[:fields]` are dropped; non-whitelisted columns within an allowed table are dropped.
 - Pass `requested_fields` to your serializer (e.g. AMS / Blueprinter) — `Includable` itself does not alter the JSON output, only the query.
 

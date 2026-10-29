@@ -105,7 +105,7 @@ One `update_columns` per row whose value actually changes, inside one transactio
 
 #### `.taggable_split(raw) → Array<String>`
 
-Splits a raw stored column value on the configured delimiter and returns a normalized (stripped, de-duplicated, blank-rejected) array. Primarily used internally but public.
+Splits a raw stored column value on the configured delimiter and returns a normalized (stripped, de-duplicated, blank-rejected) array. A tag cannot end (or start) with the start of a self-overlapping delimiter (`"--"`, `"||"`, `" | "`): the part is dropped when a tag is cleaned (`"a-"` becomes `"a"` under `"--"`); stored tags already written that way are repaired by `Model.normalize_tags!`. Primarily used internally but public.
 
 #### `.taggable_clean(tag) → String`
 
