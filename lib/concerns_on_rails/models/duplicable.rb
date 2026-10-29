@@ -270,11 +270,22 @@ module ConcernsOnRails
         association = association(name)
         trash = duplicable_trash_column(association)
         return duplicable_live(Array.wrap(public_send(name)), trash) if new_record?
-        return Array.wrap(association.target) if association.loaded? && !duplicable_hides_rows?(association, trash)
+        return duplicable_live(Array.wrap(association.target), nil) if association.loaded? && !duplicable_hides_rows?(association, trash)
 
         rows = ConcernsOnRails::Support::AssociationScope.unfiltered(self, name)
         rows = rows.where(trash => nil) if trash
-        association.loaded? ? duplicable_merge_loaded(association, rows.to_a, trash) : rows.to_a
+        return duplicable_merge_loaded(association, rows.to_a, trash) if association.loaded?
+
+        duplicable_without_marked(association, rows.to_a)
+      end
+
+      # An association that is NOT loaded can still hold in-memory records in its
+      # target — nested attributes `_destroy` pulls the addressed rows in without
+      # loading the rest. A row whose in-memory twin is marked for destruction
+      # was removed by that edit.
+      def duplicable_without_marked(association, rows)
+        marked = Array.wrap(association.target).select(&:marked_for_destruction?).map(&:id)
+        marked.empty? ? rows : rows.reject { |row| marked.include?(row.id) }
       end
 
       # The soft-delete column whose trashed rows stay out of this copy, or nil.
@@ -291,17 +302,28 @@ module ConcernsOnRails
       end
 
       # A loaded has_one's (live) target wins outright; a loaded collection's
-      # records replace their rows by id, and its unsaved ones are appended.
+      # records replace their rows by id, and its unsaved ones are appended. A
+      # loaded record marked for destruction (nested `_destroy` /
+      # `mark_for_destruction`) is an in-memory removal: it stays out, and a
+      # has_one whose target is marked has nothing to copy.
       def duplicable_merge_loaded(association, rows, trash)
         loaded = Array.wrap(association.target)
-        return duplicable_live(loaded, trash).first(1).presence || rows.first(1) unless association.reflection.collection?
+        return duplicable_loaded_one(loaded, rows, trash) unless association.reflection.collection?
 
         by_id = loaded.reject(&:new_record?).index_by(&:id)
         duplicable_live(rows.map { |row| by_id.fetch(row.id, row) } + loaded.select(&:new_record?), trash)
       end
 
-      # In-memory records minus the trashed ones (`trash` is the column, or nil).
+      def duplicable_loaded_one(loaded, rows, trash)
+        return [] if loaded.any?(&:marked_for_destruction?)
+
+        duplicable_live(loaded, trash).first(1).presence || rows.first(1)
+      end
+
+      # In-memory records minus the trashed ones (`trash` is the column, or nil)
+      # and the ones marked for destruction.
       def duplicable_live(records, trash)
+        records = records.reject(&:marked_for_destruction?)
         trash ? records.reject { |record| record[trash].present? } : records
       end
 
