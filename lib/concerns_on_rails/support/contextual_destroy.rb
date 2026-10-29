@@ -260,10 +260,13 @@ module ConcernsOnRails
           @concerns_on_rails_trashed = targets.select(&:deleted?).to_h { |record| [record, true] }.compare_by_identity
           # Wrapped in an Array, as `destroy(load_target)` does, so an empty
           # target answers [] (delete_or_destroy answers nil for a bare []).
-          delete_or_destroy([targets], SOFT_DESTROY).tap do
-            reset
-            loaded!
-          end
+          #
+          # The cache is only RESET, never marked loaded (ActiveRecord does after
+          # a hard destroy_all, where the target really is gone): a soft-deleted
+          # row stays a member whenever the association's scope does not hide the
+          # trash (`default_scope: false`, `-> { with_deleted }`), so the next
+          # read asks the database instead of claiming "loaded, empty".
+          delete_or_destroy([targets], SOFT_DESTROY).tap { reset }
         ensure
           @concerns_on_rails_trashed = nil
         end
