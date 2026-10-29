@@ -218,10 +218,15 @@ module ConcernsOnRails
       # "1e3" 1 and "abc" 0: the lambda gets the exact number, and a value
       # the type cannot represent exactly — garbage, or 5.5 for :integer —
       # fails the filter closed (`none`) without calling the lambda. There is
-      # no column here, so no range applies.
+      # no column here, so no range applies. A non-scalar value (Array,
+      # Parameters) fails closed for EVERY `type:`, as it does for a numeric one.
       def apply_filter_lambda(relation, value, options)
         type = options[:type]
         return options[:with].call(relation, type ? type.cast(value) : value) unless type
+
+        # A structured value (`?flag[]=0`, `?q[x]=1`) is no scalar any `type:` can
+        # read: the Boolean cast made `["0"]` true and the string cast `'["a"]'`.
+        return relation.none unless filterable_operand?(value)
 
         operand = ConcernsOnRails::Support::NumericOperand.classify(value, type, column_type: nil)
         return options[:with].call(relation, filterable_lambda_cast(relation, type, value)) if operand.nil?
