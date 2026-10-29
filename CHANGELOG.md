@@ -2,9 +2,8 @@
 
 ## 1.34.0 (2026-10-29)
 
-A correctness release: it fixes the 27 bugs proven by the 2026-10-29 audit of 1.33.0 (groups A, BC, D, E and F;
-the remaining groups are added below). Some fixes change behaviour, and two configurations that used to be
-silently broken now raise at class load. Read **Upgrading** first.
+A correctness release: it fixes the 42 bugs proven by the 2026-10-29 audit of 1.33.0. Some fixes change behaviour,
+and four configurations that used to be silently broken now raise at class load. Read **Upgrading** first.
 
 ### Upgrading
 
@@ -20,6 +19,12 @@ silently broken now raise at class load. Read **Upgrading** first.
   per-call `cursor_paginated(order:)` with mixed directions raises before page 1. This includes a nullable ordering
   column, which used to fall back to the OR-expansion silently. Switch to `predicate: :auto` (it falls back to the
   OR-expansion for mixed directions) or make the directions uniform. (PARAMS-4)
+- [ ] **Stateable, event named `transition`:** a transition event whose (affixed) name is `transition` raises
+  `ArgumentError` at the macro. It generated a `transition!` that always raised from the generic
+  `before_/after_transition` hooks. Rename the event or use `prefix:`/`suffix:`. (STATE-6)
+- [ ] **Authorizable, `require_role`:** `require_role` with an empty list (`require_role []`, `[[]]`) or a nil/blank
+  role (`require_role ENV["ADMIN_ROLE"]&.to_sym` unset) raises `ArgumentError` at class load; a blank role used to
+  admit actors whose role is `""` or nil. (HTTP-2)
 
 **Behaviour changes.**
 
@@ -69,8 +74,52 @@ silently broken now raise at class load. Read **Upgrading** first.
   nothing is written; an already-locked record still just answers the count. (DATA-4)
 - [ ] **Monetizable:** the writer casts an amount the cents column cannot hold to `nil`, like other oversized input
   (a 4-byte integer column overflows at about 21.4 million units). (TRANS-S3)
+- [ ] **Authorizable:** the default denial `message:` follows the status: 404 renders ErrorHandleable's exact
+  "Resource not found", 401 "Unauthorized", anything else "Forbidden". A `status: :not_found` / `:unauthorized` rule
+  without `message:` changes its body message and the `authorization_denied` payload's `message`; an explicit
+  `message:` still wins. (HTTP-1)
+- [ ] **Authorizable, `require_role`:** Array arguments are flattened, so `require_role %i[admin editor]` and
+  `require_role ADMIN_ROLES` work (they used to deny everyone). (HTTP-2)
+- [ ] **Timezoneable:** responses gain `Vary: Time-Zone` whenever the `Time-Zone` header source is on (default; no longer
+  only with `response_header:`) and `Vary: Cookie` whenever the cookie source is on. New `vary:` option (default
+  true; `vary: false` opts out). `response_header:` now controls only `X-Time-Zone`. (HTTP-3)
+- [ ] **ErrorHandleable:** the RecordNotDestroyed 422 renders "Resource could not be deleted" instead of Rails'
+  "Failed to destroy <Model> with id=<id>"; the record's `errors.full_messages` still ride as `details`. The
+  `message` of that 422 and of the `handled_error` payload changed. (HTTP-4)
+- [ ] **Respondable / ErrorEnvelope, status symbols:** on Rack >= 3.1 without Rails 8.1's own rewrite (Rails
+  7.1/7.2/8.0) the gem renders the renamed symbol (`:unprocessable_content`, ...), so `rendered[:status]` is Rack
+  dependent; specs asserting `:unprocessable_entity` should compare to `ErrorEnvelope.renderable_status(:unprocessable_entity)`.
+  An app's OWN `render_error` override still receives the raw `:unprocessable_entity`; one that calls `render` with
+  it logs Rack's deprecation on Rack >= 3.1. (HTTP-5)
+- [ ] **SecureHeadable, `:hsts`:** the `:hsts` preset is skipped when `Rails.application.config.force_ssl` is on (read
+  per request), so Rails' own HSTS (`config.ssl_options[:hsts]`) is no longer overridden by the preset's one-year
+  value. A custom `"Strict-Transport-Security"` pair with a different value is still sent. (HTTP-6)
+- [ ] **SecureHeadable, header names:** names compare case-insensitively: a lower-case custom
+  `"strict-transport-security"` is withheld over plain HTTP, and a lower-case pair beside a preset
+  (`"x-frame-options"` + `:deny_frame`) is ONE header (later value wins, first-registered spelling kept), written
+  under the spelling the response already carries. (HTTP-7)
+- [ ] **SoftDeletable:** after an association `destroy_all` the association cache is reset rather than marked
+  loaded-and-empty, so a `default_scope: false` / `-> { with_deleted }` association still shows its soft-deleted rows
+  on the next read (and `size`); one extra query on the next read. (STATE-4)
+- [ ] **Batch verbs, partial `select`:** every `*_all` verb and a SoftDeletable relation `destroy_all` over a relation
+  with a partial `select` load whole rows (`table.*` is added; computed aliases a HAVING/ORDER reads stay; joins and
+  wheres kept) instead of raising `MissingAttributeError`. Accepted limits: a joined-table column, a Rails 7.1+ Hash
+  select or a comma-joined String repeating a column beside the star can still repeat `id` in the DISTINCT key
+  subquery on PostgreSQL/MySQL; a direct `BatchOps.each_record` caller selecting without the primary key still
+  gets nil ids. (STATE-7)
+- [ ] **Stateable, `transition_all`:** a record failing validation raises `ActiveRecord::RecordNotSaved` (carrying the
+  record; batch rolled back as before) instead of `RecordInvalid`; rescue `RecordNotSaved`. Another record's failed
+  `save!` inside a hook still propagates as `RecordInvalid`. The single `<event>!` still raises `RecordInvalid`.
+  (STATE-8)
+- [ ] **Sequenceable, `period_column:`:** a row numbered before a switch to a custom `period_column:` (NULL there)
+  formats (`formatted_<field>`, `sequenceable_period_time`) in its `created_at` period instead of today's. (GRAPH-1)
+- [ ] **Sluggable, `history: true` + `scope:`:** moving a record into a scope where another record's friendly_id history
+  holds its slug regenerates the slug (it raised `RecordNotUnique` or took over the old URL). (GRAPH-5)
+- [ ] **Duplicable:** a child or has_one target marked for destruction (`_destroy`, `mark_for_destruction`) is no longer
+  copied. (GRAPH-6)
+- [ ] **Legacy aliases:** a racing first reference to a top-level alias (`ConcernsOnRails::Sluggable`) no longer prints
+  "already initialized constant". (GRAPH-4)
 
-<!-- PASS2: groups G and H -->
 
 ### Fixed
 
@@ -155,8 +204,31 @@ silently broken now raise at class load. Read **Upgrading** first.
   `?score_gt=0.1000000000000000000001` keeps a stored 0.1. A literal the double keeps (`0.1`) stays exact. (PARAMS-8)
 - **Filterable**: a `with:` lambda declared with a `type:` fails closed on an Array/Hash/Parameters value instead of
   receiving a cast one (`?flag[]=0` was `true`). (PARAMS-S4)
+- **Authorizable**: the default `message:` follows the denial status (404 "Resource not found", the shared
+  `Support::ErrorEnvelope::NOT_FOUND_MESSAGE`; 401 "Unauthorized"; else "Forbidden"), stored resolved at declaration so
+  the instrumentation payload carries it. `require_role` flattens its arguments and raises on an empty, nil or blank
+  role. (HTTP-1, HTTP-2)
+- **ErrorHandleable**: the RecordNotDestroyed 422 no longer leaks the model class name and primary key. (HTTP-4)
+- **Timezoneable**: `Vary: Time-Zone` / `Vary: Cookie` are appended (via `Support::VaryHeader`; `Vary: *` left alone)
+  even when the request carries no `Time-Zone` header; `vary: false` opts out. (HTTP-3)
+- **Respondable / ErrorEnvelope**: the envelope and inline branches no longer log "Status code :unprocessable_entity is
+  deprecated" on Rack >= 3.1; `ErrorEnvelope.renderable_status` renames only when the running Rack dropped the old
+  name (Rack < 3.1 keeps it). (HTTP-5)
+- **SecureHeadable**: `:hsts` yields to `force_ssl`; header names merge case-insensitively through
+  `SecureHeadable.merge_headers` (no more two conflicting `X-Frame-Options` lines on Rails < 7.1). (HTTP-6, HTTP-7)
+- **SoftDeletable**: association `destroy_all` resets the association cache instead of `loaded!`-empty. (STATE-4)
+- **BatchOps / SoftDeletable**: `BatchOps.full_rows(relation)` (used by `BatchOps.run` and the relation `destroy_all`)
+  adds the model's own star to a partial select; `limited_keys` keeps the own-table star first and drops only plain
+  own-table columns from a DISTINCT key subquery. (STATE-7)
+- **Stateable**: an event named `transition` is refused at the macro (STATE-6); `transition_all` raises
+  `RecordNotSaved` for its own invalid record and propagates another record's `RecordInvalid` (STATE-8).
+- **Sequenceable**: legacy rows (NULL custom `period_column:`) format in their `created_at` period; `period_time` /
+  `base_time` take the field. (GRAPH-1)
+- **Sluggable**: a `history: true` + `scope:` move treats another record's history slug in the new scope as taken.
+  (GRAPH-5)
+- **Duplicable**: records marked for destruction are skipped, loaded or not, has_one included. (GRAPH-6)
+- **Legacy aliases**: `const_missing` resolution is serialized by a reentrant Monitor. (GRAPH-4)
 
-<!-- PASS2: groups G and H -->
 
 ### Known issues (not fixed in this release)
 - CounterCacheable: a parent destroyed inside the same rolled-back transaction keeps the
@@ -169,10 +241,10 @@ silently broken now raise at class load. Read **Upgrading** first.
 - Normalizable / Sanitizable: on an unvalidated (`update_attribute`) save that is halted and retried, with TWO
   transforms on one column where the SECOND (not Normalizable) rewrites the first's output, Sanitizable's own record
   holds only the first's output, so a validated retry re-sanitizes.
-- DATA-3 (NUL byte in a token on PostgreSQL), TRANS-1 (`jsonb`) and PARAMS-5's PostgreSQL leg were fixed by reading and
-  verified on SQLite only; run the suite against PostgreSQL before relying on them. <!-- VERIFY: A_NOTES/E_NOTES say PG not run; confirm wording -->
+- Sluggable `history: true` + `scope:`: friendly_id's history finder ignores scope, so after a record moves scope its
+  stale history slug can still match `Model.where(scope).friendly.find(old_slug)`. This is stock friendly_id
+  behaviour; the gem does not change it. (GRAPH-5)
 
-<!-- PASS2: groups G and H -->
 
 ## 1.33.0 (2026-10-18)
 
