@@ -133,7 +133,7 @@ module ConcernsOnRails
           end
 
           self.secure_headable_headers =
-            secure_headable_headers.merge(resolved).merge(custom.transform_keys(&:to_s))
+            SecureHeadable.merge_headers(secure_headable_headers, resolved.merge(custom.transform_keys(&:to_s)))
         end
 
         # Thin pass-through to Rails' native CSP DSL — never re-implement CSP.
@@ -172,6 +172,18 @@ module ConcernsOnRails
 
       REPORT_ONLY_MODES = [true, false, :inherit].freeze
 
+      # Header names are case-insensitive (RFC 9110 section 5.1), so a custom
+      # "x-frame-options" pair and the :deny_frame preset are ONE header: the
+      # later value wins, under the spelling first registered. A plain Hash
+      # merge kept both keys, and on Rails < 7.1 (case-sensitive response
+      # headers) emitted two conflicting X-Frame-Options lines.
+      def self.merge_headers(existing, incoming)
+        incoming.each_with_object(existing.dup) do |(name, value), merged|
+          key = merged.keys.find { |seen| seen.casecmp?(name) } || name
+          merged[key] = value
+        end
+      end
+
       # Module-level (not a class method) so the macro stays under the block cap.
       def self.validate_report_only!(value)
         return if REPORT_ONLY_MODES.include?(value)
@@ -197,7 +209,7 @@ module ConcernsOnRails
       # section 7.2 forbids it over plaintext, and overwriting a value the app
       # already set would silently shorten a longer max-age or drop `preload`.
       def secure_headable_skip?(name)
-        return false unless name == HSTS_HEADER
+        return false unless name.to_s.casecmp?(HSTS_HEADER)
 
         secure_headable_plain_http? || secure_headable_existing_hsts.present?
       end
@@ -208,10 +220,14 @@ module ConcernsOnRails
         req.respond_to?(:ssl?) && !req.ssl?
       end
 
+      # Looked up case-insensitively: Rails < 7.1 headers are a plain Hash, so a
+      # lower-case "strict-transport-security" set earlier is a different key.
       def secure_headable_existing_hsts
-        return response.get_header(HSTS_HEADER) if response.respond_to?(:get_header)
+        value = response.get_header(HSTS_HEADER) if response.respond_to?(:get_header)
+        return value if value.present?
+        return nil unless response.respond_to?(:headers)
 
-        response.headers[HSTS_HEADER] if response.respond_to?(:headers)
+        response.headers.find { |name, _| name.to_s.casecmp?(HSTS_HEADER) }&.last
       end
     end
   end
