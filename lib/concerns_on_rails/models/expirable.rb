@@ -267,9 +267,15 @@ module ConcernsOnRails
 
       # The write behind expire! and expire_in!. Hooks fire only when the
       # time is not in the future: a future time schedules, it doesn't expire.
+      # "Future" is judged against the predicates' own bound
+      # (Support::TimeValue.predicate_bound — today in Time.zone on a date
+      # column), so the hooks fire exactly when the written value makes the
+      # record `expired?`; never through Date#to_time, which reads the
+      # process zone.
       def expirable_write_expiry(time)
-        hooks = time.to_time > Time.zone.now ? {} : { before: :before_expire, after: :after_expire }
         field = self.class.expirable_field
+        bound = ConcernsOnRails::Support::TimeValue.predicate_bound(self.class, field, Time.zone.now)
+        hooks = time > bound ? {} : { before: :before_expire, after: :after_expire }
         ConcernsOnRails::Support::HookedWrite.run(self, **hooks) do
           update(field => time)
         end
