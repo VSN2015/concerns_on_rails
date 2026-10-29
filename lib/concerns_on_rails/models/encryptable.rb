@@ -44,7 +44,11 @@ module ConcernsOnRails
     # A :datetime field behaves like a datetime column on the same model: under
     # time_zone_aware_attributes, zone-less input is read in Time.zone and the
     # value is a TimeWithZone. The plaintext is always UTC ISO8601.
-    # `key:` overrides the gem-level key per field (a String or a Proc).
+    # `key:` overrides the gem-level key per field (a String or a Proc). Once
+    # the option is PASSED the field owns its key: a nil (a Proc's, or an
+    # eagerly evaluated `ENV["X"]` / credential) or empty one is a MISSING key
+    # — it raises, or passes through under `on_missing_key: :passthrough` — and
+    # never falls back to the gem-level key. Only an omitted `key:` uses that.
     #
     # BLIND INDEX (`blind_index: true` or a Hash): because encryption is
     # non-deterministic, encrypted columns are not directly queryable. Opt into
@@ -79,6 +83,12 @@ module ConcernsOnRails
 
       LABEL = "ConcernsOnRails::Models::Encryptable".freeze
       VALID_TYPES = %i[string integer float decimal boolean date datetime].freeze
+      # `key:` omitted, as opposed to an explicit (possibly nil) value.
+      UNSET = Object.new.freeze
+      # What an explicit `key: nil` is recorded as: a declared key that
+      # resolves to nothing, so every path (cipher, blind index, rotation)
+      # sees a declared per-field key.
+      MISSING_FIELD_KEY = -> {}
 
       # Reusable ActiveModel casters. :decimal and :datetime round-trip through
       # Strings and are handled explicitly (mirrors Models::Storable).
@@ -520,10 +530,11 @@ module ConcernsOnRails
         include ConcernsOnRails::Support::ColumnGuard
 
         # Declare one or more encrypted fields. Repeatable; per-field options.
-        def encryptable(*fields, type: :string, key: nil, blind_index: nil)
+        def encryptable(*fields, type: :string, key: UNSET, blind_index: nil)
           @encryptable_declaring = true # see _default_attributes
           type = type.to_sym
           encryptable_validate!(fields, type, blind_index)
+          key = encryptable_normalize_key(key)
           schema_reachable = ensure_columns!(LABEL, *fields, types: :text)
 
           fields.each do |field|
@@ -688,6 +699,17 @@ module ConcernsOnRails
           return unless blind_index.is_a?(Hash) && blind_index[:column] && fields.size > 1
 
           raise ArgumentError, "#{LABEL}: blind_index column: cannot be combined with multiple fields"
+        end
+
+        # nil = omitted (the gem-level key applies); an explicit nil becomes
+        # MISSING_FIELD_KEY (declared, resolves to nothing); anything but a
+        # String or a callable is refused rather than `to_s`-coerced.
+        def encryptable_normalize_key(key)
+          return nil if key.equal?(UNSET)
+          return MISSING_FIELD_KEY if key.nil?
+          return key if key.is_a?(String) || key.respond_to?(:call)
+
+          raise ArgumentError, "#{LABEL}: key: must be a String or a callable (got #{key.class})"
         end
 
         # nil/false -> no index; true -> defaults; Hash -> { column:, expression: }.

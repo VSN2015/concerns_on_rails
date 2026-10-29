@@ -90,6 +90,50 @@ describe "Encryptable per-field key: that resolves to nil" do
     expect(raw_ssn(id)).to eq(before_stored)
   end
 
+  describe "key: passed but evaluated eagerly to nil" do
+    def eager_model(**opts)
+      Class.new(TestModel) do
+        self.table_name = "field_key_nils"
+        include ConcernsOnRails::Models::Encryptable
+
+        encryptable :ssn, **opts
+      end
+    end
+
+    it "treats a literal key: nil as a declared, missing key" do
+      expect { eager_model(key: nil).create!(ssn: "123-45-6789") }
+        .to raise_error(ConcernsOnRails::Encryption::MissingKeyError, /`ssn`/)
+    end
+
+    it "treats key: ENV[...] of an unset variable the same" do
+      expect { eager_model(key: ENV.fetch("COR_UNSET_FIELD_KEY_VAR", nil)).create!(ssn: "x") }
+        .to raise_error(ConcernsOnRails::Encryption::MissingKeyError, /`ssn`/)
+    end
+
+    it "raises at blind-index lookup and passes through under :passthrough" do
+      klass = eager_model(key: nil, blind_index: true)
+      expect { klass.where_ssn("x").to_a }.to raise_error(ConcernsOnRails::Encryption::MissingKeyError)
+      ConcernsOnRails.encryption.on_missing_key = :passthrough
+      expect(raw_ssn(klass.create!(ssn: "plain").id)).to eq("plain")
+    end
+
+    it "keeps an omitted key: on the global key" do
+      record = eager_model.create!(ssn: "123-45-6789")
+      expect(ConcernsOnRails::Support::Encryptor.decrypt(raw_ssn(record.id), key: global_key)).to eq("123-45-6789")
+    end
+
+    it "keeps a key: nil field out of rotation like any per-field key" do
+      expect(eager_model(key: nil).encryptable_rules[:ssn][:key]).not_to be_nil
+      expect(eager_model.encryptable_rules[:ssn][:key]).to be_nil
+    end
+
+    it "refuses a key: that is neither a String nor callable" do
+      [false, 123, :sym].each do |bad|
+        expect { eager_model(key: bad) }.to raise_error(ArgumentError, /key: must be a String or a callable/)
+      end
+    end
+  end
+
   it "leaves a gem-keyed field on the global key (key_id stamped) as before" do
     klass = Class.new(TestModel) do
       self.table_name = "field_key_nils"
