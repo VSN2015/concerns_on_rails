@@ -32,9 +32,12 @@ module ConcernsOnRails
     # `persist:` (default `false`; `true` or a Hash of cookie options — a zone
     # chosen via the PARAM is written into the `cookie:` so it sticks; needs
     # `cookie:`), `response_header:` (default `false`; `true` emits
-    # `X-Time-Zone: <name>`, or pass a header name; `Vary: Time-Zone` is
-    # appended when the header source is on). `time_zone_source` reports which
-    # source won.
+    # `X-Time-Zone: <name>`, or pass a header name), `vary:` (default `true`;
+    # appends `Vary: Time-Zone` whenever the `Time-Zone` request header is a
+    # source, whether or not `response_header:` is on, so a shared cache never
+    # serves one zone's rendering to another; `vary: false` opts out — the
+    # cookie source needs none, cookies are not a cache key).
+    # `time_zone_source` reports which source won.
     module Timezoneable
       extend ActiveSupport::Concern
 
@@ -69,7 +72,7 @@ module ConcernsOnRails
 
       module ClassMethods
         def timezoneable(available: nil, default: nil, param: :time_zone, header: true, cookie: false,
-                         persist: false, response_header: false)
+                         persist: false, response_header: false, vary: true)
           cookie_name = cookie == true ? :time_zone : cookie.presence
           self.timezoneable_options = {
             available: validate_time_zones(available),
@@ -78,7 +81,8 @@ module ConcernsOnRails
             header: header,
             cookie: cookie_name,
             persist: validate_persist(persist, cookie_name),
-            response_header: response_header == true ? DEFAULT_RESPONSE_HEADER : response_header.presence
+            response_header: response_header == true ? DEFAULT_RESPONSE_HEADER : response_header.presence,
+            vary: vary ? true : false
           }
         end
 
@@ -118,6 +122,7 @@ module ConcernsOnRails
         zone = resolved_time_zone
         persist_time_zone(zone)
         apply_time_zone_response_header(zone)
+        apply_time_zone_vary
         @timezoneable_active_zone = zone
         # ALWAYS through use_zone, even when the zone is already current: its
         # ensure is what puts Time.zone back. Skipping it for that "no-op" case
@@ -179,15 +184,26 @@ module ConcernsOnRails
         cookies[opts[:cookie]] = options
       end
 
-      # X-Time-Zone (or the configured name) plus Vary: Time-Zone when the
-      # request header can influence the choice — appended and de-duplicated,
-      # never clobbered (Localizable's Content-Language rule).
+      # X-Time-Zone (or the configured name), only when `response_header:` asks.
       def apply_time_zone_response_header(zone)
         name = self.class.timezoneable_options[:response_header]
         return unless name && zone && respond_to?(:response) && response.respond_to?(:set_header)
 
         response.set_header(name, zone.name)
-        Support::VaryHeader.append(self, "Time-Zone") if self.class.timezoneable_options[:header]
+      end
+
+      # Vary: Time-Zone whenever the request header can influence the choice
+      # (the body differs per header value), independent of `response_header:` —
+      # a CDN must not serve the Tokyo rendering to a UTC client. Appended and
+      # de-duplicated, never clobbered (Localizable's Accept-Language rule), and
+      # only the dimension the resolver actually consults: `header: false` or
+      # `vary: false` writes nothing.
+      def apply_time_zone_vary
+        opts = self.class.timezoneable_options
+        return unless opts[:header] && opts.fetch(:vary, true)
+        return unless respond_to?(:response) && response.respond_to?(:set_header)
+
+        Support::VaryHeader.append(self, "Time-Zone")
       end
 
       # Match a raw source value against the allow-list (when present), returning
