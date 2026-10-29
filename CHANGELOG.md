@@ -2,8 +2,8 @@
 
 ## 1.34.0 (2026-10-29)
 
-A correctness release: it fixes the 42 bugs proven by the 2026-10-29 audit of 1.33.0. Some fixes change behaviour,
-and four configurations that used to be silently broken now raise at class load. Read **Upgrading** first.
+A correctness release: it fixes the 43 bugs proven by the 2026-10-29 audit of 1.33.0. Some fixes change behaviour,
+and five configurations that used to be silently broken now raise at class load. Read **Upgrading** first.
 
 ### Upgrading
 
@@ -25,6 +25,16 @@ and four configurations that used to be silently broken now raise at class load.
 - [ ] **Authorizable, `require_role`:** `require_role` with an empty list (`require_role []`, `[[]]`) or a nil/blank
   role (`require_role ENV["ADMIN_ROLE"]&.to_sym` unset) raises `ArgumentError` at class load; a blank role used to
   admit actors whose role is `""` or nil. (HTTP-2)
+- [ ] **Encryptable, per-field `key:`:** a DECLARED per-field `key:` that resolves to nil or `""` (a Proc over a
+  credential that is not there yet, an explicit `key: nil`, an eagerly nil `ENV["X"]` / credential) is a missing key:
+  it raises `MissingKeyError` naming the field on write, read and blind-index lookup (or leaves the value plaintext
+  under `on_missing_key: :passthrough`) instead of silently encrypting under the global key. Only an OMITTED `key:`
+  uses the gem-level key. `key:` must be a String or respond to `call`; `key: false`, `key: 123` or `key: :sym` raises
+  `ArgumentError` at the macro. Rows already written under the global key are NOT repaired by `reencrypt_all!`
+  (it skips per-field fields); they fail to decrypt under the field key. For each such row, decrypt the raw column
+  value with the global key (`ConcernsOnRails::Support::Encryptor.decrypt(raw, key: <global key material>)`), then
+  write the plaintext back through the model while the field key resolves, so it is re-sealed under the field key.
+  Rows left plaintext under `:passthrough` only need a plain re-save once the key resolves. (DATA-2)
 
 **Behaviour changes.**
 
@@ -133,6 +143,19 @@ and four configurations that used to be silently broken now raise at class load.
 - **Tokenizable / Lockable**: `authenticate_by_<field>` / `consume_<field>` and `unlock_by_token` answer `nil`, without
   a query, for a token holding a NUL byte (`?token=%00`); on PostgreSQL they raised (the driver refuses NUL in a bound
   parameter). Uses `Support::ScalarParam.nul_free?` like Filterable. (DATA-3)
+- **Encryptable**: a per-field `key:` that resolves to nil or `""` (a Proc over a missing credential, an explicit
+  `key: nil`, an eagerly nil `ENV[...]`) no longer falls back to the global key. It raises `MissingKeyError` naming
+  the field on write, read and blind-index lookup/refresh, or stays plaintext under `on_missing_key: :passthrough`;
+  `key:` must be a String or callable (`ArgumentError` otherwise). It used to seal a key_id-0 envelope under the
+  global key that the field key could not decrypt later. (DATA-2)
+- **Authorizable**: the default denial `message:` follows the status (404 "Resource not found", 401 "Unauthorized",
+  else "Forbidden"), so a 404 denial is no longer distinguishable from ErrorHandleable's own 404. (HTTP-1)
+- **Authorizable**: `require_role` flattens Array arguments (`require_role %i[admin editor]` used to deny everyone) and
+  refuses an empty list or a nil/blank role at class load. (HTTP-2)
+- **SecureHeadable**: the `:hsts` preset is skipped under `config.force_ssl`, so it no longer overrides Rails' own HSTS
+  header. (HTTP-6)
+- **SecureHeadable**: header names compare case-insensitively, so a lower-case custom pair beside a preset (or Rails'
+  default `X-Frame-Options` on Rails < 7.1) is one header, not two conflicting ones. (HTTP-7)
 - **SoftDeletable**: `really_delete!`, `is_really_deleted?` and the trashed-row purge guard no longer raise on a
   composite primary key. (STATE-3)
 - **SoftDeletable**: `soft_delete!`/`restore!` read the SAVED stamp instead of the unsaved in-memory one; they used to
