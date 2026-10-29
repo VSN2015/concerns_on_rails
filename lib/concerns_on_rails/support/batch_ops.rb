@@ -255,13 +255,18 @@ module ConcernsOnRails
 
         # Only the key is plucked, so the derived table keeps the relation's
         # star and its computed selects (an alias the ORDER BY names) but drops
-        # the plain own-table columns full_rows' star already carries: a
-        # `select(:id)` left beside the star would repeat `id` there
-        # (PostgreSQL: ambiguous; MySQL: error 1060).
+        # the plain own-table columns the star already carries: a `select(:id)`
+        # left beside the star would repeat `id` there (PostgreSQL: ambiguous;
+        # MySQL: error 1060). The own-table star leads whenever the kept values
+        # lack one — each_record's direct callers skip full_rows, and the outer
+        # pluck reads `table.id` from the derived table.
         table = relation.klass.table_name
         kept = relation.select_values.reject { |value| plain_column?(value, table) }
         derived = relation.unscope(:select)
-        derived = derived.select(*kept) if kept.any?
+        if kept.any?
+          kept.unshift(relation.klass.arel_table[Arel.star]) if kept.none? { |value| whole_table_select?(value, table) }
+          derived = derived.select(*kept)
+        end
         relation.klass.unscoped.from(derived, relation.klass.quoted_table_name).pluck(key)
       end
 

@@ -170,6 +170,42 @@ RSpec.describe "Batch verbs and relation destroy_all over a partial select" do
     expect(derived[/FROM \(SELECT DISTINCT(.*?) FROM/m, 1]).not_to match(/[`"]?ps_posts[`"]?\.[`"]?id[`"]?/)
   end
 
+  describe "each_record directly (no full_rows) over a DISTINCT limited computed select" do
+    def derived_select_for(relation)
+      sql = []
+      callback = ->(*, payload) { sql << payload[:sql] }
+      records = []
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+        ConcernsOnRails::Support::BatchOps.each_record(relation) { |record| records << record }
+      end
+      [records, sql.find { |query| query =~ /FROM \(SELECT DISTINCT/ }[/FROM \(SELECT DISTINCT(.*?) FROM/m, 1]]
+    end
+
+    before { %w[c a b].each { |t| publishable.create!(title: t) } }
+
+    it "keeps the own-table star in front of an alias-only select" do
+      relation = publishable.select("LOWER(title) AS lt").order("lt").distinct.limit(2)
+
+      records, derived = derived_select_for(relation)
+
+      # The outer load keeps the caller's select, so no id is loaded (each_record then
+      # dedupes the nil keys): only the key subquery is under test here.
+      expect(records).not_to be_empty
+      expect(records.map(&:lt) - %w[a b]).to be_empty
+      expect(derived).to match(/[`"]?ps_posts[`"]?\.\*/)
+    end
+
+    it "keeps the own-table star when a plain column is dropped beside the alias" do
+      relation = publishable.select(:id, "LOWER(title) AS lt").order("lt").distinct.limit(2)
+
+      records, derived = derived_select_for(relation)
+
+      expect(records.map(&:id)).to match_array(publishable.where(title: %w[a b]).pluck(:id))
+      expect(derived).to match(/[`"]?ps_posts[`"]?\.\*/)
+      expect(derived).not_to match(/[`"]?ps_posts[`"]?\.[`"]?id[`"]?/)
+    end
+  end
+
   it "leaves an unselected relation alone" do
     publishable.create!(title: "a")
 
