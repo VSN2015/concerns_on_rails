@@ -44,7 +44,11 @@ module ConcernsOnRails
     # A :datetime field behaves like a datetime column on the same model: under
     # time_zone_aware_attributes, zone-less input is read in Time.zone and the
     # value is a TimeWithZone. The plaintext is always UTC ISO8601.
-    # `key:` overrides the gem-level key per field (a String or a Proc).
+    # `key:` overrides the gem-level key per field (a String or a Proc). Once
+    # the option is PASSED the field owns its key: a nil (a Proc's, or an
+    # eagerly evaluated `ENV["X"]` / credential) or empty one is a MISSING key
+    # — it raises, or passes through under `on_missing_key: :passthrough` — and
+    # never falls back to the gem-level key. Only an omitted `key:` uses that.
     #
     # BLIND INDEX (`blind_index: true` or a Hash): because encryption is
     # non-deterministic, encrypted columns are not directly queryable. Opt into
@@ -79,6 +83,12 @@ module ConcernsOnRails
 
       LABEL = "ConcernsOnRails::Models::Encryptable".freeze
       VALID_TYPES = %i[string integer float decimal boolean date datetime].freeze
+      # `key:` omitted, as opposed to an explicit (possibly nil) value.
+      UNSET = Object.new.freeze
+      # What an explicit `key: nil` is recorded as: a declared key that
+      # resolves to nothing, so every path (cipher, blind index, rotation)
+      # sees a declared per-field key.
+      MISSING_FIELD_KEY = -> {}
 
       # Reusable ActiveModel casters. :decimal and :datetime round-trip through
       # Strings and are handled explicitly (mirrors Models::Storable).
@@ -92,7 +102,7 @@ module ConcernsOnRails
       }.freeze
 
       included do
-        # { field => { type:, key:, blind_index: } }. Subclasses inherit and may
+        # { field => { type:, key:, blind_index:, field: } }. Subclasses inherit and may
         # add fields.
         class_attribute :encryptable_rules, instance_accessor: false, default: {}
         # Blind indexes are refreshed at the write boundary
@@ -206,7 +216,7 @@ module ConcernsOnRails
         return [] if inputs.empty?
 
         config = ConcernsOnRails.encryption
-        material = config.resolve_material(rule[:key])
+        material = config.resolve_material(rule[:key], field: rule[:field])
         return inputs if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
         keys = blind_index_materials(rule, config, material)
@@ -225,7 +235,7 @@ module ConcernsOnRails
       #      index hashed before, so a row indexed then is still found by the
       #      same lookup. For every type but :datetime the two are the same.
       def self.blind_index_inputs(rule, value, zone_aware, legacy: true)
-        type = EncryptedType.new(type: rule[:type], key: rule[:key])
+        type = EncryptedType.new(type: rule[:type], key: rule[:key], field: rule[:field])
         expression = rule[:blind_index][:expression]
         canonical = blind_index_canonical(type, expression, value, zone_aware)
         [canonical, (blind_index_legacy(expression, value) if legacy)].compact.uniq
@@ -344,9 +354,10 @@ module ConcernsOnRails
         # decimal column casts it (".5" is 0.5), so those fields do too.
         NUMERIC_STRING = /\A\s*[+-]?\d/
 
-        def initialize(type: :string, key: nil)
+        def initialize(type: :string, key: nil, field: nil)
           @type = type
           @key = key
+          @field = field
           super()
         end
 
@@ -482,20 +493,20 @@ module ConcernsOnRails
         # rows apart; a per-field `key:` is outside rotation and always writes 0.
         def write_ciphertext(plaintext)
           config = ConcernsOnRails.encryption
-          material = config.resolve_material(@key)
+          material = config.resolve_material(@key, field: @field)
           return plaintext if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
           ConcernsOnRails::Support::Encryptor.encrypt(
-            plaintext, key: material, key_id: @key ? 0 : config.key_id, salt: config.key_derivation_salt
+            plaintext, key: material, key_id: @key.nil? ? config.key_id : 0, salt: config.key_derivation_salt
           )
         end
 
         def read_plaintext(stored)
           config = ConcernsOnRails.encryption
-          material = config.resolve_material(@key)
+          material = config.resolve_material(@key, field: @field)
           return stored if material == ConcernsOnRails::Encryption::PASSTHROUGH
 
-          material = rotation_material(stored, config) unless @key
+          material = rotation_material(stored, config) if @key.nil?
           ConcernsOnRails::Support::Encryptor.decrypt(
             stored, key: material, salt: config.key_derivation_salt
           )
@@ -519,10 +530,11 @@ module ConcernsOnRails
         include ConcernsOnRails::Support::ColumnGuard
 
         # Declare one or more encrypted fields. Repeatable; per-field options.
-        def encryptable(*fields, type: :string, key: nil, blind_index: nil)
+        def encryptable(*fields, type: :string, key: UNSET, blind_index: nil)
           @encryptable_declaring = true # see _default_attributes
           type = type.to_sym
           encryptable_validate!(fields, type, blind_index)
+          key = encryptable_normalize_key(key)
           schema_reachable = ensure_columns!(LABEL, *fields, types: :text)
 
           fields.each do |field|
@@ -537,8 +549,8 @@ module ConcernsOnRails
             bi = encryptable_normalize_blind_index(field, blind_index)
             encryptable_guard_declared_uniqueness!(field, bi)
             ensure_columns!(LABEL, bi[:column], types: "string:index") if bi
-            self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi })
-            attribute field, EncryptedType.new(type: type, key: key)
+            self.encryptable_rules = encryptable_rules.merge(field => { type: type, key: key, blind_index: bi, field: field })
+            attribute field, EncryptedType.new(type: type, key: key, field: field)
             encryptable_define_helpers(field)
             encryptable_define_blind_index(field, bi) if bi
             encryptable_register_filter_parameter(field)
@@ -687,6 +699,17 @@ module ConcernsOnRails
           return unless blind_index.is_a?(Hash) && blind_index[:column] && fields.size > 1
 
           raise ArgumentError, "#{LABEL}: blind_index column: cannot be combined with multiple fields"
+        end
+
+        # nil = omitted (the gem-level key applies); an explicit nil becomes
+        # MISSING_FIELD_KEY (declared, resolves to nothing); anything but a
+        # String or a callable is refused rather than `to_s`-coerced.
+        def encryptable_normalize_key(key)
+          return nil if key.equal?(UNSET)
+          return MISSING_FIELD_KEY if key.nil?
+          return key if key.is_a?(String) || key.respond_to?(:call)
+
+          raise ArgumentError, "#{LABEL}: key: must be a String or a callable (got #{key.class})"
         end
 
         # nil/false -> no index; true -> defaults; Hash -> { column:, expression: }.

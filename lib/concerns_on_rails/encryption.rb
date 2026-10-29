@@ -114,21 +114,44 @@ module ConcernsOnRails
       # (String or Proc) wins, else the global key. Returns PASSTHROUGH in the
       # escape-hatch mode, or raises MissingKeyError. Shared by encryption and
       # blind indexing so both derive from the same key.
-      def resolve_material(field_key = nil)
+      #
+      # A field that DECLARES `key:` owns its key: when that resolves to nil or
+      # empty (a Proc over a credential that is not there yet) it is a missing
+      # key exactly like an unset global one — raise, or pass through under
+      # `on_missing_key: :passthrough` — and the GLOBAL key is never used for
+      # it. (It used to be: the value was sealed under the global key as a
+      # key_id-0 envelope the per-field path could never decrypt, and
+      # rotation could never find.) `field:` only names it in the error.
+      def resolve_material(field_key = nil, field: nil)
         material = field_key.respond_to?(:call) ? field_key.call : field_key
         material = material.to_s unless material.nil?
         return material if material && !material.empty?
 
-        global = key_material
-        return global unless global.nil?
-        return PASSTHROUGH if on_missing_key == :passthrough
-
-        raise MissingKeyError,
-              "ConcernsOnRails::Models::Encryptable: no encryption key configured. Set " \
-              "ConcernsOnRails.configure_encryption { |c| c.key = ... } or pass key: to the macro."
+        missing_material(field_key.nil? ? key_material : nil, declared: !field_key.nil?, field: field)
       end
 
       private
+
+      # The answer when no usable key came out of the field's own `key:`:
+      # `global` (the gem-level key, only ever offered to a field that
+      # declared none), else PASSTHROUGH, else MissingKeyError.
+      def missing_material(global, declared:, field:)
+        return global unless global.nil?
+        return PASSTHROUGH if on_missing_key == :passthrough
+
+        raise MissingKeyError, declared ? declared_key_message(field) : undeclared_key_message
+      end
+
+      def declared_key_message(field)
+        "ConcernsOnRails::Models::Encryptable: the key: declared for #{field ? "`#{field}`" : 'this field'} " \
+          "resolved to nil or an empty String. Make it return the key material (or remove key: to use the " \
+          "gem-level key); it is never replaced by the global key."
+      end
+
+      def undeclared_key_message
+        "ConcernsOnRails::Models::Encryptable: no encryption key configured. Set " \
+          "ConcernsOnRails.configure_encryption { |c| c.key = ... } or pass key: to the macro."
+      end
 
       # Describe a rejected previous_keys value by its SHAPE only. The value is
       # key material, and the most likely mistakes would otherwise put a live
