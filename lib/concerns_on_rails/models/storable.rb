@@ -3,6 +3,7 @@ require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/time_value"
+require "concerns_on_rails/support/native_json"
 require "active_support/core_ext/object/deep_dup"
 require "active_model/type"
 require "bigdecimal"
@@ -154,7 +155,7 @@ module ConcernsOnRails
             cache = (@storable_native_hash_cache ||= {})
             return cache[name] if cache.key?(name)
 
-            detected = storable_detect_native_hash(column)
+            detected = Support::NativeJson.column?(self, column)
             cache[name] = detected if schema_reachable?
             detected
           end
@@ -446,17 +447,6 @@ module ConcernsOnRails
           respond_to?(name, true) ||
             ActiveRecord::Relation.method_defined?(name) ||
             ActiveRecord::Relation.private_method_defined?(name)
-        end
-
-        def storable_detect_native_hash(column)
-          name = column.to_s
-          type = type_for_attribute(name)
-          return true if defined?(ActiveRecord::Type::Serialized) && type.is_a?(ActiveRecord::Type::Serialized)
-
-          col = columns_hash[name]
-          !col.nil? && col.type == :json
-        rescue StandardError
-          false
         end
       end
 
