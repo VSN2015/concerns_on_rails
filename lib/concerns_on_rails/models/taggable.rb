@@ -42,7 +42,8 @@ module ConcernsOnRails
     #     a save would have produced. Under a delimiter that overlaps itself
     #     ("--") a tag also cannot END with the start of it ("a-"): the join
     #     "a---b" would read back as "a" and "-b", so the trailing part is
-    #     dropped when the tag is cleaned.
+    #     dropped when the tag is cleaned (and a leading "-" likewise, which
+    #     would make tagged_with("b") match "-b").
     #   * `tagged_with` (SQL) matches the NORMALIZED column form: tags joined by
     #     the bare delimiter ("ruby,rails"). Writes through the model always
     #     produce it; rows written around the callbacks (update_column, raw
@@ -213,31 +214,41 @@ module ConcernsOnRails
         # A tag that ENDS with the start of a self-overlapping delimiter would
         # swallow part of it when joined: with delimiter "--", ["a-", "b"]
         # joins to "a---b", which splits as ["a", "-b"] — so the tag was never
-        # stored as given, and tagged_with("a-") could not find it. Such a
-        # trailing part is dropped, as the delimiter itself splits a tag
-        # (a delimiter with no overlap with itself — "," or ", " — has none).
+        # stored as given, and tagged_with("a-") could not find it. A tag that
+        # STARTS with the end of one ("-b") reads back, but the LIKE behind
+        # tagged_with("b") ("%--b") matches "x---b". Such a trailing/leading
+        # part is dropped, as the delimiter itself splits a tag (a delimiter
+        # with no overlap with itself — "," or ", " — has none).
         def taggable_trim_straddle(tag)
-          prefixes = taggable_straddle_prefixes
+          prefixes, suffixes = taggable_straddle_parts
           return tag if prefixes.empty?
 
           loop do
-            trimmed = prefixes.find { |prefix| tag.end_with?(prefix) }
-            return tag unless trimmed
+            trimmed = taggable_trim_edges(tag, prefixes, suffixes)
+            return tag if trimmed == tag
 
-            tag = tag[0, tag.length - trimmed.length].gsub(EDGE_SPACE, "")
+            tag = trimmed
           end
         end
 
-        # The prefixes p of the delimiter d for which d == p + d[0, d.length -
-        # p.length], i.e. a tag ending in p, followed by d, holds d one place
-        # early.
-        def taggable_straddle_prefixes
+        def taggable_trim_edges(tag, prefixes, suffixes)
+          trailing = prefixes.find { |prefix| tag.end_with?(prefix) }
+          tag = tag[0, tag.length - trailing.length] if trailing
+          leading = suffixes.find { |suffix| tag.start_with?(suffix) }
+          tag = tag[leading.length..] if leading
+          tag.gsub(EDGE_SPACE, "")
+        end
+
+        # For each period k of the delimiter d (d == d[0, k] + d[k..], i.e.
+        # d[k..] == d[0, d.length - k]): its first k characters, and its last
+        # k. A tag ending in the first, followed by d, holds d one place early;
+        # a tag starting with the last, after d, does the same.
+        def taggable_straddle_parts
           delimiter = taggable_delimiter
-          (1...delimiter.length).filter_map do |len|
-            delimiter[0, len] if delimiter[len..] == delimiter[0, delimiter.length - len]
-          end
+          lengths = (1...delimiter.length).select { |len| delimiter[len..] == delimiter[0, delimiter.length - len] }
+          [lengths.map { |len| delimiter[0, len] }, lengths.map { |len| delimiter[-len, len] }]
         end
-        private :taggable_trim_straddle, :taggable_straddle_prefixes
+        private :taggable_trim_straddle, :taggable_trim_edges, :taggable_straddle_parts
 
         private
 

@@ -32,10 +32,10 @@ describe "Taggable with a delimiter that overlaps itself" do
     record = klass.new
     record.tag_list = ["a-", "b", "-c", "d--e"]
 
-    expect(record.tag_list).to eq(%w[a b -c d e])
+    expect(record.tag_list).to eq(%w[a b c d e])
     record.save!
-    expect(klass.find(record.id).tag_list).to eq(%w[a b -c d e])
-    expect(klass.tagged_with("a", "b", "-c")).to contain_exactly(record)
+    expect(klass.find(record.id).tag_list).to eq(%w[a b c d e])
+    expect(klass.tagged_with("a", "b", "c")).to contain_exactly(record)
   end
 
   it "reads back every list over a small alphabet, for self-overlapping and plain delimiters" do
@@ -51,6 +51,16 @@ describe "Taggable with a delimiter that overlaps itself" do
         expect(reread).to eq(stored), "delimiter #{delimiter.inspect}: #{tags.inspect} -> #{stored.inspect} -> #{reread.inspect}"
       end
     end
+  end
+
+  it "drops a leading part too, so tagged_with('b') never matches a stored '-b'" do
+    klass = model("--")
+    record = klass.create!(tag_list: ["x", "-b"])
+
+    expect(record.reload.tag_list).to eq(%w[x b])
+    expect(klass.create!(tag_list: ["x", "-y"]).reload.tag_list).to eq(%w[x y])
+    expect(klass.tagged_with("-b")).to contain_exactly(record)
+    expect(klass.where(id: record.id).tagged_with("c")).to be_empty
   end
 
   it "keeps a tag intact under a delimiter that does not overlap itself" do
