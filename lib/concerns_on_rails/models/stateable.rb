@@ -372,6 +372,11 @@ module ConcernsOnRails
           unknown = (Array(config[:from]) + [config[:to]]).map(&:to_sym) - stateable_states
           raise ArgumentError, "#{LABEL}: transition '#{event}' references unknown states: #{unknown.join(', ')}" if unknown.any?
 
+          if stateable_method_name(event) == "transition"
+            raise ArgumentError, "#{LABEL}: transition '#{event}' would generate `transition!` with the generic " \
+                                 "before_transition/after_transition hooks as its per-event hooks; rename the event " \
+                                 "or use prefix:/suffix:"
+          end
           return unless stateable_states.include?(event.to_sym)
 
           raise ArgumentError, "#{LABEL}: transition '#{event}' clashes with the same-named state setter; use prefix:/suffix:"
