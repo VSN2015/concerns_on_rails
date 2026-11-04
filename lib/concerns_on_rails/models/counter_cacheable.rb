@@ -489,8 +489,14 @@ module ConcernsOnRails
         # `reflection.foreign_key` is memoized by Rails, so calling it here
         # would pin it before a LATER model-level `query_constraints` could
         # change it — declare `query_constraints` before `counter_cacheable_by`.
-        # The same check repeats with `strict: true` at the first recount and
-        # the first adjustment, where the reflection can be resolved fully.
+        # The same check repeats at the first recount and on every adjustment,
+        # where the reflection can be resolved fully, in two tiers: `strict:
+        # :foreign_key` (the reflection's own foreign key; resolves no parent
+        # class, so a child saved with a nil foreign key still skips cleanly
+        # whatever its `class_name:`) and `strict: true` (adds the parent's
+        # association key — constantizes the parent, so it runs only once a
+        # foreign key is actually present, and its passing verdict is
+        # remembered per reflection).
         def counter_cacheable_refuse_composite_key!(association, reflection, strict: false)
           return unless counter_cacheable_composite_key?(reflection, strict)
 
@@ -503,13 +509,28 @@ module ConcernsOnRails
           options = reflection.options
           return true if options[:foreign_key].is_a?(Array) || options[:primary_key].is_a?(Array) ||
                          options[:query_constraints]
-          return reflection.foreign_key.is_a?(Array) || reflection.association_primary_key.is_a?(Array) if strict
+          return counter_cacheable_tolerant_composite_parent?(reflection) unless strict
+          return true if reflection.foreign_key.is_a?(Array)
 
-          begin
-            reflection.association_primary_key.is_a?(Array)
-          rescue StandardError
-            false
-          end
+          strict == true && counter_cacheable_composite_parent_key?(reflection)
+        end
+
+        # Macro time: the parent's key only when its class is loadable already.
+        def counter_cacheable_tolerant_composite_parent?(reflection)
+          reflection.association_primary_key.is_a?(Array)
+        rescue StandardError
+          false
+        end
+
+        # `association_primary_key` loads the parent class, so a passing verdict
+        # is remembered per reflection (idempotent: a race only repeats it).
+        def counter_cacheable_composite_parent_key?(reflection)
+          checked = (@counter_cacheable_parent_checked ||= {}.compare_by_identity)
+          return false if checked[reflection]
+
+          composite = reflection.association_primary_key.is_a?(Array)
+          checked[reflection] = true unless composite
+          composite
         end
 
         def validate_counter_cacheable_touch!(touch)
@@ -802,9 +823,10 @@ module ConcernsOnRails
       # (its `id`, or the belongs_to's `primary_key:` column).
       def counter_cacheable_adjustment(rule, parent_key, delta, judge = self.class)
         reflection = counter_cacheable_reflection(rule, judge)
-        judge.send(:counter_cacheable_refuse_composite_key!, rule[:association], reflection, strict: true)
+        judge.send(:counter_cacheable_refuse_composite_key!, rule[:association], reflection, strict: :foreign_key)
         return nil if parent_key.nil?
 
+        judge.send(:counter_cacheable_refuse_composite_key!, rule[:association], reflection, strict: true)
         { klass: reflection.klass, key_column: reflection.association_primary_key.to_s, parent_key: parent_key,
           column: rule[:count_column], delta: delta, touch: rule[:touch], association: rule[:association],
           rule: rule, judge: judge }
@@ -922,7 +944,7 @@ module ConcernsOnRails
 
       def counter_cacheable_fk_value(rule, judge = self.class)
         reflection = counter_cacheable_reflection(rule, judge)
-        judge.send(:counter_cacheable_refuse_composite_key!, rule[:association], reflection, strict: true)
+        judge.send(:counter_cacheable_refuse_composite_key!, rule[:association], reflection, strict: :foreign_key)
         self[reflection.foreign_key]
       end
 

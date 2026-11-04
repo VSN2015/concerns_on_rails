@@ -78,6 +78,23 @@ describe "Authorizable default denial message" do
     end
   end
 
+  it "resolves a status symbol Rack >= 3.1 renamed (:unprocessable_entity) to its number" do
+    expect(ConcernsOnRails::Controllers::Authorizable.status_number(:unprocessable_entity)).to eq(422)
+
+    klass = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Respondable
+      include ConcernsOnRails::Controllers::Authorizable
+
+      authorize_by(status: :unprocessable_entity) { false }
+      define_method(:show) { render json: { ok: true } }
+    end
+    result = IntegrationHarness.dispatch(klass, :show)
+
+    expect(result.status).to eq(422)
+    expect(JSON.parse(result.body).dig("error", "code")).to eq("forbidden") # the documented fallback for a non-401/404 status
+    expect(ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity)).to be_a(Symbol)
+  end
+
   it "uses ONE constant for ErrorHandleable's 404 and Authorizable's concealment" do
     expect(ConcernsOnRails::Controllers::Authorizable::DENIAL_MESSAGES[404])
       .to equal(ConcernsOnRails::Support::ErrorEnvelope::NOT_FOUND_MESSAGE)

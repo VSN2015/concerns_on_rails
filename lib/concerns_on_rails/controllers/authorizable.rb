@@ -67,7 +67,9 @@ module ConcernsOnRails
         if status.is_a?(Integer) || status.to_s.match?(/\A\d+\z/)
           status.to_i
         elsif defined?(::Rack::Utils)
-          ::Rack::Utils::SYMBOL_TO_STATUS_CODE[status.to_s.to_sym]
+          ::Rack::Utils::SYMBOL_TO_STATUS_CODE[
+            ConcernsOnRails::Support::ErrorEnvelope.renderable_status(status.to_s.to_sym)
+          ]
         end
       end
 

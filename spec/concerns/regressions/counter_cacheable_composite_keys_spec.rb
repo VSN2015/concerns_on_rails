@@ -84,6 +84,38 @@ describe "CounterCacheable and composite keys", min_rails: "7.1" do
     expect { klass.create!(simple_order: CcSimpleOrder.create!) }.to raise_error(ArgumentError, /composite/)
   end
 
+  it "saves a child with a nil foreign key whose belongs_to cannot resolve its parent class" do
+    klass = item_class do
+      belongs_to :ghost, class_name: "DoesNotExist", foreign_key: :simple_order_id, optional: true
+      counter_cacheable_by :ghost, count: :cc_cpk_items_count
+    end
+
+    expect { klass.create! }.not_to raise_error
+    expect(klass.count).to eq(1)
+  end
+
+  it "resolves the parent's key once per reflection, not on every save" do
+    klass = item_class do
+      belongs_to :simple_order, class_name: "CcSimpleOrder", optional: true
+      counter_cacheable_by :simple_order, count: :cc_cpk_items_count
+    end
+    order = CcSimpleOrder.create!
+    calls = 0
+    reflection = klass.reflect_on_association(:simple_order)
+    allow(reflection).to receive(:association_primary_key).and_wrap_original do |original, *args|
+      calls += 1
+      original.call(*args)
+    end
+
+    klass.create!(simple_order: order)
+    after_first = calls
+    klass.create!(simple_order: order)
+
+    # the adjustment itself reads the key once per save; the composite check adds none after the first
+    expect(calls - after_first).to eq(after_first - 1)
+    expect(order.reload.cc_cpk_items_count).to eq(2)
+  end
+
   it "still counts and recounts through a single-column foreign key" do
     klass = item_class do
       belongs_to :simple_order, class_name: "CcSimpleOrder", optional: true
