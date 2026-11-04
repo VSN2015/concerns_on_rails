@@ -32,8 +32,10 @@ and five configurations that used to be silently broken now raise at class load.
   uses the gem-level key. `key:` must be a String or respond to `call`; `key: false`, `key: 123` or `key: :sym` raises
   `ArgumentError` at the macro. Rows already written under the global key are NOT repaired by `reencrypt_all!`
   (it skips per-field fields); they fail to decrypt under the field key. For each such row, decrypt the raw column
-  value with the global key (`ConcernsOnRails::Support::Encryptor.decrypt(raw, key: <global key material>)`), then
-  write the plaintext back through the model while the field key resolves, so it is re-sealed under the field key.
+  value with the global key (`ConcernsOnRails::Support::Encryptor.decrypt(raw, key: <global key material>,
+  salt: ConcernsOnRails.encryption.key_derivation_salt)`; read `raw` with `<field>_ciphertext`, since the model's
+  reader raises for such rows), then write the plaintext back through the model while the field key resolves, so it
+  is re-sealed under the field key.
   Rows left plaintext under `:passthrough` only need a plain re-save once the key resolves. (DATA-2)
 
 **Behaviour changes.**
@@ -42,18 +44,19 @@ and five configurations that used to be silently broken now raise at class load.
   output at `before_save`, so with Normalizable included BEFORE a Sanitizable/Taggable/Addressable rule on the same
   column its rule no longer gets "the last word" (`squish` then `strip` on: :write stores `" a  b"` where it stored
   `"a b"`). Include Normalizable AFTER the other transform to normalize its output. (TRANS-2)
-- [ ] **Taggable:** with a self-overlapping delimiter (`"--"`, `"||"`, `" | "`) a tag is trimmed of a trailing (and
-  leading) part that is the start of the delimiter: `"a-"` becomes `"a"` and `"-b"` becomes `"b"` under `"--"`.
-  Delimiters that do not overlap themselves are unaffected. Tags already stored that start with such a part are not
-  migrated; `Model.normalize_tags!` repairs them. (TRANS-4)
+- [ ] **Taggable:** with a self-overlapping delimiter (`"--"`, `"||"`, `" | "`) a tag is trimmed of a trailing part
+  that is the start of the delimiter, and of a leading part that is the end of it: `"a-"` becomes `"a"` and `"-b"`
+  becomes `"b"` under `"--"`. Delimiters that do not overlap themselves are unaffected. Stored tags with a leading
+  straddling part are not migrated; `Model.normalize_tags!` repairs them. (TRANS-4)
 - [ ] **Paginatable / Includable:** re-declaring `paginate_by` or `includable` in a subclass changes only what it
   passes; every omitted option now keeps its inherited value (before it reset to the gem default, for example a
   parent `max_per_page: 20` became 200). A subclass that relied on the reset must pass the option explicitly.
   For `includable` the association list still replaces the parent's, and an inherited `default:` path the new list no
   longer contains is dropped with a stderr warning at class load. (PARAMS-2)
 - [ ] **Filterable, `_null`:** `?<field>_null=` and `?field[null]=` read only `true/false/1/0/t/f/yes/no`
-  (case-insensitive) or a real boolean; any other value (`maybe`, `on`, `off`, `nope`) matches nothing instead of
-  being read as `IS NULL` (`off` used to be `IS NOT NULL`). (PARAMS-6)
+  (case-insensitive) or a real boolean; any other NON-BLANK value (`maybe`, `on`, `off`, `nope`) matches nothing
+  instead of being read as `IS NULL` (`off` used to be `IS NOT NULL`). A blank value is skipped as before, and
+  surrounding whitespace is ignored. (PARAMS-6)
 - [ ] **Filterable, encrypted columns:** on an `encryptable` column equality and `in` go through the blind index and every
   other operator (`not`, `not_in`, `gt`, `gte`, `lt`, `lte`, `contains`, `starts_with`) fails closed (`none`); a field
   without a blind index fails closed for every operator but `null`. Add `blind_index: true` to filter an encrypted
@@ -198,8 +201,8 @@ and five configurations that used to be silently broken now raise at class load.
   retried on the same record, no longer re-runs a non-idempotent rule on its own output (`"a!"` no longer becomes
   `"a!!"`, `"Tom &amp; Jerry"` no longer `"Tom &amp;amp; Jerry"`), `update_attribute` saves included. The per-save
   records are dropped after a successful save, kept across a rollback, and dup/clone no longer share them. (TRANS-3)
-- **Taggable**: a tag ending with the start of a self-overlapping delimiter (`["a-", "b"]` under `"--"` read back as
-  `["a", "-b"]`) is trimmed when cleaned; `tag_list=`/`add_tags` clean an Array item by item instead of joining and
+- **Taggable**: a tag ending with the start of a self-overlapping delimiter, or starting with its end (`["a-", "b"]`
+  under `"--"` read back as `["a", "-b"]`), is trimmed when cleaned; `tag_list=`/`add_tags` clean an Array item by item instead of joining and
   re-splitting. (TRANS-4)
 - **Monetizable**: `price = "1e18"` on an integer cents column casts to `nil` (checked against the column type's own
   range) instead of a value whose save raised `ActiveModel::RangeError`. (TRANS-S3)
@@ -218,7 +221,8 @@ and five configurations that used to be silently broken now raise at class load.
 - **Paginatable / CursorPaginatable**: `page` / `per_page` are read as exact whole numbers through
   `Support::NumericOperand` instead of `String#to_i` (`?per_page=1e3` was 1, `?per_page=10abc` was 10); a non-whole
   JSON Float falls back too. (PARAMS-7)
-- **Filterable**: `?<field>_null=` reads only an explicit true/false spelling (see Upgrading). (PARAMS-6)
+- **Filterable**: `?<field>_null=` reads only an explicit true/false spelling; any other non-blank value matches
+  nothing (see Upgrading). (PARAMS-6)
 - **Filterable**: Encryptable-aware (`Support::EncryptedLookup.rule`), `alias_attribute` followed: equality and `in` use
   the blind index, `not`/`not_in`/`gt`/`gte`/`lt`/`lte`/`contains`/`starts_with` fail closed. `?ssn_not=123` used to
   return the excluded row and `=`/`in`/`contains` silently matched nothing. `null` keeps working on an encrypted
