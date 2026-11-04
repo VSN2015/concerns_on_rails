@@ -55,7 +55,10 @@ describe ConcernsOnRails::Controllers::Paginatable do
 
   it "keeps the plain GROUP BY count for a grouped relation with no HAVING, and for ungrouped ones" do
     expect(total_for(GroupedRow.group(:category).select(:category))).to eq("3")
-    expect(total_for(GroupedRow.group(:category))).to eq("3")
+    # A bare group(:category) loads `grouped_rows.*`, which PostgreSQL and MySQL
+    # (only_full_group_by) refuse, so only its COUNT is read, never its rows.
+    controller.paginated(GroupedRow.group(:category))
+    expect(controller.response.headers["X-Total-Count"]).to eq("3")
     expect(total_for(GroupedRow.all)).to eq("6")
     expect(total_for(GroupedRow.where(category: "zzz"))).to eq("0")
   end

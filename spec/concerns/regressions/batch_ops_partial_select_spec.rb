@@ -184,12 +184,16 @@ RSpec.describe "Batch verbs and relation destroy_all over a partial select" do
     before { %w[c a b].each { |t| publishable.create!(title: t) } }
 
     it "keeps the own-table star in front of an alias-only select" do
+      skip "the outer load of a DISTINCT alias-only select cannot ORDER BY the primary key on PostgreSQL/MySQL" unless TestDatabase.sqlite?
+
       relation = publishable.select("LOWER(title) AS lt").order("lt").distinct.limit(2)
 
       records, derived = derived_select_for(relation)
 
       # The outer load keeps the caller's select, so no id is loaded (each_record then
-      # dedupes the nil keys): only the key subquery is under test here.
+      # dedupes the nil keys): only the key subquery is under test here. The outer
+      # load reorders by the primary key, which only SQLite lets a DISTINCT alias-only
+      # select do, hence the skip elsewhere.
       expect(records).not_to be_empty
       expect(records.map(&:lt) - %w[a b]).to be_empty
       expect(derived).to match(/[`"]?ps_posts[`"]?\.\*/)

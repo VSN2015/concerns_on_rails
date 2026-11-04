@@ -8,6 +8,7 @@ describe ConcernsOnRails::Models::Monetizable do
         t.integer :shipping_cents
         t.integer :total_cents
         t.integer :balance
+        t.bigint :wide_cents
       end
     end
   end
@@ -119,7 +120,12 @@ describe ConcernsOnRails::Models::Monetizable do
         expect(cents_for(klass, huge)).to be_nil, "#{huge.to_s[0, 30].inspect} should cast to nil"
       end
       expect(cents_for(klass, "1e3")).to eq(100_000)
-      expect(cents_for(klass, "92233720368547758.07")).to eq(9_223_372_036_854_775_807)
+      # The largest int64 amount is kept on an 8-byte (bigint) column on every adapter.
+      wide = product_class { monetizable :wide_cents }
+      expect(cents_for(wide, "92233720368547758.07", field: :wide)).to eq(9_223_372_036_854_775_807)
+      # `t.integer` is 4 bytes on PostgreSQL/MySQL (nil: the column cannot hold it) but
+      # SQLite's INTEGER is always 8 bytes, so it keeps the amount there.
+      expect(cents_for(klass, "92233720368547758.07")).to eq(TestDatabase.sqlite? ? 9_223_372_036_854_775_807 : nil)
     end
 
     # In a "," separator field, "1.234" used to be read as the decimal 1.234
