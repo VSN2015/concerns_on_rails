@@ -3,6 +3,7 @@ require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/callable"
 require "concerns_on_rails/support/time_value"
+require "concerns_on_rails/support/native_json"
 require "concerns_on_rails/support/write_boundary"
 require "bigdecimal"
 require "json"
@@ -232,18 +233,13 @@ module ConcernsOnRails
         auditable_native_column? ? entries : JSON.generate(entries)
       end
 
-      # A native json/jsonb column (or one the host app `serialize`d) encodes
-      # the value itself, so it is handed the Array: assigning the generated
-      # String stored a JSON string scalar wrapping the encoded trail. The
-      # same detection Models::Storable uses for its column.
+      # A native json/jsonb column (or one the host app `serialize`d, or an
+      # `attribute :x, :json` override) encodes the value itself, so it is
+      # handed the Array: assigning the generated String stored a JSON string
+      # scalar wrapping the encoded trail. The one detection Models::Storable
+      # shares (Support::NativeJson).
       def auditable_native_column?
-        name = self.class.auditable_into.to_s
-        type = self.class.type_for_attribute(name)
-        return true if defined?(ActiveRecord::Type::Serialized) && type.is_a?(ActiveRecord::Type::Serialized)
-
-        %i[json jsonb].include?(self.class.columns_hash[name]&.type)
-      rescue StandardError
-        false
+        Support::NativeJson.column?(self.class, self.class.auditable_into)
       end
 
       # Cheap pre-check before materializing the full changes hash — most saves

@@ -311,6 +311,7 @@ module ConcernsOnRails
           unless previous.key?(column) && previous[column] == value
             normalized = normalize_part(part, country, value)
             self[column] = normalized unless normalized == value
+            ConcernsOnRails::Support::TransformBackstop.wrote(self, column)
           end
           # A copy: an in-place mutation after validation must not look normalized.
           @addressable_normalized[column] = self[column].dup
@@ -427,6 +428,7 @@ module ConcernsOnRails
 
           result = normalize_part(part, country, value)
           self[column] = result unless result == value
+          ConcernsOnRails::Support::TransformBackstop.wrote(self, column)
         end
       end
 

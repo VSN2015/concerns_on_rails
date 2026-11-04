@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/generated_values"
+require "concerns_on_rails/support/primary_key"
 
 # Loaded here — with the concern, on first use — rather than at gem boot, so
 # apps that never include Sortable never load acts_as_list.
@@ -124,7 +125,9 @@ module ConcernsOnRails
         # unknown `missing:` raise before anything is written. The first id gets
         # the top position; on a :desc list it gets the highest value instead.
         # Returns the number of rows updated. Bypasses acts_as_list callbacks by
-        # design (no per-row shifting).
+        # design (no per-row shifting). A composite primary key has no single
+        # column to CASE on, so it runs one UPDATE per row, inside the same
+        # transaction (ids are [shop_id, id] tuples).
         def reposition!(ids, missing: :append)
           unless MISSING_MODES.include?(missing)
             raise ArgumentError,
@@ -134,8 +137,11 @@ module ConcernsOnRails
           ordered = sortable_reposition_order(sortable_cast_ids(ids), missing)
           return 0 if ordered.empty?
 
+          positions = sortable_positions_for(ordered)
+          return transaction { sortable_write_composite_positions(positions) } if sortable_composite_key?
+
           node = Arel::Nodes::Case.new(arel_table[primary_key])
-          sortable_positions_for(ordered).each { |id, position| node.when(id).then(position) }
+          positions.each { |id, position| node.when(id).then(position) }
           transaction { unscoped.where(primary_key => ordered).update_all(sortable_field => node) }
         end
 
@@ -177,21 +183,58 @@ module ConcernsOnRails
                 "row and treat every record as alone in its list. Scope by a non-encrypted column instead."
         end
 
-        # Params arrive as Strings; compare on the primary key's own type.
+        def sortable_composite_key?
+          primary_key.is_a?(Array)
+        end
+
+        # Params arrive as Strings; compare on the primary key's own type. A
+        # composite key's ids are tuples (`record.id` of a [shop_id, id] model),
+        # cast one column at a time.
         def sortable_cast_ids(ids)
+          return sortable_cast_composite_ids(ids) if sortable_composite_key?
+
           type = type_for_attribute(primary_key)
           Array(ids).map { |id| type.cast(id.respond_to?(:id) ? id.id : id) }
+        end
+
+        def sortable_cast_composite_ids(ids)
+          columns = primary_key
+          Array(ids).map do |id|
+            id = id.id if id.respond_to?(:id)
+            unless id.is_a?(Array) && id.size == columns.size
+              raise ArgumentError,
+                    "#{LABEL}: this model has a composite primary key (#{columns.join(', ')}); " \
+                    "each id must be a #{columns.size}-element Array (got #{id.inspect})"
+            end
+
+            columns.zip(id).map { |column, value| type_for_attribute(column).cast(value) }
+          end
+        end
+
+        # A composite key has no single column to CASE on, so each row is
+        # written by its own UPDATE addressed through Support::PrimaryKey (the
+        # caller wraps them in one transaction). The count of rows updated.
+        def sortable_write_composite_positions(positions)
+          positions.sum do |id, position|
+            unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(self, id)).update_all(sortable_field => position)
+          end
+        end
+
+        def sortable_id_list(ids)
+          ids.map { |id| id.is_a?(Array) ? id.inspect : id }.join(", ")
         end
 
         # The relation's members in the requested order, validated: no
         # duplicates, nothing foreign, and the unlisted rest appended (or raised).
         def sortable_reposition_order(ids, missing)
           duplicates = ids.tally.select { |_id, n| n > 1 }.keys
-          raise ArgumentError, "#{LABEL}: duplicate id(s) #{duplicates.join(', ')} in ids" if duplicates.any?
+          raise ArgumentError, "#{LABEL}: duplicate id(s) #{sortable_id_list(duplicates)} in ids" if duplicates.any?
 
-          current = all.reorder(sortable_field => sortable_direction, primary_key => :asc).pluck(primary_key)
+          key_columns = ConcernsOnRails::Support::PrimaryKey.columns(self)
+          current = all.reorder(sortable_field => sortable_direction, **key_columns.to_h { |column| [column.to_sym, :asc] })
+                       .pluck(*key_columns)
           unknown = ids - current
-          raise ArgumentError, "#{LABEL}: id(s) #{unknown.join(', ')} are not in this relation" if unknown.any?
+          raise ArgumentError, "#{LABEL}: id(s) #{sortable_id_list(unknown)} are not in this relation" if unknown.any?
 
           rest = current - ids
           if rest.any? && missing == :raise

@@ -1,5 +1,278 @@
 <!-- CHANGELOG.md -->
 
+## 1.34.0 (2026-10-29)
+
+A correctness release: it fixes the 43 bugs proven by the 2026-10-29 audit of 1.33.0. Some fixes change behaviour,
+and five configurations that used to be silently broken now raise at class load. Read **Upgrading** first.
+
+### Upgrading
+
+**Class-load (boot) raises for configurations that were silently broken.**
+
+- [ ] **CounterCacheable, composite keys:** `counter_cacheable_by` raises `ArgumentError` for a `belongs_to` with a
+  composite `foreign_key:` (`[:shop_id, :order_id]`), a composite association primary key or `query_constraints:`
+  (Rails 7.1+), as it does for a polymorphic one. It was accepted, never counted the children and made
+  `recount_counter_caches!` raise invalid SQL. Count on a single-column key instead. A model-level
+  `query_constraints` must be declared before `counter_cacheable_by`. (GRAPH-2)
+- [ ] **CursorPaginatable, `predicate: :row`:** `predicate: :row` with a mixed-direction `order:` or `order_presets:`
+  entry raises `ArgumentError` at class load (also when a later re-declaration combines with an inherited one), and a
+  per-call `cursor_paginated(order:)` with mixed directions raises before page 1. This includes a nullable ordering
+  column, which used to fall back to the OR-expansion silently. Switch to `predicate: :auto` (it falls back to the
+  OR-expansion for mixed directions) or make the directions uniform. (PARAMS-4)
+- [ ] **Stateable, event named `transition`:** a transition event whose (affixed) name is `transition` raises
+  `ArgumentError` at the macro. It generated a `transition!` that always raised from the generic
+  `before_/after_transition` hooks. Rename the event or use `prefix:`/`suffix:`. (STATE-6)
+- [ ] **Authorizable, `require_role`:** `require_role` with an empty list (`require_role []`, `[[]]`) or a nil/blank
+  role (`require_role ENV["ADMIN_ROLE"]&.to_sym` unset) raises `ArgumentError` at class load; a blank role used to
+  admit actors whose role is `""` or nil. (HTTP-2)
+- [ ] **Encryptable, per-field `key:`:** a DECLARED per-field `key:` that resolves to nil or `""` (a Proc over a
+  credential that is not there yet, an explicit `key: nil`, an eagerly nil `ENV["X"]` / credential) is a missing key:
+  it raises `MissingKeyError` naming the field on write, read and blind-index lookup (or leaves the value plaintext
+  under `on_missing_key: :passthrough`) instead of silently encrypting under the global key. Only an OMITTED `key:`
+  uses the gem-level key. `key:` must be a String or respond to `call`; `key: false`, `key: 123` or `key: :sym` raises
+  `ArgumentError` at the macro. Rows already written under the global key are NOT repaired by `reencrypt_all!`
+  (it skips per-field fields); they fail to decrypt under the field key. For each such row, decrypt the raw column
+  value with the global key (`ConcernsOnRails::Support::Encryptor.decrypt(raw, key: <global key material>,
+  salt: ConcernsOnRails.encryption.key_derivation_salt)`; read `raw` with `<field>_ciphertext`, since the model's
+  reader raises for such rows), then write the plaintext back through the model while the field key resolves, so it
+  is re-sealed under the field key.
+  Rows left plaintext under `:passthrough` only need a plain re-save once the key resolves. (DATA-2)
+
+**Behaviour changes.**
+
+- [ ] **Normalizable / Sanitizable / Taggable / Addressable:** Normalizable no longer re-normalizes a later transform's
+  output at `before_save`, so with Normalizable included BEFORE a Sanitizable/Taggable/Addressable rule on the same
+  column its rule no longer gets "the last word" (`squish` then `strip` on: :write stores `" a  b"` where it stored
+  `"a b"`). Include Normalizable AFTER the other transform to normalize its output. (TRANS-2)
+- [ ] **Taggable:** with a self-overlapping delimiter (`"--"`, `"||"`, `" | "`) a tag is trimmed of a trailing part
+  that is the start of the delimiter, and of a leading part that is the end of it: `"a-"` becomes `"a"` and `"-b"`
+  becomes `"b"` under `"--"`. Delimiters that do not overlap themselves are unaffected. Stored tags with a leading
+  straddling part are not migrated; `Model.normalize_tags!` repairs them. (TRANS-4)
+- [ ] **Paginatable / Includable:** re-declaring `paginate_by` or `includable` in a subclass changes only what it
+  passes; every omitted option now keeps its inherited value (before it reset to the gem default, for example a
+  parent `max_per_page: 20` became 200). A subclass that relied on the reset must pass the option explicitly.
+  For `includable` the association list still replaces the parent's, and an inherited `default:` path the new list no
+  longer contains is dropped with a stderr warning at class load. (PARAMS-2)
+- [ ] **Filterable, `_null`:** `?<field>_null=` and `?field[null]=` read only `true/false/1/0/t/f/yes/no`
+  (case-insensitive) or a real boolean; any other NON-BLANK value (`maybe`, `on`, `off`, `nope`) matches nothing
+  instead of being read as `IS NULL` (`off` used to be `IS NOT NULL`). A blank value is skipped as before, and
+  surrounding whitespace is ignored. (PARAMS-6)
+- [ ] **Filterable, encrypted columns:** on an `encryptable` column equality and `in` go through the blind index and every
+  other operator (`not`, `not_in`, `gt`, `gte`, `lt`, `lte`, `contains`, `starts_with`) fails closed (`none`); a field
+  without a blind index fails closed for every operator but `null`. Add `blind_index: true` to filter an encrypted
+  field by equality. (PARAMS-1)
+- [ ] **Filterable, `with:` lambdas:** a lambda declared with a `type:` receives no Array/Hash/Parameters value; such a
+  value fails the filter closed (`none`) for every `type:`. (PARAMS-S4)
+- [ ] **Filterable, float columns:** a decimal literal that a double does not read back as (more digits than a Float
+  keeps, e.g. `0.1000000000000000000001`) equals nothing and compares as the largest double at or below it. (PARAMS-8)
+- [ ] **Paginatable / CursorPaginatable, `page` / `per_page`:** read as exact whole numbers (`1e3` is 1000, `2e0` is 2);
+  a fractional (`2.9`), trailing-garbage (`10abc`) or unreadable value falls back to the default instead of its
+  leading digits, and a value beyond 100 digits falls back to the default instead of clamping. (PARAMS-7)
+- [ ] **CursorPaginatable, SQLite:** a hand-made cursor whose String boundary carries a NUL byte is accepted on SQLite
+  (it cannot be told from a minted one) instead of answering `InvalidCursor`. (PARAMS-5)
+- [ ] **Publishable:** `unpublish!` on a stored draft (blank saved column; false/NULL on a boolean) is a no-op like
+  `publish!`: it returns `true`, writes nothing and fires no `before/after_unpublish`. A scheduled row is still
+  cleared with the hooks. (STATE-5)
+- [ ] **SoftDeletable:** `soft_delete!`/`restore!` decide "already done" from the SAVED stamp. Assigning the stamp
+  without saving no longer makes the verb return `true` while writing nothing: it writes, fires the hooks and cascades.
+  A no-op verb now saves OTHER pending changes (previously dropped; a validation can make it return `false`). (STATE-12)
+- [ ] **Expirable:** `expire_in!(nil)` and `extend_expiry!(by: nil)` (anything but an `ActiveSupport::Duration` or a
+  `Numeric`) raise the concern's `ArgumentError` instead of a bare `TypeError`; an object that merely responds to
+  `to_i` is refused too. (STATE-10)
+- [ ] **Expirable, `date` columns:** `expire_in!(15.minutes)` on a `date` column writes today's date, so it now fires the
+  hooks, because the record is `expired?` (unchanged for UTC process zones). (STATE-2)
+- [ ] **Anonymizable:** `anonymize!` returns `false` (no `after_anonymize`) when its UPDATE reached no row, and
+  `anonymize_all!` no longer counts such a row. (STATE-9)
+- [ ] **Lockable:** `register_failed_attempt!` on a `readonly!` or destroyed record raises before incrementing, so
+  nothing is written; an already-locked record still just answers the count. (DATA-4)
+- [ ] **Monetizable:** the writer casts an amount the cents column cannot hold to `nil`, like other oversized input
+  (a 4-byte integer column overflows at about 21.4 million units). (TRANS-S3)
+- [ ] **Authorizable:** the default denial `message:` follows the status: 404 renders ErrorHandleable's exact
+  "Resource not found", 401 "Unauthorized", anything else "Forbidden". A `status: :not_found` / `:unauthorized` rule
+  without `message:` changes its body message and the `authorization_denied` payload's `message`; an explicit
+  `message:` still wins. (HTTP-1)
+- [ ] **Authorizable, `require_role`:** Array arguments are flattened, so `require_role %i[admin editor]` and
+  `require_role ADMIN_ROLES` work (they used to deny everyone). (HTTP-2)
+- [ ] **Timezoneable:** responses gain `Vary: Time-Zone` whenever the `Time-Zone` header source is on (default; no longer
+  only with `response_header:`) and `Vary: Cookie` whenever the cookie source is on. New `vary:` option (default
+  true; `vary: false` opts out). `response_header:` now controls only `X-Time-Zone`. (HTTP-3)
+- [ ] **ErrorHandleable:** the RecordNotDestroyed 422 renders "Resource could not be deleted" instead of Rails'
+  "Failed to destroy <Model> with id=<id>"; the record's `errors.full_messages` still ride as `details`. The
+  `message` of that 422 and of the `handled_error` payload changed. (HTTP-4)
+- [ ] **Respondable / ErrorEnvelope, status symbols:** on Rack >= 3.1 without Rails 8.1's own rewrite (Rails
+  7.1/7.2/8.0) the gem renders the renamed symbol (`:unprocessable_content`, ...), so `rendered[:status]` is Rack
+  dependent; specs asserting `:unprocessable_entity` should compare to `ErrorEnvelope.renderable_status(:unprocessable_entity)`.
+  An app's OWN `render_error` override still receives the raw `:unprocessable_entity`; one that calls `render` with
+  it logs Rack's deprecation on Rack >= 3.1. (HTTP-5)
+- [ ] **SecureHeadable, `:hsts`:** the `:hsts` preset is skipped when `Rails.application.config.force_ssl` is on (read
+  per request), so Rails' own HSTS (`config.ssl_options[:hsts]`) is no longer overridden by the preset's one-year
+  value. A custom `"Strict-Transport-Security"` pair with a different value is still sent. (HTTP-6)
+- [ ] **SecureHeadable, header names:** names compare case-insensitively: a lower-case custom
+  `"strict-transport-security"` is withheld over plain HTTP, and a lower-case pair beside a preset
+  (`"x-frame-options"` + `:deny_frame`) is ONE header (later value wins, first-registered spelling kept), written
+  under the spelling the response already carries. (HTTP-7)
+- [ ] **SoftDeletable:** after an association `destroy_all` the association cache is reset rather than marked
+  loaded-and-empty, so a `default_scope: false` / `-> { with_deleted }` association still shows its soft-deleted rows
+  on the next read (and `size`); one extra query on the next read. (STATE-4)
+- [ ] **Batch verbs, partial `select`:** every `*_all` verb and a SoftDeletable relation `destroy_all` over a relation
+  with a partial `select` load whole rows (`table.*` is added; computed aliases a HAVING/ORDER reads stay; joins and
+  wheres kept) instead of raising `MissingAttributeError`. Accepted limits: a joined-table column, a Rails 7.1+ Hash
+  select or a comma-joined String repeating a column beside the star can still repeat `id` in the DISTINCT key
+  subquery on PostgreSQL/MySQL; a direct `BatchOps.each_record` caller selecting without the primary key still
+  gets nil ids. (STATE-7)
+- [ ] **Stateable, `transition_all`:** a record failing validation raises `ActiveRecord::RecordNotSaved` (carrying the
+  record; batch rolled back as before) instead of `RecordInvalid`; rescue `RecordNotSaved`. Another record's failed
+  `save!` inside a hook still propagates as `RecordInvalid`. The single `<event>!` still raises `RecordInvalid`.
+  (STATE-8)
+- [ ] **Sequenceable, `period_column:`:** a row numbered before a switch to a custom `period_column:` (NULL there)
+  formats (`formatted_<field>`, `sequenceable_period_time`) in its `created_at` period instead of today's. (GRAPH-1)
+- [ ] **Sluggable, `history: true` + `scope:`:** moving a record into a scope where another record's friendly_id history
+  holds its slug regenerates the slug (it raised `RecordNotUnique` or took over the old URL). (GRAPH-5)
+- [ ] **Duplicable:** a child or has_one target marked for destruction (`_destroy`, `mark_for_destruction`) is no longer
+  copied. (GRAPH-6)
+- [ ] **Legacy aliases:** a racing first reference to a top-level alias (`ConcernsOnRails::Sluggable`) no longer prints
+  "already initialized constant". (GRAPH-4)
+
+
+### Fixed
+
+- **Lockable**: `register_failed_attempt!`, `lock_access!`, `unlock_by_token`, the lapsed-lock clear and the lost-claim
+  adoption read no longer raise `ArgumentError` on a composite primary key (Rails 7.1+); every site addresses its row
+  through `Support::PrimaryKey`. (DATA-1)
+- **Tokenizable**: `consume_<field>` no longer raises `ArgumentError` on a composite primary key. (DATA-1)
+- **Lockable**: `register_failed_attempt!` on a `readonly!` (or destroyed) record raises `ReadOnlyRecord` /
+  `ActiveRecordError` before incrementing; it used to increment in SQL and then raise from `lock_access!`, leaving the
+  row at max attempts and unlocked. (DATA-4)
+- **Tokenizable / Lockable**: `authenticate_by_<field>` / `consume_<field>` and `unlock_by_token` answer `nil`, without
+  a query, for a token holding a NUL byte (`?token=%00`); on PostgreSQL they raised (the driver refuses NUL in a bound
+  parameter). Uses `Support::ScalarParam.nul_free?` like Filterable. (DATA-3)
+- **Encryptable**: a per-field `key:` that resolves to nil or `""` (a Proc over a missing credential, an explicit
+  `key: nil`, an eagerly nil `ENV[...]`) no longer falls back to the global key. It raises `MissingKeyError` naming
+  the field on write, read and blind-index lookup/refresh, or stays plaintext under `on_missing_key: :passthrough`;
+  `key:` must be a String or callable (`ArgumentError` otherwise). It used to seal a key_id-0 envelope under the
+  global key that the field key could not decrypt later. (DATA-2)
+- **Authorizable**: the default denial `message:` follows the status (404 "Resource not found", 401 "Unauthorized",
+  else "Forbidden"), so a 404 denial is no longer distinguishable from ErrorHandleable's own 404. (HTTP-1)
+- **Authorizable**: `require_role` flattens Array arguments (`require_role %i[admin editor]` used to deny everyone) and
+  refuses an empty list or a nil/blank role at class load. (HTTP-2)
+- **SecureHeadable**: the `:hsts` preset is skipped under `config.force_ssl`, so it no longer overrides Rails' own HSTS
+  header. (HTTP-6)
+- **SecureHeadable**: header names compare case-insensitively, so a lower-case custom pair beside a preset (or Rails'
+  default `X-Frame-Options` on Rails < 7.1) is one header, not two conflicting ones. (HTTP-7)
+- **SoftDeletable**: `really_delete!`, `is_really_deleted?` and the trashed-row purge guard no longer raise on a
+  composite primary key. (STATE-3)
+- **SoftDeletable**: `soft_delete!`/`restore!` read the SAVED stamp instead of the unsaved in-memory one; they used to
+  return `true` while writing nothing (no hooks, no cascade) after the stamp was assigned unsaved. `restore!` cascades
+  by the saved stamp. (STATE-12)
+- **Sortable**: `reposition!` works on a composite primary key (Rails 7.1+). Ids are `[shop_id, id]` tuples (a record
+  is accepted too), cast per column and written one UPDATE each inside the transaction; a malformed tuple raises
+  `ArgumentError` before any write. A simple key keeps the single CASE UPDATE. It raised `TypeError: can't quote
+  Array`. (GRAPH-3)
+- **CounterCacheable**: a composite-key `belongs_to` is refused at the macro (see Upgrading); it was accepted and never
+  counted. (GRAPH-2)
+- **Expirable**: `time_until_expiry` no longer raises `TypeError` on a `date` column with a future date. It agrees with
+  `expired?` (0 when expired, today counts, in `Time.zone`), otherwise measures to the start of the date in
+  `Time.zone`, and is clamped at 0. Also fixes today's date in a zone ahead of UTC answering a positive duration
+  while `expired?` was true. (STATE-1)
+- **Expirable**: `expire!` / `expire_in!` on a `date` column fire `before/after_expire` exactly when the written value
+  makes the record `expired?`, whatever the process TZ (`Date#to_time` used `ENV["TZ"]` and skipped the hooks for
+  hours a day). A blank time (`nil`, `""`, `false`) for `expire!`/`expire_all` is cast through the column like a given
+  time (today's `Date` on a `date` column; `expire_all(nil)` writes it). (STATE-2)
+- **Expirable**: `expire_in!(nil)` and `extend_expiry!(by: nil)` raise the concern's `ArgumentError`
+  (shared `expirable_check_duration!`). (STATE-10)
+- **Publishable**: `unpublish!` on a draft is idempotent like `publish!`; `unpublish_all` already skipped such rows, so
+  verb and batch now agree. (STATE-5)
+- **Anonymizable**: the erasing UPDATE's result is honoured; a row deleted (or unwritable under optimistic locking)
+  between load and UPDATE is not counted, and `anonymize!` returns `false` instead of raising from the reload.
+  (STATE-9)
+- **HookedWrite** (every hooked verb: `publish!`, `activate!`, `expire!`, `soft_delete!`, Stateable `<event>!`, ...): a
+  veto on a NEW record inside a caller's transaction left it `persisted?` with no id; the next `save` ran
+  `UPDATE ... WHERE id IS NULL`, returned `true` and wrote no row (`StaleObjectError` with `lock_version`). The
+  identity (`new_record?`, `destroyed?`, `previously_new_record?`, id) is now snapshotted and restored for new records
+  too. Rails 6.0 never showed the bug; 6.1 through 8.1 did. (STATE-11)
+- **Storable / Auditable**: a PostgreSQL `jsonb` column and an `attribute :x, :json` override over a text column are
+  handed the Hash/Array instead of a JSON string scalar, so `where_<key>(v)` matches and `where_<key>(nil)` no longer
+  matches every row. One shared `Support::NativeJson.column?` backs both. (TRANS-1)
+- **Normalizable**: no longer re-normalizes a later transform's output at `before_save`: `normalizable :title, with:
+  :titleize` plus `sanitizable :title, with: :strip, on: :write` stored `"A &Lt; B"` for a validated `"A &lt; B"`, and
+  an entity-decoding rule could store live markup in a `:strip` column. Every transform records what it wrote
+  (`Support::TransformBackstop.wrote`) and the settle step skips a field still holding it. (TRANS-2)
+- **Normalizable / Sanitizable**: a save halted by a later `before_save` (or rolled back by `RecordNotUnique`), then
+  retried on the same record, no longer re-runs a non-idempotent rule on its own output (`"a!"` no longer becomes
+  `"a!!"`, `"Tom &amp; Jerry"` no longer `"Tom &amp;amp; Jerry"`), `update_attribute` saves included. The per-save
+  records are dropped after a successful save, kept across a rollback, and dup/clone no longer share them. (TRANS-3)
+- **Taggable**: a tag ending with the start of a self-overlapping delimiter, or starting with its end (`["a-", "b"]`
+  under `"--"` read back as `["a", "-b"]`), is trimmed when cleaned; `tag_list=`/`add_tags` clean an Array item by item instead of joining and
+  re-splitting. (TRANS-4)
+- **Monetizable**: `price = "1e18"` on an integer cents column casts to `nil` (checked against the column type's own
+  range) instead of a value whose save raised `ActiveModel::RangeError`. (TRANS-S3)
+- **Paginatable / Includable**: `paginate_by` and `includable` re-declared in a subclass keep every omitted option
+  (an UNSET sentinel, as `cursor_paginate_by`); `paginate_by style:` re-derives both param paths, explicit
+  `page_param:`/`per_page_param:` still win; `includable` `fields:`/`default:`/`strategy:` inherit when omitted
+  (`default: nil` / `fields: {}` clear them). (PARAMS-2)
+- **Paginatable**: a grouped relation with a `HAVING` on a select alias no longer raises `StatementInvalid`
+  (SQLite/MySQL); it is counted as a subquery that keeps its select list. A grouped relation with no `HAVING` or no
+  select list keeps the plain `COUNT ... GROUP BY`. (PARAMS-3)
+- **CursorPaginatable**: `predicate: :row` with mixed directions is refused at the macro (see Upgrading); page 1
+  minted a cursor and every page-2 request answered 500. (PARAMS-4)
+- **CursorPaginatable**: on SQLite a row whose String ordering value holds a NUL byte no longer ends the walk with a
+  400 on its own cursor; the boundary goes into the keyset WHERE as `CAST(X'<hex>' AS TEXT)`, which assumes a UTF-8
+  SQLite database (Rails' default). MySQL already accepted it; PostgreSQL still answers `InvalidCursor`. (PARAMS-5)
+- **Paginatable / CursorPaginatable**: `page` / `per_page` are read as exact whole numbers through
+  `Support::NumericOperand` instead of `String#to_i` (`?per_page=1e3` was 1, `?per_page=10abc` was 10); a non-whole
+  JSON Float falls back too. (PARAMS-7)
+- **Filterable**: `?<field>_null=` reads only an explicit true/false spelling; any other non-blank value matches
+  nothing (see Upgrading). (PARAMS-6)
+- **Filterable**: Encryptable-aware (`Support::EncryptedLookup.rule`), `alias_attribute` followed: equality and `in` use
+  the blind index, `not`/`not_in`/`gt`/`gte`/`lt`/`lte`/`contains`/`starts_with` fail closed. `?ssn_not=123` used to
+  return the excluded row and `=`/`in`/`contains` silently matched nothing. `null` keeps working on an encrypted
+  column. A nil member of an Array operand is dropped. (PARAMS-1)
+- **Filterable**: a Float-column operand is no longer rounded to the nearest double and treated as exact;
+  `?score_gt=0.1000000000000000000001` keeps a stored 0.1. A literal the double keeps (`0.1`) stays exact. (PARAMS-8)
+- **Filterable**: a `with:` lambda declared with a `type:` fails closed on an Array/Hash/Parameters value instead of
+  receiving a cast one (`?flag[]=0` was `true`). (PARAMS-S4)
+- **Authorizable**: the default `message:` follows the denial status (404 "Resource not found", the shared
+  `Support::ErrorEnvelope::NOT_FOUND_MESSAGE`; 401 "Unauthorized"; else "Forbidden"), stored resolved at declaration so
+  the instrumentation payload carries it. `require_role` flattens its arguments and raises on an empty, nil or blank
+  role. (HTTP-1, HTTP-2)
+- **ErrorHandleable**: the RecordNotDestroyed 422 no longer leaks the model class name and primary key. (HTTP-4)
+- **Timezoneable**: `Vary: Time-Zone` / `Vary: Cookie` are appended (via `Support::VaryHeader`; `Vary: *` left alone)
+  even when the request carries no `Time-Zone` header; `vary: false` opts out. (HTTP-3)
+- **Respondable / ErrorEnvelope**: the envelope and inline branches no longer log "Status code :unprocessable_entity is
+  deprecated" on Rack >= 3.1; `ErrorEnvelope.renderable_status` renames only when the running Rack dropped the old
+  name (Rack < 3.1 keeps it). (HTTP-5)
+- **SecureHeadable**: `:hsts` yields to `force_ssl`; header names merge case-insensitively through
+  `SecureHeadable.merge_headers` (no more two conflicting `X-Frame-Options` lines on Rails < 7.1). (HTTP-6, HTTP-7)
+- **SoftDeletable**: association `destroy_all` resets the association cache instead of `loaded!`-empty. (STATE-4)
+- **BatchOps / SoftDeletable**: `BatchOps.full_rows(relation)` (used by `BatchOps.run` and the relation `destroy_all`)
+  adds the model's own star to a partial select; `limited_keys` keeps the own-table star first and drops only plain
+  own-table columns from a DISTINCT key subquery. (STATE-7)
+- **Stateable**: an event named `transition` is refused at the macro (STATE-6); `transition_all` raises
+  `RecordNotSaved` for its own invalid record and propagates another record's `RecordInvalid` (STATE-8).
+- **Sequenceable**: legacy rows (NULL custom `period_column:`) format in their `created_at` period; `period_time` /
+  `base_time` take the field. (GRAPH-1)
+- **Sluggable**: a `history: true` + `scope:` move treats another record's history slug in the new scope as taken.
+  (GRAPH-5)
+- **Duplicable**: records marked for destruction are skipped, loaded or not, has_one included. (GRAPH-6)
+- **Legacy aliases**: `const_missing` resolution is serialized by a reentrant Monitor. (GRAPH-4)
+
+
+### Known issues (not fixed in this release)
+- CounterCacheable: a parent destroyed inside the same rolled-back transaction keeps the
+  mirrored counter/lock_version in memory.
+- Aliasable: eager-loading an alias together with its source in one query loads each child twice.
+- Encryptable: on the pre-7.1 Marshal format, a record whose field has a per-field Proc `key:`
+  cannot be `Marshal.dump`ed (`Rails.cache`).
+- CursorPaginatable: on PostgreSQL, a page ending on a timestamp stored as `'infinity'` now mints
+  its cursor (it used to be a 500), but the next page answers 400 — the walk cannot step past it.
+- Normalizable / Sanitizable: on an unvalidated (`update_attribute`) save that is halted and retried, with TWO
+  transforms on one column where the SECOND (not Normalizable) rewrites the first's output, Sanitizable's own record
+  holds only the first's output, so a validated retry re-sanitizes.
+- Sluggable `history: true` + `scope:`: friendly_id's history finder ignores scope, so after a record moves scope its
+  stale history slug can still match `Model.where(scope).friendly.find(old_slug)`. This is stock friendly_id
+  behaviour; the gem does not change it. (GRAPH-5)
+
+
 ## 1.33.0 (2026-10-18)
 
 A correctness release: it fixes the 66 bugs proven by the 2026-10 audit of 1.32.1. Some fixes change

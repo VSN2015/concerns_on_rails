@@ -286,7 +286,20 @@ module ConcernsOnRails
           to = config.fetch(:to).to_s
           return :skip if record[klass.stateable_field].to_s == to && !Array(config[:from]).map(&:to_s).include?(to)
 
-          record.public_send(guard) ? record.public_send(:"#{method_base}!") : :skip
+          record.public_send(guard) ? stateable_batch_fire(record, method_base) : :skip
+        end
+
+        # A record the event's update! rejects is a failed record: false makes
+        # BatchOps raise RecordNotSaved (with the record) and roll the batch
+        # back, the contract of every *_all verb. The single <event>! still
+        # raises RecordInvalid. Only THIS record's: another record a hook saved
+        # (`other.save!`) failing is that hook's error and propagates.
+        def stateable_batch_fire(record, method_base)
+          record.public_send(:"#{method_base}!")
+        rescue ActiveRecord::RecordInvalid => e
+          raise unless e.record.equal?(record)
+
+          false
         end
 
         def stateable_configure!(field, states, options)
@@ -372,6 +385,11 @@ module ConcernsOnRails
           unknown = (Array(config[:from]) + [config[:to]]).map(&:to_sym) - stateable_states
           raise ArgumentError, "#{LABEL}: transition '#{event}' references unknown states: #{unknown.join(', ')}" if unknown.any?
 
+          if stateable_method_name(event) == "transition"
+            raise ArgumentError, "#{LABEL}: transition '#{event}' would generate `transition!` with the generic " \
+                                 "before_transition/after_transition hooks as its per-event hooks; rename the event " \
+                                 "or use prefix:/suffix:"
+          end
           return unless stateable_states.include?(event.to_sym)
 
           raise ArgumentError, "#{LABEL}: transition '#{event}' clashes with the same-named state setter; use prefix:/suffix:"

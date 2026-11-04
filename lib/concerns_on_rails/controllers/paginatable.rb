@@ -34,6 +34,9 @@ module ConcernsOnRails
       extend ActiveSupport::Concern
 
       LABEL = "ConcernsOnRails::Controllers::Paginatable".freeze
+      # "Option not passed" for paginate_by, so a re-declaration keeps
+      # (inherits) what it omits — see the macro.
+      UNSET = Object.new.freeze
       DEFAULT_PER_PAGE = 25
       DEFAULT_MAX_PER_PAGE = 200
       # Upper bound on the requested page. `page` is untrusted input and its
@@ -79,18 +82,39 @@ module ConcernsOnRails
         # the RFC 8288 Link header is emitted.
         # Example:
         #   paginate_by per_page: 50, max_per_page: 500, link_header: false
-        def paginate_by(per_page: DEFAULT_PER_PAGE, max_per_page: DEFAULT_MAX_PER_PAGE, link_header: true,
-                        page_param: nil, per_page_param: nil, style: :flat, window: nil)
-          self.paginatable_per_page = paginatable_per_page!(per_page)
-          self.paginatable_max_per_page = paginatable_max_per_page!(max_per_page)
-          self.paginatable_link_header = link_header ? true : false
-          self.paginatable_window = paginatable_window!(window)
-          defaults = paginatable_style_params!(style)
-          self.paginatable_page_param = paginatable_param_path!(:page_param, page_param || defaults[0])
-          self.paginatable_per_page_param = paginatable_param_path!(:per_page_param, per_page_param || defaults[1])
+        #
+        # Re-declaring (typically in a subclass) changes only what it passes:
+        # every omitted option keeps its current — inherited — value, so
+        # `paginate_by per_page: 5` in a subclass never loosens the parent's
+        # `max_per_page:`, nor drops its `style: :jsonapi` / `link_header: false`.
+        # `style:` re-derives BOTH param paths (a `page_param:` / `per_page_param:`
+        # passed with it still wins); without it, only the path you name changes.
+        def paginate_by(per_page: UNSET, max_per_page: UNSET, link_header: UNSET,
+                        page_param: nil, per_page_param: nil, style: UNSET, window: UNSET)
+          # Everything is validated before anything is assigned, so a bad
+          # option never leaves the class half-reconfigured.
+          assignments = {}
+          assignments[:per_page] = paginatable_per_page!(per_page) unless per_page.equal?(UNSET)
+          assignments[:max_per_page] = paginatable_max_per_page!(max_per_page) unless max_per_page.equal?(UNSET)
+          assignments[:link_header] = link_header ? true : false unless link_header.equal?(UNSET)
+          assignments[:window] = paginatable_window!(window) unless window.equal?(UNSET)
+          assignments.merge!(paginatable_param_paths!(style, page_param, per_page_param))
+          assignments.each { |name, value| public_send(:"paginatable_#{name}=", value) }
         end
 
         private
+
+        # The page / per_page param paths a paginate_by call sets: none when it
+        # names neither a style nor a path (they stay inherited).
+        def paginatable_param_paths!(style, page_param, per_page_param)
+          defaults = style.equal?(UNSET) ? [nil, nil] : paginatable_style_params!(style)
+          paths = {}
+          page = page_param || defaults[0]
+          per_page = per_page_param || defaults[1]
+          paths[:page_param] = paginatable_param_path!(:page_param, page) if page
+          paths[:per_page_param] = paginatable_param_path!(:per_page_param, per_page) if per_page
+          paths
+        end
 
         # :flat → page / per_page; :jsonapi → page[number] / page[size].
         def paginatable_style_params!(style)
@@ -245,7 +269,9 @@ module ConcernsOnRails
         return source.size if source.is_a?(Array)
 
         relation = paginatable_count_relation(source)
-        return paginatable_distinct_select_total(relation) if paginatable_distinct_select?(relation)
+        if paginatable_distinct_select?(relation) || paginatable_grouped_having_select?(relation)
+          return paginatable_distinct_select_total(relation)
+        end
 
         paginatable_plain_count(relation)
       end
@@ -277,6 +303,19 @@ module ConcernsOnRails
         return false unless %i[distinct_value select_values group_values].all? { |reader| relation.respond_to?(reader) }
 
         paginatable_distinct?(relation) && relation.select_values.any? && relation.group_values.empty?
+      end
+
+      # A grouped relation whose HAVING can name a SELECT alias
+      # (`select("category, COUNT(*) AS n").group(:category).having("n > 1")`,
+      # valid on SQLite and MySQL): the plain count strips the select list, and
+      # the alias HAVING reads with it (`no such column: n`, a 500). Counting the
+      # relation's own SQL as a subquery keeps the list; a grouped relation
+      # without a HAVING or a select list has no alias to lose and keeps the
+      # plain GROUP BY count.
+      def paginatable_grouped_having_select?(relation)
+        return false unless %i[select_values group_values having_clause].all? { |reader| relation.respond_to?(reader) }
+
+        relation.group_values.any? && relation.select_values.any? && !relation.having_clause.empty?
       end
 
       # `.distinct`, or DISTINCT spelled inside the select list itself:

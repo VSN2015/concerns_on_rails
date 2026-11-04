@@ -134,3 +134,4 @@ invoice.duplicate(only: :payments)                  # ArgumentError — not in t
 - **HABTM shares, it does not copy.** The join rows are recreated for the copy; the associated records themselves are not duplicated.
 - **Uniqueness beyond the known concerns is yours.** A unique column the gem doesn't own (e.g. an external reference you manage by hand) belongs in `reset:` or `overrides`.
 - **Copies of soft-deleted records come back live.** Duplicate the record, not its deletion.
+- **Records marked for destruction are not copied.** A child (or has_one target) flagged by nested attributes `_destroy` or `mark_for_destruction` is skipped, so a "save as copy" flow does not resurrect a just-removed child.

@@ -384,7 +384,7 @@ module ConcernsOnRails
       # than the column itself, which tz-aware attributes present in the
       # request's zone.
       def sequenceable_period_time(field)
-        self.class.send(:period_time, self.class.sequenceable_config.fetch(field.to_sym), self)
+        self.class.send(:period_time, self.class.sequenceable_config.fetch(field.to_sym), self, field.to_sym)
       end
 
       # A field's before_create: numbers it only while its CURRENT declaration

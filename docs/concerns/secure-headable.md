@@ -46,7 +46,7 @@ Registers one or more header preset symbols and/or arbitrary custom headers. Can
 | `:no_referrer_leak` | `Referrer-Policy` | `strict-origin-when-cross-origin` |
 | `:no_cross_domain` | `X-Permitted-Cross-Domain-Policies` | `none` |
 | `:disable_legacy_xss` | `X-XSS-Protection` | `0` |
-| `:hsts` | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` — one year, no `preload` (the preload list is a months-long commitment; add it as a custom pair). For API-only apps behind a TLS-terminating proxy; with `force_ssl` / `config.ssl_options` Rails sets this itself. |
+| `:hsts` | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` — one year, no `preload` (the preload list is a months-long commitment; add it as a custom pair). For API-only apps behind a TLS-terminating proxy; with `force_ssl` / `config.ssl_options` Rails sets this itself, and the preset is skipped automatically while `config.force_ssl` is on. |
 | `:same_origin_opener` | `Cross-Origin-Opener-Policy` | `same-origin` — severs `window.opener`; breaks OAuth/payment popups that rely on it |
 | `:same_origin_opener_allow_popups` | `Cross-Origin-Opener-Policy` | `same-origin-allow-popups` — the popup-friendly variant used by `:recommended` |
 | `:require_corp_embedder` | `Cross-Origin-Embedder-Policy` | `require-corp` — every cross-origin subresource must opt in via CORS/CORP |
@@ -140,7 +140,7 @@ end
 
 ## Notes & gotchas
 
-- **HSTS is conditional.** The `:hsts` preset is skipped on a plaintext request (RFC 6797 section 7.2 forbids it there) and never overwrites a `Strict-Transport-Security` value already on the response. It does take precedence over `ActionDispatch::SSL`, which only sets its own value when none is present, so an app using `force_ssl` with a longer `max-age` or `preload` should configure one or the other, not both.
+- **HSTS is conditional.** The `:hsts` preset is skipped on a plaintext request (RFC 6797 section 7.2 forbids it there) and never overwrites a `Strict-Transport-Security` value already on the response. Under `config.force_ssl` (read per request) the preset is skipped so `ActionDispatch::SSL`'s own header (`config.ssl_options[:hsts]`) applies; a custom `Strict-Transport-Security` pair with a different value is still sent. Header names compare case-insensitively.
 
 - **`:recommended` is conservative on purpose.** It picks `same-origin-allow-popups` over `same-origin` for COOP and leaves COEP/CORP out because those three are the headers that break real apps (popup logins, CDN images, embedded widgets). Opt into `:cross_origin_isolation` deliberately, after your cross-origin assets carry CORP/CORS headers.
 - **`after_action`, not `before_action`:** Headers are written after the response is rendered. This means they can reinforce or override headers that Rails middleware or the render process set earlier. It also means the `response` object is available and populated when `apply_secure_headers` runs.

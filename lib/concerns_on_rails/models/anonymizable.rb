@@ -354,7 +354,8 @@ module ConcernsOnRails
       # Erase the configured fields in a single UPDATE (see the module docs for
       # why validations and callbacks are deliberately skipped). Returns true,
       # or false when a hook vetoed the erasure with ActiveRecord::Rollback
-      # (nothing is written, even inside a caller's transaction).
+      # (nothing is written, even inside a caller's transaction) or the UPDATE
+      # reached no row (the record was deleted since it was loaded).
       def anonymize!
         return false unless anonymize_record!
 
@@ -385,7 +386,11 @@ module ConcernsOnRails
         payload = anonymizable_payload
         slug = anonymizable_slug_payload!(payload)
         ConcernsOnRails::Support::HookedWrite.run(self, before: :before_anonymize, after: :after_anonymize) do
-          anonymizable_write!(payload, slug[:generated])
+          # The UPDATE's own answer: a row deleted (or, under optimistic locking,
+          # otherwise unwritable) since the load is not erased — false aborts
+          # the savepoint (no after hook, nothing counted by anonymize_all!).
+          next false unless anonymizable_write!(payload, slug[:generated])
+
           anonymizable_delete_slug_history! if slug[:history]
           true
         end

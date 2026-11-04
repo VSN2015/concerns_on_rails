@@ -312,7 +312,22 @@ module ConcernsOnRails
       # Unpublish the record
       # Example:
       #   record.unpublish!
+      #
+      # The mirror of publish!: a no-op on a record that is ALREADY unpublished
+      # — nothing written, no hook, where a double-submitted button re-fired
+      # before/after_unpublish ("your post was taken down") on a draft or a
+      # second call. "Already" is again the SAVED state: a stored record
+      # (destroyed included), no unsaved change to the column, and a saved
+      # value that is blank — a draft (NULL, or false/NULL on a boolean
+      # column). A published row, and a SCHEDULED one (a future time is set,
+      # which unpublishing clears), still write with the hooks, as a new
+      # record or an unsaved flip does. A no-op that finds OTHER pending
+      # changes saves them (no write of the column, no hooks).
       def unpublish!
+        if !new_record? && !will_save_change_to_attribute?(self.class.publishable_field) && publishable_draft_value?
+          return has_changes_to_save? ? save : true
+        end
+
         publishable_write_with_hooks(self.class.publishable_cleared_value, :unpublish)
       end
 
@@ -397,7 +412,14 @@ module ConcernsOnRails
 
         value.respond_to?(:<=) ? value <= publishable_now : true
       end
-      private :publishable_write_with_hooks, :publishable_published?
+
+      # Neither published nor scheduled: the column holds nothing (NULL, or
+      # false on a boolean column). Read by unpublish!'s no-op check, never
+      # through the overridable draft?.
+      def publishable_draft_value?
+        self[self.class.publishable_field].blank?
+      end
+      private :publishable_write_with_hooks, :publishable_published?, :publishable_draft_value?
     end
   end
 end

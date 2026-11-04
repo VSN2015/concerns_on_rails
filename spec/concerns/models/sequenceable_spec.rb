@@ -1166,9 +1166,11 @@ describe ConcernsOnRails::Sequenceable do
       Time.zone_default = previous
     end
 
-    it "shares the counter when both zones are explicit and the same zone, aliases included" do
+    # An ActiveSupport name and its IANA identifier are one zone. (Not a tzdata
+    # backward link such as "Asia/Calcutta": minimal runners ship without them.)
+    it "shares the counter when both zones are explicit and the same zone, an ActiveSupport name and its IANA identifier included" do
       stub_const("RedeclInv", redecl_base(prefix: "INV-", reset: :day, time_zone: "Kolkata"))
-      stub_const("RedeclSub", Class.new(RedeclInv) { sequenceable_by :sequence, time_zone: "Asia/Calcutta" })
+      stub_const("RedeclSub", Class.new(RedeclInv) { sequenceable_by :sequence, time_zone: "Asia/Kolkata" })
 
       expect(RedeclSub.sequenceable_config[:sequence][:owner]).to eq(RedeclInv)
       numbers = [RedeclInv.create!, RedeclSub.create!].map(&:number)

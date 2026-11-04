@@ -94,7 +94,7 @@ end
 # GET /products?price[gte]=20&price[lte]=100      → same, bracket form
 # GET /products?status_in=active,draft            → status IN ('active','draft')
 # GET /products?status_not=archived               → status != 'archived'
-# GET /products?discontinued_at_null=true         → discontinued_at IS NULL
+# GET /products?discontinued_at_null=true         → discontinued_at IS NULL (true/false, 1/0, t/f, yes/no; any other value matches nothing)
 # GET /products?name_contains=100%                → name LIKE '%100\%%' ESCAPE '\'  (wildcards escaped)
 # GET /products?min_stock=5                       → the lambda receives Integer 5, not "5"
 # GET /products?min_stock=1e1                     → the lambda receives Integer 10 (Integer#cast would give 1)

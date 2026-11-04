@@ -38,7 +38,7 @@ module ConcernsOnRails
 
         return rel if cfg[:reset] == :never
 
-        time = period_time(cfg, record)
+        time = period_time(cfg, record, field)
         in_period = rel.where(cfg[:period_column] => period_range(cfg[:reset], time))
         in_period = in_period.or(sequence_unstamped_in_period(rel, cfg, time)) if sequence_legacy_rows?(cfg)
         return in_period unless cfg[:into] && cfg[:template].nil?
@@ -110,7 +110,7 @@ module ConcernsOnRails
         padded = cfg[:padding].positive? ? seq.to_s.rjust(cfg[:padding], "0") : seq.to_s
         return "#{cfg[:prefix]}#{padded}" if cfg[:reset] == :never
 
-        token = period_token(cfg[:reset], period_time(cfg, record))
+        token = period_token(cfg[:reset], period_time(cfg, record, field))
         "#{cfg[:prefix]}#{token}#{cfg[:separator]}#{padded}"
       end
 
@@ -122,8 +122,12 @@ module ConcernsOnRails
       # rendered a different date depending on the READER's zone. The default
       # is resolved here, not at macro time, because config.time_zone is
       # applied by an initializer that may run after the model is loaded.
-      def period_time(cfg, record)
-        base_time(record, cfg[:period_column]).in_time_zone(period_zone(cfg))
+      #
+      # `field` (when the caller has one) lets a row numbered before a switch to
+      # a custom period_column — NULL there — sit in its created_at period, as
+      # the MAX range counts it (see #base_time).
+      def period_time(cfg, record, field = nil)
+        base_time(record, cfg[:period_column], field).in_time_zone(period_zone(cfg))
       end
 
       def period_zone(cfg)
@@ -178,8 +182,14 @@ module ConcernsOnRails
       # but it may not be set yet during before_create — fall back to the
       # current time, which is what the timestamp will resolve to anyway (and
       # what a custom column is pinned to).
-      def base_time(record, column = :created_at)
+      #
+      # A persisted row already NUMBERED in `field` whose custom period column
+      # is NULL (numbered before the switch to that column) anchors to its
+      # created_at first — the column it was numbered by, and what
+      # #sequence_unstamped_in_period counts it by — never to today.
+      def base_time(record, column = :created_at, field = nil)
         return Time.current unless record
+        return record.created_at if sequence_legacy_row?(record, column, field)
 
         # Memoize the fallback "now" on the record so every base_time call within a
         # single create resolves to the SAME instant — otherwise two Time.current
@@ -187,6 +197,11 @@ module ConcernsOnRails
         record[column] ||
           record.instance_variable_get(:@_sequenceable_now) ||
           record.instance_variable_set(:@_sequenceable_now, Time.current)
+      end
+
+      def sequence_legacy_row?(record, column, field)
+        field && column != :created_at && record.persisted? && record[field].present? &&
+          record[column].nil? && record.has_attribute?(:created_at) && record.created_at.present?
       end
     end
   end

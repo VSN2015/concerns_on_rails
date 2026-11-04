@@ -45,6 +45,33 @@ module ConcernsOnRails
       # missing-record 404 does (no existence oracle) and a 401 is not
       # labelled "forbidden". 403 and every status not listed stay "forbidden".
       DENIAL_CODES = { 401 => "unauthorized", 404 => "not_found" }.freeze
+      # The default `message:` follows the status the same way: a 404 carries
+      # EXACTLY ErrorHandleable's missing-record message (one shared constant),
+      # a 401 says "Unauthorized", every other status "Forbidden". An explicit
+      # `message:` always wins.
+      DENIAL_MESSAGES = {
+        401 => "Unauthorized",
+        404 => ConcernsOnRails::Support::ErrorEnvelope::NOT_FOUND_MESSAGE
+      }.freeze
+      DEFAULT_DENIAL_MESSAGE = "Forbidden".freeze
+
+      # Symbol, Integer or numeric String -> the Integer status (nil when unknown).
+      # An explicit message wins; nil asks for the status's default.
+      def self.denial_message(status, message)
+        return message unless message.nil?
+
+        DENIAL_MESSAGES.fetch(status_number(status), DEFAULT_DENIAL_MESSAGE)
+      end
+
+      def self.status_number(status)
+        if status.is_a?(Integer) || status.to_s.match?(/\A\d+\z/)
+          status.to_i
+        elsif defined?(::Rack::Utils)
+          ::Rack::Utils::SYMBOL_TO_STATUS_CODE[
+            ConcernsOnRails::Support::ErrorEnvelope.renderable_status(status.to_s.to_sym)
+          ]
+        end
+      end
 
       included do
         class_attribute :authorizable_rules, instance_accessor: false, default: []
@@ -55,9 +82,10 @@ module ConcernsOnRails
       module ClassMethods
         # Register an authorization predicate. `only:`/`except:` scope it to a
         # subset of actions (mutually exclusive). `status:` (default :forbidden)
-        # and `message:` control the denial response; `name:` labels the rule in
+        # and `message:` (default: derived from the status, see DENIAL_MESSAGES)
+        # control the denial response; `name:` labels the rule in
         # the `authorization_denied.concerns_on_rails` event payload.
-        def authorize_by(only: nil, except: nil, status: :forbidden, message: "Forbidden", name: nil, &block)
+        def authorize_by(only: nil, except: nil, status: :forbidden, message: nil, name: nil, &block)
           raise ArgumentError, "#{LABEL}: a block is required" unless block
 
           add_authorization_rule(check: block, only: only, except: except, status: status, message: message, name: name)
@@ -87,8 +115,12 @@ module ConcernsOnRails
         # `role_method:` (default `:role`). Implemented as a proc, never a lambda,
         # so arity slicing can't raise.
         def require_role(*roles, via: :current_user, role_method: :role, only: nil, except: nil,
-                         status: :forbidden, message: "Forbidden", name: nil)
-          raise ArgumentError, "#{LABEL}: at least one role is required" if roles.empty?
+                         status: :forbidden, message: nil, name: nil)
+          # Flatten BEFORE the empty check: `require_role %i[admin editor]` (or a
+          # role-list constant) arrives as [[:admin, :editor]], and `require_role []`
+          # as [[]] -- neither may count as a single role named "[...]".
+          roles = roles.flatten
+          validate_required_roles!(roles)
 
           wanted = roles.map(&:to_s)
           check = proc do
@@ -106,6 +138,15 @@ module ConcernsOnRails
         end
 
         private
+
+        def validate_required_roles!(roles)
+          raise ArgumentError, "#{LABEL}: at least one role is required" if roles.empty?
+          # A nil/blank entry (`require_role ENV["ADMIN_ROLE"]&.to_sym`, unset)
+          # would otherwise admit every actor whose role is "" or nil.
+          return unless roles.any? { |role| role.to_s.strip.empty? }
+
+          raise ArgumentError, "#{LABEL}: roles must not be nil or blank"
+        end
 
         def validate_skip_authorization!(only, except)
           raise ArgumentError, "#{LABEL}: pass either :only or :except, not both" if only != UNSET && except != UNSET
@@ -163,7 +204,7 @@ module ConcernsOnRails
             only: only && Array(only).map(&:to_s),
             except: except && Array(except).map(&:to_s),
             status: status,
-            message: message,
+            message: Authorizable.denial_message(status, message),
             name: name
           }
           self.authorizable_rules = authorizable_rules + [rule]
@@ -249,13 +290,7 @@ module ConcernsOnRails
 
       # Symbol, Integer or numeric String → the envelope code for that status.
       def authorization_denial_code(status)
-        number =
-          if status.is_a?(Integer) || status.to_s.match?(/\A\d+\z/)
-            status.to_i
-          elsif defined?(::Rack::Utils)
-            ::Rack::Utils::SYMBOL_TO_STATUS_CODE[status.to_s.to_sym]
-          end
-        DENIAL_CODES.fetch(number, "forbidden")
+        DENIAL_CODES.fetch(Authorizable.status_number(status), "forbidden")
       end
 
       def authorization_rule_applies?(rule, action)
