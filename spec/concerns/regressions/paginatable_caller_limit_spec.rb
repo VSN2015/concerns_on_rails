@@ -4,8 +4,10 @@ require "spec_helper"
 # LIMIT with the page's own (`source.limit(per_page).offset(offset)`) and the
 # COUNT stripped it, so a "top 5, 2 per page" leaderboard reported
 # X-Total-Count = the whole table and page 4+ served rows beyond the top 5.
-# A relation carrying a limit and/or offset is now paginated OVER that window
-# (a derived table), so the count and the pages are the window's.
+# A relation carrying a limit and/or offset is now paginated INSIDE that window:
+# the page's offset and limit are combined with the caller's on the caller's
+# own relation (offset = caller + page, limit cut to what is left of the
+# window) and the count is bounded to max(0, min(limit, rows - offset)).
 describe ConcernsOnRails::Controllers::Paginatable do
   before do
     ActiveRecord::Schema.define(verbose: false) do
@@ -30,7 +32,10 @@ describe ConcernsOnRails::Controllers::Paginatable do
     stub_const("RankedItem", Class.new(TestModel) { self.table_name = "ranked_items" })
     stub_const("RankedStaff", Class.new(TestModel) { self.table_name = "ranked_staff" })
     stub_const("RankedCoach", Class.new(RankedStaff))
-    stub_const("RankedTeam", Class.new(TestModel) { self.table_name = "ranked_teams" })
+    stub_const("RankedTeam", Class.new(TestModel) do
+      self.table_name = "ranked_teams"
+      has_many :top_players, -> { order(:score).limit(3) }, class_name: "RankedPlayer", foreign_key: :team_id
+    end)
     stub_const("RankedPlayer", Class.new(TestModel) do
       self.table_name = "ranked_players"
       belongs_to :team, class_name: "RankedTeam", optional: true
@@ -139,13 +144,15 @@ describe ConcernsOnRails::Controllers::Paginatable do
     expect(rows.map(&:doubled)).to eq([6])
   end
 
-  it "paginates a limited association scope" do
+  it "paginates a has_many association whose scope is limited" do
     team = RankedTeam.find_by!(title: "red")
-    team.update!(title: "red")
-    association = RankedPlayer.where(team_id: team.id).order(:score).limit(3)
-    names, total, = page_of(association, 2)
-    expect(total).to eq("3")
-    expect(names.size).to eq(1)
+    controller = controller_for(1)
+    expect(controller.paginated(team.top_players).map(&:name)).to eq(%w[p2 p4])
+    expect(controller.response.headers["X-Total-Count"]).to eq("3")
+
+    names, total, = page_of(team.top_players, 2)
+    expect([names, total]).to eq([%w[p6], "3"])
+    expect(page_of(team.top_players, 3).first).to eq([])
   end
 
   it "pages a has_many eager_load window as 3 players, not 9 joined rows" do
