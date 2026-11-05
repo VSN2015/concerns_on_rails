@@ -72,18 +72,6 @@ module ConcernsOnRails
           generated_values_revert!
         end
 
-        # A before_create that halts (`throw :abort`) after a producer drew its
-        # value makes the create callbacks answer false. `save` then raises
-        # Rollback, but inside a caller's transaction that Rollback is swallowed
-        # by the JOINED transaction and `rolledback!` never runs — so the
-        # restore happens here, at the halt, inside or outside a transaction.
-        # A real rollback still reverts through `rolledback!`.
-        def _create_record(*, **, &)
-          result = super
-          generated_values_revert! if result == false
-          result
-        end
-
         # `dup` copies instance variables, including the record of what the
         # ORIGINAL's create generated. The copy keeps the original's
         # number/token/position on purpose and never generated them, so a failed
@@ -96,6 +84,18 @@ module ConcernsOnRails
         private
 
         def generated_values_enrolled; end
+
+        # A before_create that halts (`throw :abort`) after a producer drew its
+        # value makes the create callbacks answer false. `save` then raises
+        # Rollback, but inside a caller's transaction that Rollback is swallowed
+        # by the JOINED transaction and `rolledback!` never runs — so the
+        # restore happens here, at the halt, inside or outside a transaction.
+        # A real rollback still reverts through `rolledback!`.
+        def _create_record(*, **, &)
+          result = super
+          generated_values_revert! if result == false
+          result
+        end
 
         # Puts back the columns a create path generated, while the record is a
         # new record again. A column the caller has changed since (no longer

@@ -46,7 +46,7 @@ RSpec.describe "Generated values after a halted create" do
   end
 
   after do
-    %i[gvh_users gvh_orders gvh_invoices].each { |t| ActiveRecord::Base.connection.drop_table(t, if_exists: true) }
+    %i[gvh_users gvh_orders gvh_invoices gvh_tasks].each { |t| ActiveRecord::Base.connection.drop_table(t, if_exists: true) }
   end
 
   halted_examples("Tokenizable") do
@@ -105,6 +105,59 @@ RSpec.describe "Generated values after a halted create" do
       def self.generated_column = :number
       def self.supplied_value = "INV-99"
     end)
+  end
+
+  halted_examples("Sortable") do
+    ActiveRecord::Schema.define do
+      create_table :gvh_tasks, force: true do |t|
+        t.integer :position
+      end
+    end
+    stub_const("GvhTask", Class.new(TestModel) do
+      self.table_name = "gvh_tasks"
+      include ConcernsOnRails::Models::Sortable
+    end)
+    # Named first: acts_as_list 1.1 (the Rails 6.0 resolution) evals the class name.
+    GvhTask.class_eval do
+      cattr_accessor :halt
+      sortable_by :position
+      before_create { throw :abort if self.class.halt }
+      def self.generated_column = :position
+      def self.supplied_value = 7
+    end
+    GvhTask
+  end
+
+  describe "Sortable positions after a halted create" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :gvh_tasks, force: true do |t|
+          t.integer :position
+        end
+      end
+      stub_const("GvhTask", Class.new(TestModel) do
+        self.table_name = "gvh_tasks"
+        include ConcernsOnRails::Models::Sortable
+      end)
+      GvhTask.class_eval do
+        cattr_accessor :halt
+        sortable_by :position
+        before_create { throw :abort if self.class.halt }
+      end
+    end
+
+    it "leaves position nil and a retry plus another create yield [1, 2, 3] (inside a transaction)" do
+      GvhTask.create!
+      record = GvhTask.new
+      GvhTask.halt = true
+      GvhTask.transaction { expect(record.save).to be(false) }
+      expect(record.position).to be_nil
+
+      GvhTask.halt = false
+      GvhTask.create!
+      GvhTask.transaction { record.save! }
+      expect(GvhTask.unscoped.pluck(:position).sort).to eq([1, 2, 3])
+    end
   end
 
   describe "Sequenceable number reuse" do
