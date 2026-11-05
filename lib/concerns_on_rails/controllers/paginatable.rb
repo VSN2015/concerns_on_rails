@@ -196,7 +196,7 @@ module ConcernsOnRails
           elsif source.is_a?(Array)
             source[offset, per_page] || []
           else
-            source.limit(per_page).offset(offset)
+            paginatable_page_source(source).limit(per_page).offset(offset)
           end
 
         @paginatable_meta =
@@ -269,7 +269,8 @@ module ConcernsOnRails
         return source.size if source.is_a?(Array)
 
         relation = paginatable_count_relation(source)
-        if paginatable_distinct_select?(relation) || paginatable_grouped_having_select?(relation)
+        if paginatable_caller_window?(relation) ||
+           paginatable_distinct_select?(relation) || paginatable_grouped_having_select?(relation)
           return paginatable_distinct_select_total(relation)
         end
 
@@ -286,7 +287,64 @@ module ConcernsOnRails
 
       def paginatable_plain_count(relation)
         counted = relation.except(:order, :limit, :offset, :select).count(:all)
-        counted.is_a?(Hash) ? counted.length : counted
+        counted = counted.length if counted.is_a?(Hash)
+        paginatable_caller_window?(relation) ? paginatable_clamp_to_caller_window(counted, relation) : counted
+      end
+
+      # A caller's own LIMIT/OFFSET is a window the pages slice (PARAMS-S2):
+      # the total is the rows INSIDE it and the pages are cut from it, never
+      # from the table behind it. Detected on the relation (a model class has
+      # no window), counted and paged as a derived table over the relation's
+      # own SQL, ORDER kept (a LIMIT is meaningless without it).
+      def paginatable_caller_window?(relation)
+        return false unless %i[limit_value offset_value].all? { |reader| relation.respond_to?(reader) }
+
+        !relation.limit_value.nil? || !(relation.offset_value.nil? || relation.offset_value.to_s == "0")
+      end
+
+      # Only the MySQL over-count fallback (an unaliasable select list) lands
+      # here: the unwindowed count bounded by what the window can hold.
+      def paginatable_clamp_to_caller_window(count, relation)
+        count -= relation.offset_value.to_i
+        count = [count, relation.limit_value.to_i].min unless relation.limit_value.nil?
+        [count, 0].max
+      end
+
+      # The relation the page's LIMIT/OFFSET is applied to: the relation itself,
+      # or — when the caller already limited/offset it — a derived table over it
+      # aliased as the model's own table, so the model's columns keep resolving.
+      # Eager loading stays on the inner relation (its JOINs shape the rows);
+      # a plain includes/preload moves outside so the page's records get it.
+      # The caller's ORDER is repeated outside when it names only the model's
+      # own columns (a joined column does not exist in the derived table), as
+      # an ORDER BY inside a subquery is not guaranteed to survive it.
+      def paginatable_page_source(source)
+        relation = paginatable_count_relation(source)
+        return source unless paginatable_caller_window?(relation)
+
+        eager = relation.eager_loading?
+        inner = eager ? relation : relation.except(:includes, :preload)
+        outer = relation.klass.unscoped.from(inner, relation.klass.table_name)
+        outer = outer.preload(*relation.preload_values) if relation.preload_values.any?
+        outer = outer.includes(*relation.includes_values) if !eager && relation.includes_values.any?
+        outer = outer.extending(*relation.extending_values) if relation.extending_values.any?
+        paginatable_caller_window_order(relation, outer)
+      end
+
+      def paginatable_caller_window_order(relation, outer)
+        orders = relation.order_values
+        reappliable = orders.any? && orders.all? { |order| paginatable_own_column_order?(relation, order) }
+        reappliable ? outer.order(*orders) : outer
+      end
+
+      # An ordering on one of the model's own columns that the derived table
+      # still carries: any, with the default `table.*` list; only a column the
+      # list names plainly under a custom `select`.
+      def paginatable_own_column_order?(relation, order)
+        return false unless order.is_a?(Arel::Nodes::Ordering) && order.expr.is_a?(Arel::Attributes::Attribute)
+        return false unless order.expr.relation == relation.klass.arel_table
+
+        relation.select_values.empty? || relation.select_values.map(&:to_s).include?(order.expr.name.to_s)
       end
 
       # `select(:group_id).distinct` is distinct over the SELECT list, so
@@ -334,7 +392,7 @@ module ConcernsOnRails
       # it has aborted the transaction anyway).
       def paginatable_distinct_select_total(relation)
         connection = relation.connection
-        subquery = relation.except(:order, :limit, :offset)
+        subquery = paginatable_caller_window?(relation) ? relation : relation.except(:order, :limit, :offset)
         sql = subquery.to_sql
         return 0 if sql.blank?
 
