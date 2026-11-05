@@ -6,6 +6,7 @@ require "active_support/core_ext/string/filters"
 require "active_support/core_ext/string/inflections"
 require "uri"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/edge_space"
 require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
@@ -43,7 +44,8 @@ module ConcernsOnRails
       # drops the suffix of "customer_id" outright.
       TITLEIZE_WORD = /(?<![[:alnum:]'])[[:alpha:]]+/
       # Leading/trailing Unicode whitespace (plus NUL, which String#strip also
-      # removed), for the stripping presets.
+      # removed), for the stripping presets. Kept for callers that match it
+      # themselves; stripping goes through Support::EdgeSpace (linear time).
       EDGE_SPACE = /\A[[:space:]\0]+|[[:space:]\0]+\z/
 
       # `:url` — strip, default the scheme to https://, lowercase the scheme and
@@ -85,7 +87,7 @@ module ConcernsOnRails
       # [[:space:]]); :nullify_blank uses it too, so a value of nothing but
       # no-break spaces is blank.
       def self.strip(value)
-        value.gsub(EDGE_SPACE, "")
+        Support::EdgeSpace.strip(value)
       end
 
       # `host=` also clears the userinfo on uri >= 1.1 (Ruby 3.2's bundled

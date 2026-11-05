@@ -55,6 +55,11 @@ module ConcernsOnRails
       # JavaScript Date#toString's "(Eastern Daylight Time)", RFC 9557's
       # "[America/New_York]".
       TRAILING_COMMENTS = /(?:\s*(?:\([^()]*\)|\[[^\[\]]*\]))+\s*\z/
+      # Date._parse refuses a String longer than this many BYTES (its `limit:`
+      # default). names_year? answers false for such a String before it runs
+      # TRAILING_COMMENTS, whose match cost grows with the input (about a
+      # microsecond per character, seconds for a few MB).
+      DATE_PARSE_LIMIT = 128
 
       module_function
 
@@ -147,6 +152,7 @@ module ConcernsOnRails
       # ActiveRecord does.
       def names_year?(value)
         return true unless value.is_a?(::String)
+        return false if value.bytesize > DATE_PARSE_LIMIT
 
         bare = value.sub(TRAILING_COMMENTS, "")
         return false if bare.match?(/[()\[\]]/)

@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/batch_ops"
 require "concerns_on_rails/support/column_guard"
+require "concerns_on_rails/support/edge_space"
 require "concerns_on_rails/support/transform_backstop"
 
 module ConcernsOnRails
@@ -61,9 +62,6 @@ module ConcernsOnRails
       # the escape character for us, so a backslash is portable here.
       LIKE_ESCAPE = "\\".freeze
       LIKE_SPECIAL = /[\\%_]/
-      # Leading/trailing Unicode whitespace (plus NUL, which String#strip also
-      # removed) — Normalizable::EDGE_SPACE.
-      EDGE_SPACE = /\A[[:space:]\0]+|[[:space:]\0]+\z/
 
       included do
         class_attribute :taggable_field, instance_accessor: false, default: DEFAULT_FIELD
@@ -207,7 +205,7 @@ module ConcernsOnRails
         # kept as a distinct tag that tagged_with("ruby") never found, though
         # it looked identical in all_tags.
         def taggable_clean(tag)
-          tag = taggable_trim_straddle(tag.to_s.gsub(EDGE_SPACE, ""))
+          tag = taggable_trim_straddle(Support::EdgeSpace.strip(tag.to_s))
           taggable_downcase ? tag.downcase : tag
         end
 
@@ -236,7 +234,7 @@ module ConcernsOnRails
           tag = tag[0, tag.length - trailing.length] if trailing
           leading = suffixes.find { |suffix| tag.start_with?(suffix) }
           tag = tag[leading.length..] if leading
-          tag.gsub(EDGE_SPACE, "")
+          Support::EdgeSpace.strip(tag)
         end
 
         # For each period k of the delimiter d (d == d[0, k] + d[k..], i.e.

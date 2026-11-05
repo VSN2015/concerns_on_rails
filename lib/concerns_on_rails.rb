@@ -87,6 +87,7 @@ module ConcernsOnRails
     autoload :VaryHeader,              "concerns_on_rails/support/vary_header"
     autoload :NumericOperand,          "concerns_on_rails/support/numeric_operand"
     autoload :TimeValue,               "concerns_on_rails/support/time_value"
+    autoload :EdgeSpace,               "concerns_on_rails/support/edge_space"
     autoload :NativeJson,              "concerns_on_rails/support/native_json"
     autoload :Callable,                "concerns_on_rails/support/callable"
     autoload :SlugSources,             "concerns_on_rails/support/slug_sources"
