@@ -17,14 +17,31 @@ describe ConcernsOnRails::Controllers::Paginatable do
       create_table :ranked_teams, force: true do |t|
         t.string :title
       end
+      create_table :ranked_items, force: true do |t|
+        t.integer :ranked_player_id
+        t.string :kind
+      end
+      create_table :ranked_staff, force: true do |t|
+        t.string :type
+        t.string :name
+        t.integer :score
+      end
     end
+    stub_const("RankedItem", Class.new(TestModel) { self.table_name = "ranked_items" })
+    stub_const("RankedStaff", Class.new(TestModel) { self.table_name = "ranked_staff" })
+    stub_const("RankedCoach", Class.new(RankedStaff))
     stub_const("RankedTeam", Class.new(TestModel) { self.table_name = "ranked_teams" })
     stub_const("RankedPlayer", Class.new(TestModel) do
       self.table_name = "ranked_players"
       belongs_to :team, class_name: "RankedTeam", optional: true
+      has_many :items, class_name: "RankedItem", foreign_key: :ranked_player_id
     end)
     teams = [RankedTeam.create!(title: "red"), RankedTeam.create!(title: "blue")]
-    (1..10).each { |i| RankedPlayer.create!(name: "p#{i}", score: i, team_id: teams[i % 2].id) }
+    (1..10).each do |i|
+      player = RankedPlayer.create!(name: "p#{i}", score: i, team_id: teams[i % 2].id)
+      %w[a b c].each { |kind| RankedItem.create!(ranked_player_id: player.id, kind: kind) }
+      RankedCoach.create!(name: "c#{i}", score: i)
+    end
   end
 
   after(:each) do
@@ -129,6 +146,62 @@ describe ConcernsOnRails::Controllers::Paginatable do
     names, total, = page_of(association, 2)
     expect(total).to eq("3")
     expect(names.size).to eq(1)
+  end
+
+  it "pages a has_many eager_load window as 3 players, not 9 joined rows" do
+    relation = RankedPlayer.eager_load(:items).order(:score).limit(3)
+    controller = controller_for(1)
+    rows = controller.paginated(relation).to_a
+    expect(rows.map(&:name)).to eq(%w[p1 p2])
+    expect(rows.map { |row| row.items.size }).to eq([3, 3])
+    expect(rows.all? { |row| row.association(:items).loaded? }).to be(true)
+    expect(controller.response.headers["X-Total-Count"]).to eq("3")
+
+    names, total, = page_of(relation, 2)
+    expect([names, total]).to eq([%w[p3], "3"])
+  end
+
+  it "pages an includes + where on the association window" do
+    relation = RankedPlayer.includes(:items).where(ranked_items: { kind: "a" }).order(:score).limit(3)
+    names, total, = page_of(relation, 2)
+    expect([names, total]).to eq([%w[p3], "3"])
+  end
+
+  it "keeps a belongs_to eager_load loaded on the page's records" do
+    rows = controller_for(1).paginated(RankedPlayer.eager_load(:team).order(:score).limit(3)).to_a
+    expect(rows.map { |row| row.association(:team).loaded? }).to eq([true, true])
+  end
+
+  it "pages an STI subclass with a partial select" do
+    relation = RankedCoach.select(:id, :name).order(:score).limit(3)
+    names, total, = page_of(relation, 2)
+    expect([names, total]).to eq([%w[c3], "3"])
+  end
+
+  it "keeps readonly, a String order and a joined computed select" do
+    rows = controller_for(1).paginated(RankedPlayer.readonly.order(:score).limit(3)).to_a
+    expect(rows.map(&:readonly?)).to eq([true, true])
+
+    expect(page_of(RankedPlayer.order("score DESC").limit(5), 2).first).to eq(%w[p8 p7])
+
+    joined = RankedPlayer.joins(:team).select("ranked_players.*, ranked_teams.title AS team_title").order(:score).limit(4)
+    rows = controller_for(2).paginated(joined).to_a
+    expect(rows.map(&:name)).to eq(%w[p3 p4])
+    expect(rows.map(&:team_title)).to all(be_a(String))
+    expect(page_of(joined, 1).second).to eq("4")
+  end
+
+  it "reports total_pages for the window and serves nothing past it, without a query" do
+    controller = controller_for(4)
+    queries = []
+    callback = ->(*, payload) { queries << payload[:sql] if payload[:sql].match?(/ranked_players/) && payload[:sql] !~ /COUNT/ }
+    result = ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+      controller.paginated(RankedPlayer.order(:score).limit(5)).to_a
+    end
+    expect(result).to eq([])
+    expect(queries).to be_empty
+    expect(controller.response.headers.values_at("X-Total-Count", "X-Total-Pages")).to eq(%w[5 3])
+    expect(controller.pagination_meta[:total_pages]).to eq(3)
   end
 
   it "keeps the pre-existing unlimited behaviour, counts included" do

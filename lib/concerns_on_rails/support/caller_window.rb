@@ -1,11 +1,10 @@
 module ConcernsOnRails
   module Support
     # A relation the caller already LIMITed and/or OFFSET (`Player.order(:score).limit(10)`)
-    # is a window: the paginators work INSIDE it (PARAMS-S2) instead of
-    # replacing its LIMIT with their own. The window becomes a derived table
-    # aliased as the model's own table, so every column reference the
-    # paginator builds keeps resolving, and the paginator's own WHERE / ORDER /
-    # LIMIT go on the outer query. Shared by Paginatable and CursorPaginatable.
+    # is a window: Paginatable pages INSIDE it (PARAMS-S2) instead of replacing
+    # its LIMIT with the page's own. The two windows are combined arithmetically
+    # on the caller's own relation, so ORDER, eager loading, STI, readonly and
+    # identifier quoting stay exactly as Rails builds them.
     module CallerWindow
       module_function
 
@@ -14,29 +13,26 @@ module ConcernsOnRails
       def window?(relation)
         return false unless %i[limit_value offset_value].all? { |reader| relation.respond_to?(reader) }
 
-        !relation.limit_value.nil? || !(relation.offset_value.nil? || relation.offset_value.to_s == "0")
+        !relation.limit_value.nil? || offset_of(relation).positive?
       end
 
-      # An unwindowed row count bounded by what the window can hold.
-      def clamp(count, relation)
-        count -= relation.offset_value.to_i
-        count = [count, relation.limit_value.to_i].min unless relation.limit_value.nil?
-        [count, 0].max
+      def offset_of(relation)
+        relation.offset_value.to_i
       end
 
-      # `FROM (<relation>) <table>` as an unscoped relation of the same model
-      # (the inner one already applied every scope). Eager loading stays inside
-      # (its JOINs shape the rows); a plain includes/preload and `extending`
-      # move outside so the page's records get them. No ORDER: the caller
-      # decides what to repeat outside.
-      def derive(relation)
-        eager = relation.eager_loading?
-        inner = eager ? relation : relation.except(:includes, :preload)
-        outer = relation.klass.unscoped.from(inner, relation.klass.table_name)
-        outer = outer.preload(*relation.preload_values) if relation.preload_values.any?
-        outer = outer.includes(*relation.includes_values) if !eager && relation.includes_values.any?
-        outer = outer.extending(*relation.extending_values) if relation.extending_values.any?
-        outer
+      # Rows inside the window, given the unwindowed row count: max(0, min(L, N - O)).
+      def rows_in(total, relation)
+        rows = total - offset_of(relation)
+        rows = [rows, relation.limit_value.to_i].min unless relation.limit_value.nil?
+        [rows, 0].max
+      end
+
+      # [offset, limit] for the page starting `page_offset` rows into the
+      # window. A limit of 0 is a page past the window's end.
+      def page_window(relation, page_offset, per_page)
+        limit = per_page
+        limit = (relation.limit_value.to_i - page_offset).clamp(0, per_page) unless relation.limit_value.nil?
+        [offset_of(relation) + page_offset, limit]
       end
     end
   end
