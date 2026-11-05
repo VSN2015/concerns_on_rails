@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/scalar_param"
+require "concerns_on_rails/support/caller_window"
 require "concerns_on_rails/support/link_header"
 
 module ConcernsOnRails
@@ -269,7 +270,7 @@ module ConcernsOnRails
         return source.size if source.is_a?(Array)
 
         relation = paginatable_count_relation(source)
-        if paginatable_caller_window?(relation) ||
+        if ConcernsOnRails::Support::CallerWindow.window?(relation) ||
            paginatable_distinct_select?(relation) || paginatable_grouped_having_select?(relation)
           return paginatable_distinct_select_total(relation)
         end
@@ -288,26 +289,7 @@ module ConcernsOnRails
       def paginatable_plain_count(relation)
         counted = relation.except(:order, :limit, :offset, :select).count(:all)
         counted = counted.length if counted.is_a?(Hash)
-        paginatable_caller_window?(relation) ? paginatable_clamp_to_caller_window(counted, relation) : counted
-      end
-
-      # A caller's own LIMIT/OFFSET is a window the pages slice (PARAMS-S2):
-      # the total is the rows INSIDE it and the pages are cut from it, never
-      # from the table behind it. Detected on the relation (a model class has
-      # no window), counted and paged as a derived table over the relation's
-      # own SQL, ORDER kept (a LIMIT is meaningless without it).
-      def paginatable_caller_window?(relation)
-        return false unless %i[limit_value offset_value].all? { |reader| relation.respond_to?(reader) }
-
-        !relation.limit_value.nil? || !(relation.offset_value.nil? || relation.offset_value.to_s == "0")
-      end
-
-      # Only the MySQL over-count fallback (an unaliasable select list) lands
-      # here: the unwindowed count bounded by what the window can hold.
-      def paginatable_clamp_to_caller_window(count, relation)
-        count -= relation.offset_value.to_i
-        count = [count, relation.limit_value.to_i].min unless relation.limit_value.nil?
-        [count, 0].max
+        ConcernsOnRails::Support::CallerWindow.window?(relation) ? ConcernsOnRails::Support::CallerWindow.clamp(counted, relation) : counted
       end
 
       # The relation the page's LIMIT/OFFSET is applied to: the relation itself,
@@ -320,15 +302,9 @@ module ConcernsOnRails
       # an ORDER BY inside a subquery is not guaranteed to survive it.
       def paginatable_page_source(source)
         relation = paginatable_count_relation(source)
-        return source unless paginatable_caller_window?(relation)
+        return source unless ConcernsOnRails::Support::CallerWindow.window?(relation)
 
-        eager = relation.eager_loading?
-        inner = eager ? relation : relation.except(:includes, :preload)
-        outer = relation.klass.unscoped.from(inner, relation.klass.table_name)
-        outer = outer.preload(*relation.preload_values) if relation.preload_values.any?
-        outer = outer.includes(*relation.includes_values) if !eager && relation.includes_values.any?
-        outer = outer.extending(*relation.extending_values) if relation.extending_values.any?
-        paginatable_caller_window_order(relation, outer)
+        paginatable_caller_window_order(relation, ConcernsOnRails::Support::CallerWindow.derive(relation))
       end
 
       def paginatable_caller_window_order(relation, outer)
@@ -392,7 +368,7 @@ module ConcernsOnRails
       # it has aborted the transaction anyway).
       def paginatable_distinct_select_total(relation)
         connection = relation.connection
-        subquery = paginatable_caller_window?(relation) ? relation : relation.except(:order, :limit, :offset)
+        subquery = ConcernsOnRails::Support::CallerWindow.window?(relation) ? relation : relation.except(:order, :limit, :offset)
         sql = subquery.to_sql
         return 0 if sql.blank?
 

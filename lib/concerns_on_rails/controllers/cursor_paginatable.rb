@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/support/error_envelope"
 require "concerns_on_rails/support/scalar_param"
+require "concerns_on_rails/support/caller_window"
 require "concerns_on_rails/support/numeric_operand"
 require "concerns_on_rails/support/time_value"
 require "json"
@@ -320,6 +321,11 @@ module ConcernsOnRails
 
       def cursor_paginate_result(relation, order:, per_page:, bidirectional: nil)
         relation = relation.all if relation.is_a?(Class)
+        # A relation the caller already LIMITed/OFFSET is walked INSIDE that
+        # window: the keyset WHERE, ORDER and the per_page + 1 probe go on a
+        # derived table over it (PARAMS-S2), not on a relation whose LIMIT the
+        # probe would replace.
+        relation = ConcernsOnRails::Support::CallerWindow.derive(relation) if ConcernsOnRails::Support::CallerWindow.window?(relation)
         pairs = cursor_order_pairs(relation, order)
         limit = cursor_per_page(per_page)
         bidi = bidirectional.nil? ? self.class.cursor_paginatable_bidirectional : bidirectional
