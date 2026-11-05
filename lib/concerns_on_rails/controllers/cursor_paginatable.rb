@@ -321,11 +321,7 @@ module ConcernsOnRails
 
       def cursor_paginate_result(relation, order:, per_page:, bidirectional: nil)
         relation = relation.all if relation.is_a?(Class)
-        # A relation the caller already LIMITed/OFFSET is walked INSIDE that
-        # window: the keyset WHERE, ORDER and the per_page + 1 probe go on a
-        # derived table over it (PARAMS-S2), not on a relation whose LIMIT the
-        # probe would replace.
-        relation = ConcernsOnRails::Support::CallerWindow.derive(relation) if ConcernsOnRails::Support::CallerWindow.window?(relation)
+        cursor_refuse_caller_window!(relation)
         pairs = cursor_order_pairs(relation, order)
         limit = cursor_per_page(per_page)
         bidi = bidirectional.nil? ? self.class.cursor_paginatable_bidirectional : bidirectional
@@ -333,6 +329,18 @@ module ConcernsOnRails
         fetch = cursor_fetch_page(relation, pairs, limit, cursor)
         { records: fetch[:page],
           meta: cursor_build_meta(relation.model, pairs, limit, fetch, bidi) }
+      end
+
+      # The keyset query's own `limit(per_page + 1)` would replace the
+      # caller's LIMIT and the walk would run past it to the end of the table
+      # (PARAMS-S2), and OFFSET has no meaning under a keyset WHERE. Refuse
+      # rather than walk rows the caller meant to exclude.
+      def cursor_refuse_caller_window!(relation)
+        return unless ConcernsOnRails::Support::CallerWindow.window?(relation)
+
+        raise ArgumentError,
+              "#{CursorPaginatable.name}: cursor pagination replaces the relation's LIMIT/OFFSET; " \
+              "drop them or use Paginatable"
       end
 
       # A backward ("prev") cursor walks the INVERTED ordering so LIMIT grabs
