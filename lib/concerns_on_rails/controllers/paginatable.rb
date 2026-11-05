@@ -1,5 +1,6 @@
 require "active_support/concern"
 require "concerns_on_rails/support/scalar_param"
+require "concerns_on_rails/support/caller_window"
 require "concerns_on_rails/support/link_header"
 
 module ConcernsOnRails
@@ -196,7 +197,7 @@ module ConcernsOnRails
           elsif source.is_a?(Array)
             source[offset, per_page] || []
           else
-            source.limit(per_page).offset(offset)
+            paginatable_page_relation(source, offset, per_page)
           end
 
         @paginatable_meta =
@@ -269,6 +270,13 @@ module ConcernsOnRails
         return source.size if source.is_a?(Array)
 
         relation = paginatable_count_relation(source)
+        total = paginatable_unwindowed_total(relation)
+        ConcernsOnRails::Support::CallerWindow.window?(relation) ? ConcernsOnRails::Support::CallerWindow.rows_in(total, relation) : total
+      end
+
+      # The count with the caller's own LIMIT/OFFSET stripped (every path below
+      # does); paginatable_total then bounds it to the caller's window.
+      def paginatable_unwindowed_total(relation)
         if paginatable_distinct_select?(relation) || paginatable_grouped_having_select?(relation)
           return paginatable_distinct_select_total(relation)
         end
@@ -282,6 +290,21 @@ module ConcernsOnRails
       # Count through its default relation, `.all`, instead.
       def paginatable_count_relation(source)
         source.is_a?(Class) && source.respond_to?(:all) ? source.all : source
+      end
+
+      # A relation the caller already limited/offset is paged INSIDE that
+      # window (PARAMS-S2): its offset plus the page's, its limit cut to what
+      # is left of the window. Still the caller's own relation, so ORDER,
+      # eager loading, STI, readonly and quoting stay Rails'. A page past the
+      # window's end is empty (no query).
+      def paginatable_page_relation(source, offset, per_page)
+        relation = paginatable_count_relation(source)
+        return source.limit(per_page).offset(offset) unless ConcernsOnRails::Support::CallerWindow.window?(relation)
+
+        window_offset, limit = ConcernsOnRails::Support::CallerWindow.page_window(relation, offset, per_page)
+        return relation.none if limit.zero?
+
+        relation.limit(limit).offset(window_offset)
       end
 
       def paginatable_plain_count(relation)
