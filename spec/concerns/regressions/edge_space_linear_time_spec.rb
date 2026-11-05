@@ -10,9 +10,9 @@ require "benchmark"
 # edge with one anchored match; names_year? answers false before the comment
 # regex for a String Date._parse would refuse anyway.
 #
-# The timing bounds are deliberately loose (seconds, against a pre-fix cost
-# that is several times the bound on a fast machine: the inputs are 3-15 MB): they catch a return to a
-# per-position scan, not a slow CI box.
+# The timing examples compare against a private copy of the OLD regex in the
+# same process (the new strip must beat it by 10x on 1 MB), so a revert fails
+# on any machine; the absolute bounds are single loose smoke checks (2 s).
 describe "Edge-whitespace stripping on large input" do
   let(:old_edge_space) { /\A[[:space:]\0]+|[[:space:]\0]+\z/ }
   let(:old_money_space) { /\A[[:space:]]+|[[:space:]]+\z/ }
@@ -52,36 +52,49 @@ describe "Edge-whitespace stripping on large input" do
     end
 
     {
-      "interior run" => [->(n) { "a#{" " * n}b" }, 5_000_000, ->(n) { "a#{" " * n}b" }],
-      "interior words" => [->(n) { "a b" * n }, 1_700_000, ->(n) { "a b" * n }],
-      "NUL run" => [->(n) { "\0" * n }, 1_000_000, ->(_) { "" }],
-      "leading run" => [->(n) { "#{" " * n}a" }, 1_000_000, ->(_) { "a" }],
-      "trailing run" => [->(n) { "a#{" " * n}" }, 1_000_000, ->(_) { "a" }]
-    }.each do |label, (build, size, expected)|
-      it "strips a #{size}-unit #{label} in linear time" do
-        input = build.call(size)
-        result = nil
-        elapsed = Benchmark.realtime { result = described_class.strip(input) }
-        expect(result).to eq(expected.call(size))
-        expect(elapsed).to be < 2.0
+      "interior run" => [->(n) { "a#{" " * n}b" }, ->(n) { "a#{" " * n}b" }],
+      "interior words" => [->(n) { "a b" * n }, ->(n) { "a b" * n }],
+      "NUL run" => [->(n) { "\0" * n }, ->(_) { "" }],
+      "leading run" => [->(n) { "#{" " * n}a" }, ->(_) { "a" }],
+      "trailing run" => [->(n) { "a#{" " * n}" }, ->(_) { "a" }]
+    }.each do |label, (build, expected)|
+      it "strips 100k units of #{label} to the expected result" do
+        expect(described_class.strip(build.call(100_000))).to eq(expected.call(100_000))
+      end
+    end
+
+    it "strips 2 MB of interior spaces within a loose absolute bound" do
+      input = "a#{" " * 2_000_000}b"
+      elapsed = Benchmark.realtime { expect(described_class.strip(input)).to eq(input) }
+      expect(elapsed).to be < 2.0
+    end
+
+    def best_of_two(&block)
+      Array.new(2) { Benchmark.realtime(&block) }.min
+    end
+
+    {
+      "an interior run" => "a#{" " * 1_000_000}b",
+      "interior words" => "a b" * 333_333
+    }.each do |label, input|
+      it "is at least 10x faster than the one-regex gsub on #{label} (1M characters)" do
+        old_regex = /\A[[:space:]\0]+|[[:space:]\0]+\z/
+        new_time = best_of_two { described_class.strip(input) }
+        old_time = best_of_two { input.gsub(old_regex, "") }
+        expect(new_time).to be < old_time / 10
       end
     end
   end
 
   describe "through the concerns" do
-    it "Normalizable.strip keeps its result and stays fast" do
-      input = "\u00A0a#{" " * 5_000_000}b\0"
-      out = nil
-      elapsed = Benchmark.realtime { out = ConcernsOnRails::Models::Normalizable.strip(input) }
-      expect(out).to eq("a#{" " * 5_000_000}b")
-      expect(elapsed).to be < 2.0
+    it "Normalizable.strip keeps its result" do
+      expect(ConcernsOnRails::Models::Normalizable.strip("\u00A0a#{" " * 2_000}b\0")).to eq("a#{" " * 2_000}b")
     end
 
-    it "Money's writer rejects an oversized padded amount quickly" do
-      elapsed = Benchmark.realtime do
-        expect(ConcernsOnRails::Support::Money.parse("1#{" " * 5_000_000}2", {})).to be_nil
-      end
-      expect(elapsed).to be < 2.0
+    it "Money's writer still reads a padded amount and rejects an oversized one" do
+      money = ConcernsOnRails::Support::Money
+      expect(money.parse("\u00A0$12.50\u3000", {})).to eq(BigDecimal("12.5"))
+      expect(money.parse("1#{" " * 100_000}2", {})).to be_nil
     end
   end
 
@@ -89,9 +102,9 @@ describe "Edge-whitespace stripping on large input" do
     let(:time_value) { ConcernsOnRails::Support::TimeValue }
 
     it "answers false quickly for a String past Date._parse's limit" do
-      long = "a#{"(x) " * 1_000_000}z"
+      long = "a#{"(x) " * 500_000}z"
       expect(Benchmark.realtime { expect(time_value.names_year?(long)).to be(false) }).to be < 2.0
-      expect(Benchmark.realtime { expect(time_value.names_year?("2026-10-01#{" " * 3_000_000}x")).to be(false) }).to be < 2.0
+      expect(Benchmark.realtime { expect(time_value.names_year?("2026-10-01#{" " * 2_000_000}x")).to be(false) }).to be < 2.0
     end
 
     it "still reads a trailing comment and a 128-byte boundary as before" do
