@@ -2041,7 +2041,7 @@ Render it straight into a `1 … 44 45 46 [47] 48 49 50 … 100` bar:
 `?page=` past the last page windows around the last page (as `rel="prev"` already does), and
 `window:` must be a non-negative Integer or `nil`/`false` — validated at declaration.
 
-A relation's total is a `COUNT` with `ORDER`/`LIMIT`/`OFFSET` stripped; a `DISTINCT` relation with its own `SELECT` list (`Membership.select(:group_id).distinct`, or DISTINCT written into the list: `select("DISTINCT category")`) is counted as a raw `SELECT COUNT(*) FROM (…)` subquery (STI-safe), so the total is the number of distinct rows it returns, not the underlying row count. MySQL alone rejects repeated output names in that subquery (`select("a.id, b.id")`); there the count is retried with the list re-aliased positionally, and a list that cannot be re-aliased (`table.*`) falls back to the plain over-count. A model class (`paginated(Article)`) is counted through `.all`.
+A relation's total is a `COUNT` with `ORDER`/`LIMIT`/`OFFSET` stripped, then bounded by the window the relation itself carries: `paginated(Player.order(score: :desc).limit(10))` pages a top 10 (total 10, so 3 per page gives 4 pages and page 5 is empty, never rows past the 10) — the pages offset and limit the caller's own relation, so `eager_load`/`includes`, STI and `readonly` keep working; a `DISTINCT` relation with its own `SELECT` list (`Membership.select(:group_id).distinct`, or DISTINCT written into the list: `select("DISTINCT category")`) is counted as a raw `SELECT COUNT(*) FROM (…)` subquery (STI-safe), so the total is the number of distinct rows it returns, not the underlying row count. MySQL alone rejects repeated output names in that subquery (`select("a.id, b.id")`); there the count is retried with the list re-aliased positionally, and a list that cannot be re-aliased (`table.*`) falls back to the plain over-count. A model class (`paginated(Article)`) is counted through `.all`.
 
 **Response headers**: `X-Total-Count`, `X-Page`, `X-Per-Page`, `X-Total-Pages`, and an RFC 8288 `Link`
 header with `first` / `prev` / `next` / `last` URLs rebuilt from the current request (other query params
@@ -2066,6 +2066,8 @@ class ArticlesController < ApplicationController
   end
 end
 ```
+
+A relation already carrying `limit`/`offset` is refused with an `ArgumentError`; page such a window with Paginatable.
 
 **URL params**
 
