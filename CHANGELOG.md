@@ -1,5 +1,61 @@
 <!-- CHANGELOG.md -->
 
+## 1.35.0 (2026-11-09)
+
+A small correctness release following the 2026-10-29 audit: it fixes the 3 findings the 1.34.0 release left open
+(DATA-S2, PARAMS-S2, TRANS-S4). Two of them change behaviour. Read **Upgrading** first.
+
+### Upgrading
+
+- [ ] **Paginatable, a relation you already limited or offset:** `paginated(Player.order(score: :desc).limit(10))`
+  now pages INSIDE that window: `X-Total-Count`, `X-Total-Pages` and `pagination_meta` describe the rows the relation
+  returns (`max(0, min(limit, rows - offset))`) and the pages slice them. A "top 10, 3 per page" relation has a total
+  of 10, pages 1-3 hold 3 rows and page 4 holds 1; later pages are empty. Before, your LIMIT/OFFSET was replaced by the
+  page's own and stripped from the COUNT, so the total was the whole table and page 4+ served rows beyond your window.
+  A relation without `limit`/`offset` is unchanged. If you relied on the old reading (a LIMIT used as "a big batch"
+  while paging the whole table), drop the `.limit(...)`/`.offset(...)` before `paginated`. (PARAMS-S2)
+- [ ] **CursorPaginatable, a relation you already limited or offset:** `cursor_paginated` / `cursor_pagination_meta`
+  raise `ArgumentError` for a relation carrying `limit`/`offset`. Before, the per_page + 1 probe replaced your LIMIT
+  and the walk ran to the end of the table (OFFSET has no meaning under a keyset WHERE). Drop them, or page the window
+  with Paginatable. (PARAMS-S2)
+- [ ] **Internal constants removed:** `Searchable::EDGE_SPACE` and `Taggable::EDGE_SPACE` no longer exist (they were
+  never public API); `Normalizable::EDGE_SPACE` stays. Use `ConcernsOnRails::Support::EdgeSpace` if you referenced
+  them. (TRANS-S4)
+
+### Fixed
+
+- **Tokenizable / Hashable / Sequenceable / Sortable: a create halted by a later `before_create` (`throw :abort`)
+  inside a caller's transaction left the drawn value on the record.** `Support::GeneratedValues::Revertible` restored
+  the token/hash/sequence number/position only from `rolledback!`, which never runs when `save` returns false inside a
+  joined transaction (Rails swallows the Rollback). A retried `save` re-used a value that was never inserted; for
+  Sequenceable that is a number another row may have taken meanwhile, so a duplicate or `RecordNotUnique`. `Revertible`
+  now also restores the recorded values the moment the create callbacks halt, inside or outside a transaction.
+  (DATA-S2)
+- **Paginatable / CursorPaginatable: a caller's LIMIT/OFFSET.** See Upgrading: Paginatable pages inside the window by
+  combining the windows arithmetically on the caller's own relation (no derived table, so `eager_load`/`includes`,
+  STI, `readonly` and `strict_loading` behave as in Rails); CursorPaginatable refuses it. (PARAMS-S2)
+- **Normalizable / Searchable / Taggable / Monetizable: edge-whitespace stripping was ~1 microsecond per character.**
+  A long interior run of spaces made `gsub(/\A[[:space:]\0]+|[[:space:]\0]+\z/, "")` cost over 1 s of CPU per MB of
+  untrusted input (a 1 MB `"a" + " " * N + "b"` query parameter). Each edge is now stripped with one anchored match
+  through `Support::EdgeSpace`, linear and byte-identical in result. `TimeValue.names_year?` (verb time arguments such
+  as `expire!`/`publish_at!`) answers false for a String over 128 bytes before running its trailing-comment regex,
+  which `Date._parse` refuses anyway (the result was already false). (TRANS-S4)
+
+### Known issues (not fixed in this release)
+- CounterCacheable: a parent destroyed inside the same rolled-back transaction keeps the
+  mirrored counter/lock_version in memory.
+- Aliasable: eager-loading an alias together with its source in one query loads each child twice.
+- Encryptable: on the pre-7.1 Marshal format, a record whose field has a per-field Proc `key:`
+  cannot be `Marshal.dump`ed (`Rails.cache`).
+- CursorPaginatable: on PostgreSQL, a page ending on a timestamp stored as `'infinity'` now mints
+  its cursor (it used to be a 500), but the next page answers 400 — the walk cannot step past it.
+- Normalizable / Sanitizable: on an unvalidated (`update_attribute`) save that is halted and retried, with TWO
+  transforms on one column where the SECOND (not Normalizable) rewrites the first's output, Sanitizable's own record
+  holds only the first's output, so a validated retry re-sanitizes.
+- Sluggable `history: true` + `scope:`: friendly_id's history finder ignores scope, so after a record moves scope its
+  stale history slug can still match `Model.where(scope).friendly.find(old_slug)`. This is stock friendly_id
+  behaviour; the gem does not change it. (GRAPH-5)
+
 ## 1.34.0 (2026-10-29)
 
 A correctness release: it fixes the 43 bugs proven by the 2026-10-29 audit of 1.33.0. Some fixes change behaviour,
