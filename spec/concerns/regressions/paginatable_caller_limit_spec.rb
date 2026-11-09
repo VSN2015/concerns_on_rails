@@ -218,7 +218,7 @@ describe ConcernsOnRails::Controllers::Paginatable do
 
     expect(page_of(RankedPlayer.all, 1)[1]).to eq("10")
     expect(page_of(RankedPlayer, 1)[1]).to eq("10")
-    [RankedPlayer.select(:team_id).distinct, RankedPlayer.group(:team_id)].each do |relation|
+    [RankedPlayer.select(:team_id).distinct, RankedPlayer.select(:team_id).group(:team_id)].each do |relation|
       controller = controller_for(1)
       controller.paginated(relation).to_a
       expect(controller.response.headers["X-Total-Count"]).to eq("2")

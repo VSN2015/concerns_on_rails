@@ -1,5 +1,4 @@
 require "spec_helper"
-require "benchmark"
 
 # Audit 2026-10-29 TRANS-S4: `gsub(/\A[[:space:]\0]+|[[:space:]\0]+\z/, "")`
 # (Normalizable :strip, Searchable's query, Taggable's tags, Money's reader)
@@ -14,6 +13,14 @@ require "benchmark"
 # same process (the new strip must beat it by 10x on 1 MB), so a revert fails
 # on any machine; the absolute bounds are single loose smoke checks (2 s).
 describe "Edge-whitespace stripping on large input" do
+  # Process.clock_gettime, not Benchmark.realtime: benchmark is a bundled (not
+  # default) gem from Ruby 4.0, and nothing in the bundle depends on it.
+  def elapsed_seconds
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    yield
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+  end
+
   let(:old_edge_space) { /\A[[:space:]\0]+|[[:space:]\0]+\z/ }
   let(:old_money_space) { /\A[[:space:]]+|[[:space:]]+\z/ }
 
@@ -65,12 +72,12 @@ describe "Edge-whitespace stripping on large input" do
 
     it "strips 2 MB of interior spaces within a loose absolute bound" do
       input = "a#{" " * 2_000_000}b"
-      elapsed = Benchmark.realtime { expect(described_class.strip(input)).to eq(input) }
+      elapsed = elapsed_seconds { expect(described_class.strip(input)).to eq(input) }
       expect(elapsed).to be < 2.0
     end
 
     def best_of_two(&block)
-      Array.new(2) { Benchmark.realtime(&block) }.min
+      Array.new(2) { elapsed_seconds(&block) }.min
     end
 
     {
@@ -103,8 +110,8 @@ describe "Edge-whitespace stripping on large input" do
 
     it "answers false quickly for a String past Date._parse's limit" do
       long = "a#{"(x) " * 500_000}z"
-      expect(Benchmark.realtime { expect(time_value.names_year?(long)).to be(false) }).to be < 2.0
-      expect(Benchmark.realtime { expect(time_value.names_year?("2026-10-01#{" " * 2_000_000}x")).to be(false) }).to be < 2.0
+      expect(elapsed_seconds { expect(time_value.names_year?(long)).to be(false) }).to be < 2.0
+      expect(elapsed_seconds { expect(time_value.names_year?("2026-10-01#{" " * 2_000_000}x")).to be(false) }).to be < 2.0
     end
 
     it "still reads a trailing comment and a 128-byte boundary as before" do
