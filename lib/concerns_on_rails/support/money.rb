@@ -1,4 +1,5 @@
 require "bigdecimal"
+require "concerns_on_rails/support/edge_space"
 
 module ConcernsOnRails
   module Support
@@ -238,7 +239,7 @@ module ConcernsOnRails
 
       # String#strip misses Unicode whitespace such as a no-break space.
       def strip_space(string)
-        string.gsub(/\A[[:space:]]+|[[:space:]]+\z/, "")
+        EdgeSpace.strip(string, nul: false)
       end
 
       # Subunits to a BigDecimal amount. A grouped relation's aggregate is a
