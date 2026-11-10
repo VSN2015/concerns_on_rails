@@ -66,6 +66,7 @@ module ConcernsOnRails
   module Support
     autoload :ColumnGuard,             "concerns_on_rails/support/column_guard"
     autoload :IncludeTree,             "concerns_on_rails/support/include_tree"
+    autoload :CallerWindow,            "concerns_on_rails/support/caller_window"
     autoload :ScalarParam,             "concerns_on_rails/support/scalar_param"
     autoload :UniqueRetry,             "concerns_on_rails/support/unique_retry"
     autoload :ErrorEnvelope,           "concerns_on_rails/support/error_envelope"
@@ -87,6 +88,7 @@ module ConcernsOnRails
     autoload :VaryHeader,              "concerns_on_rails/support/vary_header"
     autoload :NumericOperand,          "concerns_on_rails/support/numeric_operand"
     autoload :TimeValue,               "concerns_on_rails/support/time_value"
+    autoload :EdgeSpace,               "concerns_on_rails/support/edge_space"
     autoload :NativeJson,              "concerns_on_rails/support/native_json"
     autoload :Callable,                "concerns_on_rails/support/callable"
     autoload :SlugSources,             "concerns_on_rails/support/slug_sources"

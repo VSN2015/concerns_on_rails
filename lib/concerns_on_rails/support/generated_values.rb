@@ -36,6 +36,10 @@ module ConcernsOnRails
     # each column's pre-create value on the record, and `Revertible` — included
     # by every producer — puts them back when the create rolls back.
     #
+    # A create HALTED by a later before_create (`throw :abort`) puts them back
+    # at the halt itself: inside a caller's transaction Rails swallows the
+    # Rollback it raises for the false `save`, so `rolledback!` never runs.
+    #
     # Every hook is idempotent — it re-derives, it never appends — so two
     # producers reporting in one create (a token and a number) are safe. The
     # hooks are NOT free outside a save (friendly_id's slug-availability
@@ -80,6 +84,18 @@ module ConcernsOnRails
         private
 
         def generated_values_enrolled; end
+
+        # A before_create that halts (`throw :abort`) after a producer drew its
+        # value makes the create callbacks answer false. `save` then raises
+        # Rollback, but inside a caller's transaction that Rollback is swallowed
+        # by the JOINED transaction and `rolledback!` never runs — so the
+        # restore happens here, at the halt, inside or outside a transaction.
+        # A real rollback still reverts through `rolledback!`.
+        def _create_record(*, **, &)
+          result = super
+          generated_values_revert! if result == false
+          result
+        end
 
         # Puts back the columns a create path generated, while the record is a
         # new record again. A column the caller has changed since (no longer

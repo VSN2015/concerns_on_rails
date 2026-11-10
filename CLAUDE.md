@@ -351,7 +351,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 
 ### Controller concerns (`lib/concerns_on_rails/controllers/`)
 
-- **`Paginatable`** — offset pagination (`paginated`, `pagination_meta`) + `X-*` headers. `paginate_by` re-declared in a subclass changes only what it passes (UNSET sentinel; `style:` re-derives both param paths); `page`/`per_page` are exact whole numbers (`ScalarParam.to_i` via `NumericOperand`, anything else the default); a grouped relation with select list + HAVING is counted as a subquery.
+- **`Paginatable`** — offset pagination (`paginated`, `pagination_meta`) + `X-*` headers. `paginate_by` re-declared in a subclass changes only what it passes (UNSET sentinel; `style:` re-derives both param paths); `page`/`per_page` are exact whole numbers (`ScalarParam.to_i` via `NumericOperand`, anything else the default); a grouped relation with select list + HAVING is counted as a subquery. A relation already carrying `limit`/`offset` is paged INSIDE that window (offset/limit combined on the caller's own relation; the COUNT bounded to `Support::CallerWindow.rows_in` = max(0, min(L, N - O))).
 - **`Filterable`** — declarative URL-param filtering (`filter_by`: direct-where / `scope:` /
   `with:` lambda) + comparison operators (`?price_gte=` suffix or `?price[gte]=` bracket form,
   from a frozen allow-list mapped to fixed Arel nodes) and type coercion; an uncastable
@@ -447,6 +447,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   String boundary that is invalid UTF-8 or (except on MySQL/Trilogy) carries a NUL byte, and a plain
   numeric boundary `Support::NumericOperand` does not read as :exact (precision, size). A binary
   boundary (binary PK tiebreaker / ordering column) travels as strict Base64 (not Base64 → InvalidCursor).
+  Raises ArgumentError for a relation carrying limit/offset (`Support::CallerWindow.window?`).
 - **`Deprecatable`** — standards-based endpoint deprecation. `deprecate_actions *actions,
   deprecated_at:, sunset_at:, link:, successor:, after_sunset:, header_format:, notify:`
   (repeatable; no actions = catch-all; LAST matching rule wins). Emits RFC 9745
@@ -512,7 +513,7 @@ adopting the row's value; `by: -1` undoes it), `pinned` keeps an `update_all` fr
 `where(primary_key => id)`), `ErrorEnvelope` (the shared `render_error`-or-inline error
 renderer used by seven controller concerns), `FilterParameterRegistry` (live
 filter_parameters registry consulted by the proc `ConcernsOnRails::Railtie` appends at
-boot), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,
+boot), `EdgeSpace` (linear-time Unicode+NUL edge strip shared by Normalizable/Searchable/Taggable/Money; `nul: false` for Money), `CallerWindow` (a relation's own LIMIT/OFFSET window: `window?`, `rows_in` = max(0, min(L, N−O)), `page_window`), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,
 `Callable` (arity-aware `invoke` for the callable options the macros accept — Throttleable
 `by:`, WebhookVerifiable `secret:`, Deprecatable `notify:`, CounterCacheable `if:`,
 Auditable `actor:`; deliberately NOT Throttleable `if:`'s dispatch),
@@ -525,7 +526,7 @@ Sluggable's slug hook; Encryptable's blind index and Auditable's entry derive la
 boundary; each producer's before values are recorded on the record and `Revertible` (included by
 every producer, overrides `rolledback!(*, **, &)` → super) puts them back when a create rolls back,
 while the record is new again and the column still holds the generated value, so a retried `save!`
-of the same record draws afresh), `WriteBoundary` (overrides the private `attributes_for_create`/`_for_update`, which
+of the same record draws afresh; it also overrides `_create_record` and restores at the halt itself when the create callbacks halt (`throw :abort`), because inside a caller's transaction Rails swallows the Rollback and `rolledback!` never runs), `WriteBoundary` (overrides the private `attributes_for_create`/`_for_update`, which
 Persistence calls after every `before_*` callback on 6.0–8.1; runs consumers in a FIXED order —
 blind index, then audit — and adds only the columns they changed to the written list),
 `EncryptedLookup` (equality on a maybe-
