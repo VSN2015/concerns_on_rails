@@ -22,3 +22,5 @@
 
 # generated at Pages deploy by script/build_llms_docs.rb (llms.txt IS committed)
 /docs/llms-full.txt
+.DS_Store
+*.DS_Store

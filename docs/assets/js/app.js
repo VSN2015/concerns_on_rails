@@ -69,6 +69,14 @@
   /* ---------- sidebar (doc route) ---------- */
   function buildSidebar() {
     var html = '<a class="home-link" href="#/" data-home>🏠 <span>Overview</span></a>';
+    html += '<div class="nav-group home-nav-group">';
+    html += '<div class="label">Sections</div>';
+    html += '<a class="nav-item" href="#features" data-scroll="features"><span class="ico">✨</span><span class="nm">Features</span></a>';
+    html += '<a class="nav-item" href="#concerns" data-scroll="concerns"><span class="ico">📦</span><span class="nm">Concerns</span></a>';
+    html += '<a class="nav-item" href="#start" data-scroll="start"><span class="ico">🚀</span><span class="nm">Quick start</span></a>';
+    html += '<a class="nav-item" href="#api" data-scroll="api"><span class="ico">⚡</span><span class="nm">API</span></a>';
+    html += '</div>';
+
     [{ key: "model", label: "Model concerns", items: MODELS }, { key: "controller", label: "Controller concerns", items: CTRLS }].forEach(function (g) {
       html += '<div class="nav-group" data-group="' + g.key + '">';
       html += '<div class="label">' + g.label + '<span class="count">' + g.items.length + '</span></div>';
@@ -88,6 +96,7 @@
 
   /* ---------- search (sidebar nav + home cards/chips) ---------- */
   function matches(c, q) {
+    if (!c) return false;
     if (!q) return true;
     var hay = (c.name + " " + c.tagline + " " + c.include + " " + (c.tags || []).join(" ")).toLowerCase();
     return q.split(/\s+/).every(function (t) { return hay.indexOf(t) !== -1; });
@@ -97,7 +106,12 @@
     // sidebar
     var anyNav = false;
     sidebar.querySelectorAll(".nav-item").forEach(function (a) {
-      var ok = matches(BY_SLUG[a.getAttribute("data-slug")], q);
+      var slug = a.getAttribute("data-slug");
+      if (!slug) {
+        a.classList.toggle("hidden", !!q);
+        return;
+      }
+      var ok = matches(BY_SLUG[slug], q);
       a.classList.toggle("hidden", !ok); if (ok) anyNav = true;
     });
     sidebar.querySelectorAll(".nav-group").forEach(function (grp) {
@@ -334,7 +348,7 @@
           '<a class="btn" style="color:var(--code-fg);border-color:#41392f" href="' + r + '" target="_blank" rel="noopener">View on GitHub</a>' +
         '</div></div>' +
       '<div class="cols">' +
-        '<div><div class="brand-mini"><img class="logo" src="assets/img/ruby.png" alt="" width="28" height="28" /><span class="name mono" style="font-weight:700">concerns_on_rails</span></div>' +
+        '<div><div class="brand-mini"><img class="logo" src="assets/img/logo.svg?v=cor" alt="" width="28" height="28" /><span class="name mono" style="font-weight:700">concerns_on_rails</span></div>' +
           '<p class="blurb">Reusable ActiveSupport concerns for Rails models &amp; controllers. MIT licensed.</p></div>' +
         '<div><p class="col-h">Docs</p><ul>' +
           '<li><a href="#/c/sluggable">Concern reference</a></li>' +
@@ -521,16 +535,24 @@
     document.getElementById("backdrop").addEventListener("click", closeNav);
 
     searchInput.addEventListener("input", applySearch);
-    searchInput.addEventListener("keydown", function (e) { if (e.key === "Escape") { searchInput.value = ""; applySearch(); searchInput.blur(); } });
+    searchInput.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        if (searchInput.value) { searchInput.value = ""; applySearch(); }
+        searchInput.blur();
+        closeNav();
+      }
+    });
     document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { closeNav(); }
       if (e.key === "/" && document.activeElement !== searchInput && !/^(INPUT|TEXTAREA)$/.test((document.activeElement || {}).tagName || "")) { e.preventDefault(); searchInput.focus(); }
     });
 
-    // in-page anchor scrolling (landing nav + footer) without touching the route hash
+    // in-page anchor scrolling (landing nav + footer + mobile nav) without touching the route hash
     document.addEventListener("click", function (e) {
       var a = e.target.closest ? e.target.closest("[data-scroll]") : null;
       if (!a) return;
       e.preventDefault();
+      closeNav();
       if (currentSlug()) { location.hash = "#/"; setTimeout(function () { jumpTo(a.getAttribute("data-scroll")); }, 60); }
       else jumpTo(a.getAttribute("data-scroll"));
     });
