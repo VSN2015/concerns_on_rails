@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <defs>
+    <linearGradient id="fav-rail" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff8e89" />
+      <stop offset="50%" stop-color="#c13c3b" />
+      <stop offset="100%" stop-color="#6b080c" />
+    </linearGradient>
+    <linearGradient id="fav-shine" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="50%" stop-color="#ffd5d2" />
+      <stop offset="100%" stop-color="#ff7b75" />
+    </linearGradient>
+  </defs>
+
+  <!-- Sleepers -->
+  <g stroke="#a4181e" stroke-width="4.5" stroke-linecap="round" opacity="0.85">
+    <line x1="80" y1="26" x2="67" y2="40" />
+    <line x1="65" y1="17" x2="57" y2="34" />
+    <line x1="44" y1="15" x2="47" y2="34" />
+    <line x1="23" y1="24" x2="35" y2="39" />
+    <line x1="11" y1="42" x2="25" y2="50" />
+    <line x1="6"  y1="60" x2="23" y2="60" />
+    <line x1="11" y1="78" x2="25" y2="70" />
+    <line x1="23" y1="96" x2="35" y2="81" />
+    <line x1="44" y1="105" x2="47" y2="86" />
+    <line x1="65" y1="103" x2="57" y2="86" />
+    <line x1="80" y1="94" x2="67" y2="80" />
+  </g>
+
+  <!-- Outer Rail -->
+  <path d="M 82 26 A 45 45 0 1 0 82 94" fill="none" stroke="url(#fav-rail)" stroke-width="6.5" stroke-linecap="round" />
+  <path d="M 80 26 A 45 45 0 1 0 80 94" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" opacity="0.7" />
+
+  <!-- Inner Rail -->
+  <path d="M 68 39 A 28 28 0 1 0 68 81" fill="none" stroke="url(#fav-rail)" stroke-width="5" stroke-linecap="round" />
+  <path d="M 67 39 A 28 28 0 1 0 67 81" fill="none" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round" opacity="0.65" />
+
+  <!-- Rivets -->
+  <g fill="#ffffff">
+    <circle cx="80" cy="26" r="1.6" />
+    <circle cx="65" cy="17" r="1.6" />
+    <circle cx="44" cy="15" r="1.6" />
+    <circle cx="23" cy="24" r="1.6" />
+    <circle cx="11" cy="42" r="1.6" />
+    <circle cx="6"  cy="60" r="1.6" />
+    <circle cx="11" cy="78" r="1.6" />
+    <circle cx="23" cy="96" r="1.6" />
+    <circle cx="44" cy="105" r="1.6" />
+    <circle cx="65" cy="103" r="1.6" />
+    <circle cx="80" cy="94" r="1.6" />
+  </g>
+
+  <!-- Grand Ruby -->
+  <polygon points="56,38 80,38 90,50 46,50" fill="url(#fav-shine)" />
+  <polygon points="38,50 56,38 46,50" fill="#ffffff" opacity="0.95" />
+  <polygon points="98,50 80,38 90,50" fill="#ff7672" />
+  <polygon points="46,50 90,50 68,64" fill="#eb423f" />
+  <polygon points="46,50 68,64 68,82" fill="#c13c3b" />
+  <polygon points="90,50 68,64 68,82" fill="#7a0d11" />
+  <polygon points="38,50 46,50 68,82" fill="#9d181e" />
+  <polygon points="98,50 90,50 68,82" fill="#4a0508" />
+  <polyline points="56,38 46,50 68,64 68,82" fill="none" stroke="#ffffff" stroke-width="1.2" opacity="0.5" />
+</svg>
