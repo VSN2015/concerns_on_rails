@@ -1,5 +1,16 @@
 <!-- CHANGELOG.md -->
 
+## 1.35.1 (2026-11-12)
+
+A maintenance release with no change to the gem's code. Nothing to upgrade.
+
+### Internal
+
+- Dev/test lockfile moves to the Rails 8.1.4.1 security patch gems (actionpack, activerecord, activesupport,
+  railties) and permittable 0.14.0. The gemspec dependency ranges are unchanged. (#204, replaces #198–#202)
+- Docs site: a responsive layout for small screens and a new brand logo. (#205)
+- README test-suite count updated to 3,851 examples.
+
 ## 1.35.0 (2026-11-09)
 
 A small correctness release following the 2026-10-29 audit: it fixes the 3 findings the 1.34.0 release left open
