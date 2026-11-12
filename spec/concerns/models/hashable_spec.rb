@@ -185,6 +185,27 @@ describe ConcernsOnRails::Hashable do
     end
   end
 
+  describe "unique: true with every draw colliding" do
+    it "raises once the retries are exhausted" do
+      ActiveRecord::Schema.define do
+        create_table :stuck_orders, force: true do |t|
+          t.string :token
+        end
+      end
+      klass = Class.new(TestModel) do
+        self.table_name = "stuck_orders"
+        include ConcernsOnRails::Hashable
+
+        hashable_by :token, unique: true
+      end
+      klass.create!(token: "taken-value")
+      allow(SecureRandom).to receive(:hex).and_return("taken-value")
+
+      expect { klass.create! }.to raise_error(RuntimeError, /could not generate a unique value for 'token' after 10 attempts/)
+      expect(klass.count).to eq(1)
+    end
+  end
+
   describe "unique: true" do
     it "retries past an already-taken value, then succeeds" do
       ActiveRecord::Schema.define do

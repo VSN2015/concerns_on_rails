@@ -199,6 +199,12 @@ RSpec.describe ConcernsOnRails::Support::TimeValue do
         expect(described_class.read("2026-10-01T13:00:00.000000Z", zone_aware: false)).to eq(Time.utc(2026, 10, 1, 13))
         expect(described_class.read("2026-10-01T13:00:00.000000Z", zone_aware: false)).to be_utc
       end
+
+      it "converts a DateTime to the same instant as a Time" do
+        cast = described_class.cast(DateTime.new(2026, 10, 1, 22, 0, 0, "+09:00"), zone_aware: false)
+        expect(cast).to be_a(Time)
+        expect(cast).to eq(Time.utc(2026, 10, 1, 13))
+      end
     end
   end
 

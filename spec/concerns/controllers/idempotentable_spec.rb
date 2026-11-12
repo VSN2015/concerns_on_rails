@@ -319,6 +319,41 @@ describe ConcernsOnRails::Controllers::Idempotentable do
       expect(c.rendered[:status]).to eq(201) # replayed, not 422
     end
 
+    it "treats array order as significant: same array replays, a reordered one is a 422" do
+      klass = idempotent_class(store) { idempotent_actions :create }
+      perform(instance(klass, key: "k", params: { ids: [1, { b: 2, a: 1 }, 3] }))
+
+      same = instance(klass, key: "k", params: { ids: [1, { a: 1, b: 2 }, 3] })
+      expect(perform(same)).to eq(0)
+      expect(same.rendered[:status]).to eq(201)
+
+      reordered = instance(klass, key: "k", params: { ids: [3, { a: 1, b: 2 }, 1] })
+      expect(perform(reordered)).to eq(0)
+      expect(reordered.rendered[:json][:error][:code]).to eq("idempotency_key_reuse")
+    end
+
+    it "keeps Integer scalars distinct: 1 replays, 2 is a 422" do
+      klass = idempotent_class(store) { idempotent_actions :create }
+      perform(instance(klass, key: "k", params: { qty: 1 }))
+
+      replay = instance(klass, key: "k", params: { qty: 1 })
+      expect(perform(replay)).to eq(0)
+      expect(replay.rendered[:status]).to eq(201)
+
+      other = instance(klass, key: "k", params: { qty: 2 })
+      expect(perform(other)).to eq(0)
+      expect(other.rendered[:json][:error][:code]).to eq("idempotency_key_reuse")
+    end
+
+    it "stringifies a non-JSON-primitive leaf: a Symbol fingerprints as its String" do
+      klass = idempotent_class(store) { idempotent_actions :create }
+      perform(instance(klass, key: "k", params: { state: :pending }))
+
+      replay = instance(klass, key: "k", params: { state: "pending" })
+      expect(perform(replay)).to eq(0)
+      expect(replay.rendered[:status]).to eq(201)
+    end
+
     it "ignores controller/action/format params" do
       klass = idempotent_class(store) { idempotent_actions :create }
       perform(instance(klass, key: "k", params: { amount: 1, controller: "a", format: "json" }))

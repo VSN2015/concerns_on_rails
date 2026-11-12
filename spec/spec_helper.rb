@@ -1,8 +1,13 @@
 require "bundler/setup"
+# Started before the gem loads, or the loader files (core, legacy_aliases) go unmeasured.
+require "simplecov"
+SimpleCov.start do
+  add_filter "/spec/"
+end
+
 require "active_record"
 require "concerns_on_rails"
 require "faker"
-require "simplecov"
 require "support/database"
 require "support/controller_test_harness"
 require "active_support/core_ext/time"
@@ -10,10 +15,6 @@ require "active_support/core_ext/numeric/time"
 require "active_support/testing/time_helpers"
 
 Time.zone = "UTC"
-
-SimpleCov.start do
-  add_filter "/spec/"
-end
 
 # Rails <= 6.1 resolves `class_name:` through ActiveSupport::Dependencies,
 # whose Reference store memoises the constant it resolved. `stub_const` swaps

@@ -164,6 +164,8 @@ describe ConcernsOnRails::Stateable do
       expect { incident.archive! }.to raise_error(NoMethodError)
       expect(incident.reload.status).to eq("open") # the stale event wrote a state it never declared
       expect(incident).not_to respond_to(:archive!)
+      # The stub is private, so only an implicit-receiver call reaches its body.
+      expect { incident.send(:archive!) }.to raise_error(NoMethodError, /undefined method 'archive!' for RetiredIncident/)
       expect(incident).not_to respond_to(:draft!)
       expect(incident).not_to respond_to(:may_archive?)
       expect(RetiredIncident).not_to respond_to(:draft)

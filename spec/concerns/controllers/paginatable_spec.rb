@@ -209,6 +209,11 @@ describe ConcernsOnRails::Controllers::Paginatable do
       expect(page.map(&:name)).to eq(loaded[10, 10].map(&:name))
     end
 
+    it "raises when pagination_meta has neither a collection nor a prior paginated call" do
+      expect { controller_class.new.pagination_meta }
+        .to raise_error(ArgumentError, /pagination_meta needs a relation or collection/)
+    end
+
     it "memoizes meta so pagination_meta with no argument reuses it" do
       controller = controller_class.new(params: { page: 2, per_page: 20 })
       controller.paginated(items)

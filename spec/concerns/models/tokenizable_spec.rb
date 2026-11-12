@@ -179,6 +179,13 @@ describe ConcernsOnRails::Tokenizable do
     end
   end
 
+  describe "generate_tokenizable_value" do
+    it "raises for a field that is not tokenizable" do
+      expect { Account.generate_tokenizable_value(:nope) }
+        .to raise_error(ArgumentError, /'nope' is not a tokenizable field/)
+    end
+  end
+
   describe "validation" do
     it "raises if the field does not exist on the table" do
       ActiveRecord::Schema.define do

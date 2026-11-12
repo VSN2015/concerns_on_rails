@@ -583,14 +583,11 @@ module ConcernsOnRails
         @_storable_decoded = nil
       end
 
-      # A native-json Hash is used as-is; a String is parsed tolerantly; anything
-      # else (nil, an array, a stray scalar) decodes to {}.
+      # A String is parsed tolerantly; anything else (nil, an array, a stray
+      # scalar) decodes to {}. A native-json Hash never gets here:
+      # storable_decoded returns it as-is.
       def storable_decode(raw)
-        case raw
-        when Hash then raw
-        when String then storable_parse(raw)
-        else {}
-        end
+        raw.is_a?(String) ? storable_parse(raw) : {}
       end
 
       def storable_parse(string)

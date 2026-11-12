@@ -333,6 +333,49 @@ describe "SoftDeletable destroy_all on a relation or an association" do
     end
   end
 
+  describe "a loaded association whose record cannot be soft-deleted" do
+    it "raises RecordNotSaved and rolls the batch back" do
+      stub_const("SrdStrictComment", Class.new(TestModel) do
+        self.table_name = "srd_comments"
+        include ConcernsOnRails::SoftDeletable
+
+        validates :body, exclusion: { in: ["bad"] }
+      end)
+      stub_const("SrdStrictPost", Class.new(TestModel) do
+        self.table_name = "srd_posts"
+        has_many :srd_comments, class_name: "SrdStrictComment", foreign_key: :srd_post_id
+      end)
+      post = SrdStrictPost.create!(title: "t")
+      SrdStrictComment.create!(srd_post_id: post.id, body: "ok")
+      SrdStrictComment.create!(srd_post_id: post.id, body: "bad2")
+      SrdStrictComment.where(srd_post_id: post.id, body: "bad2").update_all(body: "bad")
+      post.srd_comments.load
+
+      expect { post.srd_comments.destroy_all }
+        .to raise_error(ActiveRecord::RecordNotSaved, /failed to soft-delete record/)
+      expect(SrdStrictComment.unscoped.where.not(deleted_at: nil).count).to eq(0)
+    end
+  end
+
+  describe "a loaded relation whose record cannot be soft-deleted" do
+    it "raises RecordNotSaved and rolls the batch back" do
+      stub_const("SrdStrictComment", Class.new(TestModel) do
+        self.table_name = "srd_comments"
+        include ConcernsOnRails::SoftDeletable
+
+        validates :body, exclusion: { in: ["bad"] }
+      end)
+      SrdStrictComment.create!(body: "ok")
+      SrdStrictComment.create!(body: "bad2")
+      SrdStrictComment.where(body: "bad2").update_all(body: "bad")
+      relation = SrdStrictComment.order(:id).load
+
+      expect { relation.destroy_all }
+        .to raise_error(ActiveRecord::RecordNotSaved, /failed to soft-delete record/)
+      expect(SrdStrictComment.unscoped.where.not(deleted_at: nil).count).to eq(0)
+    end
+  end
+
   describe "a loaded relation's destroy_all" do
     it "marks the loaded instances (they are the objects it acts on)" do
       SrdPost.create!(title: "a")
