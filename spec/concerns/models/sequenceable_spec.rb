@@ -164,6 +164,43 @@ describe ConcernsOnRails::Sequenceable do
     end
   end
 
+  describe "reset: :month" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :monthly_invoices, force: true do |t|
+          t.string  :number
+          t.integer :sequence
+          t.timestamps
+        end
+      end
+
+      stub_const("MonthlyInvoice", Class.new(TestModel) do
+        self.table_name = "monthly_invoices"
+        include ConcernsOnRails::Sequenceable
+
+        sequenceable_by :sequence, into: :number, prefix: "INV-", padding: 3, reset: :month
+      end)
+    end
+
+    after { ActiveRecord::Base.connection.drop_table(:monthly_invoices, if_exists: true) }
+
+    it "embeds %Y%m, continues within the month and restarts in the next" do
+      travel_to(Time.zone.local(2026, 6, 4)) do
+        expect(MonthlyInvoice.create!.number).to eq("INV-202606-001")
+        expect(MonthlyInvoice.create!.number).to eq("INV-202606-002")
+      end
+
+      travel_to(Time.zone.local(2026, 6, 30, 23, 0)) do
+        expect(MonthlyInvoice.create!.sequence).to eq(3)
+      end
+
+      travel_to(Time.zone.local(2026, 7, 1, 1, 0)) do
+        july = MonthlyInvoice.create!
+        expect([july.sequence, july.number]).to eq([1, "INV-202607-001"])
+      end
+    end
+  end
+
   describe "template:" do
     it "uses the custom formatter, overriding prefix/padding/period" do
       ActiveRecord::Schema.define do

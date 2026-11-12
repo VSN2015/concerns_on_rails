@@ -84,6 +84,13 @@ describe ConcernsOnRails::Controllers::Throttleable do
       end
     end
 
+    it "fails loudly instead of sharing one bucket when the discriminator resolves blank" do
+      klass = throttled_class(store) { throttle_by limit: 1, period: 60, by: -> { params[:user_id] } }
+
+      expect { instance(klass, params: {}).enforce_throttles }
+        .to raise_error(ArgumentError, /discriminator resolved blank/)
+    end
+
     it "partitions counters by a custom discriminator" do
       klass = throttled_class(store) { throttle_by limit: 1, period: 60, by: -> { params[:user_id] } }
 

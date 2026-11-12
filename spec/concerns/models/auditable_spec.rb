@@ -207,6 +207,35 @@ describe ConcernsOnRails::Auditable do
     end
   end
 
+  describe "Date and Symbol values" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :audit_events, force: true do |t|
+          t.date :due_on
+          t.string :kind
+          t.text :audit_log
+        end
+      end
+
+      stub_const("AuditEvent", Class.new(TestModel) do
+        self.table_name = "audit_events"
+        include ConcernsOnRails::Auditable
+
+        auditable_by :due_on, :kind, actor: -> { :system_job }
+      end)
+    end
+
+    it "records a Date as an ISO8601 date and a Symbol actor as its string" do
+      event = AuditEvent.create!(due_on: Date.new(2026, 3, 9))
+      event.update!(due_on: Date.new(2026, 4, 1))
+      entry = event.audit_trail.find { |e| e["field"] == "due_on" && e["from"] }
+      expect([entry["from"], entry["to"]]).to eq(%w[2026-03-09 2026-04-01])
+
+      # The actor callable's Symbol result is the one Symbol that reaches the serializer.
+      expect(entry["by"]).to eq("system_job")
+    end
+  end
+
   describe "actor" do
     before do
       class AuditEdit < TestModel

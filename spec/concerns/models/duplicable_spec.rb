@@ -166,6 +166,49 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
       expect(without_note.duplicate!.dup_note).to be_nil
     end
 
+    # The child hides rows (SoftDeletable's default scope), so a loaded has_one
+    # is judged against its rows rather than used as-is.
+    context "a loaded has_one whose child model hides rows" do
+      before do
+        ActiveRecord::Base.connection.add_column(:dup_notes, :deleted_at, :datetime)
+        stub_const("DupSoftNote", Class.new(TestModel) do
+          self.table_name = "dup_notes"
+          include ConcernsOnRails::SoftDeletable
+        end)
+        stub_const("DupSoftInvoice", Class.new(TestModel) do
+          self.table_name = "dup_invoices"
+          include ConcernsOnRails::Models::Duplicable
+
+          has_one :dup_soft_note, class_name: "DupSoftNote", foreign_key: :dup_invoice_id
+          duplicable_by associations: %i[dup_soft_note]
+        end)
+      end
+
+      let(:original) do
+        DupSoftInvoice.create!(title: "A").tap do |invoice|
+          DupSoftNote.create!(dup_invoice_id: invoice.id, body: "stored")
+        end
+      end
+
+      it "does not copy a target marked for destruction" do
+        original.dup_soft_note.mark_for_destruction
+
+        expect(original.duplicate!.dup_soft_note).to be_nil
+      end
+
+      it "copies the stored row when the loaded target is trashed only in memory" do
+        original.dup_soft_note.deleted_at = Time.zone.now # unsaved: the row is still live
+
+        expect(original.duplicate!.dup_soft_note.body).to eq("stored")
+      end
+
+      it "copies the loaded live target itself, edits included" do
+        original.dup_soft_note.body = "edited"
+
+        expect(original.duplicate!.dup_soft_note.body).to eq("edited")
+      end
+    end
+
     it "shares (not copies) has_and_belongs_to_many records" do
       original = DupInvoice.create!(title: "Q1")
       tag = DupTag.create!(name: "urgent")

@@ -254,6 +254,21 @@ describe ConcernsOnRails::Controllers::Cacheable do
       expect { cacheable_class { http_cache_actions :show, no_store: "yes" } }
         .to raise_error(ArgumentError, /:no_store/)
     end
+
+    it "rejects a non-positive stale_while_revalidate" do
+      expect { cacheable_class { http_cache_actions :show, stale_while_revalidate: 0 } }
+        .to raise_error(ArgumentError, /:stale_while_revalidate must be a positive/)
+    end
+
+    it "rejects a non-boolean must_revalidate" do
+      expect { cacheable_class { http_cache_actions :show, must_revalidate: "yes" } }
+        .to raise_error(ArgumentError, /:must_revalidate must be true or false/)
+    end
+
+    it "rejects a vary that is neither a String nor an Array" do
+      expect { cacheable_class { http_cache_actions :show, vary: :accept } }
+        .to raise_error(ArgumentError, /:vary must be a String or Array of Strings/)
+    end
   end
   describe "ETag extras (etag_with) and automatic Vary" do
     def etag_of(controller)

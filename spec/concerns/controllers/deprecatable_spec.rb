@@ -555,6 +555,15 @@ describe ConcernsOnRails::Controllers::Deprecatable do
       end.to raise_error(ArgumentError, /:link must be a non-blank String/)
     end
 
+    it "rejects a link or successor with control characters or angle brackets" do
+      ["https://x.test/\r\nSet-Cookie: a=b", "https://x.test/>; rel=\"evil", "<https://x.test>"].each do |bad|
+        expect { declare { deprecate_actions :index, deprecated_at: "2025-01-01", link: bad } }
+          .to raise_error(ArgumentError, %r{:link must not contain control characters or '<'/'>'})
+      end
+      expect { declare { deprecate_actions :index, deprecated_at: "2025-01-01", successor: "https://x.test/<v2" } }
+        .to raise_error(ArgumentError, /:successor must not contain control characters/)
+    end
+
     it "rejects a non-String link" do
       expect do
         declare { deprecate_actions :index, deprecated_at: "2025-01-01", link: 123 }
