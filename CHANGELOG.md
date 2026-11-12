@@ -1,5 +1,21 @@
 <!-- CHANGELOG.md -->
 
+## 1.35.2 (2026-11-13)
+
+A test-coverage release with no change to the gem's behaviour. Nothing to upgrade.
+
+### Internal
+
+- New specs for lines no example executed: Sequenceable `reset: :month`, Duplicable loaded `has_one`
+  (marked for destruction, fallback row), Auditable `Date`/`Symbol` values, Idempotentable fingerprints for
+  Array/Integer/Symbol leaves, `TimeValue` with `DateTime`, Hashable unique-retry exhaustion, the macro-time
+  `ArgumentError` guards of Cacheable, Deprecatable, Paginatable, Throttleable and Tokenizable, Stateable's
+  retired-method stub, and SoftDeletable `destroy_all` on a loaded relation/association holding a record that
+  cannot be soft-deleted. (#207)
+- SimpleCov now starts before the gem loads, so the loader files are measured. Line coverage 98.81% -> 99.05%.
+- Storable: removed an unreachable `when Hash` branch in the private `storable_decode`. (#207)
+- README test-suite count updated to 3,870 examples.
+
 ## 1.35.1 (2026-11-12)
 
 A maintenance release with no change to the gem's code. Nothing to upgrade.
