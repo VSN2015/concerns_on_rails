@@ -3,6 +3,7 @@ require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/time_value"
+require "concerns_on_rails/support/numeric_operand"
 require "concerns_on_rails/support/native_json"
 require "active_support/core_ext/object/deep_dup"
 require "active_model/type"
@@ -565,13 +566,15 @@ module ConcernsOnRails
       end
 
       # Entries validated against the exact raw value; at most two per column
-      # (the current value + the `_was` value).
+      # (the current value + the `_was` value). The key is a COPY of the raw
+      # String and compared by value, so an in-place edit of the attribute
+      # String (`settings.replace(...)`) misses instead of answering stale.
       def storable_cache_fetch(entries, raw)
-        hit = entries.find { |r, _| r.equal?(raw) || r == raw }
+        hit = entries.find { |r, _| r == raw }
         return hit[1] if hit
 
         decoded = storable_decode(raw)
-        entries.unshift([raw, decoded])
+        entries.unshift([raw.dup, decoded])
         entries.pop while entries.size > 2
         decoded
       end
@@ -663,13 +666,10 @@ module ConcernsOnRails
         end
 
         # Precision-safe String (the Auditable precedent): BigDecimal#to_s("F").
+        # Bounded first: "1e5000000" would expand to a 5 MB String, and
+        # Infinity/NaN/"1_000" are not JSON-storable numbers (nil, like :float).
         def write_decimal(value)
-          return nil if value.nil?
-
-          big = value.is_a?(BigDecimal) ? value : BigDecimal(value.to_s)
-          big.to_s("F")
-        rescue ArgumentError, TypeError
-          nil
+          ConcernsOnRails::Support::NumericOperand.bounded_decimal(value)&.to_s("F")
         end
 
         def write_date(value)

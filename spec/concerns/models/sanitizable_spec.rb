@@ -292,29 +292,36 @@ describe ConcernsOnRails::Models::Sanitizable do
         end
       end
 
+      # Timing is compared within the process (size-scaled or against a
+      # same-size baseline), never against an absolute bound: those flaked
+      # under machine load.
+      def best_time_of_plain_text(payload)
+        Array.new(2) do
+          started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          expect(ConcernsOnRails::Support::HtmlSanitizers.plain_text(payload)).to eq(payload)
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        end.min
+      end
+
       # Deciding whether an "&" starts a character reference used to run a
       # full HTML parse PER ampersand: 100 KB of "&a" took ~24 s inside
-      # before_validation. It is now a static, linear-time rule.
+      # before_validation. It is now a static, linear-time rule: 10x the
+      # input costs ~10x (quadratic would be ~100x).
       it "sanitizes ampersand-heavy input in linear time" do
-        payload = "&a" * 50_000 # 100 KB
-        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        result = ConcernsOnRails::Support::HtmlSanitizers.plain_text(payload)
-        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        small = best_time_of_plain_text("&a" * 5_000)
+        large = best_time_of_plain_text("&a" * 50_000) # 100 KB
 
-        expect(result).to eq(payload)
-        expect(elapsed).to be < 1.0
+        expect(large).to be < small * 30
       end
 
       # The legacy-name alternation in the lookahead made each "&" slow even
-      # though the pass was linear: 1 MB of "&" took ~7 s.
+      # though the pass was linear: 1 MB of "&" took ~7 s, ~57x a 1 MB string
+      # without ampersands (now ~7x).
       it "sanitizes a megabyte of bare ampersands quickly" do
-        payload = "&" * 1_000_000
-        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        result = ConcernsOnRails::Support::HtmlSanitizers.plain_text(payload)
-        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        plain = best_time_of_plain_text("a" * 1_000_000)
+        ampersands = best_time_of_plain_text("&" * 1_000_000)
 
-        expect(result).to eq(payload)
-        expect(elapsed).to be < 2.0
+        expect(ampersands).to be < plain * 25
       end
 
       it "sanitize_all! stores the same plain text and repairs rows written double-escaped" do

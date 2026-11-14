@@ -12,6 +12,7 @@ require "time"
 require "concerns_on_rails/encryption"
 require "concerns_on_rails/support/encryptor"
 require "concerns_on_rails/support/time_value"
+require "concerns_on_rails/support/numeric_operand"
 
 module ConcernsOnRails
   module Models
@@ -388,7 +389,11 @@ module ConcernsOnRails
           plaintext = value == "" ? "" : read_plaintext(value)
           return nil if plaintext.nil?
 
-          @type == :datetime ? read_time(plaintext) : cast_typed(plaintext)
+          case @type
+          when :datetime then read_time(plaintext)
+          when :decimal  then read_decimal(plaintext)
+          else cast_typed(plaintext)
+          end
         end
 
         # An in-place edit of a decrypted String (`notes << "x"`, `gsub!`,
@@ -457,6 +462,14 @@ module ConcernsOnRails
           nil
         end
 
+        # Decrypted (authenticated) plaintext is trusted: no write-side bound, so
+        # a stored form of any length (a 120-digit value, "0.000...1") reads back.
+        def read_decimal(plaintext)
+          BigDecimal(plaintext)
+        rescue ArgumentError, TypeError
+          nil
+        end
+
         def non_numeric_string?(value)
           @type == :integer && value.is_a?(::String) && !NUMERIC_STRING.match?(value)
         end
@@ -483,10 +496,10 @@ module ConcernsOnRails
           end
         end
 
+        # Bounded (see NumericOperand.bounded_decimal): "1e5000000" must not
+        # become a multi-megabyte plaintext, nor Infinity/NaN a stored value.
         def to_big_decimal(value)
-          return nil if value.nil?
-
-          value.is_a?(BigDecimal) ? value : BigDecimal(value.to_s)
+          ConcernsOnRails::Support::NumericOperand.bounded_decimal(value)
         end
 
         # Gem-keyed fields stamp the configured key_id so rotation can tell old

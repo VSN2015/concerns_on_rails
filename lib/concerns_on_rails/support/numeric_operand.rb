@@ -120,6 +120,34 @@ module ConcernsOnRails
         scale&.zero? ? value.to_i : value
       end
 
+      # A finite BigDecimal whose to_s("F") stays small, or nil: the writers' cast
+      # for `:decimal` (Storable, Encryptable). Unlike BigDecimal(raw.to_s) it
+      # refuses "1e5000000" (a 5 MB String), "Infinity"/"NaN", "1_000" and a
+      # multi-MB Integer, and bounds a BigDecimal handed in directly the same way.
+      # A String may be as long as a legitimate value up to the exponent bound
+      # (1e+-MAX_EXPONENT written out, ~1,000 digits plus a long mantissa): it is the
+      # exponent check, not the length, that stops expansion. Floats keep their
+      # shortest round-trip form (0.1 + 0.2 stays 0.30000000000000004).
+      MAX_DECIMAL_LENGTH = (2 * MAX_EXPONENT) + MAX_LENGTH
+
+      def bounded_decimal(raw)
+        value = bounded_candidate(raw)
+        value if value && value.exponent.abs <= MAX_EXPONENT + 1 # BigDecimal#exponent of 1eN is N + 1
+      end
+
+      def bounded_candidate(raw)
+        return (numeric_string?(raw, MAX_DECIMAL_LENGTH) ? raw.strip.to_d : nil) if raw.is_a?(String)
+
+        BigDecimal(raw.to_s) if small_finite_number?(raw)
+      end
+
+      def small_finite_number?(raw)
+        case raw
+        when Integer then raw.bit_length <= MAX_INTEGER_BITS
+        when Float, BigDecimal then raw.finite?
+        end
+      end
+
       def decimal_value(raw)
         case raw
         when String then numeric_string?(raw) ? raw.strip.to_d : nil
@@ -134,8 +162,8 @@ module ConcernsOnRails
       # number, and has to be refused before the regexp: `match?` raises
       # ArgumentError ("invalid byte sequence in UTF-8") on one, which no
       # caller rescues — a 500 for a tampered cursor or a JSON-body operand.
-      def numeric_string?(raw)
-        return false if !raw.valid_encoding? || raw.length > MAX_LENGTH || !NUMERIC_STRING.match?(raw)
+      def numeric_string?(raw, max_length = MAX_LENGTH)
+        return false if !raw.valid_encoding? || raw.length > max_length || !NUMERIC_STRING.match?(raw)
 
         exponent = raw[EXPONENT, 1]
         exponent.nil? || exponent.to_i.abs <= MAX_EXPONENT

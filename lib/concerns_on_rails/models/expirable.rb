@@ -299,7 +299,9 @@ module ConcernsOnRails
       # against the `private` inside the class_methods block).
       def expiry_extension_base(value)
         now = Time.zone.now
-        value.nil? || value <= now ? now : value
+        # Same bound as expired?: a date column compares against today in Time.zone.
+        bound = ConcernsOnRails::Support::TimeValue.predicate_bound(self.class, self.class.expirable_field, now)
+        value.nil? || value <= bound ? now : value
       end
 
       # The unaffixed checks behind the public predicates. Internal logic and
