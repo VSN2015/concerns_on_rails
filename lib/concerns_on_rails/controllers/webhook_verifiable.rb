@@ -270,15 +270,16 @@ module ConcernsOnRails
       private
 
       # Promote the short claim to the configured replay_ttl once the action
-      # has run (the after_action half of the replay check). A 5xx means the
-      # delivery was not processed, so release the claim outright and let the
-      # provider retry immediately. Private (callbacks are dispatched with
+      # has run (the after_action half of the replay check). Only a 2xx/3xx
+      # means the delivery was processed; any other status (a 4xx "not synced
+      # yet" is retried by every provider, a 5xx is a failure) releases the
+      # claim outright and lets the provider retry immediately. Private (callbacks are dispatched with
       # send) so it is never an action method. NOTE: `skip_after_action
       # :commit_webhook_replay_claim` disables replay protection — every claim
       # is then released by guard_webhook_replay_claim.
       def commit_webhook_replay_claim
         return unless @webhook_replay_claim
-        return release_webhook_replay_claim if webhook_response_status.to_i >= 500
+        return release_webhook_replay_claim unless webhook_response_status.to_i.between?(200, 399)
 
         claim = @webhook_replay_claim
         @webhook_replay_claim = nil
