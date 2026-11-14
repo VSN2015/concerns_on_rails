@@ -46,6 +46,9 @@ module ConcernsOnRails
 
       LIKE_ESCAPE = "\\".freeze
       LIKE_SPECIAL = /[\\%_]/
+      # `mode: :all` ANDs one predicate (and, ranked, one CASE) per word of an
+      # untrusted query; past this many distinct words the rest are dropped.
+      MAX_TERMS = 32
       VALID_MODES = %i[any all].freeze
       VALID_MATCHES = %i[contains prefix exact].freeze
       # Which match tiers can be told apart under each match mode (best first).
@@ -121,7 +124,7 @@ module ConcernsOnRails
           text = Support::EdgeSpace.strip(query.to_s)
           return [] if text.empty?
 
-          searchable_mode == :all ? text.split(/[[:space:]]+/) : [text]
+          searchable_mode == :all ? text.split(/[[:space:]]+/).uniq.first(MAX_TERMS) : [text]
         end
 
         # OR the per-field LIKE predicate for a single term.
