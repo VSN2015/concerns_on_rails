@@ -67,5 +67,26 @@ describe "Filterable alias_attribute fields (PARAMS-1)" do
       expect(names(happened_at_gte: 12_345)).to eq([]) # control
       expect(names(at_gte: 12_345)).to eq([]) # bug: binds 12345, SQLite returns every row
     end
+
+    it "PARAMS-1 reads a zone-less datetime operand in the aliased column's zone" do
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :at, :happened_at, operators: true, type: :datetime
+      end
+      model.time_zone_aware_attributes = true # off by default outside a Rails app
+      skipped = model.skip_time_zone_conversion_for_attributes
+      model.skip_time_zone_conversion_for_attributes = [:happened_at]
+      pluck = lambda do |params|
+        klass.new(params: params).filtered(model.all).pluck(:name).sort
+      end
+
+      Time.use_zone("Tokyo") do
+        expect(pluck.call(happened_at_gte: "2026-01-01 05:00")).to eq(%w[ten]) # control
+        expect(pluck.call(at_gte: "2026-01-01 05:00")).to eq(%w[ten]) # bug: read in Tokyo, 9 h early
+      end
+    ensure
+      model.skip_time_zone_conversion_for_attributes = skipped
+    end
   end
 end

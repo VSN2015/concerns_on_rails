@@ -721,8 +721,10 @@ module ConcernsOnRails
         type = options[:type] || filterable_column_type(relation, field)
         return value if type.nil?
         return UNCASTABLE if filterable_non_numeric?(type, value)
+
         if options[:type] && filterable_datetime?(type)
-          return filterable_datetime_cast(value, ConcernsOnRails::Support::TimeValue.zone_aware?(relation.model, field))
+          zone_aware = ConcernsOnRails::Support::TimeValue.zone_aware?(relation.model, filterable_resolved_field(relation, field))
+          return filterable_datetime_cast(value, zone_aware)
         end
 
         cast = filterable_type_cast(type, value)
