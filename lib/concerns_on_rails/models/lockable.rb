@@ -390,20 +390,8 @@ module ConcernsOnRails
         # threshold would then raise with the counter already written.
         lockable_guard_writable!
 
-        # A lapsed lock is cleared quietly — this is a *failed* login, so
-        # firing unlock hooks ("account unlocked" notifications) would be
-        # wrong. The failure below then counts as attempt 1 of the new window.
-        # Losing the clear means a concurrent request changed the lock first:
-        # if it re-locked the account, this failure is not counted either.
-        if lock_expired? && !lockable_clear_expired_lock!
-          lockable_adopt_current_lock!
-          return lockable_current_attempts if access_locked?
-        end
-
-        unless lockable_increment_attempts!
-          # The row is locked (adopt it) or gone (the old fresh read said 0).
-          return lockable_adopt_current_lock! ? lockable_current_attempts : 0
-        end
+        # The row is locked (adopted) or gone (the old fresh read said 0).
+        return (access_locked? ? lockable_current_attempts : 0) unless lockable_count_failure!
 
         fresh = lockable_fresh_attempts_count
         lockable_sync_attempts(fresh)
@@ -572,6 +560,23 @@ module ConcernsOnRails
           end
         end
         completed
+      end
+
+      # A lapsed lock is cleared quietly — this is a *failed* login, so
+      # firing unlock hooks ("account unlocked" notifications) would be
+      # wrong. The failure then counts as attempt 1 of the new window.
+      # Losing the clear means a concurrent request changed the lock first:
+      # if it re-locked the account, this failure is not counted either.
+      # true when the failure was counted.
+      def lockable_count_failure!
+        if lock_expired? && !lockable_clear_expired_lock!
+          lockable_adopt_current_lock!
+          return false if access_locked?
+        end
+        return true if lockable_increment_attempts!
+
+        lockable_adopt_current_lock!
+        false
       end
 
       def lockable_current_attempts
