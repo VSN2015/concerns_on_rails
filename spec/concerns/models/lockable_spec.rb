@@ -968,7 +968,11 @@ describe ConcernsOnRails::Lockable do
       expect(mailed).to be_present
       expect(first.events).to eq(%i[before_lock after_lock])
 
-      expect(second.register_failed_attempt!).to eq(3)
+      # Locked in the row already: it adopts the lock (and the row's counter)
+      # and does not count.
+      expect(second.register_failed_attempt!).to eq(2)
+      expect(locker.find(id).failed_attempts).to eq(2)
+      expect(second.attempts_remaining).to eq(0)
       expect(second.events).to be_nil
       expect(second.access_locked?).to be(true)
       expect(second.unlock_token).to eq(mailed) # adopted the winner's lock, in memory too
