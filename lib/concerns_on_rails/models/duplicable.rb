@@ -242,7 +242,8 @@ module ConcernsOnRails
           when :has_one
             copy.public_send("#{name}=", duplicable_child_copy(children.first, reflection)) if children.first
           when :has_and_belongs_to_many
-            copy.public_send("#{name}=", children)
+            # Re-link only persisted records: an unsaved one belongs to the original.
+            copy.public_send("#{name}=", children.reject(&:new_record?))
           end
         end
       end
