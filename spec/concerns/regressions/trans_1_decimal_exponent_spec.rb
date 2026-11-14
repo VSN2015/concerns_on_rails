@@ -9,6 +9,7 @@ RSpec.describe "decimal exponent bound (Storable + Encryptable)" do
       create_table(:dec_rows, force: true) do |t|
         t.text :settings
         t.text :amount
+        t.string :amount_bidx
       end
     end
   end
@@ -30,7 +31,7 @@ RSpec.describe "decimal exponent bound (Storable + Encryptable)" do
       self.table_name = "dec_rows"
       include ConcernsOnRails::Models::Encryptable
 
-      encryptable :amount, type: :decimal
+      encryptable :amount, type: :decimal, blind_index: true
     end
   end
 
@@ -64,6 +65,69 @@ RSpec.describe "decimal exponent bound (Storable + Encryptable)" do
       started = clock
       expect { storable_class.where_price("1e20000000") }.to raise_error(ArgumentError, /not a valid :decimal/)
       expect(clock - started).to be < 0.2
+    end
+  end
+
+  describe "values near the bounds and Float precision (round 2)" do
+    let(:legit) { [BigDecimal("1e99"), BigDecimal("1e-99"), BigDecimal(1).div(3, 120), BigDecimal("1e999")] }
+
+    it "Storable writes and re-reads them, and keeps a Float's 17th digit" do
+      record = storable_class.new
+      legit.each do |value|
+        record.price = value
+        expect(record.price).to eq(value)
+        echo = record.settings
+        record.price = JSON.parse(echo)["price"] # writer echo of its own stored form
+        expect(record.price).to eq(value)
+      end
+      record.price = 0.1 + 0.2
+      expect(record.price).to eq(BigDecimal("0.30000000000000004"))
+    end
+
+    it "Storable refuses a multi-megabyte Integer without building it" do
+      record = storable_class.new
+      started = clock
+      record.price = 10**200_000
+      expect(record.price).to be_nil
+      expect(clock - started).to be < 0.2
+    end
+
+    it "Encryptable round-trips them, in memory and after reload" do
+      legit.each do |value|
+        record = encryptable_class.create!(amount: value)
+        expect(record.amount).to eq(value)
+        expect(record.reload.amount).to eq(value)
+        expect(encryptable_class.find_by_amount(value)).to eq(record)
+      end
+      expect(encryptable_class.create!(amount: "1e99").reload.amount).to eq(BigDecimal("1e99"))
+      expect(encryptable_class.create!(amount: "1e-99").reload.amount).to eq(BigDecimal("1e-99"))
+    end
+
+    it "Encryptable keeps a Float's 17th digit and finds it by blind index" do
+      record = encryptable_class.create!(amount: 0.1 + 0.2)
+      expect(record.reload.amount).to eq(BigDecimal("0.30000000000000004"))
+      expect(encryptable_class.find_by_amount(0.1 + 0.2)).to eq(record)
+    end
+
+    it "Encryptable where_<field> with a huge operand finds nothing, without expanding it" do
+      encryptable_class.create!(amount: "1")
+      started = clock
+      expect(encryptable_class.where_amount("1e20000000").to_a).to eq([])
+      expect(encryptable_class.find_by_amount("1e20000000")).to be_nil
+      expect(clock - started).to be < 0.5
+    end
+
+    it "reencrypt! and reencrypt_all! keep such values readable" do
+      records = legit.map { |value| encryptable_class.create!(amount: value) }
+      ConcernsOnRails.configure_encryption do |c|
+        c.key = "r" * 32
+        c.key_id = 1
+        c.previous_keys = { 0 => "k" * 32 }
+      end
+      expect(encryptable_class.find(records.first.id).reencrypt!).to be(true)
+      encryptable_class.reencrypt_all!
+      expect(records.map { |r| encryptable_class.find(r.id).amount }).to eq(legit)
+      expect(encryptable_class.find_by_amount(legit.last)).to eq(records.last)
     end
   end
 
