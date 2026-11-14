@@ -5,6 +5,7 @@ require "concerns_on_rails/support/callable"
 require "active_support/security_utils"
 require "openssl"
 require "digest"
+require "securerandom"
 
 module ConcernsOnRails
   module Controllers
@@ -308,7 +309,12 @@ module ConcernsOnRails
         return unless claim
 
         @webhook_replay_claim = nil
-        claim[:store].delete(claim[:key]) if claim[:store].respond_to?(:delete)
+        # Only a claim this request still owns: after REPLAY_CLAIM_TTL a second
+        # delivery may hold the key. shortcut: read-then-delete is not atomic,
+        # the window is one store round trip; upgrade if a store offers a CAS delete.
+        return unless claim[:store].respond_to?(:delete) && claim[:store].read(claim[:key]) == claim[:token]
+
+        claim[:store].delete(claim[:key])
       rescue StandardError => e
         webhook_log_release_failure(e)
       end
@@ -407,8 +413,9 @@ module ConcernsOnRails
         # provider's identical retries out for the whole window — and for the
         # timestamp-less schemes this targets, every retry of the same body
         # carries the same signature, so the delivery would be lost for good.
-        if store.write(key, 1, expires_in: REPLAY_CLAIM_TTL, unless_exist: true)
-          @webhook_replay_claim = { store: store, key: key, ttl: rule[:replay_ttl] }
+        token = SecureRandom.hex(8)
+        if store.write(key, token, expires_in: REPLAY_CLAIM_TTL, unless_exist: true)
+          @webhook_replay_claim = { store: store, key: key, ttl: rule[:replay_ttl], token: token }
           return false
         end
 
