@@ -303,16 +303,20 @@ module ConcernsOnRails
       # `mark_for_destruction`) is an in-memory removal: it stays out, and a
       # has_one whose target is marked has nothing to copy.
       def duplicable_merge_loaded(association, rows, trash)
-        loaded = Array.wrap(association.target)
-        unless association.loaded?
-          loaded = loaded.select do |record|
-            record.new_record? || record.changed_for_autosave? || record.marked_for_destruction?
-          end
-        end
+        loaded = duplicable_in_memory(association)
         return duplicable_loaded_one(loaded, rows, trash) unless association.reflection.collection?
 
         by_id = loaded.reject(&:new_record?).index_by(&:id)
         duplicable_live(rows.map { |row| by_id.fetch(row.id, row) } + loaded.select(&:new_record?), trash)
+      end
+
+      # The target's records that win over their rows: all of a loaded one, only
+      # the edited / new / marked ones of a partial (unloaded) one.
+      def duplicable_in_memory(association)
+        target = Array.wrap(association.target)
+        return target if association.loaded?
+
+        target.select { |record| record.new_record? || record.changed_for_autosave? || record.marked_for_destruction? }
       end
 
       def duplicable_loaded_one(loaded, rows, trash)
