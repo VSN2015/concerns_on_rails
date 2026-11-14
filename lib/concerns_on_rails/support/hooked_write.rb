@@ -54,7 +54,7 @@ module ConcernsOnRails
             completed = true
           end
         ensure
-          unless completed
+          unless completed || record.frozen?
             restore_attributes!(record, snapshot)
             restore_identity!(record, identity)
           end
@@ -62,28 +62,39 @@ module ConcernsOnRails
         completed
       end
 
-      # Runs a batch whose own transaction wraps per-record verbs. A verb that
-      # finished (HookedWrite's savepoint released) is not undone by the
+      # Runs a batch inside `klass.transaction(requires_new: true)` and puts
+      # every record in `records` back if that transaction rolls back. A verb
+      # that finished (HookedWrite's savepoint released) is not undone by the
       # batch's later rollback: Rails restores a record's state only on a full
-      # rollback, so an instance acted on earlier kept reading "soft-deleted"
-      # while its row was live again. Snapshots every record first and puts
-      # them all back if the block raises (an exception, or a Rollback the
-      # caller's transaction swallows).
-      def restoring(records)
+      # rollback or at join level <= 1, so an instance acted on earlier kept
+      # reading "soft-deleted" while its row was live again, and a purged one
+      # stayed destroyed?/frozen. Completion is marked INSIDE the transaction:
+      # an after_commit that raises after the (outermost) commit propagates out
+      # of it, and the rows ARE written then, so nothing is put back. (An
+      # ActiveRecord::Rollback is swallowed by the transaction and never
+      # reaches here; the batches raise RecordNotSaved/RecordNotDestroyed.)
+      def restoring(records, klass)
         snapshots = records.map { |record| [record, attribute_snapshot(record), identity_snapshot(record)] }
         completed = false
         begin
-          result = yield
-          completed = true
-          result
-        ensure
-          unless completed
-            snapshots.each do |record, snapshot, identity|
-              restore_attributes!(record, snapshot)
-              restore_identity!(record, identity)
-            end
+          klass.transaction(requires_new: true) do
+            result = yield
+            completed = true
+            result
           end
+        ensure
+          snapshots.each { |record, snapshot, identity| restore_snapshot!(record, snapshot, identity) } unless completed
         end
+      end
+
+      # A frozen record was destroyed (its attribute set frozen): put back only
+      # when it was not destroyed before the batch, which swaps in the
+      # snapshot's unfrozen attribute set.
+      def restore_snapshot!(record, snapshot, identity)
+        return if record.frozen? && identity[:destroyed]
+
+        restore_attributes!(record, snapshot)
+        restore_identity!(record, identity)
       end
 
       # The record's identity flags, snapshotted for a NEW record as well as a
@@ -114,8 +125,6 @@ module ConcernsOnRails
       end
 
       def restore_identity!(record, identity)
-        return if record.frozen?
-
         record.instance_variable_set(:@new_record, identity[:new_record])
         record.instance_variable_set(:@destroyed, identity[:destroyed])
         if record.instance_variable_defined?(:@previously_new_record)
@@ -186,8 +195,6 @@ module ConcernsOnRails
       # sync_with_transaction_state — and that would overwrite everything put
       # back here (identity included). It is settled first. (Gone on 6.1+.)
       def restore_attributes!(record, snapshot)
-        return if record.frozen?
-
         record.send(:sync_with_transaction_state) if record.respond_to?(:sync_with_transaction_state, true)
         record.instance_variable_set(:@attributes, snapshot[:attributes])
         record.instance_variable_set(:@mutations_from_database, nil)
@@ -196,7 +203,7 @@ module ConcernsOnRails
         record.send(:mutations_from_database).instance_variable_set(:@forced_changes, forced) if forced.present?
       end
       private_class_method :attribute_snapshot, :detach_read_values, :mutable_type?, :restore_attributes!,
-                           :identity_snapshot, :restore_identity!
+                           :identity_snapshot, :restore_identity!, :restore_snapshot!
     end
   end
 end
