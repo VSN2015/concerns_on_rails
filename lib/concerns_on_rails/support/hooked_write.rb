@@ -62,6 +62,30 @@ module ConcernsOnRails
         completed
       end
 
+      # Runs a batch whose own transaction wraps per-record verbs. A verb that
+      # finished (HookedWrite's savepoint released) is not undone by the
+      # batch's later rollback: Rails restores a record's state only on a full
+      # rollback, so an instance acted on earlier kept reading "soft-deleted"
+      # while its row was live again. Snapshots every record first and puts
+      # them all back if the block raises (an exception, or a Rollback the
+      # caller's transaction swallows).
+      def restoring(records)
+        snapshots = records.map { |record| [record, attribute_snapshot(record), identity_snapshot(record)] }
+        completed = false
+        begin
+          result = yield
+          completed = true
+          result
+        ensure
+          unless completed
+            snapshots.each do |record, snapshot, identity|
+              restore_attributes!(record, snapshot)
+              restore_identity!(record, identity)
+            end
+          end
+        end
+      end
+
       # The record's identity flags, snapshotted for a NEW record as well as a
       # stored one. Rolling the savepoint back does not reliably put them
       # back: Rails restores a record's transaction state (`@new_record`,
