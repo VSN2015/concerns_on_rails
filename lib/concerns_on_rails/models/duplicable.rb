@@ -242,9 +242,14 @@ module ConcernsOnRails
           when :has_one
             copy.public_send("#{name}=", duplicable_child_copy(children.first, reflection)) if children.first
           when :has_and_belongs_to_many
-            copy.public_send("#{name}=", children)
+            duplicable_relink(copy, name, children)
           end
         end
+      end
+
+      # Re-link only persisted records: an unsaved one belongs to the original.
+      def duplicable_relink(copy, name, children)
+        copy.public_send("#{name}=", children.reject(&:new_record?))
       end
 
       # The children to copy. Reading the association itself applied the
@@ -274,18 +279,7 @@ module ConcernsOnRails
 
         rows = ConcernsOnRails::Support::AssociationScope.unfiltered(self, name)
         rows = rows.where(trash => nil) if trash
-        return duplicable_merge_loaded(association, rows.to_a, trash) if association.loaded?
-
-        duplicable_without_marked(association, rows.to_a)
-      end
-
-      # An association that is NOT loaded can still hold in-memory records in its
-      # target — nested attributes `_destroy` pulls the addressed rows in without
-      # loading the rest. A row whose in-memory twin is marked for destruction
-      # was removed by that edit.
-      def duplicable_without_marked(association, rows)
-        marked = Array.wrap(association.target).select(&:marked_for_destruction?).map(&:id)
-        marked.empty? ? rows : rows.reject { |row| marked.include?(row.id) }
+        duplicable_merge_loaded(association, rows.to_a, trash)
       end
 
       # The soft-delete column whose trashed rows stay out of this copy, or nil.
@@ -301,17 +295,33 @@ module ConcernsOnRails
         trash || ConcernsOnRails::Support::AssociationScope.hiding_columns(association.klass).any?
       end
 
+      # An association that is NOT loaded can still hold in-memory records in its
+      # target (nested attributes pull the addressed rows in, `build` adds new
+      # ones without loading the rest), so it merges the same way — but only
+      # records carrying a pending edit replace their rows: an untouched target
+      # record (e.g. one `create!`d earlier) may hold stale columns, the row is
+      # the truth.
+      #
       # A loaded has_one's (live) target wins outright; a loaded collection's
       # records replace their rows by id, and its unsaved ones are appended. A
       # loaded record marked for destruction (nested `_destroy` /
       # `mark_for_destruction`) is an in-memory removal: it stays out, and a
       # has_one whose target is marked has nothing to copy.
       def duplicable_merge_loaded(association, rows, trash)
-        loaded = Array.wrap(association.target)
+        loaded = duplicable_in_memory(association)
         return duplicable_loaded_one(loaded, rows, trash) unless association.reflection.collection?
 
         by_id = loaded.reject(&:new_record?).index_by(&:id)
         duplicable_live(rows.map { |row| by_id.fetch(row.id, row) } + loaded.select(&:new_record?), trash)
+      end
+
+      # The target's records that win over their rows: all of a loaded one, only
+      # the edited / new / marked ones of a partial (unloaded) one.
+      def duplicable_in_memory(association)
+        target = Array.wrap(association.target)
+        return target if association.loaded?
+
+        target.select { |record| record.new_record? || record.changed_for_autosave? || record.marked_for_destruction? }
       end
 
       def duplicable_loaded_one(loaded, rows, trash)

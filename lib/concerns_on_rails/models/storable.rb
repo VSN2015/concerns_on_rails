@@ -566,13 +566,15 @@ module ConcernsOnRails
       end
 
       # Entries validated against the exact raw value; at most two per column
-      # (the current value + the `_was` value).
+      # (the current value + the `_was` value). The key is a COPY of the raw
+      # String and compared by value, so an in-place edit of the attribute
+      # String (`settings.replace(...)`) misses instead of answering stale.
       def storable_cache_fetch(entries, raw)
-        hit = entries.find { |r, _| r.equal?(raw) || r == raw }
+        hit = entries.find { |r, _| r == raw }
         return hit[1] if hit
 
         decoded = storable_decode(raw)
-        entries.unshift([raw, decoded])
+        entries.unshift([raw.dup, decoded])
         entries.pop while entries.size > 2
         decoded
       end
