@@ -17,7 +17,9 @@ describe "Lockable decides from the row, not the instance" do
     Class.new(TestModel) do
       self.table_name = "data_lk_users"
       attr_reader :events
+
       include ConcernsOnRails::Models::Lockable
+
       lockable_by max_attempts: 5
 
       def before_unlock = (@events ||= []) << :before_unlock

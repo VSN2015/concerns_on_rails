@@ -608,7 +608,8 @@ module ConcernsOnRails
       # row. true when this call took the lock.
       def lockable_claim_lock!(attributes)
         klass = self.class
-        klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id)).where(lockable_row_unlocked).update_all(attributes.dup) == 1
+        klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id))
+             .where(lockable_row_unlocked).update_all(attributes.dup) == 1
       end
 
       # The row-side "not locked right now": locked_at NULL, or (with
