@@ -355,13 +355,8 @@ module ConcernsOnRails
       # why validations and callbacks are deliberately skipped). Returns true,
       # or false when a hook vetoed the erasure with ActiveRecord::Rollback
       # (nothing is written, even inside a caller's transaction) or the UPDATE
-      # reached no row (the record was deleted since it was loaded). A stored
-      # record whose SAVED stamp is already set (and not reassigned) is a no-op
-      # returning true — no re-hash, no hooks — as anonymize_all! skips it;
-      # with `stamp: false` there is nothing to observe, so it always runs.
+      # reached no row (the record was deleted since it was loaded).
       def anonymize!
-        stamp = self.class.anonymizable_stamp
-        return true if stamp && !new_record? && anonymized? && !will_save_change_to_attribute?(stamp)
         return false unless anonymize_record!
 
         # update_columns leaves DB-serialized values (e.g. ciphertext) in the
