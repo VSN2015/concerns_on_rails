@@ -351,7 +351,7 @@ module ConcernsOnRails
         beyond = filterable_time_beyond(value)
         return apply_filter_beyond_range(relation, field, operator, beyond) if beyond
 
-        column = relation.model.arel_table[field]
+        column = filterable_arel_column(relation, field)
         relation.where(column.public_send(COMPARISONS.fetch(operator), value))
       end
 
@@ -380,7 +380,7 @@ module ConcernsOnRails
         return nil unless mapping
 
         label = filterable_enum_label(mapping, raw)
-        return relation.where(relation.model.arel_table[field].public_send(COMPARISONS.fetch(operator), label)) if label
+        return relation.where(filterable_arel_column(relation, field).public_send(COMPARISONS.fetch(operator), label)) if label
 
         subtype = filterable_enum_integer_subtype(relation, field)
         return relation.none unless subtype
@@ -432,7 +432,7 @@ module ConcernsOnRails
         when :uncastable then relation.none
         when :above, :below then apply_filter_beyond_range(relation, field, operator, operand.status)
         when :inexact then apply_filter_inexact_comparison(relation, field, operator, operand)
-        else relation.where(relation.model.arel_table[field].public_send(COMPARISONS.fetch(operator), operand.value))
+        else relation.where(filterable_arel_column(relation, field).public_send(COMPARISONS.fetch(operator), operand.value))
         end
       end
 
@@ -446,7 +446,7 @@ module ConcernsOnRails
       # PostgreSQL money column or MySQL's 65-digit DECIMAL literal limit could
       # choke on) reaches SQL.
       def apply_filter_inexact_comparison(relation, field, operator, operand)
-        column = relation.model.arel_table[field]
+        column = filterable_arel_column(relation, field)
         if %i[gt gte].include?(operator)
           relation.where(column.gt(operand.floor))
         else
@@ -477,6 +477,12 @@ module ConcernsOnRails
           name = aliases[name]
         end
         name.to_sym
+      end
+
+      # The field's Arel column, by its alias target: Arel::Table#[] only follows
+      # `alias_attribute` on newer Rails (Rails 6.0 emits the alias as a column).
+      def filterable_arel_column(relation, field)
+        relation.model.arel_table[filterable_resolved_field(relation, field)]
       end
 
       # Only equality and `in` (through the blind index, see
@@ -705,7 +711,7 @@ module ConcernsOnRails
 
         escaped = raw.to_s.gsub(LIKE_SPECIAL) { |char| "#{LIKE_ESCAPE}#{char}" }
         pattern = operator == :contains ? "%#{escaped}%" : "#{escaped}%"
-        relation.where(relation.model.arel_table[field].matches(pattern, LIKE_ESCAPE))
+        relation.where(filterable_arel_column(relation, field).matches(pattern, LIKE_ESCAPE))
       end
 
       # `type:` wins; otherwise the column's own attribute type (what
@@ -742,7 +748,7 @@ module ConcernsOnRails
         model = relation.model
         return false unless model.respond_to?(:columns_hash)
 
-        column = model.columns_hash[field.to_s]
+        column = model.columns_hash[filterable_resolved_field(relation, field).to_s]
         return false unless column
         return true if column.respond_to?(:array) && column.array
 
@@ -750,10 +756,11 @@ module ConcernsOnRails
       end
 
       # An enum attribute's label => stored-value mapping; nil for any other
-      # field.
+      # field. The three model lookups here (enum, column type, array) go through
+      # the alias target: `alias_attribute :qty, :stock` is the `stock` column.
       def filterable_enum_mapping(relation, field)
         model = relation.model
-        model.respond_to?(:defined_enums) ? model.defined_enums[field.to_s] : nil
+        model.respond_to?(:defined_enums) ? model.defined_enums[filterable_resolved_field(relation, field).to_s] : nil
       end
 
       # The label an enum operand names: the label itself, or the label that
@@ -768,9 +775,10 @@ module ConcernsOnRails
 
       def filterable_column_type(relation, field)
         model = relation.model
-        return nil unless model.respond_to?(:attribute_types) && model.attribute_types.key?(field.to_s)
+        name = filterable_resolved_field(relation, field).to_s
+        return nil unless model.respond_to?(:attribute_types) && model.attribute_types.key?(name)
 
-        model.type_for_attribute(field.to_s)
+        model.type_for_attribute(name)
       end
 
       # Numeric types are checked against the string BEFORE casting, because
