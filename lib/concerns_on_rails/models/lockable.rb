@@ -458,13 +458,20 @@ module ConcernsOnRails
       end
 
       # Successful-login path: zero the counter, leave any lock untouched,
-      # fire no hooks. (Unlocking is a separate, deliberate act.) The
-      # already-zero short-circuit saves a write per successful login.
+      # fire no hooks. (Unlocking is a separate, deliberate act.) The UPDATE
+      # is conditional on the ROW's counter being non-zero — which spares a
+      # row write per successful login without trusting the instance's copy,
+      # stale after concurrent failures. lock_version is left where it is, as
+      # update_column left it.
       def reset_failed_attempts!
         lockable_guard_persisted!("reset_failed_attempts!")
-        return true if lockable_current_attempts.zero?
-
-        update_column(self.class.lockable_attempts_field, 0)
+        lockable_guard_writable!
+        klass = self.class
+        field = klass.lockable_attempts_field
+        klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id))
+             .where(klass.arel_table[field].not_eq(0))
+             .update_all({ field => 0 }.merge(ConcernsOnRails::Support::Locking.pinned(klass)))
+        lockable_sync_columns(field => 0)
         true
       end
 
