@@ -181,9 +181,13 @@ module ConcernsOnRails
       end
 
       # `save!` refused by a callback abort (`throw :abort`) — the record may or
-      # may not carry errors, so details are attached only when it does.
+      # may not carry errors, so details are attached only when it does. The raw
+      # message can name a model class, a primary key or this gem's internals
+      # (a SoftDeletable cascade veto, a BatchOps rollback), so — like the
+      # not_found and not_destroyed handlers — it stays in the log.
       def handle_record_not_saved(error)
-        render_handled_error(:record_not_saved, message: error.message, errors: record_error_details(error), error: error)
+        render_handled_error(:record_not_saved, message: "Resource could not be saved",
+                                                errors: record_error_details(error), error: error)
       end
 
       # `destroy!` refused by a callback abort. Rails' raw message is "Failed to
