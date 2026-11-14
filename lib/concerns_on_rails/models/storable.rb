@@ -3,6 +3,7 @@ require "concerns_on_rails/core"
 require "concerns_on_rails/support/column_guard"
 require "concerns_on_rails/support/affix"
 require "concerns_on_rails/support/time_value"
+require "concerns_on_rails/support/numeric_operand"
 require "concerns_on_rails/support/native_json"
 require "active_support/core_ext/object/deep_dup"
 require "active_model/type"
@@ -663,13 +664,10 @@ module ConcernsOnRails
         end
 
         # Precision-safe String (the Auditable precedent): BigDecimal#to_s("F").
+        # Bounded first: "1e5000000" would expand to a 5 MB String, and
+        # Infinity/NaN/"1_000" are not JSON-storable numbers (nil, like :float).
         def write_decimal(value)
-          return nil if value.nil?
-
-          big = value.is_a?(BigDecimal) ? value : BigDecimal(value.to_s)
-          big.to_s("F")
-        rescue ArgumentError, TypeError
-          nil
+          ConcernsOnRails::Support::NumericOperand.bounded_decimal(value)&.to_s("F")
         end
 
         def write_date(value)
