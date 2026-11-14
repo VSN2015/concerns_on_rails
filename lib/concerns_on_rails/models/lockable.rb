@@ -450,16 +450,28 @@ module ConcernsOnRails
 
       # Clear the lock and zero the counter in one write. Fires unlock hooks.
       # Returns true, or false when a hook aborted via ActiveRecord::Rollback.
+      # Whether there is a lock to clear is read from the ROW (a locking read
+      # inside the hooks' savepoint, which also brings a stale instance's
+      # locked_at/token up to date for the hooks): an instance loaded before a
+      # concurrent lock unlocks it, one loaded before a concurrent unlock fires
+      # no hooks again. An unlocked row is a hook-free no-op.
       def unlock_access!
         lockable_guard_persisted!("unlock_access!")
         locked_field = self.class.lockable_locked_at_field
-        return true if self[locked_field].nil?
-
         attempts_field = self.class.lockable_attempts_field
         lockable_write_with_hooks({ locked_field => self[locked_field],
                                     attempts_field => self[attempts_field] }.merge(lockable_token_snapshot)) do
+          lockable_adopt_current_lock!
+          next if self[locked_field].nil?
+
+          lockable_guard_writable!
           before_unlock
-          update_columns({ locked_field => nil, attempts_field => 0 }.merge(self.class.lockable_token_attributes(nil)))
+          cleared = { locked_field => nil, attempts_field => 0 }.merge(self.class.lockable_token_attributes(nil))
+          # Not update_columns: under optimistic locking it adds `AND lock_version = <instance's>`,
+          # which a stale instance misses — nothing written, hooks fired, true returned.
+          self.class.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(self.class, id))
+              .update_all(cleared.merge(ConcernsOnRails::Support::Locking.pinned(self.class)))
+          lockable_sync_columns(cleared)
           after_unlock
         end
       end
