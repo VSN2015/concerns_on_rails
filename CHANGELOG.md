@@ -84,6 +84,8 @@ claims). Read **Upgrading** first.
 - Found by the 2026-11-13 audit of 1.35.2 (`docs/agent-work/audits/2026-11-13-v1.35.2/`). One further finding
   (DATA-S, `reencrypt_all!` stopping at an undecryptable row under `raise_on_decrypt_error`) is intended fail-loud
   behaviour and was left as is.
+- Sanitizable's two timing specs compare in-process ratios (10x input vs a same-size baseline) instead of absolute
+  seconds, so they no longer flake under machine load. (#206)
 - README test-suite count updated to 3,937 examples on the default Rails line (3,868 on Rails 6.0).
 
 ## 1.35.2 (2026-11-13)
