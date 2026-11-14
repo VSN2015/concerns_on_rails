@@ -12,6 +12,7 @@ require "time"
 require "concerns_on_rails/encryption"
 require "concerns_on_rails/support/encryptor"
 require "concerns_on_rails/support/time_value"
+require "concerns_on_rails/support/numeric_operand"
 
 module ConcernsOnRails
   module Models
@@ -483,10 +484,10 @@ module ConcernsOnRails
           end
         end
 
+        # Bounded (see NumericOperand.bounded_decimal): "1e5000000" must not
+        # become a multi-megabyte plaintext, nor Infinity/NaN a stored value.
         def to_big_decimal(value)
-          return nil if value.nil?
-
-          value.is_a?(BigDecimal) ? value : BigDecimal(value.to_s)
+          ConcernsOnRails::Support::NumericOperand.bounded_decimal(value)
         end
 
         # Gem-keyed fields stamp the configured key_id so rotation can tell old

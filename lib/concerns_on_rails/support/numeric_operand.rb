@@ -120,6 +120,15 @@ module ConcernsOnRails
         scale&.zero? ? value.to_i : value
       end
 
+      # A finite BigDecimal whose to_s("F") stays small (a written exponent <= MAX_EXPONENT),
+      # or nil: the writers' cast for `:decimal` (Storable, Encryptable). Unlike
+      # BigDecimal(raw.to_s) it refuses "1e5000000" (a 5 MB String), "Infinity"/"NaN"
+      # and "1_000", and bounds a BigDecimal handed in directly the same way.
+      def bounded_decimal(raw)
+        value = decimal_value(raw)
+        value if value && value.exponent.abs <= MAX_EXPONENT + 1 # BigDecimal#exponent of 1eN is N + 1
+      end
+
       def decimal_value(raw)
         case raw
         when String then numeric_string?(raw) ? raw.strip.to_d : nil
