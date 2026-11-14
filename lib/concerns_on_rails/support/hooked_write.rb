@@ -125,6 +125,9 @@ module ConcernsOnRails
       end
 
       def restore_identity!(record, identity)
+        # frozen? also forces Rails 6.0's lazy transaction-state sync, which must run before the flags are put back.
+        return if record.frozen? && identity[:destroyed]
+
         record.instance_variable_set(:@new_record, identity[:new_record])
         record.instance_variable_set(:@destroyed, identity[:destroyed])
         if record.instance_variable_defined?(:@previously_new_record)
