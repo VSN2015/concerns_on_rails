@@ -527,7 +527,8 @@ module ConcernsOnRails
       def resolved_country
         column = self.class.addressable_fields[:country]
         value = column && self[column]
-        # Memoized per raw country value — normalization plus the postal and
+        # Memoized per raw country value (a copy, so an in-place edit of the
+        # attribute String misses) — normalization plus the postal and
         # state validators each need it, which used to mean recomputing the
         # strip/upcase/name-mapping three times per validation cycle.
         cached = @_addressable_resolved_country
@@ -540,7 +541,7 @@ module ConcernsOnRails
             candidate = canonical_country_code(value)
             ConcernsOnRails::Support::AddressData.valid_country?(candidate) ? candidate : nil
           end
-        @_addressable_resolved_country = [value, code] unless frozen?
+        @_addressable_resolved_country = [value.dup, code] unless frozen?
         code
       end
 
