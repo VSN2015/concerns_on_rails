@@ -1,5 +1,17 @@
 <!-- CHANGELOG.md -->
 
+## 1.36.1 (2026-11-14)
+
+A documentation release with no change to the gem's code. Nothing to upgrade.
+
+### Docs
+
+- **WebhookVerifiable `replay:`:** spells out the trade-off of 1.36.0's HTTP-3 change. The claim is released whenever
+  the action answers outside 2xx/3xx, so a handler that writes and THEN answers a 4xx (its own 409/410, say) runs again
+  on the provider's retry or on a replay of a captured delivery. Answer 2xx once the delivery has been acted on, or
+  make the handler idempotent (a unique index on the provider's delivery/event id). The raise path (`rescue_from`
+  rendering a 4xx) already behaved this way before 1.36.0. README and docs/concerns/webhook-verifiable.md updated.
+
 ## 1.36.0 (2026-11-14)
 
 A correctness and hardening release following the 2026-11-13 audit of 1.35.2. It fixes 17 findings; several change
