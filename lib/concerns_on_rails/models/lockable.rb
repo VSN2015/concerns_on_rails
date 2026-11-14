@@ -377,7 +377,10 @@ module ConcernsOnRails
       # threshold. Returns the fresh post-increment count (handy for
       # "N attempts remaining" messaging); check access_locked? for the
       # lock decision. While locked it neither counts nor re-locks — that
-      # branch returns the current in-memory count unchanged.
+      # branch returns the current in-memory count unchanged. "Locked" is
+      # decided by the ROW: the increment is conditional on the row not being
+      # locked, so an instance loaded before a concurrent lock adopts that
+      # lock instead of counting on top of it.
       def register_failed_attempt!
         lockable_guard_persisted!("register_failed_attempt!")
         return lockable_current_attempts if access_locked?
@@ -397,7 +400,11 @@ module ConcernsOnRails
           return lockable_current_attempts if access_locked?
         end
 
-        lockable_increment_attempts!
+        unless lockable_increment_attempts!
+          # The row is locked (adopt it) or gone (the old fresh read said 0).
+          return lockable_adopt_current_lock! ? lockable_current_attempts : 0
+        end
+
         fresh = lockable_fresh_attempts_count
         lockable_sync_attempts(fresh)
 
@@ -589,10 +596,16 @@ module ConcernsOnRails
       # row. true when this call took the lock.
       def lockable_claim_lock!(attributes)
         klass = self.class
+        klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id)).where(lockable_row_unlocked).update_all(attributes.dup) == 1
+      end
+
+      # The row-side "not locked right now": locked_at NULL, or (with
+      # unlock_in) lapsed — the same boundary as lock_expired?.
+      def lockable_row_unlocked
+        klass = self.class
         column = klass.arel_table[klass.lockable_locked_at_field]
         unlocked = column.eq(nil)
-        unlocked = unlocked.or(column.lteq(Time.zone.now - klass.lockable_unlock_in)) if klass.lockable_unlock_in
-        klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id)).where(unlocked).update_all(attributes.dup) == 1
+        klass.lockable_unlock_in ? unlocked.or(column.lteq(Time.zone.now - klass.lockable_unlock_in)) : unlocked
       end
 
       # Mirror a raw write into the in-memory attributes without leaving them
@@ -644,12 +657,18 @@ module ConcernsOnRails
         field ? { field => self[field] } : {}
       end
 
-      # The SQL-side `COALESCE(attempts, 0) + 1`. The class-level
-      # update_counters goes through update_all, which bumps lock_version in
-      # the row under optimistic locking — mirrored here, as increment! does.
+      # The SQL-side `COALESCE(attempts, 0) + 1`, applied only while the row
+      # is not locked in the database. update_counters goes through
+      # update_all, which bumps lock_version in the row under optimistic
+      # locking — mirrored here, as increment! does. true when it counted.
       def lockable_increment_attempts!
-        affected = self.class.update_counters(id, self.class.lockable_attempts_field => 1)
-        ConcernsOnRails::Support::Locking.mirror_bump!(self) if affected.positive?
+        klass = self.class
+        affected = klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id))
+                        .where(lockable_row_unlocked).update_counters(klass.lockable_attempts_field => 1)
+        return false unless affected.positive?
+
+        ConcernsOnRails::Support::Locking.mirror_bump!(self)
+        true
       end
 
       # Read the post-increment count back. unscoped, so a coexisting
