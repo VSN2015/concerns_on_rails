@@ -1,5 +1,91 @@
 <!-- CHANGELOG.md -->
 
+## 1.36.0 (2026-11-14)
+
+A correctness and hardening release following the 2026-11-13 audit of 1.35.2. It fixes 17 findings; several change
+behaviour at the edges (oversized decimals, hostile search input, stale-instance Lockable writes, webhook replay
+claims). Read **Upgrading** first.
+
+### Upgrading
+
+- [ ] **Storable / Encryptable `type: :decimal`:** a String over 2,100 characters or with a written exponent beyond
+  +-1000, an Integer past about 1,000 digits, and `"Infinity"`/`"NaN"`/`"1_000"` now cast to `nil` (Storable used to
+  store them as strings). `where_<key>` raises its usual "not a valid :decimal value" ArgumentError for them. A
+  BigDecimal handed in directly is bounded the same way. Stored data still reads as before; a Float keeps its shortest
+  round-trip form, so stored values and blind-index digests are unchanged. Known limit: a BigDecimal with about 2,100+
+  significant digits is stored, but its String echo through the writer reads `nil`. (TRANS-1)
+- [ ] **Searchable `mode: :all`:** only the first `Searchable::MAX_TERMS` (32) distinct words of a query are used;
+  repeats are dropped and later words are ignored (they used to each have to match). `:any` is unchanged. (TRANS-2)
+- [ ] **Filterable on an `alias_attribute` field:** filters that were coerced loosely now fail closed like the real
+  column (`?qty=5.5` on an aliased integer column was `stock = 5`). (PARAMS-1)
+- [ ] **ErrorHandleable:** a `record_not_saved` 422 renders "Resource could not be saved" instead of the exception's
+  raw message; read `details` (the record's `errors.full_messages`). Override `handle_record_not_saved` for the raw
+  text. (HTTP-1)
+- [ ] **Throttleable:** `throttled_response` raises when there is neither a response object nor a `render_error`,
+  instead of returning nil and letting the throttled action run. (HTTP-2)
+- [ ] **WebhookVerifiable `replay:`:** the claim is promoted to `replay_ttl:` only after a 2xx/3xx; a delivery
+  answered with any other status no longer counts as seen. A custom replay store now receives a random hex token
+  (not `1`) as the short-claim value, and the release deletes the claim only while it still holds that token.
+  (HTTP-3, HTTP-4)
+- [ ] **Lockable decides from the row, not the instance:** `reset_failed_attempts!` always issues one conditional
+  UPDATE and raises on a `readonly!`/destroyed record even when the counter is 0; `unlock_access!` fires
+  `before_unlock`/`after_unlock` only when the row was locked (whatever the instance says) and writes with an
+  `update_all` rather than `update_columns`; `register_failed_attempt!` on an instance that went stale behind a
+  concurrent lock adopts that lock and counter instead of incrementing (it returns the instance's own count), and
+  one whose row lock has lapsed clears it and starts a new window at 1. (DATA-1, DATA-2, DATA-3)
+- [ ] **Duplicable:** pending nested-attributes edits on an unloaded association now win over the stored rows (an
+  edited child is copied with its new values, a built child is copied), and a HABTM copy re-links only persisted
+  records. (GRAPH-1)
+- **Not a change, documented:** `anonymize!` is not idempotent by design: it always re-applies every rule (a `:hash`
+  pseudonym is re-hashed and hooks fire again); guard repeated jobs yourself (e.g. skip `anonymized?` records).
+  `reposition!` renumbers only the rows its relation shows; rows hidden by a default scope (SoftDeletable trash) keep
+  their positions and can collide once restored.
+
+### Fixed
+
+- **Storable / Encryptable: `type: :decimal` writers expanded a short exponent string into megabytes.**
+  `"1e5000000"` stored a 5 MB value (Storable) or wrote a 6.6 MB ciphertext (Encryptable), and
+  `where_<decimal key>("1e20000000")` took about 2.5 s. Both now cast through `Support::NumericOperand.bounded_decimal`.
+  (TRANS-1, including Encryptable)
+- **SoftDeletable: a rolled-back association or loaded-relation `destroy_all` left the caller's instances changed.**
+  Records soft-deleted earlier in the call stayed `deleted?` while their row was live, so a retry `soft_delete!` wrote
+  nothing. `Support::HookedWrite.restoring(records, klass)` now restores attributes, dirty tracking and identity (also
+  a frozen purged instance). (STATE-1)
+- **Searchable: `mode: :all` built one clause per word of an unbounded query.** A ~5 KB query hit SQLite's
+  "Expression tree is too large" and a ranked one built a CASE per word. Words are deduplicated and capped at 32.
+  (TRANS-2)
+- **Filterable: an `alias_attribute` field skipped the enum / column-type / array lookups and Arel columns.**
+  Numeric exactness, enum labels, date/time checks and the LIKE text-only guard now apply as on the real column; operator
+  filters on an aliased column no longer fail with `no such column: <alias>` on Rails 6.0. (PARAMS-1)
+- **ErrorHandleable: `RecordNotSaved`'s raw message was rendered to clients.** It could name a model class, a primary
+  key or the gem's own module path (SoftDeletable cascade veto, BatchOps, ContextualDestroy). (HTTP-1)
+- **Throttleable: failed open when the 429 could not be rendered.** (HTTP-2)
+- **WebhookVerifiable: a 404/422 "not synced yet" answer, which providers retry, consumed the replay claim.** The retry
+  then got 409 `webhook_replayed` for the full TTL. (HTTP-3)
+- **WebhookVerifiable: a slow first request could delete a second request's replay claim.** (HTTP-4)
+- **Lockable: `reset_failed_attempts!` decided from the instance's stale counter.** A successful login after
+  concurrent failures left the row at 3. (DATA-1)
+- **Lockable: `register_failed_attempt!` on an instance loaded before a concurrent lock kept counting.** (DATA-2)
+- **Lockable: `unlock_access!` trusted the instance.** An instance loaded before a concurrent lock did not unlock it,
+  one loaded before a concurrent unlock fired the hooks again, and under optimistic locking a stale `lock_version`
+  made it write nothing while reporting success. (DATA-3)
+- **Expirable: `extend_expiry!` on a `date` expiry column lost a day in a zone behind UTC.** It compared a Date to a
+  TimeWithZone (UTC midnight); it now compares against today in `Time.zone`, as `expired?` does. (STATE-2)
+- **Duplicable: an UNLOADED association's children were copied from the DB rows, honouring only `_destroy`.** A child
+  edited through nested attributes kept its old values and a built child was dropped. A HABTM copy also handed an
+  unsaved tag built on the original to the copy, which inserted it and stole it from the original on its next
+  `save!`. (GRAPH-1)
+- **Storable / Addressable: decode and resolved-country memos were keyed by the raw attribute String object.** An
+  in-place edit (`record.settings.replace(...)`, `record.country.replace(...)`) returned the stale value. Both now key
+  by a copy compared by value. (TRANS-S2)
+
+### Internal
+
+- Found by the 2026-11-13 audit of 1.35.2 (`docs/agent-work/audits/2026-11-13-v1.35.2/`). One further finding
+  (DATA-S, `reencrypt_all!` stopping at an undecryptable row under `raise_on_decrypt_error`) is intended fail-loud
+  behaviour and was left as is.
+- README test-suite count updated to 3,937 examples on the default Rails line (3,868 on Rails 6.0).
+
 ## 1.35.2 (2026-11-13)
 
 A test-coverage release with no change to the gem's behaviour. Nothing to upgrade.

@@ -148,7 +148,7 @@ across all 43 concerns — press <kbd>/</kbd> and type.
 - **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured columns exist and raises `ArgumentError` early — listing *every* missing column at once, with one ready-to-paste `rails generate migration` command that adds them all
 - **Composable** — concerns are independent; mix and match per model
-- **Tested like an app, not a snippet** — **3,870 RSpec examples** run against a real database on every CI build
+- **Tested like an app, not a snippet** — **3,937 RSpec examples** run against a real database on every CI build
 - **Documented twice** — everything in this README also lives as a per-concern page on the [docs site](https://vsn2015.github.io/concerns_on_rails), searchable and deep-linkable
 
 ---
@@ -365,7 +365,7 @@ sortable_by :position, add_new_at: :top          # new rows insert at the top (a
 **Notes**
 - The configured field must exist as a column; a direction other than `:asc` / `:desc` raises at declaration.
 - `scope:` can't be an [Encryptable](#-encryptable) column (a Symbol — resolved as acts_as_list does, so `scope: :list` means `list_id` or the association's foreign key — an Array entry or a fixed-value Hash key): acts_as_list's scope query would compare ciphertext, match no row and leave every record alone in its list (each new one at position 1, `move_*` a no-op), so the declaration raises `ArgumentError`, in either order. A String SQL scope is not inspected.
-- `reposition!` runs inside the current relation (`Task.where(list_id: 1)` — the same set acts_as_list's `scope:` would use), rejects ids outside it and duplicates before writing anything, coerces String ids from params, and on a descending list gives the first id the highest value. It bypasses acts_as_list callbacks by design (one `update_all`, no per-row shifting). On a composite primary key (Rails 7.1+) the ids are `[shop_id, id]` tuples (a record is accepted too) and each row is written with its own UPDATE inside the transaction; a malformed tuple raises `ArgumentError` before any write.
+- `reposition!` runs inside the current relation (`Task.where(list_id: 1)` — the same set acts_as_list's `scope:` would use), rejects ids outside it and duplicates before writing anything, coerces String ids from params, and on a descending list gives the first id the highest value. It bypasses acts_as_list callbacks by design (one `update_all`, no per-row shifting). On a composite primary key (Rails 7.1+) the ids are `[shop_id, id]` tuples (a record is accepted too) and each row is written with its own UPDATE inside the transaction; a malformed tuple raises `ArgumentError` before any write. It renumbers only the rows its relation shows: rows a default scope hides (SoftDeletable trash) keep their positions and can collide once restored.
 
 ---
 
@@ -1027,7 +1027,7 @@ Article.search("foo").where(state: 1)  # chainable like any scope
 
 ```ruby
 # mode: :any (default) — any term in any field matches (OR)
-# mode: :all           — every whitespace-separated term must match somewhere (AND per term, OR across fields)
+# mode: :all           — every whitespace-separated term must match somewhere (AND per term, OR across fields; repeats dropped, only the first 32 distinct words used)
 searchable_by :title, :body, mode: :all
 Article.search("ruby framework")  # title OR body must contain "ruby" AND "framework"
 
@@ -1694,16 +1694,16 @@ User.unlock_by_token(params[:token])   # constant-time lookup; unlocks once (hoo
 `unlock_expired` clears `locked_at` and zeroes the attempts counter on every row whose
 `locked_at + unlock_in` has passed, exactly as `unlock_access!` does — returns the Integer
 count, runs in a transaction. Returns `0` without querying when `unlock_in` is `nil` (manual
-unlock only). Because `unlock_access!` persists via `update_columns` (which already skips
-validations), the single-`UPDATE` fast path and the per-record path are equivalent here —
+unlock only). Because `unlock_access!` persists via an `update_all` on its row (no validations,
+no callbacks), the single-`UPDATE` fast path and the per-record path are equivalent here —
 unlike Publishable/Expirable/Activatable, this one has no validators gate. It does have the STI
 rule: on an STI table `unlock_expired` always streams per record, so a subclass's `after_unlock` and `lockable_by` columns apply to its rows.
 
 **Notes**
-- The increment is SQL-side (`COALESCE(attempts, 0) + 1` via `update_counters`), so concurrent failures never lose updates and a NULL counter needs no column default; a locked account stops counting.
+- The increment is SQL-side (`COALESCE(attempts, 0) + 1` via `update_counters`), so concurrent failures never lose updates and a NULL counter needs no column default; a locked account stops counting (decided from the row: an instance loaded before a concurrent lock adopts it).
 - The lock itself is a conditional `UPDATE` (only while the row is unlocked), so concurrent failures crossing the threshold lock once: the loser adopts the existing lock and unlock token and fires no hooks.
 - Expiry is **lazy**: readers and scopes treat a stale lock as unlocked but never write. The column is cleared by the next `unlock_access!` or failed attempt (quietly there — no unlock hooks fire from a failed login).
-- `lock_access!` persists via one conditional `UPDATE` (only while the row is unlocked in the database — a concurrent loser adopts the winner's lock and fires no hooks) and `unlock_access!` via `update_columns` — validations and AR callbacks deliberately bypassed so an otherwise-invalid record can still be locked (this also skips `updated_at`/`Auditable`). The `before/after_lock`, `before/after_unlock` hooks run in a transaction; `after_lock` is the place for the "account locked" email.
+- `lock_access!` persists via one conditional `UPDATE` (only while the row is unlocked in the database — a concurrent loser adopts the winner's lock and fires no hooks) and `unlock_access!` via an `update_all` keyed on the primary key (the row decides whether there is a lock to clear; `lock_version` is left alone) — validations and AR callbacks deliberately bypassed so an otherwise-invalid record can still be locked (this also skips `updated_at`/`Auditable`). The `before/after_lock`, `before/after_unlock` hooks run in a transaction; `after_lock` is the place for the "account locked" email.
 - Optimistic locking: the raw writes (the increment, the lock claim, the lapsed-lock reset, the unlock-token claim) bump `lock_version` in SQL and mirror the bump into the instance as Rails' `increment!` does, so the same instance — and the record `unlock_by_token` returns — saves afterwards without `StaleObjectError`.
 - Reach for Devise's `lockable` when you need its unlock emails or per-strategy unlocks (the `unlock_token:` option covers a self-service unlock link; sending it is up to your `after_lock`).
 
@@ -1780,6 +1780,7 @@ Account.where_theme(nil)         # unset key, explicit null, or NULL column
 
 **Notes**
 - Works on a plain `text` column (JSON encoded/decoded internally), a native `json`/`jsonb` column, or a column the host app already `serialize`d — detected automatically. `serialize` itself is never used, so the Rails 7.1 API drift is irrelevant.
+- `:decimal` writes (and Encryptable's `type: :decimal`) cast to `nil` when oversized (over 2,100 characters / exponent beyond +-1000), non-finite (`Infinity`/`NaN`) or underscore-grouped (`"1_000"`).
 - nil vs unset: a written `nil` (explicit JSON null) reads back as `nil` and does **not** fall back to the default; `reset_<key>` removes the key so the default applies again. `:decimal` is stored as a precision-safe string, `:date`/`:datetime` as ISO8601 (datetime in UTC at microsecond precision).
 - A `:datetime` key behaves like a datetime column on the same model. With `time_zone_aware_attributes` on (every Rails app), a zone-less String (a `datetime-local` form value) is wall-clock time in `Time.zone`, a `Date` is midnight there, and the reader returns an `ActiveSupport::TimeWithZone` in the current `Time.zone`. Without it, both follow `ActiveRecord.default_timezone`. `where_<key>` parses its argument the same way, a `datetime_select` value is wall-clock time in `Time.zone`, and a `default:` reads back as the same value stored would. The stored UTC form is unchanged, so existing rows read back as the same instant.
 - Writing one key dirties (and saves) the **whole column** — concurrent writers to different keys are last-write-wins on the hash. Undeclared keys are preserved. `:json` readers return a dup: reassign, don't mutate in place.
@@ -1901,6 +1902,7 @@ User.where(...).anonymize_all!     # batch; returns the count, skips stamped rec
 - Deliberately `update_columns`: erasure is never blocked by validations and never runs callbacks that could copy old values elsewhere. Values still serialize through the attribute types, so an `encryptable` field stores a fresh ciphertext envelope — never plaintext.
 - Optimistic locking: with a `lock_version` column the single UPDATE goes through `update_all`, which bumps `lock_version` in SQL (the row's value + 1). An edit form loaded before the erasure then raises `StaleObjectError` instead of writing the personal data back, and a stale anonymizing instance still erases.
 - `before_anonymize`/`after_anonymize` hooks run inside the write's own savepoint; the record reloads afterwards (erasure is terminal for the instance). A hook that raises, or vetoes with `raise ActiveRecord::Rollback`, undoes the erasure and restores the in-memory values. `anonymize!` then returns `false`, even inside your own transaction.
+- `anonymize!` is **not idempotent by design**: it always re-applies every rule (a `:hash` pseudonym is re-hashed and hooks fire again); guard repeated jobs yourself (e.g. skip `anonymized?` records).
 - `anonymize_all!` on the model itself (`User.anonymize_all!`) also erases the rows the gem's own default scopes hide — [SoftDeletable](#-softdeletable)'s trash and Publishable's drafts under `default_scope: true` — since a soft-deleted account is the typical erasure subject; your own default scopes (a tenant, a discriminator) still apply. On a relation (`User.where(account_id: 1).anonymize_all!`, an association, a `scoping` block) it erases exactly that relation, default scope included like any other chain; start from `with_deleted`/`unscoped` to include hidden rows in a subset.
 - `anonymize_all!` makes as much progress as it can. Each record is erased in its own savepoint, so a record whose hook vetoes (for example, one under a legal hold) is skipped and the others are still erased. The return value counts only the records actually erased. A hook that *raises* an exception is still an error: it propagates and rolls the batch back.
 - Never blocked by crypto state: `:nullify` reads nothing, `:redact`/`:email`/`:random_hex` only check presence (from the stored ciphertext for an encrypted field — no decryption), and `:hash`/callables write a fresh random 64-hex value (cast through the field's type) when an encrypted value cannot be decrypted — random per row, so unique indexes survive — and one bad row never rolls back `anonymize_all!`.
@@ -1940,7 +1942,7 @@ copy = invoice.duplicate!(only: [])                     # shallow copy — attri
 - The macro is optional — bare `include` gives `duplicate`/`duplicate!` with the auto resets.
 - `only:` / `except:` on `duplicate` / `duplicate!` pick which of the declared associations this particular copy carries ("Duplicate with line items?" checkbox); names outside the allow-list raise. They are reserved keys — pass overrides for attributes literally named `only`/`except` as a braced Hash.
 - Override `on_duplicate(copy)` for custom tweaks; it receives the unsaved copy last.
-- A child (or has_one target) marked for destruction in memory (nested attributes `_destroy`, `mark_for_destruction`) is not copied, so a "save as copy" flow does not resurrect a just-removed child.
+- A child (or has_one target) marked for destruction in memory (nested attributes `_destroy`, `mark_for_destruction`) is not copied, so a "save as copy" flow does not resurrect a just-removed child. Pending nested-attributes edits win over the stored rows, loaded or not (an edited child is copied with its new values, a child added via `build` is copied), and a HABTM copy re-links only persisted records.
 - Reach for [`amoeba`](https://github.com/amoeba-rb/amoeba) when you need per-attribute regex/prepend rules or belongs_to graph copying.
 
 ---
@@ -2305,7 +2307,7 @@ end
 | `parameter_missing`          | `ActionController::ParameterMissing`           | 400    | —                            |
 | `record_invalid`             | `ActiveRecord::RecordInvalid`                  | 422    | `errors.full_messages`       |
 | `validation_error`           | `ActiveModel::ValidationError`                 | 422    | `model.errors.full_messages` |
-| `record_not_saved`           | `ActiveRecord::RecordNotSaved`                 | 422    | record errors, if any        |
+| `record_not_saved`           | `ActiveRecord::RecordNotSaved`                 | 422    | record errors, if any (generic message "Resource could not be saved") |
 | `record_not_destroyed`       | `ActiveRecord::RecordNotDestroyed`             | 422    | record errors, if any (message is the generic "Resource could not be deleted") |
 | `stale_object`               | `ActiveRecord::StaleObjectError`               | 409    | —                            |
 | `record_not_unique`          | `ActiveRecord::RecordNotUnique`                | 409    | —                            |
@@ -2655,7 +2657,7 @@ end
 **Notes**
 - Comparison is constant-time and the attacker-controlled header is **never decoded** — garbage (including invalid UTF-8 bytes) just fails with 401, it cannot raise.
 - A secret that resolves **blank at request time raises `ArgumentError`** — a misconfigured endpoint should page you, not 401 into the provider's silent retry loop.
-- **Replay protection** (`replay:`): GitHub, Shopify and plain-HMAC signatures carry no timestamp, so a captured delivery verifies forever. After a signature verifies, a SHA256 of what identifies the delivery — the signature header, or for Stripe the signed `"#{t}.#{body}"` payload, since unknown `v0=` keys and stray whitespace let a captured Stripe header be mutated without invalidating it — is written to the store with `unless_exist:` (atomic — memcached `add` / Redis `SET NX` via `Rails.cache`); a second delivery with the same signature within `replay_ttl:` is rejected with **409 `webhook_replayed`**. Forged traffic never consumes a slot; the key is scoped per controller action. The store must answer `#write(key, value, expires_in:, unless_exist:)` and `#read(key)` (`#delete(key)` is optional but recommended) — `Rails.cache` does. The marker is a short 60-second claim until the action finishes, then promoted to `replay_ttl:` (an `after_action`). When the delivery was **not** processed the claim is released at once so the provider's retry (identical body, identical signature) gets through: a handler that 5xxs, one that raises (even when `rescue_from` renders a 4xx), and a later `before_action` that halts — the last two skip every `after_action`, so an `around_action` (`guard_webhook_replay_claim`) releases whatever claim is still pending. Without `#delete` — or if `#delete` raises, which is logged and never masks the original outcome — the 60-second claim simply expires. `skip_after_action :commit_webhook_replay_claim` disables replay protection (every claim is then released). If the store is unreachable the check fails **open**: Rails' Redis and memcached stores return false from `#write` on a connection error, and rejecting every inbound delivery during a cache blip would be worse than accepting a rare duplicate. A per-process `MemoryStore` gives no protection across workers. Stripe's own retries re-sign with a new `t=`, so they pass; a manual GitHub redelivery has the identical signature and is treated as a replay — override `webhook_verification_failed` if you'd rather answer 200.
+- **Replay protection** (`replay:`): GitHub, Shopify and plain-HMAC signatures carry no timestamp, so a captured delivery verifies forever. After a signature verifies, a SHA256 of what identifies the delivery — the signature header, or for Stripe the signed `"#{t}.#{body}"` payload, since unknown `v0=` keys and stray whitespace let a captured Stripe header be mutated without invalidating it — is written to the store with `unless_exist:` (atomic — memcached `add` / Redis `SET NX` via `Rails.cache`); a second delivery with the same signature within `replay_ttl:` is rejected with **409 `webhook_replayed`**. Forged traffic never consumes a slot; the key is scoped per controller action. The store must answer `#write(key, value, expires_in:, unless_exist:)` and `#read(key)` (`#delete(key)` is optional but recommended) — `Rails.cache` does. The marker is a short 60-second claim until the action finishes, then promoted to `replay_ttl:` (an `after_action`). When the delivery was **not** processed the claim is released at once so the provider's retry (identical body, identical signature) gets through: a handler that answers anything outside 2xx/3xx (the claim is promoted only after a 2xx/3xx), one that raises (even when `rescue_from` renders a 4xx), and a later `before_action` that halts — the last two skip every `after_action`, so an `around_action` (`guard_webhook_replay_claim`) releases whatever claim is still pending. Without `#delete` — or if `#delete` raises, which is logged and never masks the original outcome — the 60-second claim simply expires. `skip_after_action :commit_webhook_replay_claim` disables replay protection (every claim is then released). If the store is unreachable the check fails **open**: Rails' Redis and memcached stores return false from `#write` on a connection error, and rejecting every inbound delivery during a cache blip would be worse than accepting a rare duplicate. A per-process `MemoryStore` gives no protection across workers. Stripe's own retries re-sign with a new `t=`, so they pass; a manual GitHub redelivery has the identical signature and is treated as a replay — override `webhook_verification_failed` if you'd rather answer 200.
 - Failure codes: `webhook_signature_missing` / `webhook_signature_invalid` / `webhook_timestamp_stale` → 401; `webhook_signature_malformed` (unparseable Stripe header) → 400; `webhook_replayed` → 409. With `Respondable`, bodies delegate to `render_error`; override `webhook_verification_failed` to customize.
 - Declare **before** `Idempotentable` (a 401 cached by its around filter would be replayed) and before `Throttleable` (forged traffic shouldn't burn rate budget). Webhook endpoints also need `skip_before_action :verify_authenticity_token`.
 - In tests: `skip_before_action :verify_webhook_signature!`, or sign payloads for real with `OpenSSL::HMAC`. After a pass, `webhook_verified?` is true.
@@ -2871,9 +2873,9 @@ Point your agent at `llms.txt` for an overview, or paste a single concern's `.md
 
 ```sh
 bundle install                                  # install dev dependencies
-bundle exec rspec                               # run the test suite (3,870 examples)
+bundle exec rspec                               # run the test suite (3,937 examples)
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.35.2.gem      # install locally
+gem install ./concerns_on_rails-1.36.0.gem      # install locally
 
 # Preview the docs site locally (GitHub Pages serves docs/ as-is):
 cd docs && python3 -m http.server 8000          # → http://localhost:8000

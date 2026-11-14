@@ -64,7 +64,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   column changes keeps a slug the new scope has free and rebuilds one that scope already holds (live or, with `history: true`, another record's history). With `history: true` friendly_id's own history finder is not scope-aware: a mover's stale history row can still match the old slug in the new scope's relation.
 - **`Sortable`** — wraps `acts_as_list`; `default_scope` orders by the configured
   field/direction. `sortable_by :position` / `position: :desc`; `scope:` (an `encryptable`
-  column is refused, either order), `add_new_at:`, `use_acts_as_list: false`; `reposition!` also works on a composite primary key (`[shop_id, id]` tuples, one UPDATE per row).
+  column is refused, either order), `add_new_at:`, `use_acts_as_list: false`; `reposition!` also works on a composite primary key (`[shop_id, id]` tuples, one UPDATE per row); it renumbers only the rows its relation shows, so rows a default scope hides (SoftDeletable trash) keep their positions and can collide once restored.
 - **`Publishable`** — timestamp (default `published_at`) **or** boolean column; scopes
   `.published/.unpublished/.scheduled/.draft` (affixable via `prefix:`/`suffix:`) branch on
   the column type. `default_scope: true` hides unpublished (ONE flag-driven default_scope,
@@ -97,7 +97,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   set of [base_class, id] stops cascade cycles, the purge pass ignores a cascaded association's own limit/offset, and a vetoed child rolls the parent back (relation:
   skipped; association: RecordNotDestroyed). After an association `destroy_all` the association cache is `reset`
   (not marked loaded-and-empty), so a `default_scope: false`/`with_deleted` association still shows its trash. The association form rides Rails' own `delete_or_destroy` (before/after_remove,
-  marks the loaded instances, nil on abort); a loaded / limited / composite-key / disable_joins relation
+  marks the loaded instances, nil on abort; a rolled-back association/loaded-relation `destroy_all` restores every instance it was handed, `HookedWrite.restoring(records, klass)` wrapping the batch transaction); a loaded / limited / composite-key / disable_joins relation
   acts on its records as loaded (deduped by id). Rails' OWN maintenance stays hard (HMT
   `delete_records(:destroy)` wrapped in a fiber-local ONE-SHOT hard context for the join model: owner
   `through:, dependent: :destroy`, link removal; a callback's own `destroy_all` is soft again);
@@ -141,7 +141,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `expiring_within` scopes (affixable via `prefix:`/`suffix:`). Batch `expire_all` (single-
   UPDATE fast path when `expire!` is unoverridden AND the model has no validators; never on STI).
   `expire!`/`expire_all` with nil/blank mean "now"; an unparseable time raises before hooks;
-  neither pushes a saved expiry later (`expire!` is then a no-op that still saves the record's other pending changes; only `expire_in!`/`extend_expiry!` may, and both raise ArgumentError for anything but a Duration/Numeric). On a `date` column `expire!`'s hook decision, its blank-time default (today's Date) and `time_until_expiry` (0 when `expired?`, else to the start of the date in `Time.zone`) all work in `Time.zone`, never ENV TZ.
+  neither pushes a saved expiry later (`expire!` is then a no-op that still saves the record's other pending changes; only `expire_in!`/`extend_expiry!` may, and both raise ArgumentError for anything but a Duration/Numeric). On a `date` column `expire!`'s hook decision, its blank-time default (today's Date) and `time_until_expiry` (0 when `expired?`, else to the start of the date in `Time.zone`) and `extend_expiry!`'s expired-or-live base all work in `Time.zone`, never ENV TZ.
   When affixed, Expirable/Activatable/Schedulable also define AFFIXED predicates (plain
   ones kept; internal logic uses private checks, so sibling collisions can't flip
   `toggle_active!`, and the batch verbs build their row predicates inline); an affixed predicate
@@ -170,7 +170,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   under the row lock, so a row moved concurrently is skipped (a single `<event>!` still raises); a record failing
   validation raises `RecordNotSaved` (own record only, `e.record.equal?(record)`; batch rolled back), another record's
   `RecordInvalid` from a hook propagates, the single `<event>!` raises `RecordInvalid`.
-- **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all`,
+- **`Searchable`** — LIKE search across columns via Arel `matches`. `mode:` `:any`/`:all` (`:all` ANDs at most `MAX_TERMS` (32) distinct words: repeats dropped, extras ignored),
   `match:` `:contains`/`:prefix`/`:exact`, `case_sensitive:` (Postgres only), `ranked:` (a grouped or
   DISTINCT relation is returned unranked — its rank CASE would sit outside the GROUP BY / SELECT list).
 - **`Normalizable`** — `before_validation` normalization + a `before_save` backstop (run by the
@@ -219,14 +219,14 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   boundary (`Support::WriteBoundary`, after Encryptable's blind index), never in a callback. Detects a native JSON column through `Support::NativeJson`, like Storable.
 - **`Lockable`** — failed-attempt tracking + account lockout ("Devise lockable-lite").
   `lockable_by attempts:, locked_at:, max_attempts:, unlock_in:, prefix:/suffix:`;
-  `register_failed_attempt!` (atomic SQL increment), `access_locked?` (lazy expiry),
+  `register_failed_attempt!` (atomic SQL increment, conditional on the ROW's `locked_at` being NULL/lapsed; losing it adopts the lock and its attempts via `lockable_adopt_current_lock!`), `access_locked?` (lazy expiry),
   `lock_access!` (one conditional UPDATE claimed only while the row is unlocked — a stale
   concurrent instance adopts the existing lock/token and fires no hooks; readonly/destroyed
   preconditions replicated; `register_failed_attempt!`'s quiet lapsed-lock clear is conditional
-  the same way) / `unlock_access!` (update_columns) + before/after hooks,
-  composite primary keys work (every row condition goes through `Support::PrimaryKey`); `register_failed_attempt!` on a readonly/destroyed unlocked record raises before incrementing; `unlock_by_token` answers nil for a NUL-byte token; `reset_failed_attempts!`; expiry-aware `.locked`/`.unlocked` scopes. Batch
+  the same way) / `unlock_access!` (row-decided like `lock_access!`: a locking read in its savepoint, hooks only when the row was locked; `update_all` with lock_version pinned) + before/after hooks,
+  composite primary keys work (every row condition goes through `Support::PrimaryKey`); `register_failed_attempt!` on a readonly/destroyed unlocked record raises before incrementing; `unlock_by_token` answers nil for a NUL-byte token; `reset_failed_attempts!` (one UPDATE conditional on the row's counter <> 0, lock_version pinned; raises on a readonly/destroyed record even at 0); expiry-aware `.locked`/`.unlocked` scopes. Batch
   `unlock_expired` (mirrors `unlock_access!`; per-record on an STI table; no validators gate needed since
-  `update_columns` already skips them; returns 0 without a query when `unlock_in` is nil).
+  `update_all` skips them; returns 0 without a query when `unlock_in` is nil).
   `unlock_token:` mints a self-service unlock link — timing-safe scoped finder, race-safe
   single-use consumption (one conditional UPDATE), TTL tied to `unlock_in`, claimed in its
   own savepoint so a vetoing hook puts the token back, Duplicable-reset and
@@ -248,7 +248,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   semantics, macro-time collision/type validation, ActiveModel::Type casting
   (`:decimal` stored as string, `:datetime` ISO8601 UTC microseconds; a `default:` on a key
   with an explicit `type:` reads back cast exactly as the same value stored would — `:json`
-  excepted, an uncastable one nil; a key WITHOUT `type:` returns its default raw). `where_<key>`
+  excepted, an uncastable one nil; a key WITHOUT `type:` returns its default raw). `:decimal` writes (and Encryptable's `type: :decimal`) go through `Support::NumericOperand.bounded_decimal` (<= 2,100 chars, exponent <= 1000, finite, no `_`; else nil; a BigDecimal of ~2,100+ digits is stored but its String echo through the writer reads nil). `where_<key>`
   raises on an `encryptable` column (ciphertext isn't JSON), in either declaration order.
 - **`Encryptable`** — transparent per-field encryption for sensitive columns
   (AES-256-GCM, stdlib OpenSSL, no deps) via a custom `ActiveModel::Type` on the
@@ -315,6 +315,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (transaction, parent), follows a savepoint released into a `joinable: false` parent; a column
   moves back while clean OR equal to the mirrors' ledger value; Marshal-safe `OpenList` holder).
 - **`Anonymizable`** — declarative right-to-erasure ("GDPR-lite").
+  Not idempotent by design: `anonymize!` always re-applies every rule (a `:hash` pseudonym is re-hashed, hooks fire again); guard repeated jobs yourself (skip `anonymized?` records).
   `anonymizable *fields, with:` (presets :nullify/:redact/:hash/:email/
   :random_hex or callable; repeatable, rules merge; `stamp:` default
   :anonymized_at with `false` opt-out; `clear_audit_trail:`; `prefix:`/
@@ -345,7 +346,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   position only when its acts_as_list scope names the copied association's foreign key — the
   copy goes into the new parent's own list — else it is blanked too, an opaque String scope
   included; children are fed to acts_as_list in position order; a child/has_one target `marked_for_destruction?` — nested `_destroy` —
-  is skipped, loaded or not, via `duplicable_without_marked`) so sibling concerns regenerate on save; a Duplicable
+  is skipped, loaded or not, via `duplicable_without_marked`; edited/new target records win over their rows, loaded or not, via `duplicable_merge_loaded`; a HABTM copy re-links only PERSISTED records) so sibling concerns regenerate on save; a Duplicable
   child copies via its OWN rules (recursive graphs); `on_duplicate(copy)`
   hook. `duplicate!` re-reads the counters + `lock_version` of the copy and of every nested Duplicable copy inside its save transaction, with one SELECT per class in the copied graph (never per record).
 
@@ -362,7 +363,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   enum label drops out of equality/`in` (never `IS NULL`), `type: :datetime` reads a zone-less
   operand as the target column does (`Support::TimeValue.cast`: Time.zone on a zone-aware column,
   else default_timezone; a `with:` lambda uses Time.zone while `time_zone_aware_attributes` is on;
-  never ENV["TZ"]), `:date`/`:time` are ActiveRecord's types, blank values are skipped in both forms, and
+  never ENV["TZ"]), `:date`/`:time` are ActiveRecord's types, an `alias_attribute` field is resolved (`filterable_resolved_field`) before every enum / type / array / Arel lookup so it behaves exactly as its column, blank values are skipped in both forms, and
   `contains`/`starts_with` are case-insensitive (except under MySQL `_bin`/`_cs` collations)
   and fail closed on non-text and array columns. Numeric operands go through
   `Support::NumericOperand`: exact, never truncated (`gte 5.5` on an integer column is
@@ -383,8 +384,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `process_action` hands the BadRequest Instrumentation raises for a malformed query string
   (before `rescue_from` is in scope) to the handlers, unless `:bad_request` was trimmed.
   `handled_error.concerns_on_rails` / `on_handled_error` report the exception the handler was
-  invoked with (the `#cause` when Rescuable matched through a wrapper), nil for a direct call. RecordNotDestroyed
-  renders the generic "Resource could not be deleted" (no model name / id), `errors.full_messages` as `details`.
+  invoked with (the `#cause` when Rescuable matched through a wrapper), nil for a direct call. RecordNotDestroyed and RecordNotSaved
+  render generic messages ("Resource could not be deleted"/"Resource could not be saved"; no model name / id), `errors.full_messages` as `details`.
 - **`Includable`** — allow-listed association sideloading (nested include trees via `Support::IncludeTree`,
   `requested_includes(as: :query | :paths | :json)`, `default:`, `strategy:`) + sparse fieldsets. A re-declaration replaces the association list but inherits omitted `fields:`/`default:`/`strategy:` (`default: nil`/`fields: {}` clear; an inherited default the new list lacks is dropped with a stderr warning).
 - **`SecureHeadable`** — security response headers + native CSP DSL passthrough
@@ -408,6 +409,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   never share a counter (subclasses share their parent's rule). The first-hit seed is
   written `raw: true` (only to a `write` taking options/`**`/`raw:` — a custom store naming just
   its keywords would raise), the only form MemCacheStore on Rails 6.0–7.0 can `increment`.
+  `throttled_response` raises when nothing can render the 429 (no response object and no `render_error`), never failing open.
 - **`Timezoneable`** — per-request `Time.zone` from params / header / cookie. The
   `available:` allow-list matches by canonical tzinfo identifier (exact name first, the
   allow-listed zone returned); a value that is not valid UTF-8 is no match. The action always
@@ -424,7 +426,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   Stripe timestamp tolerance, secret rotation; 401/400 before the action runs. `replay:` /
   `replay_ttl:` add replay protection for timestamp-less schemes (store must answer BOTH
   `#write` and `#read`; short claim promoted in an after_action, and released by a private
-  around_action whenever the action didn't complete — later filter halt, exception, 5xx;
+  around_action whenever the delivery wasn't processed — later filter halt, exception, any status outside 2xx/3xx; the claim value is a per-request token and release deletes only a claim still holding it;
   Stripe keys off the signed payload, not the parsed header). Rule lookup is by
   specificity: a rule naming the action beats any catch-all (most-derived class first),
   else the most-derived catch-all.
@@ -493,9 +495,9 @@ macro's `types:` argument — adds them all: `Add<Field>To<Table>` for one colum
 `Add<Concern>ColumnsTo<Table>` for several), `ScalarParam` (untrusted
 query-param coercion shared by the paginators/Filterable, incl. the one `per_page`
 resolver with its absolute ceiling), `NumericOperand` (Filterable's exact numeric operand
-reader), `UniqueRetry` (bounded `RecordNotUnique` retry; `savepoint:` makes each attempt
+reader; `bounded_decimal` is the Storable/Encryptable writers' decimal cast), `UniqueRetry` (bounded `RecordNotUnique` retry; `savepoint:` makes each attempt
 its own savepoint so a retry works inside a caller's transaction on PostgreSQL),
-`HookedWrite` (the one before-hook → write → after-hook path: own `requires_new`
+`HookedWrite` (the one before-hook → write → after-hook path, plus `restoring(records, klass)` for batch rollbacks: own `requires_new`
 savepoint, true only once the after-hook returns, and on abort the WHOLE AttributeSet (a
 deep_dup, already-read mutable values deep-copied), the last save's mutations, forced changes
 and the record's identity (a NEW record's too: `new_record?`/`destroyed?`/`previously_new_record?`/id) are put back — unread attributes restored raw, never

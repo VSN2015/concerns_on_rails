@@ -1,3 +1,3 @@
 module ConcernsOnRails
-  VERSION = "1.35.2".freeze
+  VERSION = "1.36.0".freeze
 end
