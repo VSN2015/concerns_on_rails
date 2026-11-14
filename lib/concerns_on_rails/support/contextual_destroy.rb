@@ -156,7 +156,8 @@ module ConcernsOnRails
         klass = relation.klass
         purge = trash_scope?(relation)
         acted = []
-        klass.transaction(requires_new: true) do
+        # A loaded relation's instances are the caller's: put them back on a rollback.
+        HookedWrite.restoring(relation.loaded? ? relation.records : [], klass) do
           if records_up_front?(relation)
             destroy_loaded(relation, purge, acted)
           else
@@ -291,7 +292,7 @@ module ConcernsOnRails
         # then hard-deleted, depending on the target's order.
         def soft_destroy_records!(records)
           trashed, live = records.partition { |record| @concerns_on_rails_trashed&.key?(record) }
-          reflection.klass.transaction(requires_new: true) do
+          HookedWrite.restoring(records, reflection.klass) do
             (trashed + live).each { |record| soft_destroy_record!(record) }
           end
         end
