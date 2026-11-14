@@ -250,12 +250,12 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
       rendered = rescue!(ActiveRecord::RecordNotSaved.new("Failed to save the record", invalid_item))
       expect(rendered[:status]).to eq(ConcernsOnRails::Support::ErrorEnvelope.renderable_status(:unprocessable_entity))
       expect(rendered[:json][:error]).to eq(
-        message: "Failed to save the record", code: "record_not_saved", details: ["Name can't be blank"]
+        message: "Resource could not be saved", code: "record_not_saved", details: ["Name can't be blank"]
       )
 
       clean = ErrorItem.new(name: "ok")
       rendered = rescue!(ActiveRecord::RecordNotSaved.new("Failed to save the record", clean))
-      expect(rendered[:json][:error]).to eq(message: "Failed to save the record", code: "record_not_saved")
+      expect(rendered[:json][:error]).to eq(message: "Resource could not be saved", code: "record_not_saved")
     end
 
     it "ActiveRecord::RecordNotDestroyed → 422 record_not_destroyed" do

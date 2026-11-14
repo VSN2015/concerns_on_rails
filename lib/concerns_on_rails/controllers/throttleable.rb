@@ -166,9 +166,15 @@ module ConcernsOnRails
         )
       end
 
-      # Public override point for the 429 body.
-      def throttled_response(_rule, result)
-        return unless respond_to?(:response) && response
+      # Public override point for the 429 body. Fails CLOSED like
+      # Authorizable#authorization_denied: returning nil here left the
+      # before_action chain unhalted, so the throttled action ran. A private
+      # render_error is enough on its own (mirrors Support::ErrorEnvelope).
+      def throttled_response(rule, result)
+        unless respond_to?(:render_error, true) || (respond_to?(:response) && response)
+          raise "ConcernsOnRails::Controllers::Throttleable: the 429 for rule '#{rule[:name]}' could not be " \
+                "rendered (no response object) — refusing to fail open"
+        end
 
         message = "Rate limit exceeded. Retry in #{result[:retry_after]}s."
         ConcernsOnRails::Support::ErrorEnvelope.render(
