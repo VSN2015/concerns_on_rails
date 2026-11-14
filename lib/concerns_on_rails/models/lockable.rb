@@ -55,8 +55,8 @@ module ConcernsOnRails
     #     A lapsed lock is cleared the same way, only while it is still
     #     lapsed in the database, so a stale instance never wipes a fresh lock.
     #   * lock_access! persists via that conditional UPDATE, unlock_access! via
-    #     update_columns — both write columns directly: validations
-    #     and AR callbacks are bypassed on purpose, so an otherwise-invalid
+    #     an update_all on its row (lock_version pinned) — both write columns
+    #     directly: validations and AR callbacks are bypassed on purpose, so an otherwise-invalid
     #     record can still be locked. That also skips updated_at and means a
     #     coexisting Auditable will not record the change. Hooks (before/
     #     after_lock, before/after_unlock) run in a transaction — a raising
@@ -67,8 +67,9 @@ module ConcernsOnRails
     #     `lock_version` in SQL like any update_all, and the bump is mirrored
     #     into the instance as Rails' increment! does — so the same instance
     #     (and the record unlock_by_token returns) saves afterwards without
-    #     StaleObjectError. update_columns (unlock_access!,
-    #     reset_failed_attempts!) does not bump it, as in Rails.
+    #     StaleObjectError. unlock_access! and reset_failed_attempts! pin the
+    #     column instead (no bump, as update_columns never bumped it) and ride
+    #     the row, so a stale lock_version cannot turn them into a silent no-op.
     #   * `unlock_token:` mints a 43-char URL-safe token when the account locks
     #     (kept while locked, cleared by every unlock path — manual, batch
     #     expiry, the quiet stale-lock reset) and `unlock_by_token` consumes it:
@@ -186,7 +187,7 @@ module ConcernsOnRails
           expired = all.where(arel_table[locked_field].lteq(Time.zone.now - unlock_in))
 
           # Ownership-only check (no validations gate, and no updated_at on the
-          # bulk write): `unlock_access!` writes via update_columns, which
+          # bulk write): `unlock_access!` writes via update_all, which
           # already skips validations and timestamps, so the two paths agree.
           if ConcernsOnRails::Support::BatchOps.unoverridden?(self, ConcernsOnRails::Models::Lockable,
                                                               :before_unlock, :after_unlock, :unlock_access!)
@@ -226,10 +227,10 @@ module ConcernsOnRails
         #
         # The claim is an update_all, so under optimistic locking it bumps the
         # row's lock_version: the bump is mirrored into the record before
-        # unlock_access! runs — its update_columns is constrained on
-        # lock_version from Rails 7.0, and against a stale instance it matched
-        # no row, reporting an unlock that never happened — and taken back
-        # with the claim when the unlock does not complete.
+        # unlock_access! runs, so the instance stays in step with its row (a
+        # later save raises no StaleObjectError; unlock_access!'s own write is
+        # keyed on the primary key only) — and taken back with the claim when
+        # the unlock does not complete.
         def unlock_by_claimed_token(record, field, given)
           unlocked = nil
           version = nil
@@ -528,8 +529,8 @@ module ConcernsOnRails
         raise ArgumentError, "#{LABEL}: #{operation} cannot be called on a new record" if new_record?
       end
 
-      # Run hooks + update_columns inside a transaction, restoring the
-      # in-memory attributes when the block doesn't complete. update_columns
+      # Run hooks + the raw write inside a transaction, restoring the
+      # in-memory attributes when the block doesn't complete. The write
       # syncs the attribute cache immediately and a transaction ROLLBACK does
       # not undo that — without the restore, a raising after_lock would leave
       # access_locked? true in memory while the row stays unlocked, and every
@@ -565,17 +566,19 @@ module ConcernsOnRails
       # A lapsed lock is cleared quietly — this is a *failed* login, so
       # firing unlock hooks ("account unlocked" notifications) would be
       # wrong. The failure then counts as attempt 1 of the new window.
-      # Losing the clear means a concurrent request changed the lock first:
-      # if it re-locked the account, this failure is not counted either.
+      # The increment applies only while the ROW's locked_at is NULL, so a
+      # stale instance (it never saw the lock, or the lapse) is refused there,
+      # adopts the row, and either gives up (a live lock; or the row is gone)
+      # or clears the lapsed lock and counts. Losing a clear means a concurrent
+      # request changed the lock first: if it re-locked the account, the
+      # increment fails again and this failure is not counted either.
       # true when the failure was counted.
       def lockable_count_failure!
-        if lock_expired? && !lockable_clear_expired_lock!
-          lockable_adopt_current_lock!
-          return false if access_locked?
+        2.times do
+          lockable_clear_expired_lock! if lock_expired?
+          return true if lockable_increment_attempts!
+          return false unless lockable_adopt_current_lock! && lock_expired?
         end
-        return true if lockable_increment_attempts!
-
-        lockable_adopt_current_lock!
         false
       end
 
@@ -642,8 +645,8 @@ module ConcernsOnRails
       end
 
       # Lost the lock_access! claim: another request locked the row first.
-      # Read its lock (and token) back so this instance agrees with the
-      # database. A LOCKING read (FOR UPDATE; a no-op on SQLite): under
+      # Read its lock (token and counter too) back so this instance agrees
+      # with the database. A LOCKING read (FOR UPDATE; a no-op on SQLite): under
       # MySQL's REPEATABLE READ a plain SELECT inside the caller's
       # transaction can return the snapshot taken before the winner
       # committed — the unlocked row the claim just failed against — while a
@@ -651,7 +654,7 @@ module ConcernsOnRails
       # true — the account is locked; false when the row is gone.
       def lockable_adopt_current_lock!
         klass = self.class
-        columns = [klass.lockable_locked_at_field, klass.lockable_unlock_token_field].compact
+        columns = [klass.lockable_locked_at_field, klass.lockable_attempts_field, klass.lockable_unlock_token_field].compact
         current = klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id))
                        .select(*ConcernsOnRails::Support::PrimaryKey.columns(klass), *columns).lock.first
         return false unless current
@@ -675,14 +678,14 @@ module ConcernsOnRails
         field ? { field => self[field] } : {}
       end
 
-      # The SQL-side `COALESCE(attempts, 0) + 1`, applied only while the row
-      # is not locked in the database. update_counters goes through
+      # The SQL-side `COALESCE(attempts, 0) + 1`, applied only while the row's
+      # locked_at is NULL (a lapsed lock is cleared first, never counted onto). update_counters goes through
       # update_all, which bumps lock_version in the row under optimistic
       # locking — mirrored here, as increment! does. true when it counted.
       def lockable_increment_attempts!
         klass = self.class
         affected = klass.unscoped.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, id))
-                        .where(lockable_row_unlocked).update_counters(klass.lockable_attempts_field => 1)
+                        .where(klass.arel_table[klass.lockable_locked_at_field].eq(nil)).update_counters(klass.lockable_attempts_field => 1)
         return false unless affected.positive?
 
         ConcernsOnRails::Support::Locking.mirror_bump!(self)

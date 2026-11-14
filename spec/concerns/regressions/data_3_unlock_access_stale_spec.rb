@@ -54,4 +54,15 @@ describe "Lockable decides from the row, not the instance" do
     expect(stale.events).to be_nil
     expect(stale.access_locked?).to be(false)
   end
+
+  it "unlocks through an instance locked in memory with a stale lock_version (the old update_columns case)" do
+    id = klass.create!.id
+    klass.find(id).lock_access!
+    stale = klass.find(id)
+    klass.find(id).update!(failed_attempts: 2) # bumps lock_version past the stale instance's
+    expect(stale.unlock_access!).to be(true)
+    expect(klass.find(id).locked_at).to be_nil
+    expect(klass.find(id).failed_attempts).to eq(0)
+    expect(stale.events).to eq(%i[before_unlock after_unlock])
+  end
 end
