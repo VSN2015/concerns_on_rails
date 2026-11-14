@@ -19,6 +19,7 @@ describe "HTTP-1 ErrorHandleable RecordNotSaved message" do
     stub_const("Admin::HttpAuditSecretNote", Class.new(ActiveRecord::Base) do
       self.table_name = "http_audit_secret_notes"
       include ConcernsOnRails::SoftDeletable
+
       soft_deletable_by :deleted_at
       belongs_to :http_audit_post, class_name: "HttpAuditPost"
       def after_soft_delete
@@ -28,6 +29,7 @@ describe "HTTP-1 ErrorHandleable RecordNotSaved message" do
     stub_const("HttpAuditPost", Class.new(ActiveRecord::Base) do
       self.table_name = "http_audit_posts"
       include ConcernsOnRails::SoftDeletable
+
       has_many :notes, class_name: "Admin::HttpAuditSecretNote", foreign_key: :http_audit_post_id
       soft_deletable_by :deleted_at, cascade: :notes
     end)
@@ -40,6 +42,7 @@ describe "HTTP-1 ErrorHandleable RecordNotSaved message" do
   it "does not leak the model class name / id in the record_not_saved 422" do
     klass = IntegrationHarness.build_controller do
       include ConcernsOnRails::Controllers::ErrorHandleable
+
       define_method(:destroy) do
         post = HttpAuditPost.create!
         Admin::HttpAuditSecretNote.create!(http_audit_post_id: post.id)

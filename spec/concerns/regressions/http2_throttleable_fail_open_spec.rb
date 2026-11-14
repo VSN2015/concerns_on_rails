@@ -8,9 +8,11 @@ describe ConcernsOnRails::Controllers::Throttleable do
     Class.new(FakeController) do
       def self.before_action(*); end
       include ConcernsOnRails::Controllers::Throttleable
+
       self.throttleable_store = store
       throttle_by limit: 1, period: 60, by: -> { "client" }
       attr_reader :errors_rendered
+
       def action_name = "index"
       class_eval(&extra) if extra
     end
