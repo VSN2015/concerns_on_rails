@@ -242,10 +242,14 @@ module ConcernsOnRails
           when :has_one
             copy.public_send("#{name}=", duplicable_child_copy(children.first, reflection)) if children.first
           when :has_and_belongs_to_many
-            # Re-link only persisted records: an unsaved one belongs to the original.
-            copy.public_send("#{name}=", children.reject(&:new_record?))
+            duplicable_relink(copy, name, children)
           end
         end
+      end
+
+      # Re-link only persisted records: an unsaved one belongs to the original.
+      def duplicable_relink(copy, name, children)
+        copy.public_send("#{name}=", children.reject(&:new_record?))
       end
 
       # The children to copy. Reading the association itself applied the
