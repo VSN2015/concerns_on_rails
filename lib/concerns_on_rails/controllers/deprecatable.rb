@@ -263,7 +263,10 @@ module ConcernsOnRails
         # public-only check skipped the 410 for exactly those controllers and
         # let the sunset action run — a fail-open on the branch whose job is to
         # stop serving the endpoint.
-        return unless respond_to?(:render_error, true) || (respond_to?(:response) && response)
+        unless respond_to?(:render_error, true) || (respond_to?(:response) && response)
+          raise "ConcernsOnRails::Controllers::Deprecatable: the 410 for a sunset endpoint could not be " \
+                "rendered (no response object) — refusing to fail open"
+        end
 
         ConcernsOnRails::Support::ErrorEnvelope.render(self, message: message, status: :gone, code: "endpoint_sunset")
       end
