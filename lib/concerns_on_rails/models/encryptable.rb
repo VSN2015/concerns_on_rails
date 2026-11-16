@@ -462,10 +462,14 @@ module ConcernsOnRails
           nil
         end
 
-        # Decrypted (authenticated) plaintext is trusted: no write-side bound, so
-        # a stored form of any length (a 120-digit value, "0.000...1") reads back.
+        # Decrypted (authenticated) plaintext is trusted as to LENGTH (a
+        # 120-digit value, "0.000...1" reads back), but the read honours the same
+        # exponent bound as the write cast: a value the writer would turn into
+        # nil (stored before that bound existed) reads nil too. Otherwise it read
+        # fine and then serialized to NULL on reencrypt!/an edit, destroying the
+        # ciphertext; as nil it is left alone, like an undecryptable field.
         def read_decimal(plaintext)
-          BigDecimal(plaintext)
+          to_big_decimal(BigDecimal(plaintext))
         rescue ArgumentError, TypeError
           nil
         end
