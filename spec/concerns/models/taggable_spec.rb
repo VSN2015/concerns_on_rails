@@ -255,7 +255,11 @@ describe ConcernsOnRails::Taggable do
 
     it "matches tags containing LIKE wildcard characters literally" do
       under = TagArticle.create!(title: "under", tag_list: "ruby_on_rails")
+      TagArticle.create!(title: "decoy_", tag_list: "go, rubyXonXrails")
       expect(TagArticle.tagged_with("ruby_on_rails")).to contain_exactly(under)
+      pct = TagArticle.create!(title: "pct", tag_list: "100%")
+      TagArticle.create!(title: "decoy100", tag_list: "go, 100x")
+      expect(TagArticle.tagged_with("100%")).to contain_exactly(pct)
       expect(TagArticle.tagged_with("ruby")).to contain_exactly(a1, a2)
     end
 
