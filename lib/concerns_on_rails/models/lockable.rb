@@ -378,13 +378,13 @@ module ConcernsOnRails
       # threshold. Returns the fresh post-increment count (handy for
       # "N attempts remaining" messaging); check access_locked? for the
       # lock decision. While locked it neither counts nor re-locks — that
-      # branch returns the current in-memory count unchanged. "Locked" is
+      # branch returns the current count unchanged. "Locked" is
       # decided by the ROW: the increment is conditional on the row not being
       # locked, so an instance loaded before a concurrent lock adopts that
       # lock instead of counting on top of it.
       def register_failed_attempt!
         lockable_guard_persisted!("register_failed_attempt!")
-        return lockable_current_attempts if access_locked?
+        return lockable_current_attempts if lockable_row_locked?
 
         # Before the increment: it is a class-level update_counters, which
         # ignores readonly?/destroyed?, and the lock_access! behind the
@@ -419,7 +419,7 @@ module ConcernsOnRails
       # a hook that raises or vetoes with Rollback still undoes the lock.
       def lock_access!
         lockable_guard_persisted!("lock_access!")
-        return true if access_locked?
+        return true if lockable_row_locked?
 
         lockable_guard_writable!
         field = self.class.lockable_locked_at_field
@@ -642,6 +642,15 @@ module ConcernsOnRails
       def lockable_guard_writable!
         raise ActiveRecord::ReadOnlyRecord, "#{self.class} is marked as readonly" if readonly?
         raise ActiveRecord::ActiveRecordError, "cannot update a destroyed record" if destroyed?
+      end
+
+      # An instance that reads locked is checked against the ROW before the
+      # early return: the lock may have been lifted since it was loaded, and a
+      # stale answer would skip the count / the lock while reporting success.
+      # Adopting also refreshes the instance. A row that is gone falls through
+      # to the writable guard and the conditional write, which refuse it.
+      def lockable_row_locked?
+        access_locked? && lockable_adopt_current_lock! && access_locked?
       end
 
       # Lost the lock_access! claim: another request locked the row first.
