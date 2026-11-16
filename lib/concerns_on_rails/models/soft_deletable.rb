@@ -505,6 +505,12 @@ module ConcernsOnRails
         !new_record? && !will_save_change_to_attribute?(field) && self[field].present? == deleted
       end
 
+      # The row's SAVED stamp is set (the contextual destroy_all's live-vs-trashed
+      # split; never the in-memory stamp or the overridable `deleted?`).
+      def soft_delete_saved_trashed?
+        attribute_in_database(self.class.soft_delete_field).present?
+      end
+
       # The no-op verbs' answer: true, or the `save` result when the record
       # carries other pending changes (the stamp itself is never among them).
       def soft_delete_settle
