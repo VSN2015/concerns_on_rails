@@ -16,7 +16,10 @@ RSpec.describe "Duplicable HABTM with an unsaved nested edit on the original" do
         t.integer :g1d_tag_id
       end
     end
-    stub_const("G1dTag", Class.new(TestModel) { self.table_name = "g1d_tags" })
+    stub_const("G1dTag", Class.new(TestModel) do
+      self.table_name = "g1d_tags"
+      before_validation { self.name = name.downcase if name }
+    end)
     stub_const("G1dPost", Class.new(TestModel) { self.table_name = "g1d_posts" })
     G1dPost.class_eval do
       include ConcernsOnRails::Models::Duplicable
@@ -68,6 +71,61 @@ RSpec.describe "Duplicable HABTM with an unsaved nested edit on the original" do
         expect(post.g1d_tags.target.first).to be_marked_for_destruction
         expect(G1dPost.find(post.id).g1d_tags.map(&:id)).to eq([tag.id])
       end
+    end
+  end
+
+  context "re-linking never shares the original's objects" do
+    let(:post) do
+      original = G1dPost.create!(name: "p")
+      tags.each { |t| original.g1d_tags << t }
+      G1dPost.find(original.id)
+    end
+    let(:tags) { [G1dTag.create!(name: "a"), G1dTag.create!(name: "b"), G1dTag.create!(name: "c")] }
+
+    # The copy's own save still validates (and so normalizes) the tag it now owns, as Rails does for any
+    # linked record; what must hold is that the ORIGINAL's object is never the one that is rewritten.
+    it "does not let a before_validation rewrite of a clean-looking tag reach the original's object" do
+      tags.first.update_column(:name, "UPPER")
+      post.g1d_tags.load
+      shared = post.g1d_tags.target.find { |t| t.id == tags.first.id }
+
+      post.duplicate!
+
+      expect(shared.name).to eq("UPPER")
+      expect(shared).not_to be_changed
+    end
+
+    it "leaves a tag whose row was deleted meanwhile out of the copy instead of raising" do
+      post.g1d_tags.load
+      post.assign_attributes(g1d_tags_attributes: [{ id: tags[0].id, name: "x" }, { id: tags[1].id, name: "y" }])
+      G1dTag.where(id: tags[0].id).delete_all
+
+      copy = nil
+      expect { copy = post.duplicate! }.not_to raise_error
+      expect(G1dPost.find(copy.id).g1d_tags.map(&:id)).to match_array([tags[1].id, tags[2].id])
+    end
+
+    it "reads the edited tags back in one SELECT" do
+      post.assign_attributes(g1d_tags_attributes: tags.map { |t| { id: t.id, name: "n#{t.id}" } })
+      selects = []
+      counter = lambda do |*, payload|
+        sql = payload[:sql]
+        selects << sql if sql.match?(/\ASELECT/) && sql.match?(/FROM\s+\W?g1d_tags\W?\s+WHERE/) && sql !~ /JOIN/
+      end
+      ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { post.duplicate! }
+      expect(selects.size).to eq(1)
+    end
+
+    it "looks a row up by its stored key, not an unsaved key edit" do
+      post.g1d_tags.load
+      edited = post.g1d_tags.target.find { |t| t.id == tags[0].id }
+      edited.id = tags[1].id
+      edited.name = "moved"
+
+      copy = post.duplicate!
+
+      expect(G1dPost.find(copy.id).g1d_tags.map(&:name)).to match_array(%w[a b c])
+      expect(G1dTag.pluck(:name)).to match_array(%w[a b c])
     end
   end
 end

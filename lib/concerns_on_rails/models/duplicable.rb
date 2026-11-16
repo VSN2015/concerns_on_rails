@@ -248,14 +248,31 @@ module ConcernsOnRails
       end
 
       # Re-link only persisted records: an unsaved one belongs to the original.
-      # A record carrying the original's pending edit is re-read from its row —
-      # the copy's save autosaves whatever it is linked to, and the original
-      # (never saved) must not get that edit written through the shared row.
+      # They are re-read from their rows in ONE query (by the key stored in the
+      # database, so an unsaved key edit looks up nothing wrong) and never
+      # shared: the copy's save autosaves and validates whatever it is linked
+      # to, which would otherwise write the original's pending edit — or a
+      # before_validation rewrite of its object — through the shared row. A row
+      # deleted meanwhile is simply left out; unscoped, so rows a default scope
+      # hides are found as before; the base class, so each row is its own STI type.
       def duplicable_relink(copy, name, children)
-        persisted = children.reject(&:new_record?).map do |child|
-          child.changed_for_autosave? ? child.class.unscoped.find(child.id) : child
-        end
-        copy.public_send("#{name}=", persisted)
+        persisted = children.reject(&:new_record?)
+        copy.public_send("#{name}=", duplicable_fresh_rows(persisted))
+      end
+
+      def duplicable_fresh_rows(records)
+        return [] if records.empty?
+
+        klass = records.first.class.base_class
+        keys = records.map(&:id_in_database)
+        scope = klass.unscoped
+        scope = if klass.primary_key.is_a?(Array)
+                  keys.map { |key| scope.where(ConcernsOnRails::Support::PrimaryKey.condition(klass, key)) }.reduce(:or)
+                else
+                  scope.where(klass.primary_key => keys)
+                end
+        by_key = scope.index_by(&:id)
+        keys.filter_map { |key| by_key[key] }
       end
 
       # The children to copy. Reading the association itself applied the
