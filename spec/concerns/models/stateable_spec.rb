@@ -940,7 +940,7 @@ describe ConcernsOnRails::Stateable do
         create_tickets(lock_version: true)
         klass = ticket_model do
           define_method(:before_transition) do |*|
-            self.class.unscoped.where.not(id: id).where(title: "b").update_all(title: "b2") if title == "a"
+            self.class.unscoped.where.not(id: id).where(title: "b").update_all("title = 'b2', lock_version = lock_version + 1") if title == "a"
           end
         end
         klass.create!(title: "a")
