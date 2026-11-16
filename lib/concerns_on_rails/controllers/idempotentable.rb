@@ -1,6 +1,7 @@
 require "active_support/concern"
 require "concerns_on_rails/core"
 require "concerns_on_rails/support/error_envelope"
+require "concerns_on_rails/support/fresh_read"
 require "digest"
 require "json"
 require "securerandom"
@@ -242,7 +243,7 @@ module ConcernsOnRails
           return idempotency_execute_and_store(store, cache_key, rule, fingerprint, token, &)
         end
 
-        record = store.read(cache_key)
+        record = ConcernsOnRails::Support::FreshRead.read(store, cache_key)
         return idempotency_resolve_existing(record, rule, fingerprint) unless record.nil?
 
         # A lost claim with nothing to read back: either the holder's lock
@@ -261,7 +262,7 @@ module ConcernsOnRails
         # window: a key claimed AND released again between our two reads
         # still reads as an outage — a spurious, retry-safe 503 under
         # :reject, a run without a claim under :proceed.
-        record = store.read(cache_key)
+        record = ConcernsOnRails::Support::FreshRead.read(store, cache_key)
         return idempotency_resolve_existing(record, rule, fingerprint) unless record.nil?
 
         idempotency_store_unavailable(rule, &)
@@ -280,7 +281,7 @@ module ConcernsOnRails
       # shortcut: read-then-write/delete is not atomic (one store round trip);
       # upgrade if a store offers compare-and-delete.
       def idempotency_claim_held?(store, cache_key, token)
-        record = store.read(cache_key)
+        record = ConcernsOnRails::Support::FreshRead.read(store, cache_key)
         record.is_a?(Hash) && record["token"] == token
       end
 
@@ -318,14 +319,15 @@ module ConcernsOnRails
         record["content_type_header"] = content_type_header if content_type_header
         headers = idempotency_response_headers(rule)
         record["headers"] = headers unless headers.empty?
-        idempotency_store_done(store, cache_key, record, token, rule[:ttl])
+        idempotency_store_done(store, cache_key, record, rule[:ttl])
       end
 
-      # A claim taken over (expired, then re-claimed or completed by a retry) must not
-      # overwrite that retry's record; a key that simply expired is still ours to fill.
-      def idempotency_store_done(store, cache_key, record, token, ttl)
-        current = store.read(cache_key)
-        return unless current.nil? || (current.is_a?(Hash) && current["token"] == token)
+      # A retry's DONE record (our claim expired and it completed first) must not be
+      # overwritten; a free key or another request's in-flight claim is still ours to fill
+      # (that request then fails to release it: its token no longer matches).
+      def idempotency_store_done(store, cache_key, record, ttl)
+        current = ConcernsOnRails::Support::FreshRead.read(store, cache_key)
+        return if current.is_a?(Hash) && current["state"] == "done"
 
         store.write(cache_key, record, expires_in: ttl)
       end

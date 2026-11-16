@@ -2,6 +2,7 @@ require "active_support/concern"
 require "concerns_on_rails/core"
 require "concerns_on_rails/support/error_envelope"
 require "concerns_on_rails/support/callable"
+require "concerns_on_rails/support/fresh_read"
 require "active_support/security_utils"
 require "openssl"
 require "digest"
@@ -312,7 +313,8 @@ module ConcernsOnRails
         # Only a claim this request still owns: after REPLAY_CLAIM_TTL a second
         # delivery may hold the key. shortcut: read-then-delete is not atomic,
         # the window is one store round trip; upgrade if a store offers a CAS delete.
-        return unless claim[:store].respond_to?(:delete) && claim[:store].read(claim[:key]) == claim[:token]
+        return unless claim[:store].respond_to?(:delete) && ConcernsOnRails::Support::FreshRead.read(claim[:store],
+                                                                                                     claim[:key]) == claim[:token]
 
         claim[:store].delete(claim[:key])
       rescue StandardError => e

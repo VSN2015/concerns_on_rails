@@ -109,5 +109,42 @@ describe "Idempotentable claim token" do
 
       expect(store.data.values.map { |r| r["body"] }).to eq(["from-b"])
     end
+
+    it "a request whose claim simply expired still writes its DONE record" do
+      a = build
+      a.enforce_idempotency do
+        store.data.clear
+        a.response.status = 201
+        a.response.body = "from-a"
+      end
+
+      expect(store.data.values.map { |r| [r["state"], r["body"]] }).to eq([%w[done from-a]])
+    end
+
+    it "a request finishing while a retry is in flight writes its DONE; the retry then failing deletes nothing" do
+      runs = 0
+      b = build
+      retry_request = Fiber.new do
+        b.enforce_idempotency do
+          runs += 1
+          Fiber.yield # B is in flight while A completes
+          b.response.status = 500
+        end
+      end
+      a = build
+      a.enforce_idempotency do
+        runs += 1
+        store.data.clear # A's claim expired
+        retry_request.resume
+        a.response.status = 201
+        a.response.body = "from-a"
+      end
+      retry_request.resume # B fails
+
+      c = build
+      c.enforce_idempotency { runs += 1 }
+      expect(runs).to eq(2)
+      expect(store.data.values.map { |r| [r["state"], r["body"]] }).to eq([%w[done from-a]])
+    end
   end
 end
