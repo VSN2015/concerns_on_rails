@@ -265,7 +265,11 @@ module ConcernsOnRails
       end
 
       def sort_column_node(relation, column)
-        return relation.model.arel_table[column] if column.is_a?(Symbol)
+        if column.is_a?(Symbol)
+          model = relation.model
+          # Arel::Table#[] only follows `alias_attribute` on newer Rails (6.0 emits the alias as a column).
+          return model.arel_table[model.attribute_aliases.fetch(column.to_s, column)]
+        end
 
         table, name = column.split(".", 2)
         connection = relation.model.connection
