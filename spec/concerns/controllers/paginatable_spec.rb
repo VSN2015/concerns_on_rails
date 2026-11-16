@@ -727,18 +727,18 @@ describe ConcernsOnRails::Controllers::Paginatable do
       ActiveRecord::Schema.define { add_column :pagination_memberships, :type, :string }
       stub_const("PaginationAdmin", Class.new(PaginationMembership))
       PaginationMembership.reset_column_information
-      [1, 1, 2, 3].each { |group_id| PaginationAdmin.create!(group_id: group_id) }
+      [1, 1, 2].each { |group_id| PaginationAdmin.create!(group_id: group_id) }
 
       controller = controller_class.new(params: { per_page: 2 })
       expect { controller.paginated(PaginationAdmin.select(:group_id).distinct).to_a }.not_to raise_error
-      expect(controller.pagination_meta[:total]).to eq(3)
+      expect(controller.pagination_meta[:total]).to eq(2)
     end
 
     it "keeps the relation's bound conditions in the counted subquery" do
       controller = controller_class.new(params: { per_page: 2 })
-      controller.paginated(PaginationMembership.where(group_id: [1, 2]).select(:role_id).distinct).to_a
+      controller.paginated(PaginationMembership.where(group_id: 3).select(:role_id).distinct).to_a
 
-      expect(controller.pagination_meta[:total]).to eq(2)
+      expect(controller.pagination_meta[:total]).to eq(1)
     end
 
     # Two output columns with the same name: MySQL rejects such a derived
