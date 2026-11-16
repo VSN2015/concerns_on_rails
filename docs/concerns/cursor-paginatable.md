@@ -31,7 +31,7 @@ end
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `order` | Symbol / Array / Hash | — | Ordering columns: `:created_at`, `[:kind, :created_at]` (all ascending), or `{ created_at: :desc, kind: :asc }` for per-column directions. Columns are chosen **in code** — params can never pick them. The primary key is always appended as a tiebreaker (inheriting the last column's direction) unless you list it yourself. |
-| `per_page` | Integer | `25` | Default page size when the caller supplies no `?per_page=` (or a value below 1). |
+| `per_page` | Integer | `25` | Default page size when the caller supplies no `?per_page=` (or a value below 1). Must be a positive number: 0, a negative or a non-numeric value raises `ArgumentError` at class load. |
 | `max_per_page` | Integer | `200` | Hard cap on `per_page` (`0`/negative disables the cap — same semantics as Paginatable, including the absolute `MAX_PER_PAGE` ceiling of 1,000,000 that still applies with no cap). |
 | `order_presets` | Hash | — | Named, allow-listed orderings the client selects via `?<order_param>=` (e.g. `{ newest: { created_at: :desc }, top: { score: :desc } }`). Mutually exclusive with `order:` (exactly one is required). Unknown names raise `InvalidOrderPreset` → 400 `invalid_order_preset`; switching presets mid-walk invalidates the cursor. |
 | `default_preset` | Symbol | first preset | Preset used when the param is absent. Must name a configured preset. |

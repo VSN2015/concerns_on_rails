@@ -184,6 +184,7 @@ end
 - **Rules are inherited but not shared.** `throttleable_rules` is a `class_attribute`. Subclasses inherit the parent's rules array but appending a rule in a subclass does not mutate the parent class's array (the macro does `self.throttleable_rules = throttleable_rules + [rule]`).
 
 - **Counter key format.** Cache keys follow the pattern `throttleable:<name>:<discriminator>:<window_bucket>`. Changing `name:`, the discriminator, or the `period` effectively resets all existing counters for that rule.
+- **Rate limiting fails open during a cache-store outage.** Rails' Redis and Memcache stores swallow connection errors, so the counter reads as 1 and nothing is throttled, with no log or event. If you need fail-closed behaviour, wrap the store so it raises (or use a store that raises on connection errors).
 
 ## Changed (unreleased)
 

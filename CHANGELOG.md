@@ -1,5 +1,83 @@
 <!-- CHANGELOG.md -->
 
+## 1.37.0 (2026-11-16)
+
+A correctness release following the 2026-11-15 audit of 1.36.1. It fixes 10 findings and repairs 9 specs that could
+not fail; several change behaviour at the edges (stored decimals, Idempotentable claims, loaded `destroy_all`,
+stale-instance Lockable writes). Read **Upgrading** first.
+
+### Upgrading
+
+- [ ] **Encryptable `type: :decimal`:** reads now honour the same bound as writes. A stored value with a decimal
+  exponent beyond +-1000 (only writable before 1.36.0), or a stored Infinity/NaN, reads `nil`, like an undecryptable
+  field. The ciphertext is left alone: `reencrypt!`/`reencrypt_all!` skip it (they used to write NULL over it, losing
+  the data on key rotation) and a save of other fields never rewrites it. A presence or numericality validation on
+  that field now fails for such a row even when only other fields change, and `needs_reencryption` keeps counting
+  it: keep its key id in `previous_keys`, because dropping the key makes the ciphertext unrecoverable. Storable's
+  `:decimal` read is unchanged. (DATA-2)
+- [ ] **Idempotentable:** in-flight claim records carry a per-request `"token"`. A request that raises, throws or ends
+  5xx releases the key only while it still holds its own claim (it used to delete unconditionally, wiping a retry's
+  stored response once the slow request's `lock_ttl` had lapsed, so later retries ran the action again). A stored
+  response is not written over an existing finished record; a request whose claim lapsed may overwrite another
+  request's in-flight claim, so its successful response survives if that other request then fails. Ownership reads
+  bypass Rails' request-local cache (`Support::FreshRead`): on Rails 7.0+ with a LocalCache store (Redis/Memcache
+  `Rails.cache`), reading one's own expired claim from the local cache deleted the remote key. Claims written by a
+  pre-1.37 process have no token and are left to expire (`lock_ttl`). When two requests with the same key but
+  different payloads overlap, the one finishing first now owns the stored response (later replays of the other
+  payload get the 422 mismatch). Known limit: read-then-delete and read-then-write are still two store round trips.
+  (HTTP-1)
+- [ ] **WebhookVerifiable `replay:`:** the replay-claim release reads through the same local-cache bypass.
+- [ ] **Deprecatable `after_sunset: :gone`:** raises ("refusing to fail open") when the host has no response object
+  and no `render_error`, instead of skipping the 410 and running the retired action. Rails controllers are
+  unaffected. (HTTP-2)
+- [ ] **CursorPaginatable:** `cursor_paginate_by per_page:` raises `ArgumentError` at class load for 0, a negative or
+  a non-numeric value (a negative one used to 500 with "negative array size" on every request, 0 returned empty
+  pages). `max_per_page` keeps "0 or negative = no cap". (PARAMS-1)
+- [ ] **SoftDeletable `destroy_all` on a loaded relation or association:** live vs trashed is decided on the SAVED
+  stamp, never the in-memory or overridden `deleted?`. A live row whose instance carries an unsaved stamp is now
+  soft-deleted (it used to be skipped silently); a trashed row whose instance had the stamp cleared in memory is
+  purged by a trash-scope relation (it used to be re-stamped). An already-destroyed instance in the loaded set is
+  skipped (it used to raise `FrozenError` and roll the whole batch back) and is no longer in the association form's
+  returned Array. A record loaded with a partial `select` that omits the stamp column raises
+  `ActiveModel::MissingAttributeError` before anything is written, as the relation form already did. (STATE-1,
+  STATE-2)
+- [ ] **Lockable:** `register_failed_attempt!` and `lock_access!` on an instance that reads locked now check the row
+  (one locking SELECT, adopting its state). If the row was unlocked meanwhile, the attempt is counted or the row is
+  really locked, with hooks; before, nothing was counted and `lock_access!` returned true with the row unlocked.
+  `lock_access!` returns false when the row has gone. (DATA-1)
+
+### Fixed
+
+- **Duplicable:** a HABTM copy is linked to fresh rows read in one query by the saved primary key, never to the
+  original's in-memory records. `duplicate!` no longer writes the original's unsaved nested edits
+  (`tags_attributes: [{id:, name:}]`) to the shared row; the original keeps its pending edits and saves them later.
+  A linked row deleted meanwhile is dropped from the copy instead of raising. Known limit: saving the copy still
+  validates the linked records (stock Rails for a new record), so a `before_validation` that rewrites a linked row's
+  value still writes it, from the fresh instance and never the original's object. (GRAPH-1)
+- **Normalizable / Sanitizable `on: :write`:** a record saved more than once inside a transaction that rolls back
+  keeps the per-save transform records of all those saves (merged per field, the later save winning), so a retry
+  never runs a non-idempotent Proc on its own output. Known limit: the stash is per record, not per transaction; a
+  savepoint rolled back inside a transaction that commits behaves as before. (TRANS-1)
+- **Controller Sortable:** on Rails 6.0, `?sort=<key>` on an `alias_attribute` key orders by the aliased column
+  (it used to 500 with "no such column"). No change on 6.1+. (PARAMS-2)
+
+### Docs
+
+- **Throttleable:** documents that rate limiting fails open during a cache-store outage. Rails' Redis/Memcache stores
+  swallow connection errors, the counter reads as 1 and nothing is throttled, with no log or event. Hosts that need
+  fail-closed must wrap the store (or use one that raises). No code change. (HTTP-3)
+- README, docs/concerns/*.md and CLAUDE.md updated for the behaviour changes above.
+
+### Internal
+
+- New support module `Support::FreshRead` (autoloaded; required directly by Idempotentable and WebhookVerifiable).
+- Repaired specs that could not fail, each proven red against a broken lib line (M4-4 excepted): Addressable
+  fingerprint stamp on `save(validate: false)` (M1-1), SoftDeletable cascade fast path under `touch: false` (M4-1),
+  Stateable `transition_all` vs a `lock_version` bump (M4-2), Taggable LIKE-wildcard escaping decoys (M4-3), Sluggable
+  duplicate-title uniqueness (M4-4), Paginatable counted-subquery conditions + STI (C2-1, C2-4), ContextualDestroy
+  hard-context leak (STATE-T1), Sanitizable re-save idempotency (TRANS-T1), Searchable term cap (TRANS-T2). The two
+  graph_1 Duplicable regression specs now assert the original's rows and pending changes.
+
 ## 1.36.1 (2026-11-14)
 
 A documentation release with no change to the gem's code. Nothing to upgrade.
