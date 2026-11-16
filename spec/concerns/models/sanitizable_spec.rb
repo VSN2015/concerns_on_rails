@@ -271,8 +271,11 @@ describe ConcernsOnRails::Models::Sanitizable do
           article = SanitizableArticle.create!(title: input)
           first = article.reload.title
 
-          article.title = "#{first} "
+          # Move the stored value away, so assigning `first` back is a real
+          # change and the writer runs on already-sanitized content.
+          article.update!(title: "marker")
           article.title = first
+          expect(article.title_changed?).to be(true)
           article.save!
 
           expect(article.reload.title).to eq(first), "#{input.inspect} drifted"
