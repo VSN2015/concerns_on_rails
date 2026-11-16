@@ -39,6 +39,24 @@ RSpec.describe "Duplicable with nested-attribute edits on an unloaded associatio
     expect(list.duplicate!.g1_entries.map(&:body)).to eq(["edited"])
   end
 
+  it "leaves the original's rows and pending edit untouched while copying it" do
+    list = G1List.create!(name: "l")
+    a = list.g1_entries.create!(body: "old")
+    list = reload_list(list)
+    list.assign_attributes(g1_entries_attributes: [{ id: a.id, body: "edited" }, { body: "added" }])
+    pending = list.g1_entries.target.find { |e| e.id == a.id }
+
+    copy = list.duplicate!
+
+    expect(G1Entry.where(g1_list_id: list.id).pluck(:body)).to eq(["old"])
+    expect(G1Entry.where(g1_list_id: copy.id).pluck(:body)).to match_array(%w[edited added])
+    expect(pending.body).to eq("edited")
+    expect(pending).to be_changed
+    expect(list.g1_entries.target.count(&:new_record?)).to eq(1)
+    list.save!
+    expect(G1Entry.where(g1_list_id: list.id).pluck(:body)).to match_array(%w[edited added])
+  end
+
   it "copies a child added through nested attributes" do
     list = G1List.create!(name: "l")
     list.g1_entries.create!(body: "kept")

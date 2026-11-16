@@ -38,7 +38,10 @@ RSpec.describe "Duplicable HABTM with an unsaved built record" do
       post.g1h_tags.load if loaded
       post.g1h_tags.build(name: "new")
 
+      built = post.g1h_tags.target.find(&:new_record?)
       copy = post.duplicate!
+      expect(built).to be_new_record
+      expect(G1hTag.where(name: "new").count).to eq(0)
       post.save!
 
       expect(G1hPost.find(copy.id).g1h_tags.map(&:name)).to eq(["old"])
