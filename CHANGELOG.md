@@ -1,6 +1,6 @@
 <!-- CHANGELOG.md -->
 
-## 1.37.0 (2026-11-16)
+## 1.36.2 (2026-11-16)
 
 A correctness release following the 2026-11-15 audit of 1.36.1. It fixes 10 findings and repairs 9 specs that could
 not fail; several change behaviour at the edges (stored decimals, Idempotentable claims, loaded `destroy_all`,
@@ -22,7 +22,7 @@ stale-instance Lockable writes). Read **Upgrading** first.
   request's in-flight claim, so its successful response survives if that other request then fails. Ownership reads
   bypass Rails' request-local cache (`Support::FreshRead`): on Rails 7.0+ with a LocalCache store (Redis/Memcache
   `Rails.cache`), reading one's own expired claim from the local cache deleted the remote key. Claims written by a
-  pre-1.37 process have no token and are left to expire (`lock_ttl`). When two requests with the same key but
+  pre-1.36.2 process have no token and are left to expire (`lock_ttl`). When two requests with the same key but
   different payloads overlap, the one finishing first now owns the stored response (later replays of the other
   payload get the 422 mismatch). Known limit: read-then-delete and read-then-write are still two store round trips.
   (HTTP-1)
