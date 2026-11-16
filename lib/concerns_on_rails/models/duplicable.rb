@@ -248,8 +248,14 @@ module ConcernsOnRails
       end
 
       # Re-link only persisted records: an unsaved one belongs to the original.
+      # A record carrying the original's pending edit is re-read from its row —
+      # the copy's save autosaves whatever it is linked to, and the original
+      # (never saved) must not get that edit written through the shared row.
       def duplicable_relink(copy, name, children)
-        copy.public_send("#{name}=", children.reject(&:new_record?))
+        persisted = children.reject(&:new_record?).map do |child|
+          child.changed_for_autosave? ? child.class.unscoped.find(child.id) : child
+        end
+        copy.public_send("#{name}=", persisted)
       end
 
       # The children to copy. Reading the association itself applied the
