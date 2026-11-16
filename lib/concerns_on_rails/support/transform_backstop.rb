@@ -139,13 +139,15 @@ module ConcernsOnRails
 
         # after_save: the save went through, so the next save cycle starts
         # afresh — but the records are kept aside until the transaction is
-        # known to have committed.
+        # known to have committed. A second save in the same transaction adds
+        # to the stash without replacing it: a rollback undoes BOTH saves, so
+        # the EARLIEST records are the ones a retry must find.
         def concerns_on_rails_stash_transform_records
-          stash = {}
+          stash = instance_variable_defined?(STASH) ? instance_variable_get(STASH) : {}
           SAVE_RECORDS.each do |name|
             next unless instance_variable_defined?(name)
 
-            stash[name] = instance_variable_get(name)
+            stash[name] = instance_variable_get(name) unless stash.key?(name)
             remove_instance_variable(name)
           end
           instance_variable_set(STASH, stash)
