@@ -223,13 +223,24 @@ module ConcernsOnRails
           normalized =
             case name
             when :order_param then value.to_sym
-            when :per_page, :max_per_page then value.to_i
+            when :per_page, :max_per_page then page_size_option!(name, value)
             when :predicate then validate_predicate!(value)
             when :signed then validate_signed!(value)
             else value ? true : false # bidirectional, link_header
             end
           [name, normalized]
         end
+      end
+
+      # Like Paginatable's macro: a non-positive per_page is broken configuration
+      # (-1 made every request without ?per_page raise "negative array size", 0
+      # served empty pages forever), so it raises at class load. max_per_page
+      # keeps its contract: 0 or negative disables the cap.
+      def self.page_size_option!(name, value)
+        size = value.to_i
+        return size if name == :max_per_page || size.positive?
+
+        raise ArgumentError, "CursorPaginatable: per_page: must be a positive integer (got #{value.inspect})"
       end
 
       # [order, order_presets, default_preset] for a cursor_paginate_by call
