@@ -508,7 +508,12 @@ module ConcernsOnRails
       # The row's SAVED stamp is set (the contextual destroy_all's live-vs-trashed
       # split; never the in-memory stamp or the overridable `deleted?`).
       def soft_delete_saved_trashed?
-        attribute_in_database(self.class.soft_delete_field).present?
+        field = self.class.soft_delete_field
+        # A partial select without the stamp: attribute_in_database would answer a truthy
+        # placeholder, classifying a live row as trashed. Fail loudly, as reading it does.
+        raise ActiveModel::MissingAttributeError, "missing attribute '#{field}' for #{self.class}" unless has_attribute?(field)
+
+        attribute_in_database(field).present?
       end
 
       # The no-op verbs' answer: true, or the `save` result when the record

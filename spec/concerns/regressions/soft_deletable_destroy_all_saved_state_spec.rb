@@ -101,4 +101,40 @@ describe "SoftDeletable contextual destroy_all decides on the saved state" do
     expect(row(other).deleted_at).not_to be_nil
     expect(row(comment)).to be_nil
   end
+
+  describe "a partial select that omits the stamp column" do
+    before { SdsPost.has_many :slim, -> { select(:id, :sds_post_id) }, class_name: "SdsComment", foreign_key: :sds_post_id }
+
+    let!(:trashed) { SdsComment.create!(sds_post_id: post.id, body: "t").tap(&:soft_delete!) }
+
+    def stamps
+      SdsComment.unscoped.order(:id).pluck(:id, :deleted_at)
+    end
+
+    it "raises MissingAttributeError and changes nothing (loaded relation)" do
+      before_state = stamps
+      relation = SdsComment.select(:id, :sds_post_id).where(sds_post_id: post.id).load
+      expect { relation.destroy_all }.to raise_error(ActiveModel::MissingAttributeError)
+      expect(stamps).to eq(before_state)
+    end
+
+    it "raises MissingAttributeError and changes nothing (scoped association)" do
+      before_state = stamps
+      expect { post.slim.destroy_all }.to raise_error(ActiveModel::MissingAttributeError)
+      expect(stamps).to eq(before_state)
+    end
+
+    it "raises MissingAttributeError and changes nothing (with_deleted)" do
+      before_state = stamps
+      relation = SdsComment.with_deleted.select(:id).load
+      expect { relation.destroy_all }.to raise_error(ActiveModel::MissingAttributeError)
+      expect(stamps).to eq(before_state)
+    end
+
+    it "still soft-deletes through an UNLOADED partial-select relation" do
+      SdsComment.select(:id).where(sds_post_id: post.id).destroy_all
+      expect(row(comment).deleted_at).not_to be_nil
+      expect(row(trashed).deleted_at).not_to be_nil
+    end
+  end
 end
