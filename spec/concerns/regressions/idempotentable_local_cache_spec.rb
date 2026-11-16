@@ -4,6 +4,8 @@ require "support/local_cache_remote_store"
 # Over Rails.cache with the LocalCache middleware, a claim this request wrote sits in its
 # request-local cache. Reading it back after it expired remotely used to evict it with
 # delete_entry, deleting the REMOTE key — a retry's DONE record. The ownership read bypasses it.
+# Rails 6.0/6.1 never cache an `unless_exist` write locally, so this passes there with or without
+# the fix; it guards Rails 7.0+.
 describe ConcernsOnRails::Controllers::Idempotentable do
   IdemLocalCacheReq = Struct.new(:headers) unless defined?(IdemLocalCacheReq)
 

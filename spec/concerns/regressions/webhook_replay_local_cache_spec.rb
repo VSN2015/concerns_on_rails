@@ -5,6 +5,8 @@ require "support/local_cache_remote_store"
 
 # Same LocalCache hole as Idempotentable's: the ownership read of the replay claim came from the
 # request-local cache, so an expired claim was evicted by deleting the REMOTE key a second delivery held.
+# Rails 6.0/6.1 never cache an `unless_exist` write locally, so this passes there with or without
+# the fix; it guards Rails 7.0+.
 describe ConcernsOnRails::Controllers::WebhookVerifiable do
   it "a delivery failing after its claim expired does not delete the claim a second delivery won" do
     store = LocalCacheRemoteStore.new
