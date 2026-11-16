@@ -56,8 +56,13 @@ describe "Searchable term cap (TRANS-2)" do
 
   it "still matches on the leading terms of a capped query" do
     klass = searchable_class(ranked: false)
-    klass.create!(title: "a b c")
-    klass.create!(title: "a b")
-    expect(klass.search("a b c").count).to eq(1)
+    cap = ConcernsOnRails::Models::Searchable::MAX_TERMS
+    leading = (1..cap).map { |i| "t#{i}" }
+    klass.create!(title: leading.join(" "))
+    klass.create!(title: leading.first(cap - 1).join(" "))
+    klass.create!(title: "unrelated")
+
+    found = klass.search(distinct_query(cap + 10)).pluck(:title)
+    expect(found).to eq([leading.join(" ")]) # the first `cap` terms decide; the extras are ignored
   end
 end
