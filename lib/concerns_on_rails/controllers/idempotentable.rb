@@ -3,6 +3,7 @@ require "concerns_on_rails/core"
 require "concerns_on_rails/support/error_envelope"
 require "digest"
 require "json"
+require "securerandom"
 
 module ConcernsOnRails
   module Controllers
@@ -237,8 +238,8 @@ module ConcernsOnRails
         fingerprint = idempotency_fingerprint
         emit_idempotency_key_header(key)
 
-        if idempotency_claim(store, cache_key, rule, fingerprint)
-          return idempotency_execute_and_store(store, cache_key, rule, fingerprint, &)
+        if (token = idempotency_claim(store, cache_key, rule, fingerprint))
+          return idempotency_execute_and_store(store, cache_key, rule, fingerprint, token, &)
         end
 
         record = store.read(cache_key)
@@ -251,8 +252,8 @@ module ConcernsOnRails
         # so a cache outage turned every keyed request into a permanent
         # "in progress". Claim once more to tell the two apart: a freed key
         # is won, a dead store fails again.
-        if idempotency_claim(store, cache_key, rule, fingerprint)
-          return idempotency_execute_and_store(store, cache_key, rule, fingerprint, &)
+        if (token = idempotency_claim(store, cache_key, rule, fingerprint))
+          return idempotency_execute_and_store(store, cache_key, rule, fingerprint, token, &)
         end
 
         # ...unless someone else re-claimed the freed key in between: read
@@ -266,9 +267,25 @@ module ConcernsOnRails
         idempotency_store_unavailable(rule, &)
       end
 
+      # Returns this request's claim token, or nil when the key is already held.
       def idempotency_claim(store, cache_key, rule, fingerprint)
-        claim = { "state" => "in_flight", "fingerprint" => fingerprint, "claimed_at" => Time.now.to_i }
-        store.write(cache_key, claim, expires_in: rule[:lock_ttl], unless_exist: true)
+        token = SecureRandom.hex(8)
+        claim = { "state" => "in_flight", "fingerprint" => fingerprint, "claimed_at" => Time.now.to_i,
+                  "token" => token }
+        token if store.write(cache_key, claim, expires_in: rule[:lock_ttl], unless_exist: true)
+      end
+
+      # Whether the key still holds THIS request's claim. After lock_ttl a retry
+      # may have re-claimed it or finished it; its record must never be touched.
+      # shortcut: read-then-write/delete is not atomic (one store round trip);
+      # upgrade if a store offers compare-and-delete.
+      def idempotency_claim_held?(store, cache_key, token)
+        record = store.read(cache_key)
+        record.is_a?(Hash) && record["token"] == token
+      end
+
+      def idempotency_release(store, cache_key, token)
+        store.delete(cache_key) if idempotency_claim_held?(store, cache_key, token)
       end
 
       # on_store_unavailable: :reject (default) — fail closed with a 503 and
@@ -281,7 +298,7 @@ module ConcernsOnRails
                                    status: :service_unavailable, code: "idempotency_store_unavailable")
       end
 
-      def idempotency_execute_and_store(store, cache_key, rule, fingerprint)
+      def idempotency_execute_and_store(store, cache_key, rule, fingerprint, token)
         emit_idempotency_replayed_header(false)
         completed = false
         begin
@@ -289,11 +306,11 @@ module ConcernsOnRails
           completed = true
         ensure
           # Covers raise and throw alike, so a retry can re-execute.
-          store.delete(cache_key) unless completed
+          idempotency_release(store, cache_key, token) unless completed
         end
 
         status = idempotency_response_status
-        return store.delete(cache_key) if status >= 500
+        return idempotency_release(store, cache_key, token) if status >= 500
 
         record = { "state" => "done", "status" => status, "body" => idempotency_response_body,
                    "content_type" => idempotency_response_content_type, "fingerprint" => fingerprint }
@@ -301,7 +318,16 @@ module ConcernsOnRails
         record["content_type_header"] = content_type_header if content_type_header
         headers = idempotency_response_headers(rule)
         record["headers"] = headers unless headers.empty?
-        store.write(cache_key, record, expires_in: rule[:ttl])
+        idempotency_store_done(store, cache_key, record, token, rule[:ttl])
+      end
+
+      # A claim taken over (expired, then re-claimed or completed by a retry) must not
+      # overwrite that retry's record; a key that simply expired is still ours to fill.
+      def idempotency_store_done(store, cache_key, record, token, ttl)
+        current = store.read(cache_key)
+        return unless current.nil? || (current.is_a?(Hash) && current["token"] == token)
+
+        store.write(cache_key, record, expires_in: ttl)
       end
 
       # The rule's allow-listed headers that the action actually set, as a
