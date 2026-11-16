@@ -1137,6 +1137,8 @@ describe ConcernsOnRails::SoftDeletable do
     end
 
     it "disables the single-UPDATE fast paths so soft_delete_all / restore_all cascade too" do
+      # touch: true alone already turns the fast path off; touch: false isolates the cascade.
+      CascPost.soft_deletable_by :deleted_at, touch: false, cascade: %i[casc_comments casc_cover]
       other = CascPost.create!(title: "q")
       other_comment = CascComment.create!(casc_post: other, body: "c2")
       expect(CascPost.soft_delete_all).to eq(2)

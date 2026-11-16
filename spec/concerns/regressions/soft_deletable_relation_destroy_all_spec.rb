@@ -525,8 +525,10 @@ describe "SoftDeletable destroy_all on a relation or an association" do
     it "does not leak the hard context out of the maintenance call (even when it raises)" do
       user = SrdUser.create!
       member!(user)
+      # Raises inside the hard context BEFORE the join model's destroy_all consumes it,
+      # so only the `ensure` in ContextualDestroy.hard can drop the still-pending entry.
       allow_any_instance_of(ActiveRecord::Associations::HasManyThroughAssociation)
-        .to receive(:delete_through_records).and_raise("boom")
+        .to receive(:through_scope_attributes).and_raise("boom")
 
       expect { user.srd_groups.destroy_all }.to raise_error("boom")
 

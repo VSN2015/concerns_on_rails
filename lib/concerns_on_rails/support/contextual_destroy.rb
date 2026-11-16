@@ -181,12 +181,19 @@ module ConcernsOnRails
       def destroy_loaded(relation, purge, acted)
         # One instance per record: a joined relation holds a stale copy per row.
         rows = relation.loaded? ? relation : BatchOps.full_rows(relation) # the instances as loaded, else whole rows
-        trashed, live = rows.records.uniq(&:id).partition(&:deleted?)
+        trashed, live = partition_saved(rows.records.uniq(&:id))
         purge_loaded(trashed, acted) if purge
         live.each do |record|
           raise_not_saved(record) unless record.soft_delete!
           acted << record
         end
+      end
+
+      # [trashed, live] by the SAVED stamp, never the in-memory / overridable
+      # `deleted?`; an already-destroyed (gone) instance is dropped, as
+      # Relation#destroy_all skips it.
+      def partition_saved(records)
+        records.reject(&:destroyed?).partition { |record| record.send(:soft_delete_saved_trashed?) }
       end
 
       # soft_delete_purge! answers true (purged), false (vetoed) or nil
@@ -222,7 +229,8 @@ module ConcernsOnRails
 
       SOFT_DELETE_LABEL = "ConcernsOnRails::Models::SoftDeletable".freeze
       private_constant :SOFT_DELETE_LABEL
-      private_class_method :destroy_loaded, :destroy_streaming, :trashed_keys, :records_up_front?, :raise_not_saved, :purge_loaded
+      private_class_method :destroy_loaded, :destroy_streaming, :trashed_keys, :records_up_front?, :raise_not_saved, :purge_loaded,
+                           :partition_saved
 
       # ActiveRecord's through-association maintenance keeps ActiveRecord's
       # hard delete of the join rows.
@@ -256,10 +264,10 @@ module ConcernsOnRails
         # the proxy's instances are the ones marked deleted. Returns what
         # ActiveRecord's does: the records, or nil when a before_remove aborted.
         def concerns_on_rails_soft_destroy_all
-          targets = load_target.dup
-          purge = ContextualDestroy.trash_scope?(scope)
-          targets = targets.reject(&:deleted?) unless purge
-          @concerns_on_rails_trashed = targets.select(&:deleted?).to_h { |record| [record, true] }.compare_by_identity
+          trashed, live = ContextualDestroy.send(:partition_saved, load_target)
+          trashed = [] unless ContextualDestroy.trash_scope?(scope)
+          targets = trashed + live
+          @concerns_on_rails_trashed = trashed.to_h { |record| [record, true] }.compare_by_identity
           # Wrapped in an Array, as `destroy(load_target)` does, so an empty
           # target answers [] (delete_or_destroy answers nil for a bare []).
           #
