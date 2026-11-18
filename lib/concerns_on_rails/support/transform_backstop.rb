@@ -139,14 +139,19 @@ module ConcernsOnRails
 
         # after_save: the save went through, so the next save cycle starts
         # afresh — but the records are kept aside until the transaction is
-        # known to have committed.
+        # known to have committed. A second save in the same transaction merges
+        # into the stash per field, the later save winning: a rollback undoes
+        # BOTH saves but leaves the latest attribute values, so a field the
+        # first save alone touched keeps its record and one both touched
+        # carries the last output.
         def concerns_on_rails_stash_transform_records
-          stash = {}
+          stash = instance_variable_defined?(STASH) ? instance_variable_get(STASH) : {}
           SAVE_RECORDS.each do |name|
             next unless instance_variable_defined?(name)
 
-            stash[name] = instance_variable_get(name)
-            remove_instance_variable(name)
+            latest = remove_instance_variable(name)
+            earlier = stash[name]
+            stash[name] = earlier && latest ? earlier.merge(latest) : (latest || earlier)
           end
           instance_variable_set(STASH, stash)
         end

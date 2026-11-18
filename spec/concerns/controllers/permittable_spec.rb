@@ -483,7 +483,8 @@ describe ConcernsOnRails::Controllers::Permittable do
       rescue described_class::InvalidParameters => e
         c.render_invalid_parameters(e)
       end
-      expect(c.rendered[:status]).to eq(:unprocessable_entity)
+      # permittable >= 0.16 renders the Integer 422; older lines (Rails 6.0 resolves 0.8) the Symbol.
+      expect(c.rendered[:status]).to eq(422).or eq(:unprocessable_entity)
       expect(c.rendered[:json][:error][:code]).to eq("invalid_parameters")
       expect(c.rendered[:json][:error][:details]).to eq([{ param: "name", code: "missing" }])
     end

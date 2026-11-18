@@ -98,7 +98,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   skipped; association: RecordNotDestroyed). After an association `destroy_all` the association cache is `reset`
   (not marked loaded-and-empty), so a `default_scope: false`/`with_deleted` association still shows its trash. The association form rides Rails' own `delete_or_destroy` (before/after_remove,
   marks the loaded instances, nil on abort; a rolled-back association/loaded-relation `destroy_all` restores every instance it was handed, `HookedWrite.restoring(records, klass)` wrapping the batch transaction); a loaded / limited / composite-key / disable_joins relation
-  acts on its records as loaded (deduped by id). Rails' OWN maintenance stays hard (HMT
+  acts on its records as loaded (deduped by id), live vs trashed decided on the SAVED stamp (an unsaved stamp is still soft-deleted; a destroyed instance is skipped; a partial `select` omitting the stamp raises MissingAttributeError). Rails' OWN maintenance stays hard (HMT
   `delete_records(:destroy)` wrapped in a fiber-local ONE-SHOT hard context for the join model: owner
   `through:, dependent: :destroy`, link removal; a callback's own `destroy_all` is soft again);
   `relation_destroy_all: :hard` opts out; instance `destroy`, `dependent: :destroy`, `assoc.destroy(c)`,
@@ -224,7 +224,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   concurrent instance adopts the existing lock/token and fires no hooks; readonly/destroyed
   preconditions replicated; `register_failed_attempt!`'s quiet lapsed-lock clear is conditional
   the same way) / `unlock_access!` (row-decided like `lock_access!`: a locking read in its savepoint, hooks only when the row was locked; `update_all` with lock_version pinned) + before/after hooks,
-  composite primary keys work (every row condition goes through `Support::PrimaryKey`); `register_failed_attempt!` on a readonly/destroyed unlocked record raises before incrementing; `unlock_by_token` answers nil for a NUL-byte token; `reset_failed_attempts!` (one UPDATE conditional on the row's counter <> 0, lock_version pinned; raises on a readonly/destroyed record even at 0); expiry-aware `.locked`/`.unlocked` scopes. Batch
+  composite primary keys work (every row condition goes through `Support::PrimaryKey`); `register_failed_attempt!` on a readonly/destroyed unlocked record raises before incrementing; on an instance that READS locked, `register_failed_attempt!`/`lock_access!` check the row (one locking SELECT, adopting it; `lock_access!` false when the row is gone); `unlock_by_token` answers nil for a NUL-byte token; `reset_failed_attempts!` (one UPDATE conditional on the row's counter <> 0, lock_version pinned; raises on a readonly/destroyed record even at 0); expiry-aware `.locked`/`.unlocked` scopes. Batch
   `unlock_expired` (mirrors `unlock_access!`; per-record on an STI table; no validators gate needed since
   `update_all` skips them; returns 0 without a query when `unlock_in` is nil).
   `unlock_token:` mints a self-service unlock link — timing-safe scoped finder, race-safe
@@ -248,7 +248,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   semantics, macro-time collision/type validation, ActiveModel::Type casting
   (`:decimal` stored as string, `:datetime` ISO8601 UTC microseconds; a `default:` on a key
   with an explicit `type:` reads back cast exactly as the same value stored would — `:json`
-  excepted, an uncastable one nil; a key WITHOUT `type:` returns its default raw). `:decimal` writes (and Encryptable's `type: :decimal`) go through `Support::NumericOperand.bounded_decimal` (<= 2,100 chars, exponent <= 1000, finite, no `_`; else nil; a BigDecimal of ~2,100+ digits is stored but its String echo through the writer reads nil). `where_<key>`
+  excepted, an uncastable one nil; a key WITHOUT `type:` returns its default raw). `:decimal` writes (and Encryptable's `type: :decimal`, reads too: an out-of-bound stored value reads nil, its ciphertext untouched by `reencrypt!`, still counted by `needs_reencryption`, so keep its key id in `previous_keys`) go through `Support::NumericOperand.bounded_decimal` (<= 2,100 chars, exponent <= 1000, finite, no `_`; else nil; a BigDecimal of ~2,100+ digits is stored but its String echo through the writer reads nil). `where_<key>`
   raises on an `encryptable` column (ciphertext isn't JSON), in either declaration order.
 - **`Encryptable`** — transparent per-field encryption for sensitive columns
   (AES-256-GCM, stdlib OpenSSL, no deps) via a custom `ActiveModel::Type` on the
@@ -346,7 +346,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   position only when its acts_as_list scope names the copied association's foreign key — the
   copy goes into the new parent's own list — else it is blanked too, an opaque String scope
   included; children are fed to acts_as_list in position order; a child/has_one target `marked_for_destruction?` — nested `_destroy` —
-  is skipped, loaded or not, via `duplicable_without_marked`; edited/new target records win over their rows, loaded or not, via `duplicable_merge_loaded`; a HABTM copy re-links only PERSISTED records) so sibling concerns regenerate on save; a Duplicable
+  is skipped, loaded or not, via `duplicable_without_marked`; edited/new target records win over their rows, loaded or not, via `duplicable_merge_loaded`; a HABTM copy re-links only PERSISTED records, to fresh rows read in one query by saved primary key, never the original's in-memory ones — known limit: validating the copy still writes a linked row a `before_validation` rewrites) so sibling concerns regenerate on save; a Duplicable
   child copies via its OWN rules (recursive graphs); `on_duplicate(copy)`
   hook. `duplicate!` re-reads the counters + `lock_version` of the copy and of every nested Duplicable copy inside its save transaction, with one SELECT per class in the copied graph (never per record).
 
@@ -369,7 +369,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `Support::NumericOperand`: exact, never truncated (`gte 5.5` on an integer column is
   `>= 6`, `eq 5.5` is none), out-of-range answered per operator, oversized strings refused
   before any BigDecimal is built.
-- **`Sortable`** — allow-listed, multi-column ordering from `params[:sort]` (uses `reorder`);
+- **`Sortable`** — allow-listed, multi-column ordering from `params[:sort]` (uses `reorder`; an `alias_attribute` key resolves to its column on 6.0 too);
   the macro's `direction:` is case-insensitive and anything but asc/desc raises at class load.
 - **`Respondable`** — standard JSON success/error envelopes (`render_success`/`render_error`),
   plus `render_created(data:, location:)` and `render_invalid(record)`; `location:`/`headers:`
@@ -409,7 +409,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   never share a counter (subclasses share their parent's rule). The first-hit seed is
   written `raw: true` (only to a `write` taking options/`**`/`raw:` — a custom store naming just
   its keywords would raise), the only form MemCacheStore on Rails 6.0–7.0 can `increment`.
-  `throttled_response` raises when nothing can render the 429 (no response object and no `render_error`), never failing open.
+  `throttled_response` raises when nothing can render the 429 (no response object and no `render_error`), never failing open. Rate limiting itself fails OPEN on a cache-store outage (Rails stores swallow the error; documented — wrap the store to fail closed).
 - **`Timezoneable`** — per-request `Time.zone` from params / header / cookie. The
   `available:` allow-list matches by canonical tzinfo identifier (exact name first, the
   allow-listed zone returned); a value that is not valid UTF-8 is no match. The action always
@@ -418,7 +418,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   source is on and `Vary: Cookie` whenever the cookie source is on (through `Support::VaryHeader`; `vary: false`
   opts out; independent of `response_header:`, which only controls `X-Time-Zone`).
 - **`Idempotentable`** — `Idempotency-Key` response replay with an injectable store
-  (`idempotent_actions`); 409 on in-flight duplicates, 422 on payload mismatch, 503
+  (`idempotent_actions`); in-flight claims carry a per-request token, and a failed request releases only a claim it still holds (never overwrites a finished record; overlapping different payloads: first to finish owns the response; read-then-write stays two round trips); 409 on in-flight duplicates, 422 on payload mismatch, 503
   `idempotency_store_unavailable` when the store is down (both claims failed AND both reads
   nil); `on_store_unavailable: :proceed` runs the action without dedupe instead.
 - **`WebhookVerifiable`** — HMAC verification for inbound webhooks (`verify_webhook`):
@@ -431,7 +431,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   specificity: a rule naming the action beats any catch-all (most-derived class first),
   else the most-derived catch-all.
 - **`CursorPaginatable`** — cursor/keyset pagination (no COUNT; `cursor_paginate_by
-  order:, per_page:, max_per_page:`; `cursor_paginated`/`cursor_pagination_meta`;
+  order:, per_page:, max_per_page:` — `per_page:` must be positive, else ArgumentError at the macro; `cursor_paginated`/`cursor_pagination_meta`;
   `X-Per-Page`/`X-Count`/`X-Has-More`/`X-Next-Cursor` headers). Opaque table+order-pinned
   Base64 cursors, PK tiebreaker appended, Arel OR-expansion WHERE, `reorder`; bad cursors
   raise `InvalidCursor` → auto `rescue_from` renders 400. Opt-in: `bidirectional:`
@@ -455,7 +455,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   (repeatable; no actions = catch-all; LAST matching rule wins). Emits RFC 9745
   `Deprecation` (`@<unix>`, or `:legacy` `true`), RFC 8594 `Sunset` (httpdate),
   RFC 8288 `Link` rels (appended, never clobbered); `after_sunset: :gone` → 410
-  (`endpoint_sunset`, inclusive boundary, headers still emitted, Respondable-aware);
+  (`endpoint_sunset`, raises when nothing can render it, inclusive boundary, headers still emitted, Respondable-aware);
   instruments `deprecated_endpoint.concerns_on_rails` via `on_deprecated_access`
   override point; `deprecation_active?`/`sunset_passed?` predicates.
 - **`Cacheable`** — HTTP conditional GET + Cache-Control policies.
@@ -501,7 +501,7 @@ its own savepoint so a retry works inside a caller's transaction on PostgreSQL),
 savepoint, true only once the after-hook returns, and on abort the WHOLE AttributeSet (a
 deep_dup, already-read mutable values deep-copied), the last save's mutations, forced changes
 and the record's identity (a NEW record's too: `new_record?`/`destroyed?`/`previously_new_record?`/id) are put back — unread attributes restored raw, never
-deserialized, so encrypted fields are never decrypted), `TransformBackstop` (the ONE prepended
+deserialized, so encrypted fields are never decrypted), `TransformBackstop` (stash merged per field across saves in one transaction; the ONE prepended
 `before_save` dispatcher for the validation-skipping backstops of Normalizable, Sanitizable `on: :write`,
 Taggable and Addressable, registered once per class hierarchy by `install`; runs them in
 `before_validation` order, then each `settle:` method — Normalizable's re-check, Sanitizable's — after
@@ -565,7 +565,7 @@ SoftDeletable's column while its default scope is on, Publishable's under `defau
 matched by Arel attribute, not `unscope(where:)`'s any-table column name, with the association's
 own predicates on them put back; app default scopes (tenant, discriminator, joined-table
 same-named columns) still apply, and a limited association (has_one) ranks its reader's rows
-first; `without(relation, columns)` is the same table-qualified peel), `VaryHeader` (the shared `Vary`
+first; `without(relation, columns)` is the same table-qualified peel), `FreshRead` (reads a cache key bypassing Rails' request-local cache; Idempotentable's and WebhookVerifiable's ownership reads), `VaryHeader` (the shared `Vary`
 appender behind Localizable's
 `Accept-Language` and Timezoneable's `Time-Zone`: appends, de-duplicates case-insensitively,
 leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —

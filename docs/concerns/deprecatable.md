@@ -92,6 +92,7 @@ After the sunset instant with `after_sunset: :gone`, the action is halted with:
 - `header_format: :legacy` exists because pre-RFC tooling parses the draft boolean form; the RFC 9745 `@<unix>` form is the default and the right choice for new rollouts.
 - CDN/proxy-cached responses can outlive the headers' accuracy — pair enforcement with cache invalidation.
 - Clock skew across app servers makes the 410 flip non-simultaneous for a few seconds; comparisons run in UTC through one overridable seam (`deprecation_now`).
+- `after_sunset: :gone` raises ("refusing to fail open") when the host has no response object and no `render_error`, instead of skipping the 410 and running the retired action. Rails controllers are unaffected.
 
 ## Changed in 1.22.0
 

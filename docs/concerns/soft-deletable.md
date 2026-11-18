@@ -217,6 +217,7 @@ order.restore!       # raises if fulfilled?, deleted_at stays set
 - **Column must exist at class-load time.** `soft_deletable_by` validates the column via `ConcernsOnRails::Support::ColumnGuard#ensure_columns!` and raises `ArgumentError` with the message `"does not exist in the database"` if the column is missing. This means running the model before running migrations will fail fast rather than silently.
 
 - **`.active` scope conflict.** `Activatable`, `Expirable` and `SoftDeletable` all define an `.active` scope. On a model that combines them, pass `prefix:`/`suffix:` to rename the scopes, or rely on `.without_deleted`.
+- **Loaded `destroy_all` decides on the saved stamp.** On a loaded relation or association, live vs trashed is judged by the row's SAVED stamp, never the in-memory or overridden `deleted?`: a live row whose instance carries an unsaved stamp is soft-deleted, and a trashed row whose instance had the stamp cleared in memory is purged by a trash-scope relation. An already-destroyed instance in the loaded set is skipped (and is not in the association form's returned Array). A record loaded with a partial `select` that omits the stamp column raises `ActiveModel::MissingAttributeError` before anything is written.
 
 ## Changed in 1.22.0
 

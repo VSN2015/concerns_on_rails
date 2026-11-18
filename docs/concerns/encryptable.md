@@ -259,6 +259,7 @@ FriendlyId::Slug.where(sluggable_type: "Customer")
 Old URLs built from the sensitive value stop resolving, which is the point. If
 the slug column is also audited (Auditable), its trail holds the plaintext
 slugs too — clear it with `clear_audit_trail!`.
+- **`type: :decimal` reads are bounded like writes.** A stored value with a decimal exponent beyond +-1000 (only writable before 1.36.0), or a stored Infinity/NaN, reads `nil`, like an undecryptable field. The ciphertext is left alone: `reencrypt!`/`reencrypt_all!` skip it and a save of other fields never rewrites it, so a presence or numericality validation on that field fails for such a row even when only other fields change. `needs_reencryption` keeps counting such a row, so keep its key id in `previous_keys`; dropping the key makes that ciphertext unrecoverable. Storable's `:decimal` read is unchanged.
 
 ## Changed in 1.22.0
 

@@ -71,6 +71,7 @@ module ConcernsOnRails
     autoload :UniqueRetry,             "concerns_on_rails/support/unique_retry"
     autoload :ErrorEnvelope,           "concerns_on_rails/support/error_envelope"
     autoload :FilterParameterRegistry, "concerns_on_rails/support/filter_parameter_registry"
+    autoload :FreshRead,               "concerns_on_rails/support/fresh_read"
     autoload :RandomValue,             "concerns_on_rails/support/random_value"
     autoload :AddressData,             "concerns_on_rails/support/address_data"
     autoload :SequenceCalculator,      "concerns_on_rails/support/sequence_calculator"

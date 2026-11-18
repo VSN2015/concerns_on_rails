@@ -116,9 +116,11 @@ describe ConcernsOnRails::Sluggable do
   end
 
   it "ensures unique slugs for duplicate titles" do
-    Page.create!(title: "Same")
+    first = Page.create!(title: "Same")
     second = Page.create!(title: "Same")
-    expect(second.slug).to match(/^same(-[-\w]+)?$/)
+    expect(first.slug).to eq("same")
+    expect(second.slug).not_to eq(first.slug)
+    expect(second.slug).to start_with("same-")
   end
 
   it "generates slug from unicode characters" do

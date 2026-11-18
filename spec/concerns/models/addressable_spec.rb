@@ -816,14 +816,17 @@ describe ConcernsOnRails::Models::Addressable do
       record = klass.create!(line1: "1 Infinite Loop", city: "Cupertino (HQ)", state: "CA",
                              postal_code: "95014", country: "US")
       expect(record.city).to eq("Cupertino")
-      expect(record.reload.address_fingerprint).to eq(record.address_fingerprint)
+      expect(record.reload[:address_fingerprint]).to eq(record.address_fingerprint)
       expect(klass.with_address(record).count).to eq(1)
     end
 
     it "stamps on save(validate: false) too" do
+      klass = fingerprinted(fingerprint: :address_fingerprint)
       record = klass.new(apple)
       record.save(validate: false)
-      expect(record.reload.address_fingerprint).to eq(record.address_fingerprint)
+      stored = record.reload[:address_fingerprint]
+      expect(stored).not_to be_nil
+      expect(stored).to eq(record.address_fingerprint)
     end
 
     it "keeps ActiveModel's address_changed? when the model has its own address column" do

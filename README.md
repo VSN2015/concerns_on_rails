@@ -715,6 +715,8 @@ side effects too.
 
 **Aliases**: `soft_deleted?` and `is_soft_deleted?` both delegate to `deleted?`.
 
+
+**Loaded `destroy_all`**: on a loaded relation/association, live vs trashed is decided on the SAVED stamp (not the in-memory or overridden `deleted?`); destroyed instances are skipped; a partial `select` omitting the stamp column raises `ActiveModel::MissingAttributeError`.
 ---
 
 ## 🔐 Hashable
@@ -1712,6 +1714,7 @@ rule: on an STI table `unlock_expired` always streams per record, so a subclass'
 - Optimistic locking: the raw writes (the increment, the lock claim, the lapsed-lock reset, the unlock-token claim) bump `lock_version` in SQL and mirror the bump into the instance as Rails' `increment!` does, so the same instance — and the record `unlock_by_token` returns — saves afterwards without `StaleObjectError`.
 - Reach for Devise's `lockable` when you need its unlock emails or per-strategy unlocks (the `unlock_token:` option covers a self-service unlock link; sending it is up to your `after_lock`).
 
+- `register_failed_attempt!` / `lock_access!` on an instance that reads locked take one locking SELECT and adopt the row's state: a row unlocked meanwhile is counted / really locked, with hooks; `lock_access!` returns `false` when the row has gone.
 ---
 
 ## 🪞 Aliasable
@@ -1877,6 +1880,7 @@ Reads pick the key by the envelope's id, so old and new rows coexist; `find_by_<
 - Rotation is gem-level (`key_id` / `previous_keys`); `reencrypt_all!` streams with `find_each` and rewrites each row with one UPDATE — no validations/callbacks (only the ciphertext changes), no `lock_version` bump (so records open in edit forms don't go stale), guarded on the ciphertext it read so a concurrent write is never reverted, and skipping any field with an unsaved change. A row whose key id is no longer configured raises `DecryptionError` naming the id.
 - Reach for [`lockbox`](https://github.com/ankane/lockbox) or Rails 7+ native `encrypts` when you need Rails-managed key infrastructure (KMS, per-record keys) or deterministic encryption.
 
+- `type: :decimal` reads are bounded like writes: a stored value with an exponent beyond +-1000 or an Infinity/NaN reads `nil`, its ciphertext is left alone (`reencrypt!`/`reencrypt_all!` skip it, `needs_reencryption` keeps counting it), so keep its key id in `previous_keys`.
 ---
 
 ## 🕵️ Anonymizable
@@ -1947,6 +1951,7 @@ copy = invoice.duplicate!(only: [])                     # shallow copy — attri
 - The macro is optional — bare `include` gives `duplicate`/`duplicate!` with the auto resets.
 - `only:` / `except:` on `duplicate` / `duplicate!` pick which of the declared associations this particular copy carries ("Duplicate with line items?" checkbox); names outside the allow-list raise. They are reserved keys — pass overrides for attributes literally named `only`/`except` as a braced Hash.
 - Override `on_duplicate(copy)` for custom tweaks; it receives the unsaved copy last.
+- A HABTM copy is linked to fresh rows read in one query by the saved primary key, never to the original's in-memory records, and `duplicate!` leaves the original's pending nested edits unwritten. Known limit: saving the copy still validates the linked records, so a `before_validation` that rewrites a linked row's value still writes it (from the fresh instance).
 - A child (or has_one target) marked for destruction in memory (nested attributes `_destroy`, `mark_for_destruction`) is not copied, so a "save as copy" flow does not resurrect a just-removed child. Pending nested-attributes edits win over the stored rows, loaded or not (an edited child is copied with its new values, a child added via `build` is copied), and a HABTM copy re-links only persisted records.
 - Reach for [`amoeba`](https://github.com/amoeba-rb/amoeba) when you need per-attribute regex/prepend rules or belongs_to graph copying.
 
@@ -2093,6 +2098,7 @@ A relation already carrying `limit`/`offset` is refused with an `ArgumentError`;
 - Forward-only by default — `bidirectional: true` (macro or per call) adds prev cursors and `X-Has-Prev`/`X-Prev-Cursor`; direction is pinned in the token, so prev tokens replayed on forward-only endpoints 400 and old direction-less tokens stay valid. `order_presets: { newest: {...}, top: {...} }` (+ `default_preset:`, `order_param:`) lets clients pick a **named** ordering from an allow-list. `predicate: :auto` upgrades the keyset WHERE to a row-value tuple `(a, b, id) > (x, y, z)` on PostgreSQL/MySQL/SQLite when directions are uniform — composite-index friendly — falling back to the portable OR-expansion (`:row`/`:or` force a strategy). `:row` requires uniform directions, validated at declaration: `predicate: :row` with a mixed-direction `order:` or `order_presets:` entry raises `ArgumentError` at class load (a per-call `cursor_paginated(order:)` with mixed directions raises before page 1) — use `:auto` for a mixed order. A NUL-bearing String ordering value on SQLite is paged with the boundary cast from its hex bytes as TEXT, which assumes a UTF-8 SQLite database (Rails' default).
 - Use Paginatable when you need page numbers and totals.
 
+- `per_page:` in the macro must be positive: 0, a negative or a non-numeric value raises `ArgumentError` at class load.
 ---
 
 ## 🔎 Filterable
@@ -2570,6 +2576,7 @@ When several rules apply to one request the `X-RateLimit-*` headers describe the
 - When `Respondable` is included, the 429 body delegates to `render_error` (`code: "rate_limited"`).
 - Backports the essentials of Rails 7.2's `rate_limit` (with standardized headers) to Rails 6.0+. For richer rules (fail2ban, allow/deny lists, exponential backoff) reach for [`rack-attack`](https://github.com/rack/rack-attack).
 
+- Rate limiting **fails open** during a cache-store outage: Rails' Redis/Memcache stores swallow connection errors, the counter reads as 1 and nothing is throttled, with no log or event. Wrap the store so it raises if you need fail-closed.
 ---
 
 ## 🕒 Timezoneable
@@ -2627,6 +2634,7 @@ Per-key lifecycle: claim atomically (`write unless_exist`, TTL `lock_ttl:`) → 
 - Declare halting filters (authentication, `Throttleable`) **before** including this concern — a 401/403 rendered by an inner filter would be cached and replayed for the full TTL. Responses rendered by `rescue_from` handlers are never cached.
 - Keys must be ≤255 chars with no control characters (the raw key is echoed in `X-Idempotency-Key`); set `lock_ttl:` above the slowest declared action's worst case.
 
+- In-flight claims carry a per-request token; a request that raises or ends 5xx releases the key only while it still holds its own claim, ownership reads bypass Rails' request-local cache (`Support::FreshRead`), and when overlapping requests share a key with different payloads the first to finish owns the stored response. Known limit: read-then-delete and read-then-write are still two store round trips.
 ---
 
 ## 🪝 WebhookVerifiable
@@ -2700,6 +2708,7 @@ end
 - 410 bodies delegate to `Respondable`'s `render_error` when present (inline JSON envelope otherwise). `skip_before_action :apply_api_deprecations` opts an action out; `deprecation_active?` / `sunset_passed?` are available for serializers/response bodies.
 - Flipping `:gone` is a deliberate, customer-facing cut-off — coordinate it with `notify:`-driven outreach, and mind CDN-cached responses that may outlive the headers.
 
+- `after_sunset: :gone` raises ("refusing to fail open") when the host has no response object and no `render_error`, instead of skipping the 410 and running the retired action; Rails controllers are unaffected.
 ---
 
 ## 🗄️ Cacheable
@@ -2880,7 +2889,7 @@ Point your agent at `llms.txt` for an overview, or paste a single concern's `.md
 bundle install                                  # install dev dependencies
 bundle exec rspec                               # run the test suite (3,937 examples)
 gem build concerns_on_rails.gemspec             # build the gem
-gem install ./concerns_on_rails-1.36.1.gem      # install locally
+gem install ./concerns_on_rails-1.36.2.gem      # install locally
 
 # Preview the docs site locally (GitHub Pages serves docs/ as-is):
 cd docs && python3 -m http.server 8000          # → http://localhost:8000
