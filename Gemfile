@@ -13,7 +13,7 @@ gem "friendly_id", "~> 5.4"
 # AS 8.1 calls JSON.parse(json, options) positionally. Verified 2026-09-19:
 # with json 3.0.2 the suite fails in Storable's decode path; with json < 3 it is
 # green on Rails 8.1.3.1. Pinned here so Dependabot stops proposing the bump.
-gem "json", "< 3"
+gem "json", "< 4"
 # Dev/test only — the gem itself does not depend on railties; the spec suite
 # exercises ConcernsOnRails::Railtie directly.
 gem "railties", ">= 6.0", "< 9"
