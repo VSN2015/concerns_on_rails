@@ -1,54 +1,161 @@
+<h1 align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="ConcernsOnRails — plug-and-play ActiveSupport concerns for Rails models and controllers. One include, one macro, done.">
+</h1>
+
 <div align="center">
-
-# 🧩 ConcernsOnRails
-
-**Plug-and-play ActiveSupport concerns for Rails models &amp; controllers.**<br/>
-One `include`, one declarative macro — done.
 
 [![Gem Version](https://img.shields.io/gem/v/concerns_on_rails?logo=rubygems&logoColor=white&color=CC342D)](https://rubygems.org/gems/concerns_on_rails)
 [![Total Downloads](https://img.shields.io/gem/dt/concerns_on_rails?color=1f6feb&label=downloads)](https://rubygems.org/gems/concerns_on_rails)
-[![Latest Version Downloads](https://img.shields.io/gem/dtv/concerns_on_rails?color=8250df&label=latest%20version)](https://rubygems.org/gems/concerns_on_rails/versions)
 [![CI](https://github.com/VSN2015/concerns_on_rails/actions/workflows/ci.yml/badge.svg)](https://github.com/VSN2015/concerns_on_rails/actions/workflows/ci.yml)
-[![Docs](https://img.shields.io/badge/docs-vsn2015.github.io-6f42c1?logo=readthedocs&logoColor=white)](https://vsn2015.github.io/concerns_on_rails)
 [![Ruby](https://img.shields.io/badge/ruby-%3E%3D%203.2-CC342D?logo=ruby&logoColor=white)](https://www.ruby-lang.org)
 [![Rails](https://img.shields.io/badge/rails-6.0--8.1-CC0000?logo=rubyonrails&logoColor=white)](https://rubyonrails.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3fb950.svg)](#-license)
 
-### [📖 **Documentation**](https://vsn2015.github.io/concerns_on_rails) &nbsp;·&nbsp; [💎 **RubyGems**](https://rubygems.org/gems/concerns_on_rails) &nbsp;·&nbsp; [📝 **Changelog**](CHANGELOG.md) &nbsp;·&nbsp; [🐛 **Issues**](https://github.com/VSN2015/concerns_on_rails/issues)
-
-🧩 **26 model concerns** &nbsp;·&nbsp; 🎮 **16 controller concerns** &nbsp;·&nbsp; 🪶 **lean deps** &nbsp;·&nbsp; ✅ **schema-validated** &nbsp;·&nbsp; 🧪 **2,723 specs**
+**[📖 Documentation](https://vsn2015.github.io/concerns_on_rails)** &nbsp;·&nbsp; **[💎 RubyGems](https://rubygems.org/gems/concerns_on_rails)** &nbsp;·&nbsp; **[📝 Changelog](CHANGELOG.md)** &nbsp;·&nbsp; **[🐛 Issues](https://github.com/VSN2015/concerns_on_rails/issues)**
 
 </div>
 
 > 🇻🇳 **Hoàng Sa and Trường Sa belong to Việt Nam.**
 
-A plug-and-play collection of reusable ActiveSupport concerns for Rails **models** and **controllers** — slugs, soft delete, scheduled publish, expiry, sequential reference numbers, pagination, filtering, JSON envelopes, and more. One `include`, one declarative macro, done.
+Reusable ActiveSupport concerns for Rails **models** and **controllers** — slugs, soft delete, scheduled publishing, encryption, reference numbers, pagination, filtering, JSON envelopes, and more. Each one is a single `include` plus one declarative macro that checks your schema at load time.
+
+**26 model concerns** &nbsp;·&nbsp; **17 controller concerns** &nbsp;·&nbsp; **3,937 specs** on Rails 6.0 – 8.1 × SQLite, PostgreSQL, MySQL
+
+[Quick Start](#-quick-start) &nbsp;·&nbsp; [Installation](#-installation) &nbsp;·&nbsp; [Find your concern](#-find-your-concern) &nbsp;·&nbsp; [All concerns](#-table-of-contents) &nbsp;·&nbsp; [Why this gem?](#-why-this-gem) &nbsp;·&nbsp; [Compatibility](#-compatibility) &nbsp;·&nbsp; [Module paths](#-module-paths--namespacing) &nbsp;·&nbsp; [AI assistants](#-using-this-gem-with-ai-assistants) &nbsp;·&nbsp; [Development](#-development) &nbsp;·&nbsp; [Contributing](#-contributing) &nbsp;·&nbsp; [License](#-license)
+
+---
+
+## 🚀 Quick Start
+
+```sh
+bundle add concerns_on_rails
+```
+
+A model that's sluggable, publishable, and soft-deletable:
 
 ```ruby
 class Article < ApplicationRecord
   include ConcernsOnRails::Sluggable
   include ConcernsOnRails::Publishable
   include ConcernsOnRails::SoftDeletable
+  include ConcernsOnRails::Normalizable
 
-  sluggable_by :title
+  sluggable_by    :title
+  normalizable    :title, with: :squish
 end
 
 Article.published.without_deleted.find("hello-world")
 ```
 
-> 📖 **Prefer browsable docs?** Every concern has its own searchable, deep-linkable page
-> (dark mode included) at **[vsn2015.github.io/concerns_on_rails](https://vsn2015.github.io/concerns_on_rails)** —
-> same content as this README, one page per concern. For install stats, every released
-> version, and the live download counter, see the gem page:
-> **[rubygems.org/gems/concerns_on_rails](https://rubygems.org/gems/concerns_on_rails)**.
+A controller that filters, sorts, paginates, and renders a JSON envelope:
+
+```ruby
+class ArticlesController < ApplicationController
+  include ConcernsOnRails::Controllers::Paginatable
+  include ConcernsOnRails::Controllers::Filterable
+  include ConcernsOnRails::Controllers::Sortable
+  include ConcernsOnRails::Controllers::Respondable
+
+  filter_by   :published, scope: :published
+  sortable_by :created_at, :title, default: :created_at, direction: :desc
+
+  def index
+    render_success(data: paginated(sorted(filtered(Article.all))))
+  end
+end
+```
+
+<p align="center">
+  <img src="./assets/readme/request-line.svg" width="100%" alt="GET /articles?published=1&amp;sort=-title&amp;page=2 passes through Filterable, Sortable, Paginatable and Respondable — one line of controller code.">
+</p>
+
+That's it. Every concern below is documented here **and** as its own searchable page on the [docs site](https://vsn2015.github.io/concerns_on_rails).
+
+---
+
+## 📦 Installation
+
+Add to your application's `Gemfile`:
+
+```ruby
+gem "concerns_on_rails", "~> 1.32"
+```
+
+Or pull the latest from GitHub:
+
+```ruby
+gem "concerns_on_rails", github: "VSN2015/concerns_on_rails"
+```
+
+Then run:
+
+```sh
+bundle install
+```
+
+### Optional: one-initializer configuration
+
+Everything works with zero configuration. The store-backed controller concerns
+(`Throttleable`, `Idempotentable`) need a cache store — set it once, gem-wide,
+instead of per controller class:
+
+```ruby
+# config/initializers/concerns_on_rails.rb
+ConcernsOnRails.setup do |config|
+  config.cache_store = -> { Rails.cache }   # fallback for Throttleable / Idempotentable
+  config.audit_actor = -> { Current.user&.id } # fallback "by" for every Auditable model
+end
+
+# Encryptable's key lives in its own config (see the Encryptable section):
+ConcernsOnRails.configure_encryption do |c|
+  c.key = -> { Rails.application.credentials.dig(:encryption, :key) }
+end
+```
+
+A per-class `self.throttleable_store = ...` / `self.idempotency_store = ...`
+still wins over the gem-wide fallback.
+
+---
+
+## 🧭 Find your concern
+
+Forty-three concerns is a lot of menu. Start from the problem instead:
+
+| "I need to…" | Reach for |
+|--------------|-----------|
+| Give records pretty URLs — `/posts/hello-world`, not `/posts/42` | [📝 Sluggable](#-sluggable) |
+| Let users trash records, then restore them | [❌ SoftDeletable](#-softdeletable) |
+| Schedule a post to go live Friday at 9am | [📤 Publishable](#-publishable) |
+| Support drag-and-drop reordering | [🔢 Sortable](#-sortable) |
+| Issue API keys / invite codes with timing-safe lookup | [🔑 Tokenizable](#-tokenizable) |
+| Number invoices like `INV-2026-00042`, per account, resetting yearly | [🧾 Sequenceable](#-sequenceable) |
+| Add a small state machine without the AASM dependency | [🔄 Stateable](#-stateable) |
+| Encrypt SSNs at rest and still `find_by` them | [🔏 Encryptable](#-encryptable) |
+| Handle a GDPR "delete my data" request in one call | [🕵️ Anonymizable](#-anonymizable) |
+| Know who changed which field, and when | [📜 Auditable](#-auditable) |
+| Lock accounts after 5 failed logins | [🔐 Lockable](#-lockable) |
+| Keep typed, defaulted settings in one JSON column | [⚙️ Storable](#-storable) |
+| Maintain `approved_comments_count` next to `comments_count` | [🧮 CounterCacheable](#-countercacheable) |
+| Ship a "duplicate this invoice" button (line items included) | [🧬 Duplicable](#-duplicable) |
+| Handle money without ever touching a Float | [💰 Monetizable](#-monetizable) |
+| Paginate a JSON index — page numbers or infinite scroll | [📄 Paginatable](#-paginatable) / [🧭 CursorPaginatable](#-cursorpaginatable) |
+| Turn `?status=published&sort=title` into scopes safely | [🔎 Filterable](#-filterable) + [↕️ Sortable](#-sortable-controller) |
+| Render one consistent JSON envelope, errors included | [📦 Respondable](#-respondable) + [🛟 ErrorHandleable](#-errorhandleable) |
+| Rate-limit login attempts per IP | [🚦 Throttleable](#-throttleable) |
+| Make payment retries safe (Stripe-style `Idempotency-Key`) | [🔁 Idempotentable](#-idempotentable) |
+| Verify Stripe / GitHub / Shopify webhook signatures | [🪝 WebhookVerifiable](#-webhookverifiable) |
+| Retire `/api/v1` with proper `Deprecation` / `Sunset` headers | [🌅 Deprecatable](#-deprecatable) |
+| Serve ETags + 304s so clients stop re-downloading JSON | [🗄️ Cacheable](#-cacheable) |
+| Get strong params that also cast, bound-check, and default | [🛂 Permittable](#-permittable) |
+
+Still browsing? The [docs site](https://vsn2015.github.io/concerns_on_rails) has **instant search**
+across all 43 concerns — press <kbd>/</kbd> and type.
 
 ---
 
 ## 📚 Table of Contents
 
-[Find your concern](#-find-your-concern) &nbsp;·&nbsp; [Why this gem?](#-why-this-gem) &nbsp;·&nbsp; [Installation](#-installation) &nbsp;·&nbsp; [Compatibility](#-compatibility) &nbsp;·&nbsp; [Quick Start](#-quick-start) &nbsp;·&nbsp; [Module paths](#-module-paths--namespacing) &nbsp;·&nbsp; [AI assistants](#-using-this-gem-with-ai-assistants) &nbsp;·&nbsp; [Development](#-development) &nbsp;·&nbsp; [Contributing](#-contributing) &nbsp;·&nbsp; [License](#-license)
-
-Every concern below links to its section in this README **and** to its standalone page on the [docs site](https://vsn2015.github.io/concerns_on_rails) (📖).
+Every concern links to its section in this README **and** to its standalone page on the [docs site](https://vsn2015.github.io/concerns_on_rails) (📖).
 
 ### 🧱 Model concerns
 
@@ -105,95 +212,15 @@ Every concern below links to its section in this README **and** to its standalon
 
 ---
 
-## 🧭 Find your concern
-
-Forty-three concerns is a lot of menu. Start from the problem instead:
-
-| "I need to…" | Reach for |
-|--------------|-----------|
-| Give records pretty URLs — `/posts/hello-world`, not `/posts/42` | [📝 Sluggable](#-sluggable) |
-| Let users trash records, then restore them | [❌ SoftDeletable](#-softdeletable) |
-| Schedule a post to go live Friday at 9am | [📤 Publishable](#-publishable) |
-| Support drag-and-drop reordering | [🔢 Sortable](#-sortable) |
-| Issue API keys / invite codes with timing-safe lookup | [🔑 Tokenizable](#-tokenizable) |
-| Number invoices like `INV-2026-00042`, per account, resetting yearly | [🧾 Sequenceable](#-sequenceable) |
-| Add a small state machine without the AASM dependency | [🔄 Stateable](#-stateable) |
-| Encrypt SSNs at rest and still `find_by` them | [🔏 Encryptable](#-encryptable) |
-| Handle a GDPR "delete my data" request in one call | [🕵️ Anonymizable](#-anonymizable) |
-| Know who changed which field, and when | [📜 Auditable](#-auditable) |
-| Lock accounts after 5 failed logins | [🔐 Lockable](#-lockable) |
-| Keep typed, defaulted settings in one JSON column | [⚙️ Storable](#-storable) |
-| Maintain `approved_comments_count` next to `comments_count` | [🧮 CounterCacheable](#-countercacheable) |
-| Ship a "duplicate this invoice" button (line items included) | [🧬 Duplicable](#-duplicable) |
-| Handle money without ever touching a Float | [💰 Monetizable](#-monetizable) |
-| Paginate a JSON index — page numbers or infinite scroll | [📄 Paginatable](#-paginatable) / [🧭 CursorPaginatable](#-cursorpaginatable) |
-| Turn `?status=published&sort=title` into scopes safely | [🔎 Filterable](#-filterable) + [↕️ Sortable](#-sortable-controller) |
-| Render one consistent JSON envelope, errors included | [📦 Respondable](#-respondable) + [🛟 ErrorHandleable](#-errorhandleable) |
-| Rate-limit login attempts per IP | [🚦 Throttleable](#-throttleable) |
-| Make payment retries safe (Stripe-style `Idempotency-Key`) | [🔁 Idempotentable](#-idempotentable) |
-| Verify Stripe / GitHub / Shopify webhook signatures | [🪝 WebhookVerifiable](#-webhookverifiable) |
-| Retire `/api/v1` with proper `Deprecation` / `Sunset` headers | [🌅 Deprecatable](#-deprecatable) |
-| Serve ETags + 304s so clients stop re-downloading JSON | [🗄️ Cacheable](#-cacheable) |
-| Get strong params that also cast, bound-check, and default | [🛂 Permittable](#-permittable) |
-
-Still browsing? The [docs site](https://vsn2015.github.io/concerns_on_rails) has **instant search**
-across all 43 concerns — press <kbd>/</kbd> and type.
-
----
-
 ## ✨ Why this gem?
 
-- **Twenty-six model concerns + sixteen controller concerns**, all production-ready
 - **One include, one macro** — no boilerplate, no glue code
-- **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
 - **Schema-validated configuration** — every macro checks that the configured columns exist and raises `ArgumentError` early — listing *every* missing column at once, with one ready-to-paste `rails generate migration` command that adds them all
+- **Lean dependencies** — only `acts_as_list` (Sortable) and `friendly_id` (Sluggable), and both load **lazily**: an app that never includes those concerns never loads them. Depends on `activerecord`/`actionpack`/`activesupport`, not the full `rails` meta-gem; controller concerns have zero extra deps
 - **Composable** — concerns are independent; mix and match per model
 - **Tested like an app, not a snippet** — **3,937 RSpec examples** run against a real database on every CI build
-- **Documented twice** — everything in this README also lives as a per-concern page on the [docs site](https://vsn2015.github.io/concerns_on_rails), searchable and deep-linkable
 
----
-
-## 📦 Installation
-
-Add to your application's `Gemfile`:
-
-```ruby
-gem "concerns_on_rails", "~> 1.32"
-```
-
-Or pull the latest from GitHub:
-
-```ruby
-gem "concerns_on_rails", github: "VSN2015/concerns_on_rails"
-```
-
-Then run:
-
-```sh
-bundle install
-```
-
-### Optional: one-initializer configuration
-
-Everything works with zero configuration. The store-backed controller concerns
-(`Throttleable`, `Idempotentable`) need a cache store — set it once, gem-wide,
-instead of per controller class:
-
-```ruby
-# config/initializers/concerns_on_rails.rb
-ConcernsOnRails.setup do |config|
-  config.cache_store = -> { Rails.cache }   # fallback for Throttleable / Idempotentable
-  config.audit_actor = -> { Current.user&.id } # fallback "by" for every Auditable model
-end
-
-# Encryptable's key lives in its own config (see the Encryptable section):
-ConcernsOnRails.configure_encryption do |c|
-  c.key = -> { Rails.application.credentials.dig(:encryption, :key) }
-end
-```
-
-A per-class `self.throttleable_store = ...` / `self.idempotency_store = ...`
-still wins over the gem-wide fallback.
+Not a replacement for the category leaders — see [when to reach for a dedicated gem](#-philosophy--when-to-reach-for-a-dedicated-gem).
 
 ---
 
@@ -206,6 +233,9 @@ Every one of those lines runs the full suite on every push — Rails 6.0, 6.1, 7
 8.0 and 8.1 on SQLite, plus PostgreSQL and MySQL. Ruby 3.2, 3.3, 3.4 and 4.0 each run
 against every one of those Rails lines, and a non-blocking ruby-head job gives early
 warning of the next Ruby. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+<details>
+<summary><strong>Rails 6.0/6.1 on Ruby 3.4+</strong> — a few extra Gemfile lines</summary>
 
 **Rails 6.0/6.1 on Ruby 3.4+** needs a few Gemfile lines that Rails 6.x itself never
 declared. Ruby 3.4 and 4.0 moved these libraries out of the default gems, and without them
@@ -220,11 +250,20 @@ gem "benchmark" # Ruby 4.0+
 gem "logger"    # Ruby 4.0+
 ```
 
+
+</details>
+
+<details>
+<summary><strong>Rails 5.x is not supported</strong> — why</summary>
+
 **Rails 5.x is not supported**, despite what older versions of this gem declared. Rails 5
 cannot run on any Ruby this gem supports: Ruby 3 separated keyword arguments, which breaks
 Active Record 5.2's own `create_table`, and `required_ruby_version` here is `>= 3.2.0`. The
 old `>= 5.0` dependency was therefore unreachable — no bundle could ever have satisfied
 both halves of it.
+
+
+</details>
 
 Two things need a Rails line newer than the 6.0 floor. Both raise or are documented where
 they apply, and nothing else in the gem is affected:
@@ -233,40 +272,6 @@ they apply, and nothing else in the gem is affected:
 |---|---|---|
 | `Controllers::Sortable` — `nulls:` ordering | Rails 6.1 | Raises `ArgumentError` at macro time (Arel gained the ordering nodes in 6.1) |
 | `Models::Aliasable` — query side (`joins`/`where`/`eager_load` through an alias) | Rails 6.1 | Rails resolves a `where`-hash key to a table name, not an association, so the alias is not applied to the join. Readers, writers and `build_`/`create_` work on 6.0 |
-
----
-
-## 🚀 Quick Start
-
-```ruby
-# A model that's sluggable, publishable, and soft-deletable
-class Article < ApplicationRecord
-  include ConcernsOnRails::Sluggable
-  include ConcernsOnRails::Publishable
-  include ConcernsOnRails::SoftDeletable
-  include ConcernsOnRails::Normalizable
-
-  sluggable_by    :title
-  normalizable    :title, with: :squish
-end
-
-# A controller that paginates, filters, sorts, and renders JSON envelopes
-class ArticlesController < ApplicationController
-  include ConcernsOnRails::Controllers::Paginatable
-  include ConcernsOnRails::Controllers::Filterable
-  include ConcernsOnRails::Controllers::Sortable
-  include ConcernsOnRails::Controllers::Respondable
-
-  filter_by   :published, scope: :published
-  sortable_by :created_at, :title, default: :created_at, direction: :desc
-
-  def index
-    render_success(data: paginated(sorted(filtered(Article.all))))
-  end
-end
-```
-
-That's it. The sections below document each concern individually.
 
 ---
 
