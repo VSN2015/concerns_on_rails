@@ -42,7 +42,11 @@ class LocalCacheRemoteStore < ActiveSupport::Cache::Store
   end
 
   def write_entry(key, entry, **)
-    payload = respond_to?(:serialize_entry, true) ? serialize_entry(entry, **) : Marshal.dump(entry)
+    payload =
+      if !respond_to?(:serialize_entry, true) then Marshal.dump(entry)
+      elsif method(:serialize_entry).arity == 1 then serialize_entry(entry) # 6.1 takes no options
+      else serialize_entry(entry, **)
+      end
     write_serialized_entry(key, payload, **)
   end
 
