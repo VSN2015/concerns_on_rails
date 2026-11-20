@@ -20,6 +20,7 @@ describe "JSON data handling fixes" do
       Class.new(TestModel) do
         self.table_name = "json_data_rows"
         include ConcernsOnRails::Storable
+
         storable_by :settings, theme: { type: :string, default: "light" }, plan: { type: :string }
       end
     end
@@ -43,6 +44,7 @@ describe "JSON data handling fixes" do
       string_keyed = Class.new(TestModel) do
         self.table_name = "json_data_rows"
         include ConcernsOnRails::Storable
+
         storable_by :settings, { beta: { "type" => :boolean, "default" => true } }
       end
       record = string_keyed.new
@@ -68,6 +70,7 @@ describe "JSON data handling fixes" do
       Class.new(TestModel) do
         self.table_name = "json_data_audits"
         include ConcernsOnRails::Models::Auditable
+
         auditable_by :digest, :name
       end
     end
@@ -94,6 +97,7 @@ describe "JSON data handling fixes" do
       limited = Class.new(TestModel) do
         self.table_name = "json_data_audits"
         include ConcernsOnRails::Models::Auditable
+
         auditable_by :digest, max_value_length: 3
       end
       record = limited.create!
@@ -132,6 +136,7 @@ describe "JSON data handling fixes" do
       klass = Class.new(TestModel) do
         self.table_name = "json_data_native"
         include ConcernsOnRails::Storable
+
         storable_by :settings, theme: { type: :string, default: "light" }, plan: { type: :string }
       end
       record = klass.create!
@@ -146,6 +151,7 @@ describe "JSON data handling fixes" do
       klass = Class.new(TestModel) do
         self.table_name = "json_data_native"
         include ConcernsOnRails::Models::Auditable
+
         auditable_by :name
       end
       record = klass.create!(name: "a")
@@ -169,6 +175,7 @@ describe "JSON data handling fixes" do
       Class.new(TestModel) do
         self.table_name = "json_data_tags"
         include ConcernsOnRails::Taggable
+
         taggable_by :tags
       end
     end

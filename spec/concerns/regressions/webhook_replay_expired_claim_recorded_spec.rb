@@ -20,6 +20,7 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
         def self.before_action(*); end
         def self.after_action(*); end
         include ConcernsOnRails::Controllers::WebhookVerifiable
+
         verify_webhook :receive, secret: "s", scheme: :hex, header: "X-Sig", replay: store
       end
       build = lambda do
@@ -33,12 +34,12 @@ describe ConcernsOnRails::Controllers::WebhookVerifiable do
       t0 = Time.utc(2026, 1, 1, 12)
       travel_to(t0) { build.call.verify_webhook_signature! } # worker crashed: claim never released/committed
 
-      travel_to(t0 + 61) do                                    # provider retry after the 60 s claim lapsed
+      travel_to(t0 + 61) do # provider retry after the 60 s claim lapsed
         retry_delivery = build.call
         retry_delivery.verify_webhook_signature!
         expect(retry_delivery.webhook_verified?).to be(true)
         retry_delivery.response.status = 200
-        retry_delivery.send(:commit_webhook_replay_claim)     # processed: must now be recorded for replay_ttl
+        retry_delivery.send(:commit_webhook_replay_claim) # processed: must now be recorded for replay_ttl
       end
 
       travel_to(t0 + 62) do

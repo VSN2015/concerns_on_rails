@@ -12,6 +12,7 @@ describe ConcernsOnRails::Controllers::Idempotentable do
     Class.new(FakeController) do
       def self.around_action(*); end
       include ConcernsOnRails::Controllers::Idempotentable
+
       self.idempotency_store = store
       idempotent_actions :create
     end
@@ -23,13 +24,17 @@ describe ConcernsOnRails::Controllers::Idempotentable do
     c.define_singleton_method(:request) { r }
     c.define_singleton_method(:action_name) { "create" }
     ran = false
-    c.enforce_idempotency { ran = true; c.response.status = 201; c.response.body = "ok" }
+    c.enforce_idempotency do
+      ran = true
+      c.response.status = 201
+      c.response.body = "ok"
+    end
     [ran, c]
   end
 
   it "rejects a Hash payload reused as an Array-of-pairs payload" do
     run({ "items" => { "sku" => "A1" } })
-    ran, second = run({ "items" => [["sku", "A1"]] })
+    ran, second = run({ "items" => [%w[sku A1]] })
     expect(ran).to be(false)
     expect(second.rendered[:json][:error][:code]).to eq("idempotency_key_reuse")
   end

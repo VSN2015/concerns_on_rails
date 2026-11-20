@@ -31,13 +31,18 @@ describe "Encryptable reencrypt! and blank ciphertext" do
     Class.new(TestModel) do
       self.table_name = "reenc_pendings"
       include ConcernsOnRails::Models::Encryptable
+
       encryptable :ssn, blind_index: { column: :ssn_bidx }
       encryptable :email, :notes
     end
   end
 
   def rotate!
-    ConcernsOnRails.configure_encryption { |c| c.key = new_key; c.key_id = 1; c.previous_keys = { 0 => old_key } }
+    ConcernsOnRails.configure_encryption do |c|
+      c.key = new_key
+      c.key_id = 1
+      c.previous_keys = { 0 => old_key }
+    end
   end
 
   it "keeps pending edits (skipped field and unrelated attributes) after rotating another field" do

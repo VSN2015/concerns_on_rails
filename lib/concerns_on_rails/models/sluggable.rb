@@ -403,7 +403,11 @@ module ConcernsOnRails
         return source.present? unless self.class.sluggable_candidates
 
         Array(source).flatten.any? do |part|
-          value = part.is_a?(Symbol) ? send(part) : (part.respond_to?(:call) ? part.call : part)
+          value = if part.is_a?(Symbol)
+                    send(part)
+                  else
+                    (part.respond_to?(:call) ? part.call : part)
+                  end
           value.to_s.present?
         end
       end

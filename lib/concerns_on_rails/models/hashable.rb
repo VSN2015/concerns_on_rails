@@ -155,15 +155,12 @@ module ConcernsOnRails
         # prefix: is a literal String prepended to string-typed values only —
         # an Integer code can't carry one; to_param: is a plain flag.
         def validate_hashable_extras!(type, prefix, to_param)
-          unless prefix.nil? || prefix.is_a?(String)
-            raise ArgumentError, "#{LABEL}: prefix: must be a String (got #{prefix.inspect})"
-          end
+          raise ArgumentError, "#{LABEL}: prefix: must be a String (got #{prefix.inspect})" unless prefix.nil? || prefix.is_a?(String)
           if prefix && type == :integer
             raise ArgumentError, "#{LABEL}: prefix: is not supported for type :integer (use :custom with a digit alphabet)"
           end
-          unless [true, false].include?(to_param)
-            raise ArgumentError, "#{LABEL}: to_param: must be true or false (got #{to_param.inspect})"
-          end
+          raise ArgumentError, "#{LABEL}: to_param: must be true or false (got #{to_param.inspect})" unless [true, false].include?(to_param)
+
           validate_hashable_to_param_conflict!(to_param)
         end
 

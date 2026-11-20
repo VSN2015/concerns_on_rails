@@ -28,6 +28,7 @@ describe ConcernsOnRails::Models::CounterCacheable do
     stub_const("BmComment", Class.new(TestModel) do
       self.table_name = "bm_comments"
       include ConcernsOnRails::CounterCacheable
+
       belongs_to :bm_post, class_name: "BmPost", optional: true, inverse_of: :bm_comments
       counter_cacheable_by :bm_post
     end)
@@ -160,7 +161,8 @@ describe ConcernsOnRails::Models::CounterCacheable do
       raise ActiveRecord::Rollback
     end
 
-    expect([post.bm_comments_count, post.lock_version, post.changes]).to eq([control.bm_comments_count, control.lock_version, control.changes])
+    expect([post.bm_comments_count, post.lock_version,
+            post.changes]).to eq([control.bm_comments_count, control.lock_version, control.changes])
   end
 
   it "keeps the mirror and the parent's save when the transaction commits" do

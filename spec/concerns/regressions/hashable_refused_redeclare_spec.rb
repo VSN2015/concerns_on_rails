@@ -14,6 +14,7 @@ RSpec.describe "Hashable: a refused re-declaration" do
     Class.new(TestModel) do
       self.table_name = "refused_orders"
       include ConcernsOnRails::Models::Hashable
+
       hashable_by :token
     end
   end

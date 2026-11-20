@@ -334,7 +334,9 @@ describe ConcernsOnRails::Controllers::ErrorHandleable do
       result = IntegrationHarness.dispatch(real, :show)
       expect(result.status).to eq(409)
       body = JSON.parse(result.body)
-      expect(body).to eq("success" => false, "error" => { "message" => "Resource was modified by another request; reload and retry", "code" => "stale_object" })
+      expect(body).to eq("success" => false,
+                         "error" => { "message" => "Resource was modified by another request; reload and retry",
+                                      "code" => "stale_object" })
     end
   end
 
