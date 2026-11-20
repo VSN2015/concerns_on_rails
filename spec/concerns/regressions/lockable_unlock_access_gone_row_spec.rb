@@ -35,4 +35,18 @@ describe "D unlock_access! on a deleted row" do
     expect(user.events).to be_nil # FAILS: [:after_unlock] — an "account unlocked" mail for a deleted row
     expect(result).to be(false)
   end
+
+  it "still raises on a destroyed record, as lock_access! does" do
+    klass = Class.new(TestModel) do
+      self.table_name = "d_gone_accounts"
+      include ConcernsOnRails::Lockable
+
+      lockable_by
+    end
+    user = klass.create!
+    user.lock_access!
+    user.destroy
+
+    expect { user.unlock_access! }.to raise_error(ActiveRecord::ActiveRecordError, /destroyed/)
+  end
 end

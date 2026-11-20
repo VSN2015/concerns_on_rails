@@ -443,17 +443,26 @@ module ConcernsOnRails
       # locked_at/token up to date for the hooks): an instance loaded before a
       # concurrent lock unlocks it, one loaded before a concurrent unlock fires
       # no hooks again. An unlocked row is a hook-free no-op; a row that has
-      # gone answers false with no hooks, as lock_access! does.
+      # gone (under a non-destroyed instance reading locked) answers false with
+      # no hooks, as lock_access! does; a destroyed/readonly one raises.
       def unlock_access!
         lockable_guard_persisted!("unlock_access!")
         locked_field = self.class.lockable_locked_at_field
         attempts_field = self.class.lockable_attempts_field
+        # A destroyed record is frozen (the hooks' rollback restore would raise FrozenError),
+        # so it raises its own error up front, as lock_access! does.
+        lockable_guard_writable! if destroyed? && !self[locked_field].nil?
         gone = false
         completed = lockable_write_with_hooks({ locked_field => self[locked_field],
                                                 attempts_field => self[attempts_field] }.merge(lockable_token_snapshot)) do
-          next if (gone = !lockable_adopt_current_lock!) || self[locked_field].nil?
+          # Only a row that vanished under an instance still reading locked is "gone"
+          # (the writable guard still comes first: a readonly record raises).
+          gone = !lockable_adopt_current_lock! && !self[locked_field].nil?
+          next if self[locked_field].nil?
 
           lockable_guard_writable!
+          next if gone
+
           before_unlock
           cleared = { locked_field => nil, attempts_field => 0 }.merge(self.class.lockable_token_attributes(nil))
           # Not update_columns: under optimistic locking it adds `AND lock_version = <instance's>`,
@@ -463,7 +472,7 @@ module ConcernsOnRails
           lockable_sync_columns(cleared)
           after_unlock
         end
-        gone ? false : completed
+        !gone && completed
       end
 
       # Successful-login path: zero the counter, leave any lock untouched,

@@ -228,12 +228,12 @@ module ConcernsOnRails
       def extend_expiry!(by:)
         expirable_check_duration!(by, "extend_expiry!", "a duration (by:)")
         field = self.class.expirable_field
-        # A bare Numeric is seconds; added to a `date` base it would be DAYS (Date#+).
-        by = by.seconds if by.is_a?(Numeric)
-        return update(field => expiry_extension_base(self[field]) + by) if new_record? || will_save_change_to_attribute?(field)
+        if new_record? || will_save_change_to_attribute?(field)
+          return update(field => expiry_extended(expiry_extension_base(self[field]), by))
+        end
 
         ConcernsOnRails::Support::Locking.with_row_lock(self, field) do |row|
-          update(field => expiry_extension_base(row ? row[field.to_s] : self[field]) + by)
+          update(field => expiry_extended(expiry_extension_base(row ? row[field.to_s] : self[field]), by))
         end
       end
 
@@ -306,6 +306,17 @@ module ConcernsOnRails
         value.nil? || value <= bound ? now : value
       end
 
+      # base + by. A bare Numeric is SECONDS, but Date#+ adds DAYS, and
+      # `by.seconds` on a Date base lands on 23:00 the day before on a DST
+      # fall-back day (a 25-hour day) — so a Date base takes whole calendar days
+      # plus the remainder. A Time base adds seconds as ever.
+      def expiry_extended(base, by)
+        return base + by unless by.is_a?(Numeric) && base.is_a?(Date) && !base.is_a?(DateTime)
+
+        days, rest = by.divmod(86_400)
+        base + (ActiveSupport::Duration.days(days) + ActiveSupport::Duration.seconds(rest))
+      end
+
       # The unaffixed checks behind the public predicates. Internal logic and
       # the affixed predicates call these, never `active?` / `expired?`,
       # which a sibling concern may own.
@@ -324,7 +335,7 @@ module ConcernsOnRails
         !expirable_expired?
       end
 
-      private :expiry_extension_base, :expirable_expired?, :expirable_live?,
+      private :expiry_extension_base, :expiry_extended, :expirable_expired?, :expirable_live?,
               :expirable_expires_by?, :expirable_write_expiry, :expirable_settle, :expirable_check_duration!
     end
   end
