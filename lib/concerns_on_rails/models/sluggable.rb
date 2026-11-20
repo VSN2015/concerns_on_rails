@@ -59,7 +59,7 @@ module ConcernsOnRails
           # slug ASSIGNED in this save — "" from an optional form field, or
           # nil, friendly_id's way to ask for a fresh one — is not stored as
           # is (a second "" would trip the slug's unique index).
-          return true if send(slug_column).blank? && sluggable_candidate_key.any?
+          return true if send(slug_column).blank? && sluggable_source_present?
 
           # An explicitly-assigned slug wins — don't overwrite it with a generated
           # one when the slug column itself is being changed in this save. The
@@ -394,6 +394,20 @@ module ConcernsOnRails
       # The normalized candidate strings the slug is built from — friendly_id's
       # own Candidates, so reserved-word filtering and max_length: apply. No
       # query: availability is only checked when a slug is actually built.
+      # Whether there is anything to build a slug from. With `candidates:` the
+      # source is always an Array, so presence is asked of its parts the way
+      # friendly_id reads them (Symbol -> method, callable -> call, else to_s):
+      # all-blank candidates must not reach friendly_id's bare-uuid fallback.
+      def sluggable_source_present?
+        source = slug_source
+        return source.present? unless self.class.sluggable_candidates
+
+        Array(source).flatten.any? do |part|
+          value = part.is_a?(Symbol) ? send(part) : (part.respond_to?(:call) ? part.call : part)
+          value.to_s.present?
+        end
+      end
+
       def sluggable_candidate_key
         FriendlyId::Candidates.new(self, send(friendly_id_config.base)).to_a
       end
