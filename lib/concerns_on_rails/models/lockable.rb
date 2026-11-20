@@ -197,9 +197,8 @@ module ConcernsOnRails
           ConcernsOnRails::Support::BatchOps.run(
             expired,
             label: LABEL,
-            message: "failed to unlock record",
-            &:unlock_access!
-          )
+            message: "failed to unlock record"
+          ) { |record| record.send(:lockable_unlock_if_lapsed!) }
         end
 
         private
@@ -443,15 +442,16 @@ module ConcernsOnRails
       # inside the hooks' savepoint, which also brings a stale instance's
       # locked_at/token up to date for the hooks): an instance loaded before a
       # concurrent lock unlocks it, one loaded before a concurrent unlock fires
-      # no hooks again. An unlocked row is a hook-free no-op.
+      # no hooks again. An unlocked row is a hook-free no-op; a row that has
+      # gone answers false with no hooks, as lock_access! does.
       def unlock_access!
         lockable_guard_persisted!("unlock_access!")
         locked_field = self.class.lockable_locked_at_field
         attempts_field = self.class.lockable_attempts_field
-        lockable_write_with_hooks({ locked_field => self[locked_field],
-                                    attempts_field => self[attempts_field] }.merge(lockable_token_snapshot)) do
-          lockable_adopt_current_lock!
-          next if self[locked_field].nil?
+        gone = false
+        completed = lockable_write_with_hooks({ locked_field => self[locked_field],
+                                                attempts_field => self[attempts_field] }.merge(lockable_token_snapshot)) do
+          next if (gone = !lockable_adopt_current_lock!) || self[locked_field].nil?
 
           lockable_guard_writable!
           before_unlock
@@ -463,6 +463,7 @@ module ConcernsOnRails
           lockable_sync_columns(cleared)
           after_unlock
         end
+        gone ? false : completed
       end
 
       # Successful-login path: zero the counter, leave any lock untouched,
@@ -524,6 +525,18 @@ module ConcernsOnRails
       end
 
       private
+
+      # unlock_expired's per-record step. The row is read under a lock inside
+      # the batch's transaction, and unlocked only if ITS lock has lapsed:
+      # the batch's own copy may predate a concurrent re-lock (the fast path's
+      # `locked_at <= cutoff` predicate says the same). :skip when the row
+      # is gone, unlocked or freshly locked.
+      def lockable_unlock_if_lapsed!
+        lockable_guard_persisted!("unlock_expired")
+        return :skip unless lockable_adopt_current_lock! && lock_expired?
+
+        unlock_access!
+      end
 
       def lockable_guard_persisted!(operation)
         raise ArgumentError, "#{LABEL}: #{operation} cannot be called on a new record" if new_record?

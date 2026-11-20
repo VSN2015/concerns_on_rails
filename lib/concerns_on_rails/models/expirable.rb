@@ -228,6 +228,8 @@ module ConcernsOnRails
       def extend_expiry!(by:)
         expirable_check_duration!(by, "extend_expiry!", "a duration (by:)")
         field = self.class.expirable_field
+        # A bare Numeric is seconds; added to a `date` base it would be DAYS (Date#+).
+        by = by.seconds if by.is_a?(Numeric)
         return update(field => expiry_extension_base(self[field]) + by) if new_record? || will_save_change_to_attribute?(field)
 
         ConcernsOnRails::Support::Locking.with_row_lock(self, field) do |row|
