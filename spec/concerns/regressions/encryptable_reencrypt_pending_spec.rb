@@ -7,6 +7,8 @@ describe "Encryptable reencrypt! and blank ciphertext" do
 
   before do
     ConcernsOnRails.encryption.key = old_key
+    ConcernsOnRails.encryption.key_id = 0
+    ConcernsOnRails.encryption.previous_keys = {}
     ActiveRecord::Schema.define do
       create_table :reenc_pendings, force: true do |t|
         t.text :ssn
@@ -73,6 +75,15 @@ describe "Encryptable reencrypt! and blank ciphertext" do
     record = klass.create!(ssn: "111-11-1111")
     expect(record.notes_ciphertext).to eq("")
     expect(record.notes_key_id).to be_nil
+  end
+
+  it "leaves a stored \"\" untouched while rotating another field" do
+    record = klass.find(klass.create!(ssn: "111-11-1111").id)
+    rotate!
+    expect(record.reencrypt!).to be(true)
+    expect(record.notes_ciphertext).to eq("")
+    expect(klass.connection.select_value("SELECT notes FROM reenc_pendings WHERE id = #{record.id}")).to eq("")
+    expect(klass.reencrypt_all!).to eq(0)
   end
 
   it "does not count or rewrite blank (\"\") rows as needing rotation" do

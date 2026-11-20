@@ -1081,18 +1081,8 @@ module ConcernsOnRails
         return false if updates.empty?
         return false unless encryptable_rotate_row!(updates, guards, binds) == 1
 
-        encryptable_adopt_rotated_columns!(updates.keys)
+        encryptable_adopt_stored_columns!(updates.keys.map(&:to_s))
         true
-      end
-
-      # Take the just-rotated columns' stored values as the clean database
-      # values (one SELECT, raw adapter values). Not `reload`: that would drop
-      # the caller's pending edits — the very ones the plan skipped to keep.
-      def encryptable_adopt_rotated_columns!(columns)
-        names = columns.map(&:to_s)
-        condition = ConcernsOnRails::Support::PrimaryKey.condition(self.class, id_in_database)
-        row = self.class.connection.select_rows(self.class.unscoped.where(condition).select(*names).to_sql).first
-        names.each_with_index { |name, index| @attributes.write_from_database(name, row[index]) } if row
       end
 
       # Every save/create/touch ends in changes_applied; on Rails < 7.1 that is
@@ -1126,9 +1116,16 @@ module ConcernsOnRails
         names = encryptable_stored_field_names(fields)
         return if names.empty?
 
+        encryptable_adopt_stored_columns!(names)
+      end
+
+      # Take the columns' stored values as the clean database values (one
+      # SELECT, raw adapter values). reencrypt! uses it instead of `reload`,
+      # which would drop the caller's pending edits — the very ones its plan
+      # skipped to keep.
+      def encryptable_adopt_stored_columns!(names)
         condition = ConcernsOnRails::Support::PrimaryKey.condition(self.class, id_in_database)
-        sql = self.class.unscoped.where(condition).select(*names).to_sql
-        row = self.class.connection.select_rows(sql).first
+        row = self.class.connection.select_rows(self.class.unscoped.where(condition).select(*names).to_sql).first
         names.each_with_index { |name, index| @attributes.write_from_database(name, row[index]) } if row
       end
 
@@ -1167,7 +1164,7 @@ module ConcernsOnRails
         binds = []
         self.class.encryptable_rotatable_fields(fields).each do |field|
           stored = encryptable_stored_value(field)
-          next if stored.nil? || public_send("#{field}_changed?")
+          next if stored.nil? || stored == "" || public_send("#{field}_changed?") # "" = column default, no key
 
           value = public_send(field)
           # A rotation must never be able to destroy data. Under
