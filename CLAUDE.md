@@ -464,7 +464,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   catch-all; LAST match wins). `stale_resource?`/`set_cache_validators` (weak
   ETag, Last-Modified, RFC 7232 precedence; safe methods only — unsafe requests
   get neither 304 nor validators). `no_store` is also applied via
-  prepend_before_action so rescue_from-rendered errors keep it, and empties Rails' `response.cache_control` hash (which would drop it at commit); positive
+  prepend_around_action (re-applied in its ensure, before rescue_from renders) so rescue_from-rendered errors keep it, and empties Rails' `response.cache_control` hash (which would drop it at commit); positive
   freshness is emitted only for GET/HEAD with status 200/203/204/206/304 (never on
   rescued errors); `vary:` merges through `Support::VaryHeader`. Per-call `extras:`
   (any, nil included) force `private`, like a Vary-less `etag_with` source.

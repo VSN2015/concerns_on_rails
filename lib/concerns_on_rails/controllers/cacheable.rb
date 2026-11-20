@@ -117,7 +117,11 @@ module ConcernsOnRails
         # deliberately do NOT move early — rescued errors already get Rails'
         # safe `max-age=0, private` default, and emitting `public, max-age` on
         # a rescued 500 would let shared caches serve the error.
-        prepend_before_action :apply_http_no_store if respond_to?(:prepend_before_action)
+        # An around (not a before) so its ensure re-applies no_store when the
+        # action raised, BEFORE rescue_from renders: the action may have filled
+        # Rails' cache_control hash (expires_in) first, and the rescued error
+        # would otherwise go out cacheable.
+        prepend_around_action :apply_http_no_store_around if respond_to?(:prepend_around_action)
         after_action :apply_http_cache_headers
       end
 
@@ -245,6 +249,13 @@ module ConcernsOnRails
 
       # Early half of the policy (see the included block): only no_store, and
       # idempotent with apply_http_cache_headers re-applying it after render.
+      def apply_http_no_store_around
+        apply_http_no_store
+        yield
+      ensure
+        apply_http_no_store
+      end
+
       def apply_http_no_store
         rule = http_cache_rule_for_action
         return unless rule && rule[:no_store]

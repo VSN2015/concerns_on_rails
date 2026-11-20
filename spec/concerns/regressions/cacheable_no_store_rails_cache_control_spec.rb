@@ -39,4 +39,39 @@ describe ConcernsOnRails::Controllers::Cacheable, "no_store after an action-leve
     result = IntegrationHarness.dispatch(controller, :token)
     expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
   end
+
+  it "keeps no-store on a rescue_from-rendered error after the action used expires_in" do
+    controller = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Cacheable
+
+      http_cache_actions :token, no_store: true
+      rescue_from(RuntimeError) { render(json: { error: "boom" }, status: :internal_server_error) }
+
+      def token
+        expires_in 10.minutes, public: true
+        raise "boom"
+      end
+    end
+    result = IntegrationHarness.dispatch(controller, :token)
+    expect(result.status).to eq(500)
+    expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
+  end
+
+  # Rails 6.0's bare-bones harness stack has no request.flash, which its `head` calls.
+  it "keeps no-store on a fresh_when 304 inside a no_store action", min_rails: "6.1" do
+    controller = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Cacheable
+
+      http_cache_actions :token, no_store: true
+
+      def token
+        fresh_when(etag: "v1", public: true)
+        render(json: { token: "secret" }) unless performed?
+      end
+    end
+    etag = IntegrationHarness.dispatch(controller, :token).header("ETag")
+    result = IntegrationHarness.dispatch(controller, :token, headers: { "If-None-Match" => etag })
+    expect(result.status).to eq(304)
+    expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
+  end
 end
