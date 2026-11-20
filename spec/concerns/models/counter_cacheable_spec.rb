@@ -695,6 +695,9 @@ describe ConcernsOnRails::Models::CounterCacheable do
       zeroed  = statements.index { |sql| sql.start_with?("UPDATE #{posts}") }
 
       expect([opened, locked, tallied, zeroed]).to all(be_a(Integer))
+      # SQLite has no row locks and Rails drops the clause there, so the SELECT
+      # alone only proves ordering; on PostgreSQL/MySQL it must really lock.
+      expect(statements[locked]).to match(/FOR UPDATE/i) unless TestDatabase.sqlite?
       expect(opened).to be < locked  # the lock is taken inside the transaction
       expect(locked).to be < tallied # ...and before the tally the rewrite depends on
       expect(tallied).to be < zeroed

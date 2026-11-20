@@ -287,14 +287,13 @@ describe ConcernsOnRails::Support::BatchOps do
         belongs_to :batch_owner, class_name: "BatchOwner", optional: true
       end
       owner = BatchOwner.create!(name: "o")
-      items = %w[c a b].map { |state| joined.create!(state: state, batch_owner_id: owner.id) }
+      %w[c a b].each { |state| joined.create!(state: state, batch_owner_id: owner.id) }
 
       seen = []
       relation = joined.joins(:batch_owner).distinct.order(:state).limit(2)
       described_class.each_record(relation) { |record| seen << record.state }
 
-      expect(seen.sort).to eq(%w[a b])
-      expect(items.size).to eq(3)
+      expect(seen.sort).to eq(%w[a b]) # the 2 first by state, each once despite the join
     end
 
     # The limited path re-queried `relation.unscope(:order, :limit, :offset)`,

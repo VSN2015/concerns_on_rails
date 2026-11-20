@@ -165,10 +165,13 @@ describe ConcernsOnRails::Controllers::Idempotentable do
       inner = instance(klass, key: "dup")
 
       inner_calls = nil
-      outer.enforce_idempotency do
-        inner_calls = perform(inner)
-        outer.response.status = 201
-        outer.response.body = "ok"
+      # Retry-After is lock_ttl minus the claim's age, so the exact value needs a frozen clock.
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        outer.enforce_idempotency do
+          inner_calls = perform(inner)
+          outer.response.status = 201
+          outer.response.body = "ok"
+        end
       end
 
       expect(inner_calls).to eq(0)

@@ -282,10 +282,28 @@ describe ConcernsOnRails::SoftDeletable do
   end
 
   context 'scope chaining' do
-    it 'returns no record when chaining soft_deleted and active' do
+    it 'chains each scope with a where, in the database' do
+      live = dummy_class.create!(name: 'live')
+      trashed = dummy_class.create!(name: 'trashed')
+      trashed.soft_delete!
+
+      expect(dummy_class.soft_deleted.where(name: 'trashed').to_a).to eq([trashed])
+      expect(dummy_class.soft_deleted.where(name: 'live').to_a).to be_empty
+      expect(dummy_class.active.where(name: 'live').to_a).to eq([live])
+      expect(dummy_class.active.where(name: 'trashed').to_a).to be_empty
+      expect(dummy_class.with_deleted.where(name: %w[live trashed]).to_a).to match_array([live, trashed])
+    end
+
+    it 'lets the LAST trash scope in a chain win (each peels the previous one\'s predicate)' do
       record.soft_delete!
-      # Chaining these scopes is not meaningful due to unscope usage, so test intersection instead
-      expect(dummy_class.soft_deleted & dummy_class.active).to be_empty
+      live = dummy_class.create!(name: 'live')
+
+      expect(dummy_class.soft_deleted.active.to_a).to include(live)
+      expect(dummy_class.soft_deleted.active.to_a).not_to include(record)
+      expect(dummy_class.active.soft_deleted.to_a).to include(record)
+      expect(dummy_class.active.soft_deleted.to_a).not_to include(live)
+      expect(dummy_class.with_deleted.soft_deleted.to_a).to include(record)
+      expect(dummy_class.with_deleted.soft_deleted.to_a).not_to include(live)
     end
   end
 
