@@ -53,7 +53,10 @@ callback, Auditable binary values, Lockable and Encryptable verbs). Read **Upgra
 - **Hashable (F-1):** a refused re-declaration no longer leaves a bad config that produced nil tokens.
 - **Sluggable (F-2):** all-blank `candidates:` no longer mint a bare uuid slug.
 - **Idempotentable (H1-3):** Hash vs Array-of-pairs fingerprint collision.
-- **Audit items A-3, H1-4:** plausible findings, fixed defensively.
+- **Encryptable `<field>_key_id`:** returns nil for a stored `""` (column default) instead of raising
+  `DecryptionError`; `needs_reencryption`/`reencrypt!` skip `""` rows. (A-3)
+- **Idempotentable:** the `Idempotency-Key` is scrubbed before strip/format check, so a key with invalid UTF-8 no
+  longer raises (500). (H1-4)
 - Specs: ~14 specs that could not fail were strengthened (localizable/timezoneable leak, error_handleable,
   paginatable, batch_ops, soft_deletable chaining, throttleable, cacheable, idempotentable, duplicable HABTM,
   counter_cacheable `FOR UPDATE` on PG/MySQL).
