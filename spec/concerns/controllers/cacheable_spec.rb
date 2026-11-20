@@ -232,6 +232,19 @@ describe ConcernsOnRails::Controllers::Cacheable do
       c = instance(cacheable_class, headers: { "If-None-Match" => %(W/"abc") })
       expect(c.stale_resource?(etag: %(W/"abc"))).to be(false)
     end
+
+    it "accepts an explicit last_modified" do
+      stamp = Time.utc(2026, 1, 1, 12, 0, 0)
+      fresh = instance(cacheable_class, headers: { "If-Modified-Since" => stamp.httpdate })
+      expect(fresh.stale_resource?(last_modified: stamp)).to be(false)
+      expect(fresh.response.status).to eq(304)
+      expect(fresh.response.headers["Last-Modified"]).to eq(stamp.httpdate)
+
+      stale = instance(cacheable_class, headers: { "If-Modified-Since" => (stamp - 3600).httpdate })
+      expect(stale.stale_resource?(last_modified: stamp)).to be(true)
+      expect(stale.rendered).to be_nil
+      expect(stale.response.headers["Last-Modified"]).to eq(stamp.httpdate)
+    end
   end
 
   describe "argument validation" do
