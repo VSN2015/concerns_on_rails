@@ -128,6 +128,7 @@ module ConcernsOnRails
       class MirrorUndo
         LEDGER = :@concerns_on_rails_counter_mirror
         OPEN = :@concerns_on_rails_counter_undo
+        SNAPSHOT = :@_start_transaction_state # Rails' own, 6.0 through 8.1
 
         # Note one mirror onto `target` (an UPDATE through `klass` moved
         # `counters` by their deltas, and bumped lock_version when `bumped`).
@@ -139,11 +140,12 @@ module ConcernsOnRails
           remember(target, klass, counters, bumped)
           transaction = connection.current_transaction
           bumps = bumped ? 1 : 0
+          baked = baked_into_snapshot(target, klass, counters, bumped)
           open = open_for(target, transaction)
-          return open.add(counters, bumps) if open
+          return open.add(counters, bumps, baked) if open
 
           undo = new(connection, target, klass)
-          undo.add(counters, bumps)
+          undo.add(counters, bumps, baked)
           undo.enroll(transaction, target)
         end
 
@@ -197,6 +199,16 @@ module ConcernsOnRails
           target.instance_variable_set(LEDGER, ledger.merge(names.to_h { |name| [name, target[name]] }))
         end
 
+        # { column => delta } this mirror will be part of the parent's start-of-
+        # transaction snapshot: when none exists yet, the parent's next save
+        # takes it AFTER the mirror (see #shift_snapshot). A snapshot already
+        # taken predates the mirror, so nothing is baked in.
+        def self.baked_into_snapshot(target, klass, counters, bumped)
+          return {} if target.instance_variable_get(SNAPSHOT)
+
+          bumped ? counters.merge(klass.locking_column => 1) : counters.to_h
+        end
+
         def initialize(connection, target, klass)
           @connection = connection
           @transaction = nil
@@ -204,11 +216,13 @@ module ConcernsOnRails
           @klass = klass
           @counters = Hash.new(0)
           @bumps = 0
+          @baked = Hash.new(0)
           @settled = false
         end
 
-        def add(counters, bumps)
+        def add(counters, bumps, baked = {})
           counters.each { |name, delta| @counters[name] += delta }
+          baked.each { |name, delta| @baked[name] += delta }
           @bumps += bumps
         end
 
@@ -260,7 +274,7 @@ module ConcernsOnRails
 
         protected
 
-        attr_reader :counters, :bumps
+        attr_reader :counters, :bumps, :baked
 
         def alive_target
           @target.weakref_alive? ? @target.__getobj__ : nil
@@ -278,7 +292,7 @@ module ConcernsOnRails
 
           open = self.class.open_for(parent, transaction)
           if open
-            open.add(counters, bumps)
+            open.add(counters, bumps, baked)
             settle!
           else
             enroll(transaction, parent)
@@ -300,6 +314,32 @@ module ConcernsOnRails
           ledger = parent.instance_variable_get(LEDGER) || {}
           moves(parent).each { |name, delta| ledger = move_back(parent, ledger, name, delta) }
           parent.instance_variable_set(LEDGER, ledger)
+          shift_snapshot(parent)
+        end
+
+        # A save of the parent after the mirror made Rails snapshot the
+        # mirrored values as its start-of-transaction state, and Rails puts
+        # that snapshot's baseline back AFTER this undo (the parent enrolled
+        # later): the counter would read "changed from the mirrored value" and
+        # lock_version would look clean at a value the row never held. Shift
+        # the pending snapshot back by what the snapshot absorbed.
+        def shift_snapshot(parent)
+          state = parent.instance_variable_get(SNAPSHOT)
+          return if @baked.empty? || !state || !state[:attributes]
+
+          state[:attributes] = state[:attributes].map do |attr|
+            delta = @baked[attr.name]
+            delta.zero? ? attr : shifted_attribute(attr, delta)
+          end
+        end
+
+        # `attr` with its value AND its baseline (a snapshot taken mid-save
+        # carries the parent's own lock bump as a pending change) moved back.
+        def shifted_attribute(attr, delta)
+          original = attr.send(:original_attribute)
+          return attr.with_value_from_database(attr.value_for_database.to_i - delta) unless original
+
+          shifted_attribute(original, delta).with_value_from_user(attr.value.to_i - delta)
         end
 
         # { column => delta } to take back: the counters, then lock_version.
@@ -312,13 +352,42 @@ module ConcernsOnRails
         # Move `name` back by `delta` while it is still the mirrors' value.
         def move_back(parent, ledger, name, delta)
           current = parent[name]
-          mirrors_value = !parent.will_save_change_to_attribute?(name) || (ledger.key?(name) && current == ledger[name])
+          pending = parent.will_save_change_to_attribute?(name)
+          return restore_absorbed(parent, ledger, name, delta) if pending && saved_over_mirror?(parent, ledger, name, current)
+
+          mirrors_value = !pending || (ledger.key?(name) && current == ledger[name])
           return ledger unless mirrors_value
 
           value = current.to_i - delta
           parent[name] = value
-          parent.send(:clear_attribute_change, name)
+          # A pending change is the parent's OWN save (Rails keeps it after a
+          # rollback): assigning compares against its baseline, clearing would drop it.
+          parent.send(:clear_attribute_change, name) unless pending
           ledger.merge(name => value)
+        end
+
+        # Rails 6.0 restores the parent BEFORE this undo runs (no snapshot is
+        # left to #shift_snapshot), and what it restored holds the mirror in
+        # its baseline: shift the live attribute's value and baseline.
+        # lock_version is the one column the parent's OWN save rewrites, from
+        # the mirrored value: it reads ABOVE the mirrors' value, which a caller's
+        # assignment (a form's hidden field, lower) does not.
+        # shortcut: a caller assigning a HIGHER lock_version after the mirror is
+        # read as a save, and shifted too; Rails 6.0 only, no cleaner signal survives.
+        def saved_over_mirror?(parent, ledger, name, current)
+          name == @klass.locking_column && !parent.instance_variable_get(SNAPSHOT) &&
+            ledger.key?(name) && current > ledger[name]
+        end
+
+        def restore_absorbed(parent, ledger, name, delta)
+          if @baked[name].positive?
+            attributes = parent.instance_variable_get(:@attributes)
+            attributes[name] = shifted_attribute(attributes[name], delta)
+            parent.instance_variable_set(:@mutations_from_database, nil)
+          else
+            parent[name] = parent[name].to_i - delta
+          end
+          ledger.merge(name => parent[name])
         end
       end
 
