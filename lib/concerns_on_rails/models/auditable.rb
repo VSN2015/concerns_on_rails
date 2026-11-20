@@ -325,7 +325,8 @@ module ConcernsOnRails
       # TimeWithZone is caught by `when Time` (it masquerades via #is_a?).
       def auditable_json_value(value)
         case value
-        when nil, true, false, Integer, String then value
+        when nil, true, false, Integer then value
+        when String, Symbol then auditable_string_value(value.to_s)
         when Float then auditable_float_value(value)
         when BigDecimal then value.to_s("F")
         # A UTC copy. The value is the record's own attribute (often the
@@ -333,9 +334,20 @@ module ConcernsOnRails
         # FrozenError on a frozen one.
         when Time, DateTime then ConcernsOnRails::Support::TimeValue.utc(value).iso8601
         when Date then value.iso8601
-        when Symbol then value.to_s
         else value.as_json
         end
+      end
+
+      # JSON.generate raises on a String that is not valid UTF-8 (a binary
+      # digest/blob), failing every save that changes it. Such bytes are stored
+      # as "base64:<strict Base64>" (readable, truncatable); anything JSON can
+      # already encode — binary that happens to be valid UTF-8 included — is
+      # untouched, so existing trails read the same.
+      def auditable_string_value(value)
+        return value if value.encoding != Encoding::BINARY && value.valid_encoding?
+        return value if value.encoding == Encoding::BINARY && value.dup.force_encoding(Encoding::UTF_8).valid_encoding?
+
+        "base64:#{[value].pack('m0')}"
       end
 
       # JSON.generate raises on non-finite floats — store NaN/Infinity as strings.
@@ -378,9 +390,12 @@ module ConcernsOnRails
       # detached from the attribute.)
       def auditable_decode(raw)
         return raw.grep(Hash).map(&:deep_dup) if raw.is_a?(Array)
-        return [] unless raw.is_a?(String) && !raw.strip.empty?
+        return [] unless raw.is_a?(String)
 
-        parsed = JSON.parse(raw)
+        # Blank or invalid-UTF-8 text raises ParserError (a `strip` guard here
+        # raised ArgumentError on invalid bytes). Last duplicate key wins, as
+        # json 2.x did; json >= 3 raises on one, which read the whole trail as [].
+        parsed = JSON.parse(raw, allow_duplicate_key: true)
         parsed.is_a?(Array) ? parsed.grep(Hash) : []
       rescue JSON::ParserError
         []

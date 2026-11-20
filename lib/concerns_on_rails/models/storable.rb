@@ -323,6 +323,7 @@ module ConcernsOnRails
 
         def storable_normalize_spec(key, raw_spec, prefix, suffix, query)
           storable_assert_spec_shape!(key, raw_spec)
+          raw_spec = raw_spec.symbolize_keys # the shape check accepts String keys, so read them too
           unless KEY_NAME.match?(key.to_s)
             raise ArgumentError,
                   "#{LABEL}: key ':#{key}' must be a plain identifier — letters, digits and underscores, not starting " \
@@ -594,9 +595,11 @@ module ConcernsOnRails
       end
 
       def storable_parse(string)
-        return {} if string.strip.empty?
-
-        parsed = JSON.parse(string)
+        # Blank or invalid-UTF-8 text raises ParserError (a `strip` guard here
+        # raised ArgumentError on invalid bytes). Last duplicate key wins, as
+        # json 2.x did; json >= 3 raises on one, which read the column as {}
+        # and let the next key write erase every other key.
+        parsed = JSON.parse(string, allow_duplicate_key: true)
         parsed.is_a?(Hash) ? parsed : {}
       rescue JSON::ParserError
         {}
