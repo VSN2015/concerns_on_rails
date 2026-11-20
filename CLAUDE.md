@@ -289,7 +289,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   not atomic — and it never writes a field it could not decrypt. Each row is one
   `update_all` GUARDED on the ciphertext read at load (a concurrent write is
   skipped, never reverted), fields with unsaved changes are skipped, and a
-  successful `reencrypt!` reloads. Fields auto-register with Rails
+  successful `reencrypt!` re-reads only the rotated columns (fields + blind indexes), never `reload`s, so
+  pending edits survive; a blank `""` row is not counted by `needs_reencryption` and its `<field>_key_id` is nil. Fields auto-register with Rails
   filter_parameters via `FilterParameterRegistry` + the railtie. Blind indexes refresh at the
   write boundary (`Support::WriteBoundary`, after EVERY `before_*` callback) — on create EVERY
   indexed field (a copy never keeps its original's digest), on update changed fields; the finders run the
