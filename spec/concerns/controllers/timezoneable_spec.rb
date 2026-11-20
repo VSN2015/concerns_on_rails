@@ -301,6 +301,7 @@ describe ConcernsOnRails::Controllers::Timezoneable do
 
       it "never leaks the zone into the next request on the thread" do
         IntegrationHarness.dispatch(klass, :fail_arg, headers: { "Time-Zone" => "Tokyo" })
+        expect(Time.zone.name).to eq("UTC") # checked BEFORE any later request could re-set it
         result = IntegrationHarness.dispatch(klass, :show)
 
         expect(JSON.parse(result.body)).to eq("zone" => "UTC")
