@@ -59,7 +59,7 @@ module ConcernsOnRails
           # slug ASSIGNED in this save — "" from an optional form field, or
           # nil, friendly_id's way to ask for a fresh one — is not stored as
           # is (a second "" would trip the slug's unique index).
-          return true if send(slug_column).blank? && slug_source.present?
+          return true if send(slug_column).blank? && sluggable_candidate_key.any?
 
           # An explicitly-assigned slug wins — don't overwrite it with a generated
           # one when the slug column itself is being changed in this save. The
