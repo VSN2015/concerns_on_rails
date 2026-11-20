@@ -313,7 +313,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   on the parent, the loaded parent gets the delta + bump mirrored in memory; a rollback takes it
   back via `MirrorUndo`, its OWN transaction record (WeakRef to the parent, one per
   (transaction, parent), follows a savepoint released into a `joinable: false` parent; a column
-  moves back while clean OR equal to the mirrors' ledger value; Marshal-safe `OpenList` holder).
+  moves back while clean OR equal to the mirrors' ledger value; it also shifts the parent's pending start-transaction snapshot back by what that snapshot absorbed; Marshal-safe `OpenList` holder).
 - **`Anonymizable`** — declarative right-to-erasure ("GDPR-lite").
   Not idempotent by design: `anonymize!` always re-applies every rule (a `:hash` pseudonym is re-hashed, hooks fire again); guard repeated jobs yourself (skip `anonymized?` records).
   `anonymizable *fields, with:` (presets :nullify/:redact/:hash/:email/

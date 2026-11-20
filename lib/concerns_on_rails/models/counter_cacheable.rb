@@ -326,6 +326,9 @@ module ConcernsOnRails
         def shift_snapshot(parent)
           state = parent.instance_variable_get(SNAPSHOT)
           return if @baked.empty? || !state || !state[:attributes]
+          # Until a successful save replaces it, the snapshot IS the live set
+          # (a failed save, a touch): move_back already moved it.
+          return if state[:attributes].equal?(parent.instance_variable_get(:@attributes))
 
           state[:attributes] = state[:attributes].map do |attr|
             delta = @baked[attr.name]
@@ -366,14 +369,15 @@ module ConcernsOnRails
           ledger.merge(name => value)
         end
 
-        # Rails 6.0 restores the parent BEFORE this undo runs (no snapshot is
-        # left to #shift_snapshot), and what it restored holds the mirror in
-        # its baseline: shift the live attribute's value and baseline.
+        # A parent restored BEFORE this undo runs (always on Rails 6.0; on
+        # later lines when a savepoint's undo follows into the outer one) has
+        # no snapshot left for #shift_snapshot, and what it restored holds the
+        # mirror in its baseline: shift the live attribute's value and baseline.
         # lock_version is the one column the parent's OWN save rewrites, from
         # the mirrored value: it reads ABOVE the mirrors' value, which a caller's
         # assignment (a form's hidden field, lower) does not.
         # shortcut: a caller assigning a HIGHER lock_version after the mirror is
-        # read as a save, and shifted too; Rails 6.0 only, no cleaner signal survives.
+        # read as a save, and shifted too; no cleaner signal survives the restore.
         def saved_over_mirror?(parent, ledger, name, current)
           name == @klass.locking_column && !parent.instance_variable_get(SNAPSHOT) &&
             ledger.key?(name) && current > ledger[name]
