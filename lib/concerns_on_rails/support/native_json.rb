@@ -1,3 +1,5 @@
+require "json"
+
 module ConcernsOnRails
   module Support
     # Does a column's ATTRIBUTE type encode a Hash/Array itself? The one answer
@@ -16,6 +18,22 @@ module ConcernsOnRails
       module_function
 
       JSON_TYPES = %i[json jsonb].freeze
+
+      # A native json column's cast value, re-read when Rails could not decode it.
+      # Type::Json decodes with ActiveSupport::JSON.decode and rescues any
+      # ParserError to nil, so on json >= 3 a stored document with a repeated
+      # object key reads nil — Storable then wrote the next key over defaults,
+      # erasing the rest. When the cast is nil, the attribute is unchanged and
+      # the raw database String parses with the last duplicate key winning
+      # (json 2.x semantics), that is what is returned; otherwise `value` as is.
+      def reread(record, column, value)
+        return value unless value.nil? && !record.attribute_changed?(column.to_s)
+
+        raw = record.read_attribute_before_type_cast(column.to_s)
+        raw.is_a?(String) ? JSON.parse(raw, allow_duplicate_key: true) : value
+      rescue JSON::ParserError
+        value
+      end
 
       def column?(klass, column)
         type = klass.type_for_attribute(column.to_s)

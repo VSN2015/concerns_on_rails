@@ -84,10 +84,78 @@ describe "JSON data handling fixes" do
       expect(record.reload.audit_trail.last["to"]).to eq("abc")
     end
 
+    it "stores a non-ASCII binary value that is valid UTF-8 as that text (not ASCII-8BIT)" do
+      record = klass.create!(name: "a")
+      expect { record.update!(digest: "café".b) }.not_to raise_error
+      expect(record.reload.audit_trail.last["to"]).to eq("café")
+    end
+
+    it "truncates a base64 blob on its raw bytes, keeping a decodable payload" do
+      limited = Class.new(TestModel) do
+        self.table_name = "json_data_audits"
+        include ConcernsOnRails::Models::Auditable
+        auditable_by :digest, max_value_length: 3
+      end
+      record = limited.create!
+      record.update!(digest: "\xFF\xFE\xFD\xFC\xFB".b)
+      to = record.reload.audit_trail.last["to"]
+      expect(to).to eq("base64:#{["\xFF\xFE\xFD".b].pack('m0')}…")
+    end
+
+    it "stores a non-UTF-8 String nested in an Array value without raising" do
+      record = klass.create!(name: "a")
+      allow(record).to receive(:auditable_tracked_changes).and_return("digest" => [nil, ["x", "\xFF".b]])
+      expect { record.update!(name: "b") }.not_to raise_error
+      expect(record.reload.audit_trail.map { |e| e["to"] }).to include(["x", "base64:/w=="])
+    end
+
     it "reads a trail carrying a duplicate key (last wins) instead of dropping it" do
       record = klass.create!(name: "a")
       record.update_column(:audit_log, '[{"field":"name","from":null,"to":"x","to":"a","at":"2020-01-01T00:00:00Z"}]')
       expect(klass.find(record.id).audit_trail.first["to"]).to eq("a")
+    end
+  end
+
+  describe "native json columns holding a duplicate key (Rails reads them as nil)" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :json_data_native, force: true do |t|
+          t.json :settings
+          t.json :audit_log
+          t.string :name
+        end
+      end
+    end
+    after { ActiveRecord::Base.connection.drop_table(:json_data_native) }
+
+    it "Storable keeps the other keys when one key is written" do
+      klass = Class.new(TestModel) do
+        self.table_name = "json_data_native"
+        include ConcernsOnRails::Storable
+        storable_by :settings, theme: { type: :string, default: "light" }, plan: { type: :string }
+      end
+      record = klass.create!
+      klass.connection.execute(%q(UPDATE json_data_native SET settings = '{"plan":"pro","theme":"a","theme":"dark"}'))
+      record = klass.find(record.id)
+      expect(record.theme).to eq("dark")
+      record.update!(theme: "blue")
+      expect(klass.find(record.id).settings).to eq("plan" => "pro", "theme" => "blue")
+    end
+
+    it "Auditable keeps the existing trail" do
+      klass = Class.new(TestModel) do
+        self.table_name = "json_data_native"
+        include ConcernsOnRails::Models::Auditable
+        auditable_by :name
+      end
+      record = klass.create!(name: "a")
+      klass.connection.execute(
+        %q(UPDATE json_data_native SET audit_log = '[{"field":"name","from":null,"to":"a","to":"a","at":"2020-01-01T00:00:00Z"}]')
+      )
+      record = klass.find(record.id)
+      expect(record.audit_trail.size).to eq(1)
+      record.update!(name: "b")
+      expect(klass.find(record.id).audit_trail.map { |e| e["to"] }).to eq(%w[a b])
     end
   end
 

@@ -456,14 +456,19 @@ module ConcernsOnRails
 
       private
 
+      # The column's value, recovering a native-json document Rails read as nil.
+      def storable_column_value(column)
+        Support::NativeJson.reread(self, column, self[column])
+      end
+
       def storable_get(column, key)
         spec = storable_spec(column, key)
-        storable_resolve(spec, storable_decoded(column, self[column]), key)
+        storable_resolve(spec, storable_decoded(column, storable_column_value(column)), key)
       end
 
       def storable_set(column, key, value)
         spec = storable_spec(column, key)
-        hash = storable_decoded(column, self[column]).dup
+        hash = storable_decoded(column, storable_column_value(column)).dup
         hash[key.to_s] = storable_cast_write(spec, value)
         storable_assign(column, hash)
       end
@@ -483,7 +488,7 @@ module ConcernsOnRails
       # In-memory only (no save) — hence no bang. Removing the key lets the
       # reader fall back to the default again.
       def storable_reset(column, key)
-        hash = storable_decoded(column, self[column])
+        hash = storable_decoded(column, storable_column_value(column))
         return unless hash.key?(key.to_s)
 
         new_hash = hash.dup
@@ -711,7 +716,7 @@ module ConcernsOnRails
       # and nil values pass (compose with a presence validator if you need them).
       def storable_validate_inclusions
         self.class.storable_keys.each do |column, keys|
-          decoded = storable_decoded(column, self[column])
+          decoded = storable_decoded(column, storable_column_value(column))
           keys.each do |key, spec|
             allowed = spec[:in]
             next unless allowed

@@ -216,7 +216,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Auditable`** — single-column JSON change history ("paper_trail-lite"). `auditable_by
   *fields, into:, actor:, max_entries:, max_value_length:`; `audit_trail` /
   `last_change_for` / `audited_changes_since` / `clear_audit_trail!`. Captured at the write
-  boundary (`Support::WriteBoundary`, after Encryptable's blind index), never in a callback. Detects a native JSON column through `Support::NativeJson`, like Storable.
+  boundary (`Support::WriteBoundary`, after Encryptable's blind index), never in a callback. Detects a native JSON column through `Support::NativeJson`, like Storable. A String value that is not valid UTF-8 (a binary digest, nested ones too) is stored as `"base64:<strict Base64>"` (a real String with that prefix is indistinguishable; `max_value_length` then keeps the first N BYTES, encoded, plus `…`), binary text that IS valid UTF-8 as that text. Storable and Auditable parse JSON with `allow_duplicate_key: true` (last key wins; json >= 3 raises otherwise) and, on a native column Rails read as nil, re-parse the raw String the same way (`NativeJson.reread`; not for `attribute_was`, and not when the attribute has unsaved changes).
 - **`Lockable`** — failed-attempt tracking + account lockout ("Devise lockable-lite").
   `lockable_by attempts:, locked_at:, max_attempts:, unlock_in:, prefix:/suffix:`;
   `register_failed_attempt!` (atomic SQL increment, conditional on the ROW's `locked_at` being NULL/lapsed; losing it adopts the lock and its attempts via `lockable_adopt_current_lock!`), `access_locked?` (lazy expiry),

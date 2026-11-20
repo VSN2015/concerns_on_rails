@@ -53,6 +53,12 @@ module ConcernsOnRails
     #     plain numeric string, symbols → strings. With `max_value_length:`,
     #     String values longer than the limit are stored as the first N
     #     characters plus a trailing "…" (non-strings are never truncated).
+    #   * A String that is not valid UTF-8 (a binary digest, also one nested in
+    #     an Array/Hash value) is stored as "base64:<strict Base64 of its
+    #     bytes>" instead of failing the save; a real String starting with
+    #     "base64:" is indistinguishable from it. Binary text that is valid
+    #     UTF-8 is stored as that text. `max_value_length:` keeps the first N
+    #     BYTES of such a blob, then the "…" after the Base64.
     #   * A corrupt or non-array column decodes as [] and is overwritten on the
     #     next tracked save. Concurrent saves of one row are last-writer-wins.
     #   * New entries are built on the PERSISTED trail (so an aborted save
@@ -150,7 +156,7 @@ module ConcernsOnRails
       # treat them as read-only. (Never with the column value itself, so
       # editing one can't rewrite the stored history.)
       def audit_trail
-        raw = self[self.class.auditable_into]
+        raw = Support::NativeJson.reread(self, self.class.auditable_into, self[self.class.auditable_into])
         cached = @_auditable_trail
         return cached[1].dup if cached && (cached[0].equal?(raw) || cached[0] == raw)
 
@@ -258,7 +264,7 @@ module ConcernsOnRails
       def auditable_persisted_trail
         into = self.class.auditable_into
         raw = respond_to?(:attribute_in_database) ? attribute_in_database(into.to_s) : self[into]
-        auditable_decode(raw)
+        auditable_decode(Support::NativeJson.reread(self, into, raw))
       end
 
       # Microsecond precision: at second precision two saves within the same
@@ -308,6 +314,12 @@ module ConcernsOnRails
 
       # from/to pipeline: JSON coercion, then opt-in truncation.
       def auditable_entry_value(value)
+        limit = self.class.auditable_max_value_length
+        # A String/Symbol is truncated inside auditable_string_value, on its raw
+        # bytes when it is encoded as base64 (cutting the encoded text would
+        # destroy the marker and the padding).
+        return auditable_string_value(value.to_s, limit) if value.is_a?(String) || value.is_a?(Symbol)
+
         auditable_truncate(auditable_json_value(value))
       end
 
@@ -334,20 +346,35 @@ module ConcernsOnRails
         # FrozenError on a frozen one.
         when Time, DateTime then ConcernsOnRails::Support::TimeValue.utc(value).iso8601
         when Date then value.iso8601
-        else value.as_json
+        else auditable_scrub(value.as_json)
+        end
+      end
+
+      # as_json leaves a String inside an Array/Hash as it is, so a non-UTF-8 one
+      # nested in a value would still make JSON.generate raise.
+      def auditable_scrub(value)
+        case value
+        when Array then value.map { |item| auditable_scrub(item) }
+        when Hash then value.transform_values { |item| auditable_scrub(item) }
+        when String then auditable_string_value(value)
+        else value
         end
       end
 
       # JSON.generate raises on a String that is not valid UTF-8 (a binary
-      # digest/blob), failing every save that changes it. Such bytes are stored
-      # as "base64:<strict Base64>" (readable, truncatable); anything JSON can
-      # already encode — binary that happens to be valid UTF-8 included — is
-      # untouched, so existing trails read the same.
-      def auditable_string_value(value)
-        return value if value.encoding != Encoding::BINARY && value.valid_encoding?
-        return value if value.encoding == Encoding::BINARY && value.dup.force_encoding(Encoding::UTF_8).valid_encoding?
+      # digest/blob), failing every save that changes it. Binary text that IS
+      # valid UTF-8 (a blob column holding "café") is tagged UTF-8 — json 3 also
+      # rejects it as ASCII-8BIT. Anything else is stored as "base64:<strict
+      # Base64 of the bytes>"; `limit` (max_value_length) then keeps the first N
+      # BYTES, encoded, plus a trailing "…" outside the payload. A real String
+      # starting with "base64:" is indistinguishable from it.
+      def auditable_string_value(value, limit = nil)
+        text = value.encoding == Encoding::BINARY ? value.dup.force_encoding(Encoding::UTF_8) : value
+        return limit ? auditable_truncate(text) : text if text.valid_encoding?
 
-        "base64:#{[value].pack('m0')}"
+        bytes = value.b
+        cut = limit && bytes.bytesize > limit
+        "base64:#{[cut ? bytes.byteslice(0, limit) : bytes].pack('m0')}#{'…' if cut}"
       end
 
       # JSON.generate raises on non-finite floats — store NaN/Infinity as strings.
