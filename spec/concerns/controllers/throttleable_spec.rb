@@ -4,6 +4,8 @@ describe ConcernsOnRails::Controllers::Throttleable do
   # Minimal atomic increment-with-expiry store — the contract Throttleable needs.
   # Stands in for Rails.cache / Redis so the suite stays dependency-free.
   class FakeThrottleStore
+    attr_reader :counts
+
     def initialize
       @counts = Hash.new(0)
     end
@@ -290,6 +292,7 @@ describe ConcernsOnRails::Controllers::Throttleable do
 
       expect(c.rendered).to be_nil
       expect(c.response.headers["X-RateLimit-Limit"]).to be_nil
+      expect(store.counts).to be_empty
     end
 
     it "applies a rule whose if: callable is truthy" do
@@ -362,18 +365,29 @@ describe ConcernsOnRails::Controllers::Throttleable do
       expect(c.response.headers["X-RateLimit-Limit"]).to be_nil
     end
 
-    it "requires BOTH conditions to pass when if: and unless: are given together" do
-      c = controller(store: store) do
-        throttle_by limit: 1, period: 60, if: -> { true }, unless: -> { true }
+    # Second hit inside one frozen window: true when the rule 429s it.
+    def throttled_on_second_hit?(declaration_options = {}, action: "index", **extra)
+      klass = throttled_class(store) { throttle_by(limit: 1, period: 60, **declaration_options, **extra) }
+      travel_to Time.utc(2026, 1, 1, 12, 0, 0) do
+        hits = Array.new(2) { instance(klass, action: action).tap(&:enforce_throttles) }
+        !hits.last.rendered.nil?
       end
-      c.enforce_throttles
-      expect(c.response.headers["X-RateLimit-Limit"]).to be_nil
     end
 
-    it "composes with only:/except:" do
-      c = controller(store: store, action: "index") { throttle_by limit: 1, period: 60, only: :index, if: -> { false } }
-      c.enforce_throttles
-      expect(c.response.headers["X-RateLimit-Limit"]).to be_nil
+    it "requires BOTH conditions to pass when if: and unless: are given together" do
+      expect(throttled_on_second_hit?(if: -> { true }, unless: -> { false })).to be(true)
+      expect(throttled_on_second_hit?(if: -> { false }, unless: -> { false })).to be(false)
+      expect(throttled_on_second_hit?(if: -> { true }, unless: -> { true })).to be(false)
+      expect(throttled_on_second_hit?(if: -> { false }, unless: -> { true })).to be(false)
+    end
+
+    it "composes with only:/except: — the action filter decides first, the condition second" do
+      expect(throttled_on_second_hit?({ only: :index, if: -> { true } }, action: "index")).to be(true)
+      expect(throttled_on_second_hit?({ only: :index, if: -> { true } }, action: "show")).to be(false)
+      expect(throttled_on_second_hit?({ only: :index, if: -> { false } }, action: "index")).to be(false)
+      expect(throttled_on_second_hit?({ except: :index, if: -> { true } }, action: "index")).to be(false)
+      expect(throttled_on_second_hit?({ except: :index, if: -> { true } }, action: "show")).to be(true)
+      expect(store.counts.values.max).to be <= 2 # no rule that was filtered out ever counted
     end
 
     it "rejects a non-callable, non-Symbol if:/unless:" do
