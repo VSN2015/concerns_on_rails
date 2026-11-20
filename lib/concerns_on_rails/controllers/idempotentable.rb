@@ -147,7 +147,7 @@ module ConcernsOnRails
         raw = read_idempotency_header(rule)
         return idempotency_handle_missing_key(rule, &) if raw.nil?
 
-        key = raw.to_s.strip
+        key = raw.to_s.scrub.strip
         unless valid_idempotency_key?(key)
           return idempotency_error_response(message: "#{rule[:header]} is invalid (expected 1-#{MAX_KEY_LENGTH} characters).",
                                             status: :bad_request, code: "idempotency_key_invalid")
@@ -465,12 +465,14 @@ module ConcernsOnRails
       end
 
       # Deterministic JSON regardless of param insertion order: hashes become
-      # sorted [key, value] pairs, arrays keep their (significant) order, and
-      # non-JSON-primitive leaves are stringified so nothing can raise.
+      # sorted [key, value] pairs, arrays keep their (significant) order but are
+      # wrapped in a one-key object (a JSON array of pairs would otherwise equal
+      # a Hash, and [] equal {}), and non-JSON-primitive leaves are stringified
+      # so nothing can raise.
       def idempotency_deep_sort(value)
         case value
         when Hash then value.map { |k, v| [k.to_s, idempotency_deep_sort(v)] }.sort_by(&:first)
-        when Array then value.map { |v| idempotency_deep_sort(v) }
+        when Array then { "array" => value.map { |v| idempotency_deep_sort(v) } }
         else idempotency_scalar(value)
         end
       end

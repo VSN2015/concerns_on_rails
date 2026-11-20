@@ -418,14 +418,14 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   source is on and `Vary: Cookie` whenever the cookie source is on (through `Support::VaryHeader`; `vary: false`
   opts out; independent of `response_header:`, which only controls `X-Time-Zone`).
 - **`Idempotentable`** — `Idempotency-Key` response replay with an injectable store
-  (`idempotent_actions`); in-flight claims carry a per-request token, and a failed request releases only a claim it still holds (never overwrites a finished record; overlapping different payloads: first to finish owns the response; read-then-write stays two round trips); 409 on in-flight duplicates, 422 on payload mismatch, 503
+  (`idempotent_actions`); in-flight claims carry a per-request token, and a failed request releases only a claim it still holds (never overwrites a finished record; overlapping different payloads: first to finish owns the response; read-then-write stays two round trips); 409 on in-flight duplicates, 422 on payload mismatch (the fingerprint wraps an Array as `{"array"=>[...]}` so a Hash and an Array of pairs, or `{}` and `[]`, differ; the key is scrubbed of invalid UTF-8), 503
   `idempotency_store_unavailable` when the store is down (both claims failed AND both reads
   nil); `on_store_unavailable: :proceed` runs the action without dedupe instead.
 - **`WebhookVerifiable`** — HMAC verification for inbound webhooks (`verify_webhook`):
   scheme presets `:stripe`/`:github`/`:shopify`/`:hex`/`:base64`, constant-time compare,
   Stripe timestamp tolerance, secret rotation; 401/400 before the action runs. `replay:` /
   `replay_ttl:` add replay protection for timestamp-less schemes (store must answer BOTH
-  `#write` and `#read`; short claim promoted in an after_action, and released by a private
+  `#write` and `#read`; short claim promoted in an after_action (a lost claim with a nil read-back is re-claimed once, like Idempotentable, so a lapsed-but-undeleted FileStore entry still records the delivery), and released by a private
   around_action whenever the delivery wasn't processed — later filter halt, exception, any status outside 2xx/3xx; the claim value is a per-request token and release deletes only a claim still holding it;
   Stripe keys off the signed payload, not the parsed header). Rule lookup is by
   specificity: a rule naming the action beats any catch-all (most-derived class first),
@@ -464,7 +464,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   catch-all; LAST match wins). `stale_resource?`/`set_cache_validators` (weak
   ETag, Last-Modified, RFC 7232 precedence; safe methods only — unsafe requests
   get neither 304 nor validators). `no_store` is also applied via
-  prepend_before_action so rescue_from-rendered errors keep it; positive
+  prepend_before_action so rescue_from-rendered errors keep it, and empties Rails' `response.cache_control` hash (which would drop it at commit); positive
   freshness is emitted only for GET/HEAD with status 200/203/204/206/304 (never on
   rescued errors); `vary:` merges through `Support::VaryHeader`. Per-call `extras:`
   (any, nil included) force `private`, like a Vary-less `etag_with` source.

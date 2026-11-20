@@ -233,6 +233,7 @@ module ConcernsOnRails
         return unless respond_to?(:response) && response
 
         value = http_cache_control_for_response(rule)
+        http_cache_clear_rails_directives if rule[:no_store]
         response.set_header("Cache-Control", value) if value
         http_cache_merge_vary(rule[:vary]) if rule[:vary]
         # Here too, not only from set_cache_validators: an action that renders
@@ -249,7 +250,15 @@ module ConcernsOnRails
         return unless rule && rule[:no_store]
         return unless respond_to?(:response) && response
 
+        http_cache_clear_rails_directives
         response.set_header("Cache-Control", "no-store")
+      end
+
+      # Rails folds response.cache_control (the hash expires_in / fresh_when /
+      # http_cache_forever fill) over the raw header at commit and drops its
+      # no-store; no_store must win, so empty the hash.
+      def http_cache_clear_rails_directives
+        response.cache_control.clear if response.respond_to?(:cache_control) && response.cache_control.respond_to?(:clear)
       end
 
       # Set ETag/Last-Modified validators for the resource, then — for a safe
