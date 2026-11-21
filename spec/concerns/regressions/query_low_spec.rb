@@ -72,6 +72,33 @@ describe "query-side controller concerns, LOW findings" do
     end
   end
 
+  describe "Filterable keeps a non-String type: over an integer column (epoch seconds)" do
+    let(:epoch) { Time.utc(2026, 1, 1).to_i }
+
+    before do
+      QueryLowRow.create!(name: "old", stock: epoch - 100)
+      QueryLowRow.create!(name: "new", stock: epoch + 100)
+    end
+
+    def names(type, params)
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Filterable
+
+        filter_by :stock, type: type, operators: true
+      end
+      klass.new(params: params).filtered(QueryLowRow.all).pluck(:name).sort
+    end
+
+    it "still compares a :datetime operand against the epoch" do
+      expect(names(:datetime, stock_gte: "2026-01-01 00:00:00")).to eq(%w[new])
+      expect(names(:datetime, stock_lt: "2026-01-01 00:00:00")).to eq(%w[old])
+    end
+
+    it "leaves a :boolean operand on its own path" do
+      expect(names(:boolean, stock_gt: "0")).to eq(%w[new old]) # "0" casts to false => stock > 0
+    end
+  end
+
   describe "CursorPaginatable reads back a decimal boundary it minted" do
     let(:controller) do
       Class.new(FakeController) do

@@ -5,7 +5,7 @@
 ### Fixed
 
 - **Sortable (controller):** a sort key behind a chain of `alias_attribute`s no longer fails as an unknown column.
-- **Filterable:** a numeric column compares numerically whatever `type:` says (`?stock_gt=4abc` no longer means `> 4`).
+- **Filterable:** a numeric column under `type: :string` compares numerically (`?stock_gt=4abc` no longer means `> 4`).
 - **CursorPaginatable:** a cursor on a very long `decimal` value (PostgreSQL `numeric`) no longer answers 400.
 
 ## 1.36.3 (2026-11-21)

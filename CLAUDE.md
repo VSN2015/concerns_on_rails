@@ -357,7 +357,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Filterable`** — declarative URL-param filtering (`filter_by`: direct-where / `scope:` /
   `with:` lambda) + comparison operators (`?price_gte=` suffix or `?price[gte]=` bracket form,
   from a frozen allow-list mapped to fixed Arel nodes) and type coercion; an uncastable
-  comparison value returns `none` (fail-closed; a numeric column always reads its operand as a number, whatever `type:` is declared), as does any operand with a NUL byte
+  comparison value returns `none` (fail-closed; a numeric column reads its operand as a number unless the declared `type:` casts it to a non-String, e.g. `:datetime` over epoch seconds), as does any operand with a NUL byte
   (`ScalarParam.nul_free?`; binary columns exempt), an enum column compares by label (an
   integer-backed one reads any non-label as a NUMBER via `NumericOperand`, so `gte 2` is `>= 2`;
   an unknown non-numeric label → `none`; never `EnumType#cast` on the raw operand), an unknown
