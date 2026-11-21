@@ -357,7 +357,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Filterable`** — declarative URL-param filtering (`filter_by`: direct-where / `scope:` /
   `with:` lambda) + comparison operators (`?price_gte=` suffix or `?price[gte]=` bracket form,
   from a frozen allow-list mapped to fixed Arel nodes) and type coercion; an uncastable
-  comparison value returns `none` (fail-closed), as does any operand with a NUL byte
+  comparison value returns `none` (fail-closed; a numeric column always reads its operand as a number, whatever `type:` is declared), as does any operand with a NUL byte
   (`ScalarParam.nul_free?`; binary columns exempt), an enum column compares by label (an
   integer-backed one reads any non-label as a NUMBER via `NumericOperand`, so `gte 2` is `>= 2`;
   an unknown non-numeric label → `none`; never `EnumType#cast` on the raw operand), an unknown
@@ -370,7 +370,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `Support::NumericOperand`: exact, never truncated (`gte 5.5` on an integer column is
   `>= 6`, `eq 5.5` is none), out-of-range answered per operator, oversized strings refused
   before any BigDecimal is built.
-- **`Sortable`** — allow-listed, multi-column ordering from `params[:sort]` (uses `reorder`; an `alias_attribute` key resolves to its column on 6.0 too);
+- **`Sortable`** — allow-listed, multi-column ordering from `params[:sort]` (uses `reorder`; an `alias_attribute` key resolves to its column, through a chain of aliases, on 6.0 too);
   the macro's `direction:` is case-insensitive and anything but asc/desc raises at class load.
 - **`Respondable`** — standard JSON success/error envelopes (`render_success`/`render_error`),
   plus `render_created(data:, location:)` and `render_invalid(record)`; `location:`/`headers:`
@@ -448,7 +448,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   back only where the adapter stores it (SQLite binds a `9e999` literal); a date/time
   boundary that doesn't decode to a date/time is an InvalidCursor, and so is a non-binary
   String boundary that is invalid UTF-8 or (except on MySQL/Trilogy) carries a NUL byte, and a plain
-  numeric boundary `Support::NumericOperand` does not read as :exact (precision, size). A binary
+  numeric boundary `Support::NumericOperand` does not read as :exact (precision, size; a decimal String is first read at `bounded_decimal`'s 2,100-char bound, so a minted 100+ digit `numeric` boundary round-trips). A binary
   boundary (binary PK tiebreaker / ordering column) travels as strict Base64 (not Base64 → InvalidCursor).
   Raises ArgumentError for a relation carrying limit/offset (`Support::CallerWindow.window?`).
 - **`Deprecatable`** — standards-based endpoint deprecation. `deprecate_actions *actions,

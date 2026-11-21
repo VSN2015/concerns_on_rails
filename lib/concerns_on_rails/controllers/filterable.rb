@@ -333,7 +333,11 @@ module ConcernsOnRails
         return enum if enum
 
         column_type = filterable_column_type(relation, field)
-        operand = ConcernsOnRails::Support::NumericOperand.classify(raw, options[:type] || column_type, column_type: column_type)
+        # A numeric column binds the operand through its own caster whatever `type:` says
+        # (`type: :string` over an integer column read "12abc" as 12), so it is always read as a number.
+        numeric_column = ConcernsOnRails::Support::NumericOperand.kind(column_type)
+        operand = ConcernsOnRails::Support::NumericOperand.classify(raw, numeric_column ? column_type : (options[:type] || column_type),
+                                                                    column_type: column_type)
         return apply_filter_numeric_comparison(relation, field, operator, operand) if operand
 
         apply_filter_cast_comparison(relation, field, operator, raw, options)
