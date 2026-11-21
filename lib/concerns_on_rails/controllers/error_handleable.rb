@@ -262,7 +262,16 @@ module ConcernsOnRails
       rescue StandardError => e
         raise unless error_handleable_rescue_early_bad_request?(e)
 
+        # No callback ran on this path, so SecureHeadable's before_action
+        # never wrote its headers; do it for the response rendered here —
+        # unless the controller skipped that callback.
+        apply_secure_headers if error_handleable_secure_headers_callback?
         rescue_with_handler(e) || raise
+      end
+
+      def error_handleable_secure_headers_callback?
+        respond_to?(:apply_secure_headers, true) &&
+          _process_action_callbacks.any? { |cb| cb.kind == :before && cb.filter == :apply_secure_headers }
       end
 
       def error_handleable_rescue_early_bad_request?(error)

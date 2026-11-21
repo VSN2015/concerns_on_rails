@@ -90,7 +90,9 @@ module ConcernsOnRails
       def resolved_locale
         @resolved_locale ||= begin
           opts = self.class.localizable_options
-          allowed = opts[:available].presence || I18n.available_locales
+          # Only locales I18n can switch to are candidates, so an unusable param
+          # falls through the chain (header → default:) instead of skipping it.
+          allowed = (opts[:available].presence || I18n.available_locales) & I18n.available_locales
           candidate = locale_from_param(opts, allowed) || locale_from_header(opts, allowed) || opts[:default]
 
           candidate && I18n.available_locales.include?(candidate.to_sym) ? candidate.to_sym : I18n.default_locale
@@ -148,8 +150,12 @@ module ConcernsOnRails
       # :"zh-Hant" was available.
       def parse_accept_language(header, allowed)
         depth = allowed.map { |locale| locale.to_s.count("-_") }.max.to_i + 1
-        ranked_accept_languages(header).each do |lang|
+        pairs = accept_language_pairs(header)
+        refused = refused_accept_languages(pairs)
+        ranked_accept_languages(pairs).each do |lang|
           accept_language_lookup_ranges(lang, depth).each do |range|
+            next if refused.include?(locale_match_key(range))
+
             match = match_locale(range, allowed)
             return match if match
           end
@@ -174,26 +180,40 @@ module ConcernsOnRails
         end
       end
 
-      # Language tags from an Accept-Language header (kept whole — see
-      # parse_accept_language for region handling), q=0 dropped, highest-q
-      # first (RFC 7231 preference order). Ties keep header order: Ruby's
-      # sort_by is NOT stable (from ~8 entries equal keys come back shuffled),
-      # so the header position is an explicit secondary key.
-      def ranked_accept_languages(header)
-        pairs = header.split(",").filter_map do |part|
+      # [tag, q] for every part of an Accept-Language header, tags kept whole —
+      # see parse_accept_language for region handling. Well-formed q=0 parts
+      # are included; a part with a malformed weight is dropped.
+      def accept_language_pairs(header)
+        header.split(",").filter_map do |part|
           token, *params = part.split(";").map(&:strip)
-          quality = accept_language_quality(params)
-          next if quality <= 0.0
-
           lang = token.to_s.strip
-          [lang, quality] if lang.present?
+          quality = accept_language_quality(params)
+          [lang, quality] if quality && lang.present?
         end
-        pairs.each_with_index.sort_by { |(_lang, quality), index| [-quality, index] }.map { |(lang, _q), _i| lang }
+      end
+
+      # A tag the client refused with a well-formed q=0 is never served, not even
+      # through a truncated range (`fr-CA, fr;q=0` must not resolve to :fr) —
+      # unless the same header also lists it with q > 0. A Set of match keys: a
+      # hostile header of thousands of ranges must not make each lookup a scan.
+      def refused_accept_languages(pairs)
+        accepted, refused = pairs.partition { |_lang, quality| quality.positive? }
+        refused.to_set { |lang, _q| locale_match_key(lang) } - accepted.map { |lang, _q| locale_match_key(lang) }
+      end
+
+      # The acceptable tags of those pairs (q=0 dropped), highest-q first (RFC
+      # 7231 preference order). Ties keep header order: Ruby's sort_by is NOT
+      # stable (from ~8 entries equal keys come back shuffled), so the header
+      # position is an explicit secondary key.
+      def ranked_accept_languages(pairs)
+        pairs.select { |_lang, quality| quality.positive? }
+             .each_with_index.sort_by { |(_lang, quality), index| [-quality, index] }.map { |(lang, _q), _i| lang }
       end
 
       # The q-value (relative quality) of an Accept-Language part: 1.0 when
-      # absent. q=0 means "not acceptable" and is dropped — and so is a weight
-      # that is not an RFC 9110 qvalue (0 to 1, at most three decimals):
+      # absent. q=0 means "not acceptable" (a refusal, see refused_accept_languages);
+      # a weight that is not an RFC 9110 qvalue (0 to 1, at most three decimals)
+      # is nil and the part is dropped, NOT read as a refusal:
       # `Float()` used to read q=0x10 as 16, q=1_0 as 10, q=Infinity and q=2
       # at face value, so a malformed weight outranked every real one.
       # The parameter name is case-insensitive (RFC 9110 §12.4.2): `Q=0` used
@@ -203,7 +223,7 @@ module ConcernsOnRails
         return 1.0 unless qparam
 
         weight = qparam[2..].strip
-        QVALUE.match?(weight) ? weight.to_f : 0.0
+        QVALUE.match?(weight) ? weight.to_f : nil
       end
 
       # Case-insensitive, with `_` and `-` as ONE separator: Accept-Language
