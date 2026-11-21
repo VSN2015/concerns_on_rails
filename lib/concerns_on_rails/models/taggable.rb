@@ -335,7 +335,7 @@ module ConcernsOnRails
       # AND semantics for delimiter-containing input, mirroring the class-level
       # tagged_with default: tagged_with?("a,b") is true when BOTH tags are set.
       def tagged_with?(tag)
-        parts = self.class.taggable_split(tag.to_s)
+        parts = taggable_coerce(tag)
         parts.any? && (parts - tag_list).empty?
       end
       alias has_tag? tagged_with?

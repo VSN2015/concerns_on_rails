@@ -101,6 +101,9 @@ describe ConcernsOnRails::Controllers::Paginatable do
   end
 
   it "counts groups (not a raw Hash) for a grouped relation" do
+    # 10 duplicate names: 60 rows fall into 50 groups, so counting rows
+    # (or the Hash a grouped COUNT returns) cannot pass for the group count.
+    10.times { |i| Widget.create!(name: "Widget #{i}") }
     controller = controller_class.new(params: { per_page: 10 })
     # `.select(:name)` is the caller's job, not the concern's: the default
     # `SELECT widgets.*` alongside `GROUP BY widgets.name` is invalid SQL on
@@ -108,9 +111,10 @@ describe ConcernsOnRails::Controllers::Paginatable do
     # The count path strips the select (`except(:select)`) and still counts
     # groups, which is what this example is about.
     records = controller.paginated(Widget.group(:name).select(:name))
-    expect { records.to_a }.not_to raise_error
-    # 50 distinct names => 50 groups
+    expect(records.to_a.size).to eq(10)
+    expect(Widget.count).to eq(60)
     expect(controller.response.headers["X-Total-Count"]).to eq("50")
+    expect(controller.response.headers["X-Total-Pages"]).to eq("5")
   end
 
   it "exposes pagination_meta without applying limit/offset" do
@@ -940,6 +944,15 @@ describe ConcernsOnRails::Controllers::Paginatable do
     # app configured that way — on a patch upgrade, for a value that works.
     it "treats a negative max_per_page as 'no cap', like 0" do
       declare(max_per_page: -5).not_to raise_error
+
+      klass = Class.new(FakeController) do
+        include ConcernsOnRails::Controllers::Paginatable
+
+        paginate_by max_per_page: -5
+      end
+      expect(klass.paginatable_max_per_page).to eq(0)
+      # a leaked -5 would clamp every page to -5 rows; uncapped honours the request
+      expect(klass.new(params: { per_page: 40 }).paginated(Widget.all).to_a.size).to eq(40)
     end
 
     it "allows max_per_page: 0 (documented as 'no cap')" do

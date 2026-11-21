@@ -1,0 +1,122 @@
+require "spec_helper"
+require "support/integration_harness"
+
+# Cacheable writes no_store as a raw Cache-Control header. Rails' merge_and_normalize_cache_control!
+# deletes no-store/no-cache from the raw header whenever response.cache_control (the hash every
+# Rails helper writes: expires_in, fresh_when(public:), http_cache_forever) is non-empty, so the
+# documented "no_store overrides everything" is silently dropped.
+RSpec::Matchers.define_negated_matcher :not_match, :match
+
+describe ConcernsOnRails::Controllers::Cacheable do
+  it "keeps no-store when a filter/action also used Rails' expires_in" do
+    controller = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Cacheable
+
+      http_cache_actions :token, no_store: true
+      before_action { expires_in 10.minutes } # e.g. a base-controller default
+
+      def token = render(json: { token: "secret" })
+    end
+    result = IntegrationHarness.dispatch(controller, :token)
+    # Rails 6.0 normalizes a lone raw no-store to "private, no-store"; what matters is that
+    # no positive freshness survives next to it.
+    expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
+  end
+end
+
+describe ConcernsOnRails::Controllers::Cacheable, "no_store after an action-level Rails directive" do
+  it "keeps no-store when the action itself calls expires_in / http_cache_forever" do
+    controller = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Cacheable
+
+      http_cache_actions :token, no_store: true
+
+      def token
+        expires_in 10.minutes, public: true
+        render(json: { token: "secret" })
+      end
+    end
+    result = IntegrationHarness.dispatch(controller, :token)
+    expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
+  end
+
+  it "keeps no-store on a rescue_from-rendered error after the action used expires_in" do
+    controller = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Cacheable
+
+      http_cache_actions :token, no_store: true
+      rescue_from(RuntimeError) { render(json: { error: "boom" }, status: :internal_server_error) }
+
+      def token
+        expires_in 10.minutes, public: true
+        raise "boom"
+      end
+    end
+    result = IntegrationHarness.dispatch(controller, :token)
+    expect(result.status).to eq(500)
+    expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
+  end
+
+  # 6.x: fresh_when goes through EtagWithFlash, which needs request.flash, absent in the bare harness.
+  it "keeps no-store on a fresh_when 304 inside a no_store action", min_rails: "7.0" do
+    controller = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Cacheable
+
+      http_cache_actions :token, no_store: true
+
+      def token
+        fresh_when(etag: "v1", public: true)
+        render(json: { token: "secret" }) unless performed?
+      end
+    end
+    etag = IntegrationHarness.dispatch(controller, :token).header("ETag")
+    result = IntegrationHarness.dispatch(controller, :token, headers: { "If-None-Match" => etag })
+    expect(result.status).to eq(304)
+    expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
+  end
+end
+
+describe ConcernsOnRails::Controllers::Cacheable, "skipping the no_store callback" do
+  let(:base) do
+    IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Cacheable
+
+      http_cache_actions :token, no_store: true
+      rescue_from(RuntimeError) { render(json: { error: "boom" }, status: :internal_server_error) }
+
+      def token = render(json: { token: "secret" })
+
+      def boom
+        expires_in 10.minutes, public: true
+        raise "boom"
+      end
+    end
+  end
+
+  # The callback name is public API (1.36.2): skipping it must keep loading. As in 1.36.2 the
+  # after_action still stamps a successful response, so a FULL opt-out skips both callbacks.
+  it "lets a subclass skip_before_action :apply_http_no_store without raising" do
+    sub = Class.new(base) { skip_before_action :apply_http_no_store }
+    expect(IntegrationHarness.dispatch(sub, :token).header("Cache-Control").to_s).to include("no-store")
+  end
+
+  it "sends no no-store at all when both callbacks are skipped" do
+    sub = Class.new(base) do
+      skip_before_action :apply_http_no_store
+      skip_after_action :apply_http_cache_headers
+    end
+    expect(IntegrationHarness.dispatch(sub, :token).header("Cache-Control").to_s).not_to include("no-store")
+  end
+
+  it "does not re-apply no-store on a rescued error once the before callback is skipped" do
+    sub = Class.new(base) { skip_before_action :apply_http_no_store }
+    expect(IntegrationHarness.dispatch(sub, :boom).header("Cache-Control").to_s).not_to include("no-store")
+  end
+
+  it "still keeps no-store on the rescued error when the callback is not skipped" do
+    base.http_cache_actions :boom, no_store: true
+    result = IntegrationHarness.dispatch(base, :boom)
+    expect(result.status).to eq(500)
+    expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
+  end
+end

@@ -560,9 +560,10 @@ module ConcernsOnRails
       end
 
       # `touch: true` goes through `update` (validations, callbacks,
-      # updated_at); `touch: false` through update_column (none of those).
+      # updated_at); `touch: false` through update_column (none of those) — a
+      # NEW record has no row to update_column, so it is saved like `touch: true`.
       def soft_delete_write(value)
-        if self.class.soft_delete_touch
+        if self.class.soft_delete_touch || new_record?
           update(self.class.soft_delete_field => value)
         else
           update_column(self.class.soft_delete_field, value)

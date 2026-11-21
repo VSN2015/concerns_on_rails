@@ -13,7 +13,11 @@ RSpec.describe "decimal exponent bound (Storable + Encryptable)" do
       end
     end
   end
-  after { ActiveRecord::Base.connection.drop_table(:dec_rows) }
+  after do
+    ConcernsOnRails.encryption.key_id = 0
+    ConcernsOnRails.encryption.previous_keys = {}
+    ActiveRecord::Base.connection.drop_table(:dec_rows)
+  end
 
   def clock = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 

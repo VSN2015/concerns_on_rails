@@ -45,17 +45,20 @@ module ConcernsOnRails
         #   hashable_by :public_id, type: :custom, length: 14, alphabet: "abcdefghijklmnopqrstuvwxyz0123456789",
         #               prefix: "ord_", unique: true, to_param: true      # => "ord_k7m3pq9a2x5n8v" in URLs
         def hashable_by(field, type: :hex, length: 16, alphabet: nil, unique: false, prefix: nil, to_param: false)
+          # Validate BEFORE assigning: a refused (and rescued) re-declaration
+          # must leave the previous, working declaration in place.
+          ensure_columns!("ConcernsOnRails::Models::Hashable", field.to_sym,
+                          types: unique ? "string:uniq" : :string)
+          options = validated_hashable_options(type: type.to_sym, length: length.to_i, alphabet: alphabet,
+                                               prefix: prefix, to_param: to_param)
           self.hashable_field = field.to_sym
-          self.hashable_type = type.to_sym
-          self.hashable_length = length.to_i
-          self.hashable_alphabet = alphabet
+          self.hashable_type = options[:type]
+          self.hashable_length = options[:length]
+          self.hashable_alphabet = options[:alphabet]
           self.hashable_unique = unique
           self.hashable_prefix = prefix
           self.hashable_to_param = to_param
 
-          ensure_columns!("ConcernsOnRails::Models::Hashable", hashable_field,
-                          types: hashable_unique ? "string:uniq" : :string)
-          validate_hashable_options!
           before_create :assign_hashable_value
           # Separate from the (public, skip_callback-able) assignment so a
           # host calling assign_hashable_value itself — outside a save, in
@@ -86,6 +89,7 @@ module ConcernsOnRails
                   when :uuid    then SecureRandom.uuid
                   when :integer then hashable_fixed_width_integer
                   when :custom  then ConcernsOnRails::Support::RandomValue.from_alphabet(hashable_alphabet, hashable_length)
+                  else raise ArgumentError, "#{LABEL}: unknown type '#{hashable_type}'"
                   end
           hashable_prefix ? "#{hashable_prefix}#{value}" : value
         end
@@ -102,18 +106,21 @@ module ConcernsOnRails
       end
 
       module ClassMethods
-        def validate_hashable_options!
-          unless VALID_TYPES.include?(hashable_type)
+        # Returns the type/length/alphabet to store (the alphabet de-duplicated);
+        # reads and writes no class state, so a refusal leaves the class untouched.
+        def validated_hashable_options(type:, length:, alphabet:, prefix:, to_param:)
+          unless VALID_TYPES.include?(type)
             raise ArgumentError,
-                  "ConcernsOnRails::Models::Hashable: unknown type '#{hashable_type}'. Valid types: #{VALID_TYPES.join(', ')}"
+                  "ConcernsOnRails::Models::Hashable: unknown type '#{type}'. Valid types: #{VALID_TYPES.join(', ')}"
           end
 
-          if length_bearing_hashable_type? && !hashable_length.positive?
+          if %i[hex integer custom].include?(type) && !length.positive? # :uuid ignores length
             raise ArgumentError, "ConcernsOnRails::Models::Hashable: length must be a positive integer"
           end
 
-          validate_hashable_alphabet! if hashable_type == :custom
-          validate_hashable_extras!
+          alphabet = validated_hashable_alphabet(alphabet) if type == :custom
+          validate_hashable_extras!(type, prefix, to_param)
+          { type: type, length: length, alphabet: alphabet }
         end
 
         # Sampling is uniform over the alphabet's POSITIONS, so a repeated
@@ -122,60 +129,51 @@ module ConcernsOnRails
         # app that shipped such an alphabet, so it is de-duplicated (removing
         # the bias) with a deprecation warning; 2.0 will raise. One distinct
         # character is a constant, not an identifier — that still raises.
-        def validate_hashable_alphabet!
-          unless hashable_alphabet.is_a?(String) && !hashable_alphabet.empty?
+        def validated_hashable_alphabet(alphabet)
+          unless alphabet.is_a?(String) && !alphabet.empty?
             raise ArgumentError, "ConcernsOnRails::Models::Hashable: type :custom requires a non-empty alphabet: String"
           end
 
-          dedupe_hashable_alphabet!
-          return if hashable_alphabet.length >= 2
+          alphabet = dedupe_hashable_alphabet(alphabet)
+          return alphabet if alphabet.length >= 2
 
           raise ArgumentError, "#{LABEL}: alphabet needs at least 2 distinct characters"
         end
 
-        def dedupe_hashable_alphabet!
-          duplicates = hashable_alphabet.each_char.tally.select { |_char, n| n > 1 }.keys
-          return if duplicates.empty?
+        def dedupe_hashable_alphabet(alphabet)
+          duplicates = alphabet.each_char.tally.select { |_char, n| n > 1 }.keys
+          return alphabet if duplicates.empty?
 
           ConcernsOnRails.deprecator.warn(
             "#{LABEL}: #{name || 'model'} alphabet has duplicate character(s) " \
             "#{duplicates.map(&:inspect).join(', ')}, which biased the generated values; they have been " \
             "de-duplicated. Remove them from the alphabet — this will raise in 2.0."
           )
-          self.hashable_alphabet = hashable_alphabet.each_char.to_a.uniq.join
+          alphabet.each_char.to_a.uniq.join
         end
 
         # prefix: is a literal String prepended to string-typed values only —
         # an Integer code can't carry one; to_param: is a plain flag.
-        def validate_hashable_extras!
-          unless hashable_prefix.nil? || hashable_prefix.is_a?(String)
-            raise ArgumentError, "#{LABEL}: prefix: must be a String (got #{hashable_prefix.inspect})"
-          end
-          if hashable_prefix && hashable_type == :integer
+        def validate_hashable_extras!(type, prefix, to_param)
+          raise ArgumentError, "#{LABEL}: prefix: must be a String (got #{prefix.inspect})" unless prefix.nil? || prefix.is_a?(String)
+          if prefix && type == :integer
             raise ArgumentError, "#{LABEL}: prefix: is not supported for type :integer (use :custom with a digit alphabet)"
           end
-          unless [true, false].include?(hashable_to_param)
-            raise ArgumentError, "#{LABEL}: to_param: must be true or false (got #{hashable_to_param.inspect})"
-          end
+          raise ArgumentError, "#{LABEL}: to_param: must be true or false (got #{to_param.inspect})" unless [true, false].include?(to_param)
 
-          validate_hashable_to_param_conflict!
+          validate_hashable_to_param_conflict!(to_param)
         end
 
         # Sluggable pulls in friendly_id, which also overrides to_param. Which
         # one wins is decided purely by the order the two concerns are included
         # — so one of `to_param: true` and friendly URLs silently loses. Refuse
         # the ambiguity instead of letting include order decide it.
-        def validate_hashable_to_param_conflict!
-          return unless hashable_to_param && respond_to?(:friendly_id_config)
+        def validate_hashable_to_param_conflict!(to_param)
+          return unless to_param && respond_to?(:friendly_id_config)
 
           raise ArgumentError,
                 "#{LABEL}: to_param: true conflicts with Sluggable/friendly_id, which also overrides to_param " \
                 "(the winner would depend on include order). Drop one, or override to_param on the model yourself."
-        end
-
-        # :uuid ignores length; the others derive their size from it.
-        def length_bearing_hashable_type?
-          %i[hex integer custom].include?(hashable_type)
         end
       end
 

@@ -289,6 +289,7 @@ describe ConcernsOnRails::Controllers::Localizable do
 
       it "never leaks the locale into the next request on the thread" do
         IntegrationHarness.dispatch(klass, :fail_arg, headers: { "Accept-Language" => "fr" })
+        expect(I18n.locale).to eq(:en) # checked BEFORE any later request could re-set it
         result = IntegrationHarness.dispatch(klass, :show)
 
         expect(JSON.parse(result.body)).to eq("locale" => "en")

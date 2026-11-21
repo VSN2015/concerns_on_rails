@@ -58,7 +58,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 
 - **`Sluggable`** — wraps `friendly_id` (`:slugged`). Regenerates the slug when the source
   field changes to a value with a usable candidate (a cleared/blank source keeps the slug, never a
-  bare uuid), backfills a blank slug (an ASSIGNED `""`/nil too, whenever the source is present), and
+  bare uuid — except on a NOT NULL slug column, which keeps the uuid fallback rather than raising), backfills a blank slug (an ASSIGNED `""`/nil too, whenever the source is present), and
   won't overwrite an explicitly-assigned non-blank slug.
   Options: `history:`, `scope:` (a column, an association, or an Array of them), `reserved_words:`, `finders:`. A saved record whose `scope:`
   column changes keeps a slug the new scope has free and rebuilds one that scope already holds (live or, with `history: true`, another record's history). With `history: true` friendly_id's own history finder is not scope-aware: a mover's stale history row can still match the old slug in the new scope's relation.
@@ -216,7 +216,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Auditable`** — single-column JSON change history ("paper_trail-lite"). `auditable_by
   *fields, into:, actor:, max_entries:, max_value_length:`; `audit_trail` /
   `last_change_for` / `audited_changes_since` / `clear_audit_trail!`. Captured at the write
-  boundary (`Support::WriteBoundary`, after Encryptable's blind index), never in a callback. Detects a native JSON column through `Support::NativeJson`, like Storable.
+  boundary (`Support::WriteBoundary`, after Encryptable's blind index), never in a callback. Detects a native JSON column through `Support::NativeJson`, like Storable. A String value that is not valid UTF-8 (a binary digest, nested ones too) is stored as `"base64:<strict Base64>"` (a real String with that prefix is indistinguishable; `max_value_length` then keeps the first N BYTES, encoded, plus `…`), binary text that IS valid UTF-8 as that text. Storable and Auditable parse JSON with `allow_duplicate_key: true` (last key wins; json >= 3 raises otherwise) and, on a native column Rails read as nil, re-parse the raw String the same way (`NativeJson.reread`; not for `attribute_was`, and not when the attribute has unsaved changes).
 - **`Lockable`** — failed-attempt tracking + account lockout ("Devise lockable-lite").
   `lockable_by attempts:, locked_at:, max_attempts:, unlock_in:, prefix:/suffix:`;
   `register_failed_attempt!` (atomic SQL increment, conditional on the ROW's `locked_at` being NULL/lapsed; losing it adopts the lock and its attempts via `lockable_adopt_current_lock!`), `access_locked?` (lazy expiry),
@@ -224,8 +224,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   concurrent instance adopts the existing lock/token and fires no hooks; readonly/destroyed
   preconditions replicated; `register_failed_attempt!`'s quiet lapsed-lock clear is conditional
   the same way) / `unlock_access!` (row-decided like `lock_access!`: a locking read in its savepoint, hooks only when the row was locked; `update_all` with lock_version pinned) + before/after hooks,
-  composite primary keys work (every row condition goes through `Support::PrimaryKey`); `register_failed_attempt!` on a readonly/destroyed unlocked record raises before incrementing; on an instance that READS locked, `register_failed_attempt!`/`lock_access!` check the row (one locking SELECT, adopting it; `lock_access!` false when the row is gone); `unlock_by_token` answers nil for a NUL-byte token; `reset_failed_attempts!` (one UPDATE conditional on the row's counter <> 0, lock_version pinned; raises on a readonly/destroyed record even at 0); expiry-aware `.locked`/`.unlocked` scopes. Batch
-  `unlock_expired` (mirrors `unlock_access!`; per-record on an STI table; no validators gate needed since
+  composite primary keys work (every row condition goes through `Support::PrimaryKey`); `register_failed_attempt!` on a readonly/destroyed unlocked record raises before incrementing; on an instance that READS locked, `register_failed_attempt!`/`lock_access!` check the row (one locking SELECT, adopting it; `lock_access!` false when the row is gone; `unlock_access!` too, with no hooks); `unlock_by_token` answers nil for a NUL-byte token; `reset_failed_attempts!` (one UPDATE conditional on the row's counter <> 0, lock_version pinned; raises on a readonly/destroyed record even at 0); expiry-aware `.locked`/`.unlocked` scopes. Batch
+  `unlock_expired` (mirrors `unlock_access!`; per-record on an STI table, where each row is read under a lock and skipped unless ITS lock is still lapsed; no validators gate needed since
   `update_all` skips them; returns 0 without a query when `unlock_in` is nil).
   `unlock_token:` mints a self-service unlock link — timing-safe scoped finder, race-safe
   single-use consumption (one conditional UPDATE), TTL tied to `unlock_in`, claimed in its
@@ -289,7 +289,8 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   not atomic — and it never writes a field it could not decrypt. Each row is one
   `update_all` GUARDED on the ciphertext read at load (a concurrent write is
   skipped, never reverted), fields with unsaved changes are skipped, and a
-  successful `reencrypt!` reloads. Fields auto-register with Rails
+  successful `reencrypt!` re-reads only the rotated columns (fields + blind indexes), never `reload`s, so
+  pending edits survive; a blank `""` row is not counted by `needs_reencryption` and its `<field>_key_id` is nil. Fields auto-register with Rails
   filter_parameters via `FilterParameterRegistry` + the railtie. Blind indexes refresh at the
   write boundary (`Support::WriteBoundary`, after EVERY `before_*` callback) — on create EVERY
   indexed field (a copy never keeps its original's digest), on update changed fields; the finders run the
@@ -313,7 +314,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   on the parent, the loaded parent gets the delta + bump mirrored in memory; a rollback takes it
   back via `MirrorUndo`, its OWN transaction record (WeakRef to the parent, one per
   (transaction, parent), follows a savepoint released into a `joinable: false` parent; a column
-  moves back while clean OR equal to the mirrors' ledger value; Marshal-safe `OpenList` holder).
+  moves back while clean OR equal to the mirrors' ledger value; it also shifts the parent's pending start-transaction snapshot back by what that snapshot absorbed; Marshal-safe `OpenList` holder).
 - **`Anonymizable`** — declarative right-to-erasure ("GDPR-lite").
   Not idempotent by design: `anonymize!` always re-applies every rule (a `:hash` pseudonym is re-hashed, hooks fire again); guard repeated jobs yourself (skip `anonymized?` records).
   `anonymizable *fields, with:` (presets :nullify/:redact/:hash/:email/
@@ -418,14 +419,14 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   source is on and `Vary: Cookie` whenever the cookie source is on (through `Support::VaryHeader`; `vary: false`
   opts out; independent of `response_header:`, which only controls `X-Time-Zone`).
 - **`Idempotentable`** — `Idempotency-Key` response replay with an injectable store
-  (`idempotent_actions`); in-flight claims carry a per-request token, and a failed request releases only a claim it still holds (never overwrites a finished record; overlapping different payloads: first to finish owns the response; read-then-write stays two round trips); 409 on in-flight duplicates, 422 on payload mismatch, 503
+  (`idempotent_actions`); in-flight claims carry a per-request token, and a failed request releases only a claim it still holds (never overwrites a finished record; overlapping different payloads: first to finish owns the response; read-then-write stays two round trips); 409 on in-flight duplicates, 422 on payload mismatch (the fingerprint wraps an Array as `{"array"=>[...]}` so a Hash and an Array of pairs, or `{}` and `[]`, differ; the key is scrubbed of invalid UTF-8), 503
   `idempotency_store_unavailable` when the store is down (both claims failed AND both reads
   nil); `on_store_unavailable: :proceed` runs the action without dedupe instead.
 - **`WebhookVerifiable`** — HMAC verification for inbound webhooks (`verify_webhook`):
   scheme presets `:stripe`/`:github`/`:shopify`/`:hex`/`:base64`, constant-time compare,
   Stripe timestamp tolerance, secret rotation; 401/400 before the action runs. `replay:` /
   `replay_ttl:` add replay protection for timestamp-less schemes (store must answer BOTH
-  `#write` and `#read`; short claim promoted in an after_action, and released by a private
+  `#write` and `#read`; short claim promoted in an after_action (a lost claim with a nil read-back is re-claimed once, like Idempotentable, so a lapsed-but-undeleted FileStore entry still records the delivery), and released by a private
   around_action whenever the delivery wasn't processed — later filter halt, exception, any status outside 2xx/3xx; the claim value is a per-request token and release deletes only a claim still holding it;
   Stripe keys off the signed payload, not the parsed header). Rule lookup is by
   specificity: a rule naming the action beats any catch-all (most-derived class first),
@@ -464,7 +465,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   catch-all; LAST match wins). `stale_resource?`/`set_cache_validators` (weak
   ETag, Last-Modified, RFC 7232 precedence; safe methods only — unsafe requests
   get neither 304 nor validators). `no_store` is also applied via
-  prepend_before_action so rescue_from-rendered errors keep it; positive
+  `prepend_before_action :apply_http_no_store` (kept under its 1.36.2 name so `skip_before_action` of it still loads; a full opt-out also skips `apply_http_cache_headers`) plus a prepended around whose ensure re-applies it before rescue_from renders, only when the before ran, so rescue_from-rendered errors keep it, and empties Rails' `response.cache_control` hash (which would drop it at commit); positive
   freshness is emitted only for GET/HEAD with status 200/203/204/206/304 (never on
   rescued errors); `vary:` merges through `Support::VaryHeader`. Per-call `extras:`
   (any, nil included) force `private`, like a Vary-less `etag_with` source.
@@ -612,3 +613,19 @@ Bump `lib/concerns_on_rails/version.rb`, the `Gemfile.lock` PATH pin, `CHANGELOG
 `README.md` (TOC row + section + version pins — its omission is how Encryptable shipped
 undocumented in 1.21), and the docs version (`docs/assets/js/concerns.js`) together;
 create a GitHub Release tag and attach the built `.gem`.
+
+CHANGELOG format (keep it short — one line per item, user-facing, no internals or audit ids):
+
+```
+## <version> (<YYYY-MM-DD>)
+
+<one sentence: what this release is; bold "upgrade soon if …" when a shipped bug loses data or is a security hole>
+
+### Upgrade notes        <- only what a user must act on or will notice; omit the section if empty
+
+- **<Concern>:** <what changes for the app, one line>
+
+### Added | Changed | Fixed   <- only the sections that apply, in this order
+
+- **<Concern>:** <what was wrong / what now happens, one line>
+```

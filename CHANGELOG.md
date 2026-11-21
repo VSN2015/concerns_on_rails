@@ -1,5 +1,33 @@
 <!-- CHANGELOG.md -->
 
+## Unreleased
+
+Bug fixes from the 2026-11-21 audit of 1.36.2. **Upgrade soon if you run json 3.x** (Storable could erase data).
+
+### Upgrade notes
+
+- **Idempotentable:** a retry spanning the deploy whose payload has an Array gets 422, not the stored response.
+- **Storable:** String-keyed key options (`"type" =>`, `"default" =>`) now take effect; they were silently ignored.
+- **Auditable:** a non-UTF-8 String is stored as `"base64:<Base64>"` (it used to make the save raise).
+- **Sluggable:** with `candidates:`, all-blank sources leave the slug nil (a NOT NULL slug column still gets a uuid).
+
+### Fixed
+
+- **Storable / Auditable:** under json 3.x a duplicate JSON key made the column read empty and the next save erase it.
+- **Encryptable:** `reencrypt!` no longer discards unsaved edits; a `""` column default no longer raises or gets rotated.
+- **Auditable:** tracking a binary column no longer raises `JSON::GeneratorError`.
+- **CounterCacheable:** a rolled-back child create + parent save no longer leaves `lock_version` ahead (`StaleObjectError`).
+- **Expirable:** `extend_expiry!(by: 86_400)` on a `date` column adds 1 day, not 86,400 days.
+- **Lockable:** `unlock_expired` no longer clears a lock re-applied mid-batch; a deleted row unlocks to false.
+- **WebhookVerifiable:** a delivery processed after a failed replay claim is now recorded, so its replay is rejected.
+- **Cacheable:** `no_store` now survives `expires_in` / `fresh_when` and `rescue_from`-rendered errors.
+- **Idempotentable:** a Hash and an Array of pairs no longer share a fingerprint; an invalid-UTF-8 key no longer 500s.
+- **SoftDeletable:** `touch: false` `soft_delete!` / `restore!` work on a new record.
+- **Storable:** a column with invalid UTF-8 reads `{}` instead of raising.
+- **Taggable:** `tagged_with?` accepts an Array.
+- **Hashable:** a rejected `hashable_by` re-declaration no longer leaves a broken config (nil tokens).
+- **Specs:** 14 specs that could not fail now can.
+
 ## 1.36.2 (2026-11-16)
 
 A correctness release following the 2026-11-15 audit of 1.36.1. It fixes 10 findings and repairs 9 specs that could

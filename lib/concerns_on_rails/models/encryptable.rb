@@ -637,7 +637,8 @@ module ConcernsOnRails
           prefix = ConcernsOnRails::Support::Encryptor.header_prefix(ConcernsOnRails.encryption.key_id)
           clauses = columns.map do |field|
             quoted = "#{quoted_table_name}.#{connection.quote_column_name(field)}"
-            "(#{quoted} IS NOT NULL AND #{encryptable_prefix_mismatch_sql(quoted)})"
+            # `""` is the column default, never an envelope: no key to rotate.
+            "(#{quoted} IS NOT NULL AND #{quoted} <> '' AND #{encryptable_prefix_mismatch_sql(quoted)})"
           end
           base.where(clauses.join(" OR "), *Array.new(columns.size, prefix))
         end
@@ -780,11 +781,12 @@ module ConcernsOnRails
           end
 
           # The key id stamped into the stored envelope, for auditing a rotation
-          # ("which key is this row under?"). nil when nothing is at rest yet —
-          # it reads <field>_ciphertext, so it is never asked of plaintext.
+          # ("which key is this row under?"). nil when nothing is at rest yet
+          # (NULL, or the `""` column default) — it reads <field>_ciphertext,
+          # so it is never asked of plaintext.
           define_method("#{field}_key_id") do
             stored = public_send("#{field}_ciphertext")
-            stored.nil? ? nil : ConcernsOnRails::Support::Encryptor.key_id(stored)
+            stored.nil? || stored == "" ? nil : ConcernsOnRails::Support::Encryptor.key_id(stored)
           end
         end
 
@@ -1062,8 +1064,9 @@ module ConcernsOnRails
       # and a callback (an Auditable capture, a webhook) must not fire for a key
       # rotation — nor does lock_version move, so no open instance goes stale
       # (see encryptable_rotate_row!). Returns true when something was
-      # rewritten, then reloads so the record's ciphertext readers describe
-      # what is now at rest.
+      # rewritten, after re-reading ONLY the rotated columns (fields + blind
+      # indexes) so the ciphertext readers describe what is now at rest while
+      # every other attribute, pending edits included, is left as it is.
       #
       # The UPDATE is GUARDED on the exact ciphertext each field was read with.
       # A rotation runs for hours against a live table, and an unguarded
@@ -1078,7 +1081,7 @@ module ConcernsOnRails
         return false if updates.empty?
         return false unless encryptable_rotate_row!(updates, guards, binds) == 1
 
-        reload
+        encryptable_adopt_stored_columns!(updates.keys.map(&:to_s))
         true
       end
 
@@ -1113,9 +1116,16 @@ module ConcernsOnRails
         names = encryptable_stored_field_names(fields)
         return if names.empty?
 
+        encryptable_adopt_stored_columns!(names)
+      end
+
+      # Take the columns' stored values as the clean database values (one
+      # SELECT, raw adapter values). reencrypt! uses it instead of `reload`,
+      # which would drop the caller's pending edits — the very ones its plan
+      # skipped to keep.
+      def encryptable_adopt_stored_columns!(names)
         condition = ConcernsOnRails::Support::PrimaryKey.condition(self.class, id_in_database)
-        sql = self.class.unscoped.where(condition).select(*names).to_sql
-        row = self.class.connection.select_rows(sql).first
+        row = self.class.connection.select_rows(self.class.unscoped.where(condition).select(*names).to_sql).first
         names.each_with_index { |name, index| @attributes.write_from_database(name, row[index]) } if row
       end
 
@@ -1154,7 +1164,7 @@ module ConcernsOnRails
         binds = []
         self.class.encryptable_rotatable_fields(fields).each do |field|
           stored = encryptable_stored_value(field)
-          next if stored.nil? || public_send("#{field}_changed?")
+          next if stored.nil? || stored == "" || public_send("#{field}_changed?") # "" = column default, no key
 
           value = public_send(field)
           # A rotation must never be able to destroy data. Under

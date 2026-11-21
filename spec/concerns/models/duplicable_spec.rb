@@ -218,6 +218,12 @@ RSpec.describe ConcernsOnRails::Models::Duplicable do
 
       expect(copy.dup_tags).to contain_exactly(tag)
       expect(DupTag.count).to eq(1)
+
+      # The join table is the proof of "shares": one row per invoice, same tag row.
+      rows = ActiveRecord::Base.connection.select_rows(
+        "SELECT dup_invoice_id, dup_tag_id FROM dup_invoices_dup_tags ORDER BY dup_invoice_id"
+      )
+      expect(rows).to eq([[original.id, tag.id], [copy.id, tag.id]])
     end
   end
 

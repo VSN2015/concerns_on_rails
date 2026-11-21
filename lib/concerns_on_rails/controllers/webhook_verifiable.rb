@@ -416,17 +416,29 @@ module ConcernsOnRails
         # timestamp-less schemes this targets, every retry of the same body
         # carries the same signature, so the delivery would be lost for good.
         token = SecureRandom.hex(8)
-        if store.write(key, token, expires_in: REPLAY_CLAIM_TTL, unless_exist: true)
-          @webhook_replay_claim = { store: store, key: key, ttl: rule[:replay_ttl], token: token }
-          return false
-        end
+        return false if claim_webhook_replay(store, key, rule, token)
 
         # A falsy write is ambiguous: either someone else holds the key, or the
         # store is unreachable — Rails' Redis and memcached stores swallow
         # connection errors and return false. Confirm with a read, which fails
         # safe to nil, so a cache outage lets webhooks through instead of
         # rejecting every single one.
+        return true unless store.read(key).nil?
+
+        # Nil read-back: the key may have only just lapsed (Rails' FileStore keeps an expired
+        # entry's file, so `unless_exist` loses and the read then evicts it). Claim once more,
+        # as Idempotentable does, so that delivery is still recorded; a dead store fails
+        # again and the delivery proceeds unclaimed.
+        return false if claim_webhook_replay(store, key, rule, token)
+
         !store.read(key).nil?
+      end
+
+      # Atomic claim write; records the claim on success.
+      def claim_webhook_replay(store, key, rule, token)
+        return false unless store.write(key, token, expires_in: REPLAY_CLAIM_TTL, unless_exist: true)
+
+        @webhook_replay_claim = { store: store, key: key, ttl: rule[:replay_ttl], token: token }
       end
 
       # What identifies this delivery. For every scheme but Stripe the header is
