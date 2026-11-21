@@ -2,63 +2,31 @@
 
 ## Unreleased
 
-A correctness release following the 2026-11-21 audit of 1.36.2. It fixes 18 findings and strengthens about 14 specs
-that could not fail; several change behaviour at the edges (Idempotentable fingerprints, Cacheable's no_store
-callback, Auditable binary values, Lockable and Encryptable verbs). Read **Upgrading** first.
+Bug fixes from the 2026-11-21 audit of 1.36.2. **Upgrade soon if you run json 3.x** (Storable could erase data).
 
-### Upgrading
+### Upgrade notes
 
-- [ ] **Idempotentable:** the payload fingerprint of a payload containing an Array changes (a Hash and an Array of
-  pairs no longer collide). A retry spanning the deploy whose stored record predates it gets 422
-  `idempotency_key_reuse` instead of a replay. Hash-only payloads are unaffected. (H1-3)
-- [ ] **Cacheable:** `no_store` now also clears Rails' `response.cache_control` hash and holds on `rescue_from`-rendered errors. (H1-2)
-- [ ] **Auditable:** a tracked String that is not valid UTF-8 is stored as `"base64:<strict Base64>"` (indistinguishable
-  from a real string with that prefix); binary that is valid UTF-8 is stored as text. It used to raise
-  `JSON::GeneratorError` and block the save. (A-2)
-- [ ] **Storable / Auditable under json 3.x:** duplicate JSON keys read last-wins again (`allow_duplicate_key`),
-  including native json columns via `NativeJson.reread`. Known limit: an Auditable native-json trail holding a
-  duplicate key can lose old entries when a save is rolled back and retried. (E-1)
-- [ ] **Lockable:** `unlock_access!` on a vanished row returns `false` without hooks; on a destroyed record it raises
-  `ActiveRecord::ActiveRecordError`. `unlock_expired`'s per-record path skips a row whose current lock is not lapsed.
-  (D-1, D-2)
-- [ ] **Encryptable:** `reencrypt!` no longer reloads, so other unsaved edits survive. It re-reads only the rotated
-  columns, so it no longer adopts a concurrently bumped `lock_version`. Rows holding `""` are never rotated or
-  counted, and `<field>_key_id` is nil for `""`. (A-1)
-- [ ] **Expirable:** `extend_expiry!(by: Numeric)` on a `date` column adds seconds (it added days), DST-safe. (C-1)
-- [ ] **Sluggable:** `candidates:` whose sources are all blank give a nil slug instead of a bare uuid, unless the slug
-  column is NOT NULL (it keeps the uuid fallback, so the create still succeeds). (F-2)
-- [ ] **Hashable:** a refused `hashable_by` re-declaration leaves the previous config intact. (F-1)
-- [ ] **CounterCacheable:** `MirrorUndo` also shifts the parent's start-transaction snapshot back, so a rolled-back
-  save no longer raises `StaleObjectError`. On Rails 6.0 a heuristic shortcut (documented in the code) skips the
-  shift when the snapshot is the live attribute set. (B-1)
+- **Idempotentable:** a retry spanning the deploy whose payload has an Array gets 422, not the stored response.
+- **Storable:** String-keyed key options (`"type" =>`, `"default" =>`) now take effect; they were silently ignored.
+- **Auditable:** a non-UTF-8 String is stored as `"base64:<Base64>"` (it used to make the save raise).
+- **Sluggable:** with `candidates:`, all-blank sources leave the slug nil (a NOT NULL slug column still gets a uuid).
 
 ### Fixed
 
-- **Storable/Auditable (E-1):** duplicate keys in stored JSON no longer read as `{}` under json 3.x, so the next write
-  no longer erases the other keys.
-- **Encryptable (A-1):** `reencrypt!` keeps unsaved edits.
-- **Auditable (A-2):** a binary non-UTF-8 tracked value no longer blocks the save.
-- **CounterCacheable (B-1):** rollback no longer leaves the parent's `lock_version` one ahead.
-- **Expirable (C-1):** `extend_expiry!(by:)` on a date column adds seconds.
-- **Lockable (D-1):** the per-record `unlock_expired` no longer clears a freshly re-applied lock.
-- **Storable (E-2):** String-keyed key options are accepted again instead of silently ignored.
-- **WebhookVerifiable (H1-1):** a failed claim plus a nil read no longer drops a processed delivery's record, so a
-  replay is not accepted.
-- **Cacheable (H1-2):** `no_store` is no longer dropped when Rails' cache_control hash is populated.
-- **SoftDeletable (C-2):** `touch: false` `soft_delete!`/`restore!` no longer raises on a new record.
-- **Lockable (D-2):** `unlock_access!` on a deleted row no longer fires hooks and returns true.
-- **Storable (E-3):** an invalid UTF-8 column reads `{}` instead of raising.
-- **Taggable (E-4):** `tagged_with?(Array)` is no longer mangled.
-- **Hashable (F-1):** a refused re-declaration no longer leaves a bad config that produced nil tokens.
-- **Sluggable (F-2):** all-blank `candidates:` no longer mint a bare uuid slug (a NOT NULL slug column keeps the fallback).
-- **Idempotentable (H1-3):** Hash vs Array-of-pairs fingerprint collision.
-- **Encryptable `<field>_key_id`:** returns nil for a stored `""` (column default) instead of raising
-  `DecryptionError`; `needs_reencryption`/`reencrypt!` skip `""` rows. (A-3)
-- **Idempotentable:** the `Idempotency-Key` is scrubbed before strip/format check, so a key with invalid UTF-8 no
-  longer raises (500). (H1-4)
-- Specs: ~14 specs that could not fail were strengthened (localizable/timezoneable leak, error_handleable,
-  paginatable, batch_ops, soft_deletable chaining, throttleable, cacheable, idempotentable, duplicable HABTM,
-  counter_cacheable `FOR UPDATE` on PG/MySQL).
+- **Storable / Auditable:** under json 3.x a duplicate JSON key made the column read empty and the next save erase it.
+- **Encryptable:** `reencrypt!` no longer discards unsaved edits; a `""` column default no longer raises or gets rotated.
+- **Auditable:** tracking a binary column no longer raises `JSON::GeneratorError`.
+- **CounterCacheable:** a rolled-back child create + parent save no longer leaves `lock_version` ahead (`StaleObjectError`).
+- **Expirable:** `extend_expiry!(by: 86_400)` on a `date` column adds 1 day, not 86,400 days.
+- **Lockable:** `unlock_expired` no longer clears a lock re-applied mid-batch; a deleted row unlocks to false.
+- **WebhookVerifiable:** a delivery processed after a failed replay claim is now recorded, so its replay is rejected.
+- **Cacheable:** `no_store` now survives `expires_in` / `fresh_when` and `rescue_from`-rendered errors.
+- **Idempotentable:** a Hash and an Array of pairs no longer share a fingerprint; an invalid-UTF-8 key no longer 500s.
+- **SoftDeletable:** `touch: false` `soft_delete!` / `restore!` work on a new record.
+- **Storable:** a column with invalid UTF-8 reads `{}` instead of raising.
+- **Taggable:** `tagged_with?` accepts an Array.
+- **Hashable:** a rejected `hashable_by` re-declaration no longer leaves a broken config (nil tokens).
+- **Specs:** 14 specs that could not fail now can.
 
 ## 1.36.2 (2026-11-16)
 

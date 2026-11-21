@@ -613,3 +613,19 @@ Bump `lib/concerns_on_rails/version.rb`, the `Gemfile.lock` PATH pin, `CHANGELOG
 `README.md` (TOC row + section + version pins — its omission is how Encryptable shipped
 undocumented in 1.21), and the docs version (`docs/assets/js/concerns.js`) together;
 create a GitHub Release tag and attach the built `.gem`.
+
+CHANGELOG format (keep it short — one line per item, user-facing, no internals or audit ids):
+
+```
+## <version> (<YYYY-MM-DD>)
+
+<one sentence: what this release is; bold "upgrade soon if …" when a shipped bug loses data or is a security hole>
+
+### Upgrade notes        <- only what a user must act on or will notice; omit the section if empty
+
+- **<Concern>:** <what changes for the app, one line>
+
+### Added | Changed | Fixed   <- only the sections that apply, in this order
+
+- **<Concern>:** <what was wrong / what now happens, one line>
+```
