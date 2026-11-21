@@ -75,3 +75,48 @@ describe ConcernsOnRails::Controllers::Cacheable, "no_store after an action-leve
     expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
   end
 end
+
+describe ConcernsOnRails::Controllers::Cacheable, "skipping the no_store callback" do
+  let(:base) do
+    IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::Cacheable
+
+      http_cache_actions :token, no_store: true
+      rescue_from(RuntimeError) { render(json: { error: "boom" }, status: :internal_server_error) }
+
+      def token = render(json: { token: "secret" })
+
+      def boom
+        expires_in 10.minutes, public: true
+        raise "boom"
+      end
+    end
+  end
+
+  # The callback name is public API (1.36.2): skipping it must keep loading. As in 1.36.2 the
+  # after_action still stamps a successful response, so a FULL opt-out skips both callbacks.
+  it "lets a subclass skip_before_action :apply_http_no_store without raising" do
+    sub = Class.new(base) { skip_before_action :apply_http_no_store }
+    expect(IntegrationHarness.dispatch(sub, :token).header("Cache-Control").to_s).to include("no-store")
+  end
+
+  it "sends no no-store at all when both callbacks are skipped" do
+    sub = Class.new(base) do
+      skip_before_action :apply_http_no_store
+      skip_after_action :apply_http_cache_headers
+    end
+    expect(IntegrationHarness.dispatch(sub, :token).header("Cache-Control").to_s).not_to include("no-store")
+  end
+
+  it "does not re-apply no-store on a rescued error once the before callback is skipped" do
+    sub = Class.new(base) { skip_before_action :apply_http_no_store }
+    expect(IntegrationHarness.dispatch(sub, :boom).header("Cache-Control").to_s).not_to include("no-store")
+  end
+
+  it "still keeps no-store on the rescued error when the callback is not skipped" do
+    base.http_cache_actions :boom, no_store: true
+    result = IntegrationHarness.dispatch(base, :boom)
+    expect(result.status).to eq(500)
+    expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
+  end
+end

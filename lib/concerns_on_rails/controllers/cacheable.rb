@@ -117,10 +117,14 @@ module ConcernsOnRails
         # deliberately do NOT move early — rescued errors already get Rails'
         # safe `max-age=0, private` default, and emitting `public, max-age` on
         # a rescued 500 would let shared caches serve the error.
-        # An around (not a before) so its ensure re-applies no_store when the
-        # action raised, BEFORE rescue_from renders: the action may have filled
-        # Rails' cache_control hash (expires_in) first, and the rescued error
-        # would otherwise go out cacheable.
+        # The before callback keeps its 1.36.2 name so a host's
+        # `skip_before_action :apply_http_no_store` (the opt-out) still works.
+        # The around's ensure re-applies no_store when the action raised, BEFORE
+        # rescue_from renders (the action may have filled Rails' cache_control
+        # hash via expires_in, and the rescued error would go out cacheable) —
+        # but only when the before callback ran for this request, so skipping it
+        # opts out of both.
+        prepend_before_action :apply_http_no_store if respond_to?(:prepend_before_action)
         prepend_around_action :apply_http_no_store_around if respond_to?(:prepend_around_action)
         after_action :apply_http_cache_headers
       end
@@ -250,13 +254,13 @@ module ConcernsOnRails
       # Early half of the policy (see the included block): only no_store, and
       # idempotent with apply_http_cache_headers re-applying it after render.
       def apply_http_no_store_around
-        apply_http_no_store
         yield
       ensure
-        apply_http_no_store
+        apply_http_no_store if @http_no_store_ran
       end
 
       def apply_http_no_store
+        @http_no_store_ran = true
         rule = http_cache_rule_for_action
         return unless rule && rule[:no_store]
         return unless respond_to?(:response) && response

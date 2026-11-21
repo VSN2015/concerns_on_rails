@@ -58,7 +58,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 
 - **`Sluggable`** — wraps `friendly_id` (`:slugged`). Regenerates the slug when the source
   field changes to a value with a usable candidate (a cleared/blank source keeps the slug, never a
-  bare uuid), backfills a blank slug (an ASSIGNED `""`/nil too, whenever the source is present), and
+  bare uuid — except on a NOT NULL slug column, which keeps the uuid fallback rather than raising), backfills a blank slug (an ASSIGNED `""`/nil too, whenever the source is present), and
   won't overwrite an explicitly-assigned non-blank slug.
   Options: `history:`, `scope:` (a column, an association, or an Array of them), `reserved_words:`, `finders:`. A saved record whose `scope:`
   column changes keeps a slug the new scope has free and rebuilds one that scope already holds (live or, with `history: true`, another record's history). With `history: true` friendly_id's own history finder is not scope-aware: a mover's stale history row can still match the old slug in the new scope's relation.
@@ -465,7 +465,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   catch-all; LAST match wins). `stale_resource?`/`set_cache_validators` (weak
   ETag, Last-Modified, RFC 7232 precedence; safe methods only — unsafe requests
   get neither 304 nor validators). `no_store` is also applied via
-  prepend_around_action (re-applied in its ensure, before rescue_from renders) so rescue_from-rendered errors keep it, and empties Rails' `response.cache_control` hash (which would drop it at commit); positive
+  `prepend_before_action :apply_http_no_store` (kept under its 1.36.2 name so `skip_before_action` of it still loads; a full opt-out also skips `apply_http_cache_headers`) plus a prepended around whose ensure re-applies it before rescue_from renders, only when the before ran, so rescue_from-rendered errors keep it, and empties Rails' `response.cache_control` hash (which would drop it at commit); positive
   freshness is emitted only for GET/HEAD with status 200/203/204/206/304 (never on
   rescued errors); `vary:` merges through `Support::VaryHeader`. Per-call `extras:`
   (any, nil included) force `private`, like a Vary-less `etag_with` source.

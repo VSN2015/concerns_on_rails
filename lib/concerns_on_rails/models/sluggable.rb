@@ -59,7 +59,7 @@ module ConcernsOnRails
           # slug ASSIGNED in this save — "" from an optional form field, or
           # nil, friendly_id's way to ask for a fresh one — is not stored as
           # is (a second "" would trip the slug's unique index).
-          return true if send(slug_column).blank? && sluggable_source_present?
+          return true if send(slug_column).blank? && sluggable_slug_buildable?
 
           # An explicitly-assigned slug wins — don't overwrite it with a generated
           # one when the slug column itself is being changed in this save. The
@@ -398,6 +398,12 @@ module ConcernsOnRails
       # source is always an Array, so presence is asked of its parts the way
       # friendly_id reads them (Symbol -> method, callable -> call, else to_s):
       # all-blank candidates must not reach friendly_id's bare-uuid fallback.
+      # A NOT NULL slug column can't take the nil an all-blank source would
+      # leave, so there friendly_id's fallback slug is the lesser evil.
+      def sluggable_slug_buildable?
+        sluggable_source_present? || self.class.columns_hash[friendly_id_config.slug_column.to_s]&.null == false
+      end
+
       def sluggable_source_present?
         source = slug_source
         return source.present? unless self.class.sluggable_candidates

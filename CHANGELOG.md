@@ -11,9 +11,7 @@ callback, Auditable binary values, Lockable and Encryptable verbs). Read **Upgra
 - [ ] **Idempotentable:** the payload fingerprint of a payload containing an Array changes (a Hash and an Array of
   pairs no longer collide). A retry spanning the deploy whose stored record predates it gets 422
   `idempotency_key_reuse` instead of a replay. Hash-only payloads are unaffected. (H1-3)
-- [ ] **Cacheable:** the early `no_store` callback is now `prepend_around_action :apply_http_no_store_around` (it was
-  `before_action :apply_http_no_store`). A host calling `skip_before_action :apply_http_no_store` must change it.
-  `no_store` now also clears Rails' `response.cache_control` hash and holds on `rescue_from`-rendered errors. (H1-2)
+- [ ] **Cacheable:** `no_store` now also clears Rails' `response.cache_control` hash and holds on `rescue_from`-rendered errors. (H1-2)
 - [ ] **Auditable:** a tracked String that is not valid UTF-8 is stored as `"base64:<strict Base64>"` (indistinguishable
   from a real string with that prefix); binary that is valid UTF-8 is stored as text. It used to raise
   `JSON::GeneratorError` and block the save. (A-2)
@@ -27,7 +25,8 @@ callback, Auditable binary values, Lockable and Encryptable verbs). Read **Upgra
   columns, so it no longer adopts a concurrently bumped `lock_version`. Rows holding `""` are never rotated or
   counted, and `<field>_key_id` is nil for `""`. (A-1)
 - [ ] **Expirable:** `extend_expiry!(by: Numeric)` on a `date` column adds seconds (it added days), DST-safe. (C-1)
-- [ ] **Sluggable:** `candidates:` whose sources are all blank give a nil slug instead of a bare uuid. (F-2)
+- [ ] **Sluggable:** `candidates:` whose sources are all blank give a nil slug instead of a bare uuid, unless the slug
+  column is NOT NULL (it keeps the uuid fallback, so the create still succeeds). (F-2)
 - [ ] **Hashable:** a refused `hashable_by` re-declaration leaves the previous config intact. (F-1)
 - [ ] **CounterCacheable:** `MirrorUndo` also shifts the parent's start-transaction snapshot back, so a rolled-back
   save no longer raises `StaleObjectError`. On Rails 6.0 a heuristic shortcut (documented in the code) skips the
@@ -51,7 +50,7 @@ callback, Auditable binary values, Lockable and Encryptable verbs). Read **Upgra
 - **Storable (E-3):** an invalid UTF-8 column reads `{}` instead of raising.
 - **Taggable (E-4):** `tagged_with?(Array)` is no longer mangled.
 - **Hashable (F-1):** a refused re-declaration no longer leaves a bad config that produced nil tokens.
-- **Sluggable (F-2):** all-blank `candidates:` no longer mint a bare uuid slug.
+- **Sluggable (F-2):** all-blank `candidates:` no longer mint a bare uuid slug (a NOT NULL slug column keeps the fallback).
 - **Idempotentable (H1-3):** Hash vs Array-of-pairs fingerprint collision.
 - **Encryptable `<field>_key_id`:** returns nil for a stored `""` (column default) instead of raising
   `DecryptionError`; `needs_reencryption`/`reencrypt!` skip `""` rows. (A-3)

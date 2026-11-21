@@ -28,4 +28,21 @@ RSpec.describe "Sluggable candidates: with every candidate blank" do
     klass = page_class(candidates: [:title, %i[title subtitle]])
     expect(klass.create!(title: "Hello", subtitle: "World").slug).to eq("hello")
   end
+
+  context "on a NOT NULL slug column" do
+    before do
+      ActiveRecord::Schema.define do
+        create_table :blank_candidate_pages, force: true do |t|
+          t.string :title
+          t.string :subtitle
+          t.string :slug, null: false, default: nil
+        end
+      end
+    end
+
+    it "keeps friendly_id's fallback slug instead of raising NotNullViolation, with or without candidates:" do
+      expect(page_class.create!(title: nil).slug).to be_present
+      expect(page_class(candidates: [:title, %i[title subtitle]]).create!(title: nil).slug).to be_present
+    end
+  end
 end
