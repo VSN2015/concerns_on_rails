@@ -333,10 +333,19 @@ module ConcernsOnRails
         return enum if enum
 
         column_type = filterable_column_type(relation, field)
-        operand = ConcernsOnRails::Support::NumericOperand.classify(raw, options[:type] || column_type, column_type: column_type)
+        operand = filterable_numeric_operand(raw, column_type, options[:type])
         return apply_filter_numeric_comparison(relation, field, operator, operand) if operand
 
         apply_filter_cast_comparison(relation, field, operator, raw, options)
+      end
+
+      # A declared `type:` whose cast leaves the operand a String (`:string`) hands it to the numeric
+      # column's own caster, which read "12abc" as 12: read such an operand as a number. A `:datetime` /
+      # `:boolean` over an epoch column casts to a non-String and keeps its own path.
+      def filterable_numeric_operand(raw, column_type, declared)
+        numeric = ConcernsOnRails::Support::NumericOperand
+        by_column = numeric.kind(column_type) && (declared.nil? || filterable_type_cast(declared, raw).is_a?(String))
+        numeric.classify(raw, by_column ? column_type : (declared || column_type), column_type: column_type)
       end
 
       def apply_filter_cast_comparison(relation, field, operator, raw, options)

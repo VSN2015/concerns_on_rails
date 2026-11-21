@@ -755,7 +755,17 @@ module ConcernsOnRails
         return true unless ConcernsOnRails::Support::NumericOperand.kind(type)
         return true if cursor_non_finite_float?(type, raw)
 
-        ConcernsOnRails::Support::NumericOperand.classify(raw, type)&.status == :exact
+        ConcernsOnRails::Support::NumericOperand.classify(cursor_decimal_operand(type, raw), type)&.status == :exact
+      end
+
+      # A decimal boundary is minted with BigDecimal#to_s, which keeps every digit of an unconstrained
+      # PostgreSQL `numeric` (95+ digits outgrow NumericOperand's 100-character String bound), so it is
+      # read back with the writers' larger, still exponent-bounded `bounded_decimal`. Anything it
+      # refuses stays a String and fails classify's own bounds.
+      def cursor_decimal_operand(type, raw)
+        return raw unless type.type == :decimal && raw.is_a?(String)
+
+        ConcernsOnRails::Support::NumericOperand.bounded_decimal(raw) || raw
       end
 
       def cursor_non_finite_float?(type, raw)
