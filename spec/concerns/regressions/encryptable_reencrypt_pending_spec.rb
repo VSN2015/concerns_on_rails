@@ -15,7 +15,7 @@ describe "Encryptable reencrypt! and blank ciphertext" do
         t.text :ssn_bidx
         t.text :email
         t.string :name
-        t.text :notes, null: false, default: ""
+        t.string :notes, null: false, default: "" # MySQL: TEXT takes no default
       end
     end
   end

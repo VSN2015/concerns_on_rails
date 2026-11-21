@@ -57,8 +57,8 @@ describe ConcernsOnRails::Controllers::Cacheable, "no_store after an action-leve
     expect(result.header("Cache-Control")).to include("no-store").and(not_match(/max-age|public/))
   end
 
-  # Rails 6.0's bare-bones harness stack has no request.flash, which its `head` calls.
-  it "keeps no-store on a fresh_when 304 inside a no_store action", min_rails: "6.1" do
+  # 6.x: fresh_when goes through EtagWithFlash, which needs request.flash, absent in the bare harness.
+  it "keeps no-store on a fresh_when 304 inside a no_store action", min_rails: "7.0" do
     controller = IntegrationHarness.build_controller do
       include ConcernsOnRails::Controllers::Cacheable
 
