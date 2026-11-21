@@ -1,5 +1,17 @@
 <!-- CHANGELOG.md -->
 
+## Unreleased
+
+### Fixed
+
+- **Localizable:** a language the client refused with `q=0` is no longer picked through Lookup truncation.
+- **Localizable:** a `?locale=` that I18n can't use now falls through to the header and `default:`.
+- **ErrorHandleable:** the malformed-query 400 now carries SecureHeadable's headers.
+- **Localizable / Timezoneable:** no spurious `Vary: Accept` under `ignore_accept_header = true` on Rails 8.1.
+- **Sortable (controller):** a sort key behind a chain of `alias_attribute`s no longer fails as an unknown column.
+- **Filterable:** a numeric column under `type: :string` compares numerically (`?stock_gt=4abc` no longer means `> 4`).
+- **CursorPaginatable:** a cursor on a very long `decimal` value (PostgreSQL `numeric`) no longer answers 400.
+
 ## 1.36.3 (2026-11-21)
 
 Bug fixes from the 2026-11-21 audit of 1.36.2. **Upgrade soon if you run json 3.x** (Storable could erase data).

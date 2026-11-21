@@ -268,7 +268,11 @@ module ConcernsOnRails
         if column.is_a?(Symbol)
           model = relation.model
           # Arel::Table#[] only follows `alias_attribute` on newer Rails (6.0 emits the alias as a column).
-          return model.arel_table[model.attribute_aliases.fetch(column.to_s, column)]
+          # Followed through an alias of an alias, bounded like Filterable's, so a cycle cannot hang.
+          aliases = model.attribute_aliases
+          name = column.to_s
+          aliases.size.times { name = aliases[name] if aliases.key?(name) }
+          return model.arel_table[name]
         end
 
         table, name = column.split(".", 2)

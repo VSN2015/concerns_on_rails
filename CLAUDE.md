@@ -357,7 +357,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
 - **`Filterable`** — declarative URL-param filtering (`filter_by`: direct-where / `scope:` /
   `with:` lambda) + comparison operators (`?price_gte=` suffix or `?price[gte]=` bracket form,
   from a frozen allow-list mapped to fixed Arel nodes) and type coercion; an uncastable
-  comparison value returns `none` (fail-closed), as does any operand with a NUL byte
+  comparison value returns `none` (fail-closed; a numeric column reads its operand as a number unless the declared `type:` casts it to a non-String, e.g. `:datetime` over epoch seconds), as does any operand with a NUL byte
   (`ScalarParam.nul_free?`; binary columns exempt), an enum column compares by label (an
   integer-backed one reads any non-label as a NUMBER via `NumericOperand`, so `gte 2` is `>= 2`;
   an unknown non-numeric label → `none`; never `EnumType#cast` on the raw operand), an unknown
@@ -370,7 +370,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `Support::NumericOperand`: exact, never truncated (`gte 5.5` on an integer column is
   `>= 6`, `eq 5.5` is none), out-of-range answered per operator, oversized strings refused
   before any BigDecimal is built.
-- **`Sortable`** — allow-listed, multi-column ordering from `params[:sort]` (uses `reorder`; an `alias_attribute` key resolves to its column on 6.0 too);
+- **`Sortable`** — allow-listed, multi-column ordering from `params[:sort]` (uses `reorder`; an `alias_attribute` key resolves to its column, through a chain of aliases, on 6.0 too);
   the macro's `direction:` is case-insensitive and anything but asc/desc raises at class load.
 - **`Respondable`** — standard JSON success/error envelopes (`render_success`/`render_error`),
   plus `render_created(data:, location:)` and `render_invalid(record)`; `location:`/`headers:`
@@ -383,7 +383,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   app's OWN `render_error` override still gets the raw old symbol.
 - **`ErrorHandleable`** — `rescue_from` for RecordNotFound / ParameterMissing / RecordInvalid; a private
   `process_action` hands the BadRequest Instrumentation raises for a malformed query string
-  (before `rescue_from` is in scope) to the handlers, unless `:bad_request` was trimmed.
+  (before `rescue_from` is in scope) to the handlers (after applying SecureHeadable's headers, which no callback wrote), unless `:bad_request` was trimmed.
   `handled_error.concerns_on_rails` / `on_handled_error` report the exception the handler was
   invoked with (the `#cause` when Rescuable matched through a wrapper), nil for a direct call. RecordNotDestroyed and RecordNotSaved
   render generic messages ("Resource could not be deleted"/"Resource could not be saved"; no model name / id), `errors.full_messages` as `details`.
@@ -397,8 +397,9 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   first-registered spelling; each header is written under the spelling the response already carries).
 - **`Localizable`** — per-request `I18n.locale` from params / `Accept-Language` (strict
   RFC 9110 q-values, stable order on ties; RFC 4647 Lookup truncation one subtag at a time,
-  `zh-Hant-TW` → `zh-Hant` → `zh`; `-` and `_` match each other, case-insensitively,
-  returning the app's own symbol). Like Timezoneable's zone, the locale stays
+  `zh-Hant-TW` → `zh-Hant` → `zh`, never to a tag the client refused with `q=0`; `-` and `_` match each other,
+  case-insensitively, returning the app's own symbol; only `I18n.available_locales` members are candidates, so an
+  unusable param falls through to the header, then `default:`). Like Timezoneable's zone, the locale stays
   active for `rescue_from` handlers and is always restored afterwards.
 - **`Authorizable`** — declarative per-action authorization (`authorize_by`, `require_role`); the
   denial's envelope `code` follows its `status:` (401 `unauthorized`, 404 `not_found` — the same
@@ -448,7 +449,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   back only where the adapter stores it (SQLite binds a `9e999` literal); a date/time
   boundary that doesn't decode to a date/time is an InvalidCursor, and so is a non-binary
   String boundary that is invalid UTF-8 or (except on MySQL/Trilogy) carries a NUL byte, and a plain
-  numeric boundary `Support::NumericOperand` does not read as :exact (precision, size). A binary
+  numeric boundary `Support::NumericOperand` does not read as :exact (precision, size; a decimal String is first read at `bounded_decimal`'s 2,100-char bound, so a minted 100+ digit `numeric` boundary round-trips). A binary
   boundary (binary PK tiebreaker / ordering column) travels as strict Base64 (not Base64 → InvalidCursor).
   Raises ArgumentError for a relation carrying limit/offset (`Support::CallerWindow.window?`).
 - **`Deprecatable`** — standards-based endpoint deprecation. `deprecate_actions *actions,
@@ -570,8 +571,8 @@ first; `without(relation, columns)` is the same table-qualified peel), `FreshRea
 appender behind Localizable's
 `Accept-Language` and Timezoneable's `Time-Zone`: appends, de-duplicates case-insensitively,
 leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —
-seeds `Accept` itself whenever Rails' own `_set_vary_header` would have, since that only
-fires while the header is still blank).
+seeds Rails' own list (`request.vary_headers` on 8.1, honouring `ignore_accept_header`; else `Accept`)
+whenever `_set_vary_header` would have, since before 8.1 that only fires while the header is still blank).
 `lib/concerns_on_rails/railtie.rb` loads only when `Rails::Railtie` is defined — required by
 `core.rb` too, so a directly required concern file (`require: false` hosts) gets it; an
 `after_initialize` hook installs the filter for files required during or after boot (eager

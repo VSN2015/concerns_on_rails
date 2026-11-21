@@ -41,13 +41,16 @@ module ConcernsOnRails
       # negotiating action a cache dimension — a shared cache would then hand a
       # JSON body to an HTML request — so seed Accept ourselves whenever Rails
       # would have. No request at all (the FakeController harness): nothing to
-      # seed. `#request` is looked up privately for the same reason `#cookies`
-      # is: a controller may well declare it that way.
+      # seed. Rails 8.1 appends `request.vary_headers` (X-Requested-With only
+      # under `ignore_accept_header`), so that exact list is seeded when the
+      # request has it; older Rails always adds `Accept`. `#request` is looked
+      # up privately for the same reason `#cookies` is: a controller may well
+      # declare it that way.
       def rails_accept_dimension(controller)
         return [] unless controller.respond_to?(:request, true) && (request = controller.send(:request))
         return [] unless request.respond_to?(:should_apply_vary_header?) && request.should_apply_vary_header?
 
-        ["Accept"]
+        request.respond_to?(:vary_headers) ? request.vary_headers : ["Accept"]
       end
     end
   end
