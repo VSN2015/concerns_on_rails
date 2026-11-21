@@ -76,7 +76,11 @@ RSpec.configure do |config|
   config.filter_run_excluding(min_rails: ->(version) { running_rails < Gem::Version.new(version) })
   # The mirror gate, for an example that can only fail on the older lines (Rails 8.1 appends
   # Vary: Accept itself, so a seeding regression is invisible there).
-  config.filter_run_excluding(max_rails: ->(version) { running_rails.release > Gem::Version.new(version) })
+  config.filter_run_excluding(max_rails: lambda { |version|
+    tag = Gem::Version.new(version)
+    # Only the tag's own segments count, so "8.0" keeps 8.0.5.1 and drops 8.1.
+    Gem::Version.new(running_rails.segments.first(tag.segments.length).join(".")) > tag
+  })
 
   config.expect_with :rspec do |expectations|
     expectations.include_chain_clauses_in_custom_matcher_descriptions = true

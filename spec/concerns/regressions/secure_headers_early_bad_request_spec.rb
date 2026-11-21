@@ -19,4 +19,20 @@ RSpec.describe "SecureHeadable headers on ErrorHandleable's early 400" do
     expect(status).to eq(400)
     expect(headers["cross-origin-resource-policy"] || headers["Cross-Origin-Resource-Policy"]).to eq("same-origin")
   end
+
+  it "leaves them off when the controller skipped the callback" do
+    klass = IntegrationHarness.build_controller do
+      include ConcernsOnRails::Controllers::SecureHeadable
+      include ConcernsOnRails::Controllers::ErrorHandleable
+
+      secure_headers "Cross-Origin-Resource-Policy" => "same-origin"
+      skip_before_action :apply_secure_headers
+      define_method(:index) { render json: {} }
+    end
+    env = Rack::MockRequest.env_for("/")
+    env["QUERY_STRING"] = "q=%FF"
+    status, headers, _body = klass.action(:index).call(env)
+    expect(status).to eq(400)
+    expect(headers["cross-origin-resource-policy"] || headers["Cross-Origin-Resource-Policy"]).to be_nil
+  end
 end
