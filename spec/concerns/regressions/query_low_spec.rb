@@ -109,6 +109,8 @@ describe "query-side controller concerns, LOW findings" do
     end
 
     it "round-trips a decimal with 120 significant digits" do
+      skip "MySQL decimals are bounded (precision <= 65); the long value cannot be stored" if TestDatabase.mysql?
+
       digits = "1.#{'3' * 119}"
       record = QueryLowRow.create!(weight: BigDecimal(digits))
       minted = controller.send(:cursor_minted_value, QueryLowRow, record, :weight)
