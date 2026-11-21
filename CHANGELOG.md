@@ -1,6 +1,6 @@
 <!-- CHANGELOG.md -->
 
-## Unreleased
+## 1.36.3 (2026-11-21)
 
 Bug fixes from the 2026-11-21 audit of 1.36.2. **Upgrade soon if you run json 3.x** (Storable could erase data).
 
