@@ -233,8 +233,11 @@ describe ConcernsOnRails::Controllers::Timezoneable do
     # render in 6.1 (ActionController::Rendering#_set_vary_header). Support::VaryHeader
     # deliberately mirrors that — it seeds Accept only when
     # `request.should_apply_vary_header?` exists and says so — so on 6.0 there
-    # is no Accept to preserve and nothing to assert.
-    it "keeps Rails' own Vary: Accept on a real content-negotiated response", min_rails: "6.1" do
+    # is no Accept to preserve and nothing to assert. max_rails 8.0: Rails 8.1's
+    # _set_vary_header appends Accept itself even to a non-blank Vary, so this
+    # example passes there with the seeding removed; the 8.1 seeding is covered by
+    # spec/concerns/regressions/vary_header_ignore_accept_header_spec.rb.
+    it "keeps Rails' own Vary: Accept on a real content-negotiated response", min_rails: "6.1", max_rails: "8.0" do
       # Rails adds Vary: Accept during render, but only while the header is
       # still blank (ActionController::Rendering#_set_vary_header), so writing
       # ours before the action would silently drop that cache dimension and a

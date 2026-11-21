@@ -90,7 +90,9 @@ module ConcernsOnRails
       def resolved_locale
         @resolved_locale ||= begin
           opts = self.class.localizable_options
-          allowed = opts[:available].presence || I18n.available_locales
+          # Only locales I18n can switch to are candidates, so an unusable param
+          # falls through the chain (header → default:) instead of skipping it.
+          allowed = (opts[:available].presence || I18n.available_locales) & I18n.available_locales
           candidate = locale_from_param(opts, allowed) || locale_from_header(opts, allowed) || opts[:default]
 
           candidate && I18n.available_locales.include?(candidate.to_sym) ? candidate.to_sym : I18n.default_locale
@@ -148,8 +150,12 @@ module ConcernsOnRails
       # :"zh-Hant" was available.
       def parse_accept_language(header, allowed)
         depth = allowed.map { |locale| locale.to_s.count("-_") }.max.to_i + 1
-        ranked_accept_languages(header).each do |lang|
+        pairs = accept_language_pairs(header)
+        refused = refused_accept_languages(pairs)
+        ranked_accept_languages(pairs).each do |lang|
           accept_language_lookup_ranges(lang, depth).each do |range|
+            next if refused.include?(locale_match_key(range))
+
             match = match_locale(range, allowed)
             return match if match
           end
@@ -174,21 +180,29 @@ module ConcernsOnRails
         end
       end
 
-      # Language tags from an Accept-Language header (kept whole — see
-      # parse_accept_language for region handling), q=0 dropped, highest-q
-      # first (RFC 7231 preference order). Ties keep header order: Ruby's
-      # sort_by is NOT stable (from ~8 entries equal keys come back shuffled),
-      # so the header position is an explicit secondary key.
-      def ranked_accept_languages(header)
-        pairs = header.split(",").filter_map do |part|
+      # [tag, q] for every part of an Accept-Language header, tags kept whole —
+      # see parse_accept_language for region handling. q=0 parts are included.
+      def accept_language_pairs(header)
+        header.split(",").filter_map do |part|
           token, *params = part.split(";").map(&:strip)
-          quality = accept_language_quality(params)
-          next if quality <= 0.0
-
           lang = token.to_s.strip
-          [lang, quality] if lang.present?
+          [lang, accept_language_quality(params)] if lang.present?
         end
-        pairs.each_with_index.sort_by { |(_lang, quality), index| [-quality, index] }.map { |(lang, _q), _i| lang }
+      end
+
+      # A q=0 tag is a refusal: a truncated range equal to one is never served
+      # (`fr-CA, fr;q=0` must not resolve to :fr). Compared as match keys.
+      def refused_accept_languages(pairs)
+        pairs.select { |_lang, quality| quality <= 0.0 }.map { |lang, _q| locale_match_key(lang) }
+      end
+
+      # The acceptable tags of those pairs (q=0 dropped), highest-q first (RFC
+      # 7231 preference order). Ties keep header order: Ruby's sort_by is NOT
+      # stable (from ~8 entries equal keys come back shuffled), so the header
+      # position is an explicit secondary key.
+      def ranked_accept_languages(pairs)
+        pairs.reject { |_lang, quality| quality <= 0.0 }
+             .each_with_index.sort_by { |(_lang, quality), index| [-quality, index] }.map { |(lang, _q), _i| lang }
       end
 
       # The q-value (relative quality) of an Accept-Language part: 1.0 when
