@@ -41,6 +41,9 @@ Gem::Specification.new do |spec|
   # Controllers::Permittable was extracted into its own gem; the constant here
   # is an alias (see lib/concerns_on_rails/controllers/permittable.rb).
   spec.add_runtime_dependency 'permittable', '>= 0.8', '< 1'
+  # Controllers::Idempotentable was extracted into its own gem; the constant here
+  # is an alias (see lib/concerns_on_rails/controllers/idempotentable.rb).
+  spec.add_runtime_dependency 'idempotentable', '>= 0.1', '< 1'
 
   # Merge (not reassign) so the "license" key set above is preserved.
   spec.metadata.merge!(

@@ -418,10 +418,18 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `Time.zone =` never leaks to the thread's next request. It appends `Vary: Time-Zone` whenever the header
   source is on and `Vary: Cookie` whenever the cookie source is on (through `Support::VaryHeader`; `vary: false`
   opts out; independent of `response_header:`, which only controls `X-Time-Zone`).
-- **`Idempotentable`** — `Idempotency-Key` response replay with an injectable store
-  (`idempotent_actions`); in-flight claims carry a per-request token, and a failed request releases only a claim it still holds (never overwrites a finished record; overlapping different payloads: first to finish owns the response; read-then-write stays two round trips); 409 on in-flight duplicates, 422 on payload mismatch (the fingerprint wraps an Array as `{"array"=>[...]}` so a Hash and an Array of pairs, or `{}` and `[]`, differ; the key is scrubbed of invalid UTF-8), 503
-  `idempotency_store_unavailable` when the store is down (both claims failed AND both reads
-  nil); `on_store_unavailable: :proceed` runs the action without dedupe instead.
+- **`Idempotentable`** — `Idempotency-Key` response replay.
+  Lives in the STANDALONE `idempotentable` gem (runtime dependency `>= 0.1, < 1`, published on
+  rubygems.org; developed in the sibling repo `../idempotentable`,
+  github.com/VSN2015/idempotentable). `ConcernsOnRails::Controllers::Idempotentable` is an alias for
+  `::Idempotentable`; the bridge file points `Idempotentable.store` at
+  `ConcernsOnRails.config.resolved_cache_store` unless the app set one first, so
+  `ConcernsOnRails.setup { |c| c.cache_store }` still is the fallback (an app that writes `include ::Idempotentable`
+  without ever referencing the alias does not load the bridge and sets `Idempotentable.store` itself). Errors render
+  through `render_error` when present (private allowed), else an inline envelope; error messages start `Idempotentable:`.
+  This repo's `spec/concerns/controllers/idempotentable_bridge_spec.rb` is the compatibility suite; the behavioural specs
+  live in the gem. Declare halting filters before it (see the gem README, callback ordering); the default scope carries
+  no principal (see the gem README, `idempotency_scope`).
 - **`WebhookVerifiable`** — HMAC verification for inbound webhooks (`verify_webhook`):
   scheme presets `:stripe`/`:github`/`:shopify`/`:hex`/`:base64`, constant-time compare,
   Stripe timestamp tolerance, secret rotation; 401/400 before the action runs. `replay:` /
@@ -514,7 +522,7 @@ adopting the row's value; `by: -1` undoes it), `pinned` keeps an `update_all` fr
 (`with_lock`) and reads + adopts only the column for one with unsaved changes), `PrimaryKey`
 (the one-row `where` Hash for hand-built SQL, Rails 7.1+ composite keys included — never
 `where(primary_key => id)`), `ErrorEnvelope` (the shared `render_error`-or-inline error
-renderer used by seven controller concerns), `FilterParameterRegistry` (live
+renderer used by the controller concerns except Idempotentable, which has its own private render path), `FilterParameterRegistry` (live
 filter_parameters registry consulted by the proc `ConcernsOnRails::Railtie` appends at
 boot), `EdgeSpace` (linear-time Unicode+NUL edge strip shared by Normalizable/Searchable/Taggable/Money; `nul: false` for Money), `CallerWindow` (a relation's own LIMIT/OFFSET window: `window?`, `rows_in` = max(0, min(L, N−O)), `page_window`), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,
 `Callable` (arity-aware `invoke` for the callable options the macros accept — Throttleable
@@ -566,7 +574,7 @@ SoftDeletable's column while its default scope is on, Publishable's under `defau
 matched by Arel attribute, not `unscope(where:)`'s any-table column name, with the association's
 own predicates on them put back; app default scopes (tenant, discriminator, joined-table
 same-named columns) still apply, and a limited association (has_one) ranks its reader's rows
-first; `without(relation, columns)` is the same table-qualified peel), `FreshRead` (reads a cache key bypassing Rails' request-local cache; Idempotentable's and WebhookVerifiable's ownership reads), `VaryHeader` (the shared `Vary`
+first; `without(relation, columns)` is the same table-qualified peel), `FreshRead` (reads a cache key bypassing Rails' request-local cache; WebhookVerifiable's ownership reads; Idempotentable does its own private read), `VaryHeader` (the shared `Vary`
 appender behind Localizable's
 `Accept-Language` and Timezoneable's `Time-Zone`: appends, de-duplicates case-insensitively,
 leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —
@@ -605,6 +613,7 @@ FEATURE is version gated (Sortable's `nulls:`, Aliasable's query side) — not t
 - `acts_as_list >= 0.7.5, < 2` (lazy-loaded with Sortable)
 - `friendly_id ~> 5.4` (lazy-loaded with Sluggable)
 - `permittable >= 0.8, < 1` (the extracted Permittable concern, resolved from rubygems.org; 0.8 is the floor so every host has monitor mode, `:json`, `nullable:`, field groups, the matchers, the generator and the OpenAPI export — 0.9+ needs Rails >= 6.1, so the Rails 6.0 line stays on 0.8)
+- `idempotentable >= 0.1, < 1` (the extracted Idempotentable concern, resolved from rubygems.org; developed in ../idempotentable)
 - Ruby `>= 3.2.0`
 
 ### Release process

@@ -7,6 +7,7 @@ PATH
       activesupport (>= 6.0, < 9)
       acts_as_list (>= 0.7.5, < 2)
       friendly_id (~> 5.4)
+      idempotentable (>= 0.1, < 1)
       permittable (>= 0.8, < 1)
 
 GEM
@@ -67,6 +68,9 @@ GEM
       activerecord (>= 4.0.0)
     i18n (1.15.2)
       concurrent-ruby (~> 1.0)
+    idempotentable (0.1.0)
+      actionpack (>= 6.0, < 9)
+      activesupport (>= 6.0, < 9)
     io-console (0.9.5)
     irb (1.19.0)
       pp (>= 0.6.0)
