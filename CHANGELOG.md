@@ -1,6 +1,6 @@
 <!-- CHANGELOG.md -->
 
-## 1.37.0 (unreleased)
+## 1.37.0 (2026-11-27)
 
 Idempotentable now ships as the standalone `idempotentable` gem; the include path is unchanged.
 
