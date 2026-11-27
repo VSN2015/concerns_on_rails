@@ -9,6 +9,8 @@ Idempotentable now ships as the standalone `idempotentable` gem; the include pat
 - **Idempotentable:** ArgumentError messages now start with `Idempotentable:` instead of `ConcernsOnRails::Controllers::Idempotentable:`; update any spec or rescue that matches the old prefix.
 - **Idempotentable:** the "no store configured" message now names `Idempotentable.store`; `ConcernsOnRails.setup { |c| c.cache_store }` still works as the fallback.
 
+- **Idempotentable:** 1.37 defines a top-level `::Idempotentable` constant; an app with its own `Idempotentable` module/concern must rename it.
+
 ### Changed
 
 - **Idempotentable:** extracted into the `idempotentable` gem (new runtime dependency, `>= 0.1, < 1`); `ConcernsOnRails::Controllers::Idempotentable` is an alias.

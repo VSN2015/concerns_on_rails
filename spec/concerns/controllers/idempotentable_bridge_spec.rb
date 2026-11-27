@@ -43,7 +43,6 @@ describe ConcernsOnRails::Controllers::Idempotentable do
   end
 
   it "uses ConcernsOnRails.setup cache_store as the fallback store" do
-    Idempotentable.store = -> { ConcernsOnRails.config.resolved_cache_store }
     controller = fake_controller
     mine = store
     ConcernsOnRails.setup { |c| c.cache_store = -> { mine } }
@@ -51,14 +50,12 @@ describe ConcernsOnRails::Controllers::Idempotentable do
   end
 
   it "re-reads the setup Proc on every request" do
-    Idempotentable.store = -> { ConcernsOnRails.config.resolved_cache_store }
     ConcernsOnRails.setup { |c| c.cache_store = -> { Object.new } }
     controller = fake_controller
     expect(controller.send(:idempotency_store!)).not_to be(controller.send(:idempotency_store!))
   end
 
   it "raises the no-store ArgumentError when setup holds nothing" do
-    Idempotentable.store = -> { ConcernsOnRails.config.resolved_cache_store }
     ConcernsOnRails.config.cache_store = nil
     expect { fake_controller.send(:idempotency_store!) }.to raise_error(ArgumentError, /no store configured/)
   end
@@ -125,6 +122,8 @@ describe ConcernsOnRails::Controllers::Idempotentable do
       response = post(controller)
       expect(response.status).to eq(409)
       expect(response.body).to include("idempotency_conflict")
+      expect(response.header("Content-Type")).to start_with("application/problem+json")
+      expect(JSON.parse(response.body)).to include("status" => 409)
     end
   end
 end

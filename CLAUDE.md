@@ -426,7 +426,7 @@ and may be called multiple times, rather than the `<concern>_by` form.)
   `ConcernsOnRails.config.resolved_cache_store` unless the app set one first, so
   `ConcernsOnRails.setup { |c| c.cache_store }` still is the fallback (an app that writes `include ::Idempotentable`
   without ever referencing the alias does not load the bridge and sets `Idempotentable.store` itself). Errors render
-  through `Respondable#render_error` via the gem's own `ErrorEnvelope` copy; error messages start `Idempotentable:`.
+  through `render_error` when present (private allowed), else an inline envelope; error messages start `Idempotentable:`.
   This repo's `spec/concerns/controllers/idempotentable_bridge_spec.rb` is the compatibility suite; the behavioural specs
   live in the gem. Declare halting filters before it (see the gem README, callback ordering); the default scope carries
   no principal (see the gem README, `idempotency_scope`).
@@ -522,7 +522,7 @@ adopting the row's value; `by: -1` undoes it), `pinned` keeps an `update_all` fr
 (`with_lock`) and reads + adopts only the column for one with unsaved changes), `PrimaryKey`
 (the one-row `where` Hash for hand-built SQL, Rails 7.1+ composite keys included — never
 `where(primary_key => id)`), `ErrorEnvelope` (the shared `render_error`-or-inline error
-renderer used by the controller concerns except Idempotentable, which carries its own copy), `FilterParameterRegistry` (live
+renderer used by the controller concerns except Idempotentable, which has its own private render path), `FilterParameterRegistry` (live
 filter_parameters registry consulted by the proc `ConcernsOnRails::Railtie` appends at
 boot), `EdgeSpace` (linear-time Unicode+NUL edge strip shared by Normalizable/Searchable/Taggable/Money; `nul: false` for Money), `CallerWindow` (a relation's own LIMIT/OFFSET window: `window?`, `rows_in` = max(0, min(L, N−O)), `page_window`), `Encryptor` (AES-256-GCM codec with a bounded PBKDF2 key cache), `RandomValue`,
 `Callable` (arity-aware `invoke` for the callable options the macros accept — Throttleable
@@ -574,7 +574,7 @@ SoftDeletable's column while its default scope is on, Publishable's under `defau
 matched by Arel attribute, not `unscope(where:)`'s any-table column name, with the association's
 own predicates on them put back; app default scopes (tenant, discriminator, joined-table
 same-named columns) still apply, and a limited association (has_one) ranks its reader's rows
-first; `without(relation, columns)` is the same table-qualified peel), `FreshRead` (reads a cache key bypassing Rails' request-local cache; WebhookVerifiable's ownership reads; Idempotentable carries its own copy), `VaryHeader` (the shared `Vary`
+first; `without(relation, columns)` is the same table-qualified peel), `FreshRead` (reads a cache key bypassing Rails' request-local cache; WebhookVerifiable's ownership reads; Idempotentable does its own private read), `VaryHeader` (the shared `Vary`
 appender behind Localizable's
 `Accept-Language` and Timezoneable's `Time-Zone`: appends, de-duplicates case-insensitively,
 leaves a `Vary: *` response alone, and — because both concerns write Vary BEFORE the action —

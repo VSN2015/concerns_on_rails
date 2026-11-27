@@ -104,7 +104,7 @@ RSpec.describe "ConcernsOnRails.setup / Configuration" do
       expect(klass.new(params: {}).send(:idempotency_store!)).to be(:explicit)
     end
 
-    it "Idempotentable falls back to the gem-wide store, and raises with the setup hint when unset" do
+    it "Idempotentable falls back to the gem-wide store, and raises the no-store error when unset" do
       klass = Class.new(base_class) do
         include ConcernsOnRails::Controllers::Idempotentable
       end
