@@ -6,7 +6,7 @@
 # alone rather than made to eval this file: its Gemfile.lock is committed and
 # carries the PATH pin that has to track lib/concerns_on_rails/version.rb (see
 # the release process in CLAUDE.md), so restructuring it would churn the lock
-# for no benefit. Adding a dev gem means adding it in both places.
+# for no benefit. Adding a dev gem means adding it in both places (the LOCAL-ONLY idempotentable path line too).
 
 # json 3.0 removed JSON.generate's :quirks_mode option, which ActiveSupport's
 # JSON encoder still passes — so `render json:` raises
@@ -22,6 +22,8 @@ gem "rake"
 gem "acts_as_list", ">= 0.7.5", "< 2"
 gem "faker", "~> 3.8"
 gem "friendly_id", "~> 5.4"
+# LOCAL-ONLY until idempotentable 0.1.0 is on rubygems.org; delete this line (and in the root Gemfile) before merging.
+gem "idempotentable", path: File.expand_path("../../idempotentable", __dir__)
 gem "rspec", "~> 3.12"
 gem "simplecov", "~> 1.1"
 

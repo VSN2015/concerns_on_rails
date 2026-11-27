@@ -110,7 +110,7 @@ RSpec.describe "ConcernsOnRails.setup / Configuration" do
       end
       controller = klass.new(params: {})
       expect { controller.send(:idempotency_store!) }
-        .to raise_error(ArgumentError, /ConcernsOnRails\.setup/)
+        .to raise_error(ArgumentError, /no store configured/)
 
       ConcernsOnRails.setup { |c| c.cache_store = -> { store } }
       expect(controller.send(:idempotency_store!)).to be(store)
