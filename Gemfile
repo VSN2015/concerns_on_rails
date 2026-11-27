@@ -8,8 +8,6 @@ gem "activerecord", ">= 6.0", "< 9"
 gem 'acts_as_list', '>= 0.7.5', '< 2'
 gem "faker", "~> 3.8"
 gem "friendly_id", "~> 5.4"
-# LOCAL-ONLY until idempotentable 0.1.0 is on rubygems.org; delete this line (and in gemfiles/shared.rb) before merging.
-gem "idempotentable", path: "../idempotentable"
 # json 3.x is supported for dev/test (master runs 3.1.0, suite green); the gem passes
 # allow_duplicate_key: true wherever it parses stored JSON so duplicate keys read
 # last-wins as under json 2. Capped below 4 until that major is verified.

@@ -1,11 +1,4 @@
 PATH
-  remote: ../idempotentable
-  specs:
-    idempotentable (0.1.0)
-      actionpack (>= 6.0, < 9)
-      activesupport (>= 6.0, < 9)
-
-PATH
   remote: .
   specs:
     concerns_on_rails (1.36.3)
@@ -75,6 +68,9 @@ GEM
       activerecord (>= 4.0.0)
     i18n (1.15.2)
       concurrent-ruby (~> 1.0)
+    idempotentable (0.1.0)
+      actionpack (>= 6.0, < 9)
+      activesupport (>= 6.0, < 9)
     io-console (0.9.5)
     irb (1.19.0)
       pp (>= 0.6.0)
@@ -197,7 +193,6 @@ DEPENDENCIES
   concerns_on_rails!
   faker (~> 3.8)
   friendly_id (~> 5.4)
-  idempotentable!
   json (< 4)
   railties (>= 6.0, < 9)
   rake
