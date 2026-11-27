@@ -2636,7 +2636,7 @@ Per-key lifecycle: claim atomically (`write unless_exist`, TTL `lock_ttl:`) → 
 - Declare halting filters (authentication, `Throttleable`) **before** including this concern — a 401/403 rendered by an inner filter would be cached and replayed for the full TTL. Responses rendered by `rescue_from` handlers are never cached.
 - Keys must be ≤255 chars with no control characters (the raw key is echoed in `X-Idempotency-Key`); set `lock_ttl:` above the slowest declared action's worst case.
 
-- In-flight claims carry a per-request token; a request that raises or ends 5xx releases the key only while it still holds its own claim, ownership reads bypass Rails' request-local cache (`Support::FreshRead`), and when overlapping requests share a key with different payloads the first to finish owns the stored response. Known limit: read-then-delete and read-then-write are still two store round trips.
+- In-flight claims carry a per-request token; a request that raises or ends 5xx releases the key only while it still holds its own claim, ownership reads bypass Rails' request-local cache (`Idempotentable::FreshRead`), and when overlapping requests share a key with different payloads the first to finish owns the stored response. Known limit: read-then-delete and read-then-write are still two store round trips.
 ---
 
 ## 🪝 WebhookVerifiable
